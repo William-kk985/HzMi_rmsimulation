@@ -31,9 +31,9 @@ if ros2 service list 2>/dev/null | grep -q "/slam_toolbox/save_map"; then
     echo "🔄 如果你需要点云地图，请按以下步骤操作:"
     echo "   1. 停止当前系统 (Ctrl+C)"
     echo "   2. 启动mapping模式:"
-    echo "      scripts/control/start_sentinel.sh -w RMUL2026 -m mapping --lio fastlio --lio-rviz True"
+    echo "      tools/scripts/control/start_sentinel.sh -w RMUL2026 -m mapping --lio fastlio --lio-rviz True"
     echo "   3. 探索完整环境"
-    echo "   4. 在新终端中执行: scripts/mapping/save_pcd.sh"
+    echo "   4. 在新终端中执行: tools/scripts/mapping/save_pcd.sh"
     exit 1
 fi
 
@@ -42,8 +42,8 @@ echo "❌ 未检测到有效的建图系统！"
 echo "🔧 请确保在mapping或nav模式下运行系统以使用LIO建图"
 echo ""
 echo "🚀 启动mapping模式的命令:"
-echo "   scripts/control/start_sentinel.sh -w RMUL2026 -m mapping --lio fastlio --lio-rviz True"
+echo "   tools/scripts/control/start_sentinel.sh -w RMUL2026 -m mapping --lio fastlio --lio-rviz True"
 echo ""
 echo "🚀 启动nav模式的命令:"
-echo "   scripts/control/start_sentinel.sh -w RMUL2026 -m nav --lio fastlio --nav-rviz True"
+echo "   tools/scripts/control/start_sentinel.sh -w RMUL2026 -m nav --lio fastlio --nav-rviz True"
 exit 1

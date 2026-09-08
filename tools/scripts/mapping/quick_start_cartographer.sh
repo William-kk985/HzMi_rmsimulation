@@ -43,7 +43,7 @@ echo ''
 echo '地图：RMUL2026'
 echo '模式：Mapping'
 echo ''
-${WORKSPACE}/scripts/control/start_sentinel.sh -w RMUL2026 -m mapping
+${WORKSPACE}/tools/scripts/control/start_sentinel.sh -w RMUL2026 -m mapping
 exec bash
 "
 

@@ -103,13 +103,13 @@
 
 ## 🚀 快速开始
 
-> 📁 项目布局：启动/工具脚本在 `scripts/`（控制类 `scripts/control/`、建图类 `scripts/mapping/`），文档在 `docs/`（建图 `docs/mapping/`、配置包 `docs/package/`），一次性报告归档在 `archive/`。
+> 📁 项目布局：启动/工具脚本在 `tools/scripts/`（控制类 `tools/scripts/control/`、建图类 `tools/scripts/mapping/`），文档在 `docs/`（建图 `docs/mapping/`、配置包 `docs/package/`），一次性报告归档在 `archive/`。
 
 ### 方式一：使用便捷启动脚本（推荐）
 
 #### 1. 一键启动仿真（推荐新手）
 ```bash
-scripts/control/start_sentinel.sh
+tools/scripts/control/start_sentinel.sh
 ```
 - 自动使用默认配置：RMUL场地 + 建图模式 + Fast-LIO
 - 自动清理残留进程
@@ -118,19 +118,19 @@ scripts/control/start_sentinel.sh
 #### 2. 高级启动脚本（支持参数配置）
 ```bash
 # 查看帮助
-scripts/control/start_sentinel.sh --help
+tools/scripts/control/start_sentinel.sh --help
 
 # 使用默认参数启动
-scripts/control/start_sentinel.sh
+tools/scripts/control/start_sentinel.sh
 
 # 自定义配置启动
-scripts/control/start_sentinel.sh -w RMUC -m nav --lio pointlio
+tools/scripts/control/start_sentinel.sh -w RMUC -m nav --lio pointlio
 
 # 启用LIO可视化
-scripts/control/start_sentinel.sh --lio-rviz True
+tools/scripts/control/start_sentinel.sh --lio-rviz True
 ```
 
-> 其他脚本：构建 `scripts/build.sh`；建图工具 `scripts/mapping/`（`generate_cartographer_pbstream.sh`、`quick_start_cartographer.sh`、`save_pcd.sh`、`save_grid_map.sh`）；配置/打包 `scripts/setup_from_package.sh`、`scripts/create_config_package.sh`。
+> 其他脚本：构建 `tools/scripts/build.sh`；建图工具 `tools/scripts/mapping/`（`generate_cartographer_pbstream.sh`、`quick_start_cartographer.sh`、`save_pcd.sh`、`save_grid_map.sh`）；配置/打包 `tools/scripts/setup_from_package.sh`、`tools/scripts/create_config_package.sh`。
 
 ### 方式二：手动启动命令
 

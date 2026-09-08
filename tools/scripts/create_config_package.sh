@@ -57,11 +57,11 @@ print_info "复制源文件..."
 cp -r src "$TEMP_DIR/"
 
 # 复制启动脚本
-cp "${PROJECT_ROOT}/scripts/control/start_sentinel.sh" "$TEMP_DIR/" 2>/dev/null || print_info "start_sentinel.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/scripts/mapping/save_pcd.sh" "$TEMP_DIR/" 2>/dev/null || print_info "save_pcd.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/scripts/mapping/save_grid_map.sh" "$TEMP_DIR/" 2>/dev/null || print_info "save_grid_map.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/scripts/control/improved_teleop.sh" "$TEMP_DIR/" 2>/dev/null || print_info "improved_teleop.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/scripts/setup_from_package.sh" "$TEMP_DIR/" 2>/dev/null || print_info "setup_from_package.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/control/start_sentinel.sh" "$TEMP_DIR/" 2>/dev/null || print_info "start_sentinel.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/mapping/save_pcd.sh" "$TEMP_DIR/" 2>/dev/null || print_info "save_pcd.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/mapping/save_grid_map.sh" "$TEMP_DIR/" 2>/dev/null || print_info "save_grid_map.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/control/improved_teleop.sh" "$TEMP_DIR/" 2>/dev/null || print_info "improved_teleop.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/setup_from_package.sh" "$TEMP_DIR/" 2>/dev/null || print_info "setup_from_package.sh 不存在，跳过"
 
 # 复制文档
 cp "${PROJECT_ROOT}/README.md" "$TEMP_DIR/" 2>/dev/null || print_info "README.md 不存在，跳过"
