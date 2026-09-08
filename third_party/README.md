@@ -9,6 +9,7 @@
 ## 规则（重要）
 
 - **只读**：不要在本目录内做任何修改/调参；需要改动的版本放 `src/` 对应角色目录。
+- **不参与编译**：目录内已有 `COLCON_IGNORE` 标记，colcon 构建会跳过本目录（否则原版包名会和 src 里的使用版冲突）。
 - 以 **git submodule** 固定到具体 commit（见下），方便随时 fetch 上游新版本对比。
 - 新增候选库：`git submodule add <官方URL> third_party/<名字>`，并在下表登记。
 
