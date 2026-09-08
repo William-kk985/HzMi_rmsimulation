@@ -57,7 +57,8 @@ def generate_launch_description():
 
     ################################ icp_registration parameters start ################################
     icp_pcd_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'PCD', world]), ".pcd"
-    icp_registration_params_dir = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'icp_registration_sim.yaml')
+    # 原误指向 simulation 的 yaml，修正为 reality 配置（sim 版本已回归 icp_registration 包内）
+    icp_registration_params_dir = os.path.join(rm_nav_bringup_dir, 'config', 'reality', 'icp_registration_real.yaml')
     ################################# icp_registration parameters end #################################
 
     ############################# pointcloud_downsampling parameters start ############################

@@ -58,7 +58,8 @@ def generate_launch_description():
 
     ################################ icp_registration parameters start ################################
     icp_pcd_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'PCD', world]), ".pcd"
-    icp_registration_params_dir = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'icp_registration_sim.yaml')
+    # 参数已回归 icp_registration 包自身 config/（R1），经 ament_auto_package INSTALL_TO_SHARE 安装
+    icp_registration_params_dir = os.path.join(get_package_share_directory('icp_registration'), 'config', 'icp_registration_sim.yaml')
     ################################# icp_registration parameters end #################################
 
     ############################# pointcloud_downsampling parameters start ############################

@@ -22,7 +22,7 @@
 |---|---|---|---|---|---|
 | 1 | `config/simulation/fastlio_mid360_sim.yaml` | **fast_lio**（FAST_LIO 子模块） | `bringup_sim.launch.py` `fastlio_mid360_params` | ① fast_lio 包 config/ | FAST_LIO CMake install config；launch 改用 `FindPackageShare('fast_lio')` |
 | 2 | `config/simulation/pointlio_mid360_sim.yaml` | **point_lio** | 同上 `pointlio_mid360_params` | ① point_lio 包 config/ | point_lio CMake；launch 路径 |
-| 3 | `config/simulation/icp_registration_sim.yaml` | **icp_registration**（自研/借鉴包） | 同上 `icp_registration_params_dir` | ① icp_registration 包 config/ | 该包 CMake；launch 路径 |
+| 3 | ~~`config/simulation/icp_registration_sim.yaml`~~ → `icp_registration/config/icp_registration_sim.yaml`（**✅ 已回归**） | **icp_registration**（自研/借鉴包） | bringup_sim：改引 `get_package_share_directory('icp_registration')/config/...`；bringup_real：误引用修正为 reality yaml | ① 已在包 config/（包 CMake 本就 INSTALL_TO_SHARE config） | 完成（launch 引用同步改好） |
 | 4 | `config/simulation/segmentation_sim.yaml` | **linefit_ground_segmentation_ros** | 同上 `segmentation_params` | ① linefit_ground_segmentation_ros 包内 | 该包 CMake；launch 路径 |
 | 5 | `config/simulation/mapper_params_online_async_sim.yaml` | **slam_toolbox**（apt，无源码） | 同上（mapping 模式） | ② `variants/slam_toolbox/` | launch 路径 |
 | 6 | `config/simulation/mapper_params_localization_sim.yaml` | **slam_toolbox**（apt，无源码） | 同上（nav+localization=slam_toolbox） | ② `variants/slam_toolbox/` | launch 路径 |
@@ -58,9 +58,10 @@ nav2_params = os.path.join(get_package_share_directory('rm_nav_bringup') 或 var
 
 ## 4. 状态跟踪
 
-- [ ] #1 fastlio 参数回归 fast_lio 包
-- [ ] #2 pointlio 参数回归 point_lio 包
-- [ ] #3 icp_registration 参数回归
+- [x] #3 icp_registration 参数回归（**2026-09 试水完成**）：yaml 移回包 config/，bringup_sim 改引 `FindPackageShare('icp_registration')/config/`；包原生 `config/icp.yaml` 保留未动（作为原始样本）；bringup_real 原先误指向 sim yaml 一并修正为 reality
+- [ ] #1 fastlio 参数回归 fast_lio 包（⚠️ 子模块：需先决定 fork 归属，见下）
+- [ ] #2 pointlio 参数回归 point_lio 包（⚠️ 子模块，同上）
+- [ ] #4 segmentation 参数回归
 - [ ] #4 segmentation 参数回归
 - [ ] #5/#6 slam_toolbox 参数 → variants/
 - [ ] #7 nav2 参数拆分 → variants/nav2/<组合>.yaml
