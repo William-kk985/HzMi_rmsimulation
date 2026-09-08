@@ -13,3 +13,12 @@
 [submodule "src/rm_localization/point_lio"]
 	path = src/rm_localization/point_lio
 	url = https://github.com/LihanChen2004/Point-LIO.git
+[submodule "third_party/fast_lio"]
+	path = third_party/fast_lio
+	url = https://github.com/hku-mars/FAST_LIO
+[submodule "third_party/point_lio"]
+	path = third_party/point_lio
+	url = https://github.com/hku-mars/Point-LIO
+[submodule "third_party/cartographer"]
+	path = third_party/cartographer
+	url = https://github.com/cartographer-project/cartographer
