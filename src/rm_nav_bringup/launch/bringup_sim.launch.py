@@ -67,10 +67,6 @@ def generate_launch_description():
     icp_registration_params_dir = os.path.join(get_package_share_directory('icp_registration'), 'config', 'icp_registration_sim.yaml')
     ################################# icp_registration parameters end #################################
 
-    ############################# pointcloud_downsampling parameters start ############################
-    pointcloud_downsampling_config_dir = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'pointcloud_downsampling_sim.yaml')
-    ############################# pointcloud_downsampling parameters start ############################
-
     # Declare launch options
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time',
@@ -87,14 +83,9 @@ def generate_launch_description():
         default_value='True',
         description='Visualize navigation2 if true')
 
-    declare_use_slam_cmd = DeclareLaunchArgument(
-        'use_slam',
-        default_value='False',
-        description='Use slam_toolbox for mapping if true')
-
     declare_world_cmd = DeclareLaunchArgument(
         'world',
-        default_value='RMUL',
+        default_value='RMUL2026',
         description='Select world (map file, pcd file, world file share the same name prefix as the this parameter)')
 
     declare_mode_cmd = DeclareLaunchArgument(
@@ -109,7 +100,7 @@ def generate_launch_description():
 
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
-        default_value='fast_lio',
+        default_value='fastlio',
         description='Choose lio alogrithm: fastlio or pointlio')
 
     # Specify the actions
@@ -317,7 +308,6 @@ def generate_launch_description():
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_lio_rviz_cmd)
     ld.add_action(declare_nav_rviz_cmd)
-    ld.add_action(declare_use_slam_cmd)
     ld.add_action(declare_world_cmd)
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)

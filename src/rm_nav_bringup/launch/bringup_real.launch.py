@@ -61,10 +61,6 @@ def generate_launch_description():
     icp_registration_params_dir = os.path.join(rm_nav_bringup_dir, 'config', 'reality', 'icp_registration_real.yaml')
     ################################# icp_registration parameters end #################################
 
-    ############################# pointcloud_downsampling parameters start ############################
-    pointcloud_downsampling_config_dir = os.path.join(rm_nav_bringup_dir, 'config', 'reality', 'pointcloud_downsampling_real.yaml')
-    ############################# pointcloud_downsampling parameters start ############################
-
     ####################### Livox_ros_driver2 parameters start #######################
     xfer_format   = 4    # 0-PointCloud2Msg(PointXYZRTL), 1-LivoxCustomMsg, 2-PclPxyziMsg, 3-LivoxImuMsg, 4-AllMsg
     multi_topic   = 0    # 0-All LiDARs share the same topic, 1-One LiDAR one topic
