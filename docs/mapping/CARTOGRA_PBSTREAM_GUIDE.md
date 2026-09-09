@@ -24,8 +24,8 @@ cd ~/HzMi_rmsimulation
 ### 准备工作
 
 确保以下文件存在：
-- ✅ `src/rm_nav_bringup/config/lua/cartographer.lua` - 建图配置
-- ✅ `src/rm_nav_bringup/config/lua/cartographer_localization.lua` - 纯定位配置
+- ✅ `src/rm_localization/cartographer_ros/cartographer_ros/configuration_files/cartographer.lua` - 建图配置
+- ✅ `src/rm_localization/cartographer_ros/cartographer_ros/configuration_files/cartographer_localization.lua` - 纯定位配置
 - ✅ `src/rm_nav_bringup/map/RMUL2026.yaml` - 地图配置
 - ✅ `src/rm_nav_bringup/map/RMUL2026.pgm` - 地图图像
 
@@ -49,7 +49,7 @@ source install/setup.bash
 cd ~/HzMi_rmsimulation
 source install/setup.bash
 ros2 launch cartographer_ros cartographer.launch.py \
-  configuration_directory:="src/rm_nav_bringup/config/lua" \
+  configuration_directory:="src/rm_localization/cartographer_ros/cartographer_ros/configuration_files" \
   configuration_basename:="cartographer.lua"
 ```
 
@@ -160,7 +160,7 @@ cd /path/to/target_project
 source install/setup.bash
 
 ros2 launch cartographer_ros cartographer.launch.py \
-  configuration_directory:="config/lua" \
+  configuration_directory:="src/rm_localization/cartographer_ros/cartographer_ros/configuration_files" \
   configuration_basename:="cartographer_localization.lua" \
   load_state_filename:="maps/RMUL2026.pbstream"
 ```
