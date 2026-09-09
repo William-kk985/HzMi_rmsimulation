@@ -49,14 +49,16 @@ def generate_launch_description():
 
     ################################## slam_toolbox parameters start ##################################
     slam_toolbox_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world])
-    slam_toolbox_localization_file_dir = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'mapper_params_localization_sim.yaml')
-    slam_toolbox_mapping_file_dir = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'mapper_params_online_async_sim.yaml')
+    # slam_toolbox 已源码化，参数回归其自身 config/（R1）
+    slam_toolbox_localization_file_dir = os.path.join(get_package_share_directory('slam_toolbox'), 'config', 'mapper_params_localization_sim.yaml')
+    slam_toolbox_mapping_file_dir = os.path.join(get_package_share_directory('slam_toolbox'), 'config', 'mapper_params_online_async_sim.yaml')
     ################################### slam_toolbox parameters end ###################################
 
     ################################### navigation2 parameters start ##################################
     nav2_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world]), ".yaml"
     empty_map_dir = os.path.join(rm_nav_bringup_dir, 'map', 'empty_map.yaml')
-    nav2_params_file_dir = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'nav2_params_sim.yaml')
+    # nav2 参数已回归自研 rm_navigation 包 params/（R1）
+    nav2_params_file_dir = os.path.join(get_package_share_directory('rm_navigation'), 'params', 'nav2_params_sim.yaml')
     ################################### navigation2 parameters end ####################################
 
     ################################ icp_registration parameters start ################################

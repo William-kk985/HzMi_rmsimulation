@@ -10,7 +10,7 @@
 | 约定 | 内容 |
 |---|---|
 | ① 有源码的包 | 参数文件放进**该包自己的 config/ 目录**，由包 CMakeLists 安装到 install，launch 通过 `FindPackageShare('该包')` 引用 |
-| ② apt 安装、无源码的包（nav2 / slam_toolbox / cartographer_ros） | 参数**无法放回包源码**（包里没有我们的代码），统一放 `variants/<算法名>/` 目录（装配层之下、独立于总装包），launch 引用之 |
+| ② 原"apt 无源码 → variants/" 方案 **已取消（2026-09）** | 改为：**apt 包源码化进 src**（vendored/submodule），源码编译覆盖 apt，参数照常归包内 config/；实在不源码化的（如 nav2 全家 30+ 包）本体放 `third_party/nav2` 参考、参数归自研装配包（rm_navigation/params） |
 | ③ 平台参数（雷达安装外参等） | **不属于算法**：留在机器人描述/装配处（当前 `measurement_params_sim.yaml`），不搬 |
 | ④ config/reality 全家 | 按 R5 冻结：不回归、不维护、不再双份同步（真车配置将来在部署导出阶段另行生成） |
 
@@ -24,9 +24,9 @@
 | 2 | ~~`config/simulation/pointlio_mid360_sim.yaml`~~ → `point_lio/config/pointlio_mid360_sim.yaml`（**✅ 已回归**） | **point_lio**（自有 fork 子模块） | bringup_sim 改引 `get_package_share_directory('point_lio')/config/...` | ① 已在包 config/（CMake 本就安装 config） | 完成（fork 已推送） |
 | 3 | ~~`config/simulation/icp_registration_sim.yaml`~~ → `icp_registration/config/icp_registration_sim.yaml`（**✅ 已回归**） | **icp_registration**（自研/借鉴包） | bringup_sim：改引 `get_package_share_directory('icp_registration')/config/...`；bringup_real：误引用修正为 reality yaml | ① 已在包 config/（包 CMake 本就 INSTALL_TO_SHARE config） | 完成（launch 引用同步改好） |
 | 4 | ~~`config/simulation/segmentation_sim.yaml`~~ → `linefit_ground_segmentation_ros/config/segmentation_sim.yaml`（**✅ 已回归**） | **linefit_ground_segmentation_ros** | bringup_sim 改引 `get_package_share_directory('linefit_ground_segmentation_ros')/config/...` | ① 已在包 config/（CMake 加 INSTALL_TO_SHARE config） | 完成 |
-| 5 | `config/simulation/mapper_params_online_async_sim.yaml` | **slam_toolbox**（apt，无源码） | 同上（mapping 模式） | ② `variants/slam_toolbox/` | launch 路径 |
-| 6 | `config/simulation/mapper_params_localization_sim.yaml` | **slam_toolbox**（apt，无源码） | 同上（nav+localization=slam_toolbox） | ② `variants/slam_toolbox/` | launch 路径 |
-| 7 | `config/simulation/nav2_params_sim.yaml` | **Nav2 装配参数**（半 apt + 大量自调） | bringup → `bringup_rm_navigation.py` params_file | ② `variants/nav2/<组合>.yaml`（teb/dwb/rpp 分开） | launch 路径；注意 rm_navigation/params/nav2_params.yaml 是旧默认，以 variants 为准 |
+| 5 | ~~`config/simulation/mapper_params_online_async_sim.yaml`~~ → `slam_toolbox/config/mapper_params_online_async_sim.yaml`（**✅ 已回归**） | **slam_toolbox**（已源码化 vendored 进 src，编译覆盖 apt） | bringup_sim 改引 `get_package_share_directory('slam_toolbox')/config/...` | ① 已在包 config/（CMake 本装 config） | 完成 |
+| 6 | ~~`config/simulation/mapper_params_localization_sim.yaml`~~ → `slam_toolbox/config/mapper_params_localization_sim.yaml`（**✅ 已回归**） | **slam_toolbox**（同上源码化） | 同上 | ① 同上 | 完成 |
+| 7 | ~~`config/simulation/nav2_params_sim.yaml`~~ → `rm_navigation/params/nav2_params_sim.yaml`（**✅ 已回归**） | **nav2 组装参数**（nav2 本体不源码化，仅 third_party 参考；参数归自研 rm_navigation） | bringup_sim 改引 `get_package_share_directory('rm_navigation')/params/...` | ① rm_navigation/params/（CMake 本装 params） | 完成 |
 | 8 | `config/lua/cartographer.lua` + `cartographer_localization.lua` | **cartographer_ros**（apt，无源码） | `cartographer_sim.launch.py`（默认引用） | ② `variants/cartographer/`（连 launch 片段一起） | launch 路径 |
 | 9 | `config/simulation/measurement_params_sim.yaml` | **平台外参**（base_link↔livox） | bringup 拼 robot_description | ③ 留在装配层/机器人描述，不搬 | — |
 | — | `config/reality/*.yaml`（9 个） | 真车 | bringup_real | ④ 冻结 | — |
@@ -65,7 +65,7 @@ nav2_params = os.path.join(get_package_share_directory('rm_nav_bringup') 或 var
 - [x] a/b/c launch 内嵌参数回归（**2026-09 完成**）：imu/laserscan/fake_vel 各自 config yaml + CMake 安装 + launch 引用
 - [x] d point_lio 覆盖参数并入 pointlio_mid360_sim.yaml（**2026-09 完成**）
 - [x] reality 分支冻结标记（**2026-09**）：`config/reality/FROZEN.md`
-- [ ] #5/#6 slam_toolbox 参数 → variants/
-- [ ] #7 nav2 参数拆分 → variants/nav2/<组合>.yaml
-- [ ] #8 cartographer lua + launch 片段 → variants/cartographer/
+- [x] #5/#6 slam_toolbox 参数回归（**2026-09 完成**）：slam_toolbox 已**源码化 vendored 进 src**（编译覆盖 apt），mapper 参数入其 config/
+- [x] #7 nav2 参数拆分（**2026-09 完成**）：nav2 本体**不源码化**（30+ 包过大），完整源码放 `third_party/nav2` 参考；参数归自研 `rm_navigation/params/`
+- [ ] #8 cartographer lua 归属（待定：cartographer_ros 源码化编译较重，需单独评估）
 - [ ] 回归后跑通 bringup_sim 验证（mapping/nav × fastlio/pointlio × 各 localization）
