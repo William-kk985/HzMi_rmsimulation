@@ -1,0 +1,3 @@
+/**:
+  ros__parameters:
+    spin_speed: 5.0   # rad/s，云台旋转速度补偿

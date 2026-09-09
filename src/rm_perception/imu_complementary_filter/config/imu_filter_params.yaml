@@ -1,0 +1,7 @@
+/**:
+  ros__parameters:
+    do_bias_estimation: true
+    do_adaptive_gain: true
+    use_mag: false
+    gain_acc: 0.01
+    gain_mag: 0.01

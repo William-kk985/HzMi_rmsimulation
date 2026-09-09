@@ -31,7 +31,8 @@ def generate_launch_description():
     ################################# robot_description parameters end ################################
 
     ########################## linefit_ground_segementation parameters start ##########################
-    segmentation_params = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'segmentation_sim.yaml')
+    # 参数已回归 linefit_ground_segmentation_ros 包自身 config/（R1）
+    segmentation_params = os.path.join(get_package_share_directory('linefit_ground_segmentation_ros'), 'config', 'segmentation_sim.yaml')
     ########################## linefit_ground_segementation parameters end ############################
 
     #################################### FAST_LIO parameters start ####################################
@@ -124,13 +125,8 @@ def generate_launch_description():
         executable='complementary_filter_node',
         name='complementary_filter_gain_node',
         output='screen',
-        parameters=[
-            {'do_bias_estimation': True},
-            {'do_adaptive_gain': True},
-            {'use_mag': False},
-            {'gain_acc': 0.01},
-            {'gain_mag': 0.01},
-        ],
+        # 参数已回归 imu_complementary_filter 包 config/（R1）
+        parameters=[os.path.join(get_package_share_directory('imu_complementary_filter'), 'config', 'imu_filter_params.yaml')],
         remappings=[
             ('/imu/data_raw', '/livox/imu'),
         ]
@@ -147,20 +143,8 @@ def generate_launch_description():
         package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
         remappings=[('cloud_in',  ['/segmentation/obstacle']),
                     ('scan',  ['/scan'])],
-        parameters=[{
-            'target_frame': 'livox_frame',
-            'transform_tolerance': 0.01,
-            'min_height': -1.0,
-            'max_height': 0.1,
-            'angle_min': -3.14159,  # -M_PI/2
-            'angle_max': 3.14159,   # M_PI/2
-            'angle_increment': 0.0043,  # M_PI/360.0
-            'scan_time': 0.3333,
-            'range_min': 0.45,
-            'range_max': 10.0,
-            'use_inf': True,
-            'inf_epsilon': 1.0
-        }],
+        # 参数已回归 pointcloud_to_laserscan 包 config/（R1）
+        parameters=[os.path.join(get_package_share_directory('pointcloud_to_laserscan'), 'config', 'laserscan_params.yaml')],
         name='pointcloud_to_laserscan'
     )
 
@@ -198,17 +182,8 @@ def generate_launch_description():
                 output='screen',
                 parameters=[
                     pointlio_mid360_params,
-                    {'use_sim_time': use_sim_time,
-                    'use_imu_as_input': False,  # Change to True to use IMU as input of Point-LIO
-                    'prop_at_freq_of_imu': True,
-                    'check_satu': False,
-                    'init_map_size': 10,
-                    'point_filter_num': 3,  # Options: 1, 3
-                    'space_down_sample': True,
-                    'filter_size_surf': 0.5,  # Options: 0.5, 0.3, 0.2, 0.15, 0.1
-                    'filter_size_map': 0.5,  # Options: 0.5, 0.3, 0.15, 0.1
-                    'ivox_nearby_type': 26,   # Options: 0, 6, 18, 26
-                    'runtime_pos_log_enable': False}
+                    # 算法调参键已并入 pointlio_mid360_sim.yaml（R1），此处仅留装配级 use_sim_time
+                    {'use_sim_time': use_sim_time}
                 ],
             ),
             Node(
@@ -277,10 +252,9 @@ def generate_launch_description():
         package='fake_vel_transform',
         executable='fake_vel_transform_node',
         output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'spin_speed': 5.0 # rad/s
-        }]
+        # spin_speed 已回归 fake_vel_transform 包 config/（R1），此处仅留装配级 use_sim_time
+        parameters=[os.path.join(get_package_share_directory('fake_vel_transform'), 'config', 'fake_vel_params.yaml'),
+                    {'use_sim_time': use_sim_time}]
     )
 
     # 添加TF桥接节点，将LIO的frame映射到标准frame
