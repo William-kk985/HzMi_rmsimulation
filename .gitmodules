@@ -22,3 +22,7 @@
 [submodule "third_party/cartographer"]
 	path = third_party/cartographer
 	url = https://github.com/cartographer-project/cartographer
+[submodule "third_party/nav2"]
+	path = third_party/nav2
+	url = https://github.com/ros-navigation/navigation2.git
+	branch = humble

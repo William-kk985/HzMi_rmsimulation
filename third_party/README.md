@@ -20,5 +20,6 @@
 | `third_party/fast_lio` | https://github.com/hku-mars/FAST_LIO | `src/rm_localization/FAST_LIO` | 7cc4175 (main) |
 | `third_party/point_lio` | https://github.com/hku-mars/Point-LIO | `src/rm_localization/point_lio` | 4b86a46 |
 | `third_party/cartographer` | https://github.com/cartographer-project/cartographer | （ROS2 版由 apt 提供：ros-humble-cartographer*） | 877157a (2.0.0) |
+| `third_party/nav2` | https://github.com/ros-navigation/navigation2 | 本工程用 apt(ros-humble-nav2*) + 自研 `rm_navigation` 组装；此处为**完整源码参考/对比学习** | 3c3db59 (humble) |
 
-> 备注：cartographer 本体为 ROS1 时代官方仓库；本工程 ROS2 用法走 apt 的 ros-humble-cartographer/cartographer_ros，此处仅为"最源头"参考。其它用 apt 的库（nav2、slam_toolbox 等）同样无需源码，不入本目录。
+> 备注：cartographer 本体为 ROS1 时代官方仓库；本工程 ROS2 用法走 apt 的 ros-humble-cartographer/cartographer_ros，此处仅为"最源头"参考。nav2 全家（30+ 包）源码巨大，只放 third_party 做**对照学习**，**不参与编译、不替换 apt**；运行仍用 apt 版 + 你们自研 `rm_navigation` 的 launch/params 组装。
