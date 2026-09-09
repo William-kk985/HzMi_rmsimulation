@@ -9,10 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     # 配置参数
-    # 注意：本仓库 cartographer_ros 为源码 vendored（lua 已归其 configuration_files/），但该上游是 catkin(ROS1) 构建，
-    # 无法在本机(colcon/humble)编译覆盖 apt → 目录已加 COLCON_IGNORE。
-    # 运行时走 apt 版 cartographer_ros，lua 目录需显式传参（见 docs/mapping/ 指南；源码路径示例：
-    #   configuration_directory:=<workspace>/src/rm_localization/cartographer_ros/cartographer_ros/configuration_files）
+    # lua 已回归 cartographer_ros 包 configuration_files/（官方 ament 源码 vendored，colcon 编译覆盖 apt）
     configuration_directory = LaunchConfiguration('configuration_directory')
     configuration_basename = LaunchConfiguration('configuration_basename')
     use_bag_play = LaunchConfiguration('use_bag_play', default='false')

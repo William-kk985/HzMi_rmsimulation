@@ -27,7 +27,7 @@
 | 5 | ~~`config/simulation/mapper_params_online_async_sim.yaml`~~ → `slam_toolbox/config/mapper_params_online_async_sim.yaml`（**✅ 已回归**） | **slam_toolbox**（已源码化 vendored 进 src，编译覆盖 apt） | bringup_sim 改引 `get_package_share_directory('slam_toolbox')/config/...` | ① 已在包 config/（CMake 本装 config） | 完成 |
 | 6 | ~~`config/simulation/mapper_params_localization_sim.yaml`~~ → `slam_toolbox/config/mapper_params_localization_sim.yaml`（**✅ 已回归**） | **slam_toolbox**（同上源码化） | 同上 | ① 同上 | 完成 |
 | 7 | ~~`config/simulation/nav2_params_sim.yaml`~~ → `rm_navigation/params/nav2_params_sim.yaml`（**✅ 已回归**） | **nav2 组装参数**（nav2 本体不源码化，仅 third_party 参考；参数归自研 rm_navigation） | bringup_sim 改引 `get_package_share_directory('rm_navigation')/params/...` | ① rm_navigation/params/（CMake 本装 params） | 完成 |
-| 8 | ~~`config/lua/*.lua`~~ → 已迁入 **vendored cartographer_ros** `cartographer_ros/configuration_files/`（官方示例同目录） | **cartographer（源码化部分实现）** | `cartographer_sim.launch.py` / `docs/mapping` 指南 | ① 归位成功（lua = Cartographer 官方配置格式，官方包自带 configuration_files 示例）；⚠️ 上游是 catkin(ROS1) 构建、本机无法 colcon 覆盖 apt → 目录加 COLCON_IGNORE，运行时仍 apt + 显式传 lua 目录 | 部分实现 + 阻塞记录（2026-09） |
+| 8 | ~~`config/lua/*.lua`~~ → **`cartographer_ros/configuration_files/`**（官方示例同目录） | **cartographer_ros**（**官方 ament 源码 vendored，colcon 编译覆盖 apt**） | `cartographer_sim.launch.py` 默认引 `FindPackageShare('cartographer_ros')/configuration_files` | ① 完成：ros2-gbp humble(ament) 源码 vendored，lua 随包安装，全量 19 包编译通过 | **✅ 完成（2026-09）** |
 | 9 | `config/simulation/measurement_params_sim.yaml` | **平台外参**（base_link↔livox） | bringup 拼 robot_description | ③ 留在装配层/机器人描述，不搬 | — |
 | — | `config/reality/*.yaml`（9 个） | 真车 | bringup_real | ④ 冻结 | — |
 
@@ -67,5 +67,5 @@ nav2_params = os.path.join(get_package_share_directory('rm_nav_bringup') 或 var
 - [x] reality 分支冻结标记（**2026-09**）：`config/reality/FROZEN.md`
 - [x] #5/#6 slam_toolbox 参数回归（**2026-09 完成**）：slam_toolbox 已**源码化 vendored 进 src**（编译覆盖 apt），mapper 参数入其 config/
 - [x] #7 nav2 参数拆分（**2026-09 完成**）：nav2 本体**不源码化**（30+ 包过大），完整源码放 `third_party/nav2` 参考；参数归自研 `rm_navigation/params/`
-- [x] #8 cartographer lua（**2026-09 部分实现**）：lua 已迁入 vendored cartographer_ros `configuration_files/`（原生位置，lua=官方配置格式）；但上游为 catkin 构建无法本机覆盖编译 → COLCON_IGNORE，运行时 apt + 显式传参（详见上表第 8 行阻塞记录）
+- [x] #8 cartographer lua（**2026-09 完成**）：换用 **ros2-gbp humble 官方 ament 源码**（非 catkin 版），vendored 进 src 并 colcon 编译覆盖 apt；lua 随 `cartographer_ros/configuration_files/` 安装，wrapper launch 默认即可用
 - [ ] 回归后跑通 bringup_sim 验证（mapping/nav × fastlio/pointlio × 各 localization）
