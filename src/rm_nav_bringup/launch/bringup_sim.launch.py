@@ -35,12 +35,14 @@ def generate_launch_description():
     ########################## linefit_ground_segementation parameters end ############################
 
     #################################### FAST_LIO parameters start ####################################
-    fastlio_mid360_params = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'fastlio_mid360_sim.yaml')
+    # 参数已回归 fast_lio 包自身 config/（R1）
+    fastlio_mid360_params = os.path.join(get_package_share_directory('fast_lio'), 'config', 'fastlio_mid360_sim.yaml')
     fastlio_rviz_cfg_dir = os.path.join(rm_nav_bringup_dir, 'rviz', 'fastlio.rviz')
     ##################################### FAST_LIO parameters end #####################################
 
     ################################### POINT_LIO parameters start ####################################
-    pointlio_mid360_params = os.path.join(rm_nav_bringup_dir, 'config', 'simulation', 'pointlio_mid360_sim.yaml')
+    # 参数已回归 point_lio 包自身 config/（R1）
+    pointlio_mid360_params = os.path.join(get_package_share_directory('point_lio'), 'config', 'pointlio_mid360_sim.yaml')
     pointlio_rviz_cfg_dir = os.path.join(rm_nav_bringup_dir, 'rviz', 'pointlio.rviz')
     #################################### POINT_LIO parameters end #####################################
 
