@@ -104,6 +104,8 @@
 ## 🚀 快速开始
 
 > 📁 项目布局：启动/工具脚本在 `tools/scripts/`（控制类 `tools/scripts/control/`、建图类 `tools/scripts/mapping/`），文档在 `docs/`（建图 `docs/mapping/`、配置包 `docs/package/`），一次性报告归档在 `archive/`。
+>
+> 🏗️ **目录架构总览见 [`docs/architecture.md`](docs/architecture.md)**（角色域、参数归属、third_party、子模块、构建运行要点）。
 
 ### 方式一：使用便捷启动脚本（推荐）
 
