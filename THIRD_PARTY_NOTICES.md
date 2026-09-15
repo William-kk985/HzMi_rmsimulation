@@ -49,7 +49,7 @@
 2. **cartographer_ros 缺 LICENSE**：上游 bloom 打包分支不含 LICENSE，我们已补入 Apache-2.0 全文（文本取自同项目 `cartographer-project/cartographer`）与 `AUTHORS`；
 3. **costmap_converter 缺 LICENSE 文件**：上游（含所用 fork）仅有 `package.xml` 的 `<license>BSD</license>`、无许可证文本。因其为 git 子模块（不便于向内添加文件），此处登记而不修改；建议向上游提 issue，或后续用自有 fork 补文本；
 4. **imu_complementary_filter 缺 LICENSE**：已从上游 `ccny-ros-pkg/imu_tools` 取回 `LICENSE.bsd`（BSD-3-Clause）补入；
-5. **本仓自身许可证待明确**：顶层 `LICENSE` 现为 `MIT (c) 2024 ziknagXie`（疑似随上游文件带入），且自研/改编包 `package.xml` 仍有 `TODO` 许可证字段（`hzmi_rm_simulation`、`icp_registration`、`rm_navigation`）——**建议团队确认自有代码的许可证与署名后统一填写**；
+5. **本仓自身许可证已明确（2026-09）**：顶层 `LICENSE` = **MIT ©2026 HzMi（赫兹矩阵）**；`hzmi_rm_simulation`、`icp_registration`、`rm_navigation` 的 `package.xml` 已由 `TODO` 更新为 `MIT`（`fake_vel_transform`、`rm_nav_bringup` 原本即为 MIT）。各 `package.xml` 的 `<maintainer>`/`<author>` 仍保留上游原作者署名（Lihan Chen / zcf / fyt），这是对各包来源的尊重；如团队希望补充本方维护者，可另行追加；
 6. **FAST_LIO 自有 fork 为快照根**：仅 2 个提交，未保留上游提交历史（提交信息已注明基于 `5d9dc72`）。如需完整血统，可在 GitHub 对上游点一次 **Fork** 后叠加我等适配提交，并更新 `.gitmodules` 与 pin。
 
 ## 五、维护约定

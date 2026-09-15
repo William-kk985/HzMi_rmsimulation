@@ -7,7 +7,7 @@
     Gazebo simulation package for the RMUC
   </description>
   <maintainer email="lihanchen2004@163.com">Lihan Chen</maintainer>
-  <license>TODO</license>
+  <license>MIT</license>
   <author email="lihanchen2004@163.com">Lihan Chen</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
