@@ -209,9 +209,11 @@ tools/scripts/control/start_sentinel.sh
 |---|---|---|
 | `world` | `RMUC` / `RMUL` / `RMUL2026`（默认） | 场地（同时决定 map/PCD 前缀） |
 | `mode` | `mapping` / `nav` | 边建图边导航 / 已知地图导航 |
-| `lio` | `fastlio`（默认） / `pointlio` | 里程计选择 |
+| `lio` | `fastlio`（默认） / `pointlio` / **`none`** | 里程计实现选择；**`none` = 不启动任何 LIO**（须由外部提供 odom/TF，如轮式里程计或 cartographer；此时 LIO 相关的静态 TF 桥不会启动） |
 | `localization` | `slam_toolbox` / `amcl` / `icp`（仅 nav 模式） | 重定位方式 |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | 可视化开关 |
+
+> `lio:=none` 的用途：跑**纯 2D 组合**（例如 cartographer 自带前端，或轮式里程计）时避免 LIO 与之争抢位姿/TF。注意 2D 定位/导航链仍需要 `odom→base_link` 与 `map→odom`，`none` 只是"不由本工程提供"，需另接来源。
 
 ---
 

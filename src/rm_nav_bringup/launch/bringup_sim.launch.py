@@ -102,7 +102,8 @@ def generate_launch_description():
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
         default_value='fastlio',
-        description='Choose lio alogrithm: fastlio or pointlio')
+        description='Choose lio algorithm: fastlio | pointlio | none '
+                    '(none = 不启动任何 LIO，需外部提供 odom/TF，如轮式里程计或 cartographer)')
 
     # Specify the actions
     start_rm_simulation = IncludeLaunchDescription(
@@ -252,7 +253,10 @@ def generate_launch_description():
     )
 
     # 添加TF桥接节点，将LIO的frame映射到标准frame
+    # 注意：这些桥仅在启用 LIO 时才有意义（lio:=none 时应由外部里程计提供 odom/TF，避免假 TF 抢占）
+    lio_enabled = LaunchConfigurationNotEquals('lio', 'none')
     tf_bridge_node = Node(
+        condition=lio_enabled,
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_bridge_camera_init_to_map',
@@ -261,6 +265,7 @@ def generate_launch_description():
     )
     
     tf_bridge_node2 = Node(
+        condition=lio_enabled,
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_bridge_body_to_odom',
@@ -268,8 +273,9 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}]
     )
 
-    # 只保留必要的静态TF变换
+    # 只保留必要的静态TF变换（LIO 的 base_link ↔ 导航用 base_link_fake）
     static_tf_base_link_to_base_link_fake = Node(
+        condition=lio_enabled,
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_tf_base_link_to_base_link_fake',
