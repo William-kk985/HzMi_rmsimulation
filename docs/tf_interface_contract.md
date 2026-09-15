@@ -15,7 +15,7 @@
 | `point_lio` | **`camera_init → aft_mapped`** | `aft_mapped_to_init`（header `camera_init` / child **`body`**） | `point_lio/src/laserMapping.cpp` L245-246、L258-259 |
 | `slam_toolbox`（localization） | **`map → odom`** | `/map`、`/scan` | `mapper_params_localization_sim.yaml`（`map_frame=map`、`odom_frame=odom`、`base_frame=base_link`） |
 | `amcl` | **`map → odom`** | `/amcl_pose` | `nav2_params_sim.yaml`（`global_frame_id=map`、`odom_frame_id=odom`、`base_frame_id=base_link`） |
-| `icp_registration` | **无 TF**（`map→odom` 广播整段被注释） | 无 | `icp_registration.cpp` L118-125（`timer_` 与 `sendTransform` 全被注释） |
+| `icp_registration` | **`map → odom`**（100Hz 专用线程，L127-146；L118-125 只是被注释的重复定时器） | 无 | `icp_registration.cpp` L127-146、L217-231 |
 | `fake_vel_transform` | **`base_link → base_link_fake`**；还做 `/cmd_vel` → `/cmd_vel_chassis` 速度变换 | `/cmd_vel`、`/cmd_vel_chassis` | `fake_vel_transform/src/*.cpp` L11-12、L67、L88-89 |
 | `bringup_sim` 三条**静态桥** | `camera_init→map`、`body→odom`、`base_link→base_link_fake` | — | `bringup_sim.launch.py`（LIO 启用时启动） |
 | `robot_state_publisher` | URDF 固定关节（`base_link`↔`livox_frame`/`imu_link` 等） | `/tf_static` | `sentry_robot_sim.xacro` |
@@ -30,7 +30,7 @@
 |---|---|---|
 | **P1** | 静态 `camera_init→map` 与 AMCL/slam_toolbox 的 `map→odom` **并存** → `map`/`odom` 出现多个父边（帧树闭环/非法） | TF 树冲突、`view_frames` 报警、定位/代价地图偶发丢帧 |
 | **P2** | 两套 LIO 输出不一致：话题 `‎/Odometry` vs `aft_mapped_to_init`；TF 子帧 `body` vs `aft_mapped` | 下游无法用统一接口消费，只能靠帧桥硬凑 |
-| **P3** | `icp_registration` **不发布 `map→odom`**（广播被注释） | `localization:=icp` 时 `map↔odom` 只能靠静态桥凑，ICP 的配准结果实际没进 TF 树 |
+| **P3** ✅已修 | `icp_registration` **确实会发 `map→odom`**（L127-146 专用线程），但它需要 `lookupTransform(laser_frame_id, **range_odom_frame_id**)`（L198），而配置里的 `range_odom_frame_id: "lidar_odom"` 对应的静态帧在早前 WIP 中被删除 → 查 TF 抛异常 → `is_ready_=false` → **ICP 的 `map→odom` 实际从未发布**（原先文档表述为"广播被注释"，已纠正） | `localization:=icp` 实际拿不到 ICP 的配准结果；修复=把 `range_odom_frame_id` 改为 `odom`（数学上 `T_map←odom = T_map←livox(ICP 结果) · T_livox←odom(TF 链)` 恰好成立），**一行配置即可，无需改代码** |
 | **P4** | `base_link→base_link_fake` 有**两个发布者**：`fake_vel_transform` + 静态桥 | 同一条边双发布，TF 抖动/覆盖 |
 | **P5** | sim 里 **Gazebo 也发 `odom→base_link`**，与 LIO 定位争夺同一条边（若把 LIO 改名为 odom→base_link 必然冲突） | 定位与真值混用，仿真验证结论不可信 |
 | **P6** | nav2 用 `base_link_fake` 作为 `robot_base_frame`，而非标准 `base_link` | 多一层"假帧"，与 URDF/TF 语义脱节 |
@@ -71,10 +71,10 @@ map ──(重定位：AMCL / slam_toolbox / ICP 之一发布)──► odom ─
 |---|---|---|
 | **T1 ✅（2026-09 已实施）** | 帧桥改为**仅 `mode:=nav` + `localization:=icp` + 启用 LIO** 时启动；删除重复的静态 `base_link→base_link_fake`（由 `fake_vel_transform` 20Hz 独占发布） | P1/P4 消除：amcl/slam_toolbox 模式不再与静态桥争 `map`/`odom` |
 | **T2 ✅（2026-09 已实施）** | 统一里程计话题：bringup 把 `fast_lio` 的 `/Odometry`、`point_lio` 的 `aft_mapped_to_init` 都 **remap 为 `/odom`** | `ros2 topic hz /odom` 在两种 LIO 下都连续；TEB 变体的 `odom_topic: /odom` 生效 |
-| **T3** | 新增 `lio_tf_adapter`，输出标准 `odom→base_link`；删除全部静态桥 | `tf_echo odom base_link` 连续；帧树只剩标准边 |
-| **T4** | sim URDF 关闭 Gazebo `publish_odom_tf`（真值仅保留 `/odom` 话题供对比） | 无"双发布者"警告；LIO 定位成为唯一位姿源 |
-| **T5** | 启用 `icp_registration` 的 `map→odom` 广播（修好被注释的定时器/或改为每次配准后发布） | `localization:=icp` 时 `map→odom` 由 ICP 提供 |
-| **T6** | nav2 `robot_base_frame` 由 `base_link_fake` 改回 `base_link`（并回归 footprint/速度参数） | nav2 各组合实跑通过 |
+| **T3 ✅（2026-09 已实施）** | 新增自研包 `src/rm_localization/lio_tf_adapter`：订阅统一后的 `/odom`，广播标准 **`odom→base_link`**；`lio:=none` 时不启动 | LIO 成为导航唯一里程计来源；帧树不再出现 `camera_init/body/aft_mapped` |
+| **T4 ✅（2026-09 已实施）** | sim URDF 关闭 Gazebo `publish_odom_tf`（`/odom` 话题保留供对比） | 无"双发布者"：`odom→base_link` 仅由 `lio_tf_adapter` 发布 |
+| **T5 ✅（2026-09 已实施）** | 修正 `icp_registration_sim.yaml`：`range_odom_frame_id: "odom"`（原 `lidar_odom` 已失效） | `localization:=icp` 时 `map→odom` 真正由 ICP 提供（需实跑确认） |
+| **T6** | nav2 `robot_base_frame` 由 `base_link_fake` 改回 `base_link`（并回归 footprint/速度参数） | nav2 各组合实跑通过（**留到实跑后**，风险最高） |
 
 ---
 

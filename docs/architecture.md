@@ -44,7 +44,8 @@
 | | `imu_complementary_filter` | IMU 滤波 → `/imu/data`（喂 FAST-LIO） | 本仓直接管理 |
 | `rm_localization/` | `fast_lio` | 里程计 + 3D 建图（一体） | **git 子模块（自有 fork）** |
 | | `point_lio` | 高频里程计 + 建图（`fast_lio` 的替身） | **git 子模块（自有 fork）** |
-| | `icp_registration` | 3D 重定位（吃 `.pcd`） | 本仓直接管理 |
+| | `icp_registration` | 3D 重定位（吃 `.pcd`），发布 `map→odom` | 本仓直接管理 |
+| | `lio_tf_adapter` | **LIO 位姿 → 标准帧树适配**（`/odom` ⇒ `odom→base_link`，T3） | 本仓直接管理 |
 | | `slam_toolbox` | 2D 建图 / 纯定位（官方源码 vendored，**编译覆盖 apt**） | 内嵌源码（去 .git） |
 | | `cartographer_ros` | 2D 建图 / 纯定位（**ros2-gbp humble 官方 ament 源码**，编译覆盖 apt） | 内嵌源码（去 .git） |
 | `rm_navigation/` | `rm_navigation` | Nav2 组装（launch + **nav2 参数** + rviz） | 本仓直接管理 |
@@ -217,7 +218,7 @@ tools/scripts/control/start_sentinel.sh
 
 > `lio:=none` 的用途：跑**纯 2D 组合**（例如 cartographer 自带前端，或轮式里程计）时避免 LIO 与之争抢位姿/TF。注意 2D 定位/导航链仍需要 `odom→base_link` 与 `map→odom`，`none` 只是"不由本工程提供"，需另接来源。
 >
-> **TF/话题契约（T1/T2 已实施，2026-09）**：两套 LIO 的里程计话题在 bringup 内统一 remap 为 **`/odom`**；原先"无条件启动"的三条静态 TF 桥现改为 **仅 `mode:=nav` + `localization:=icp` + 启用 LIO** 时启动（amcl/slam_toolbox 自己发 `map→odom`，不得再叠加），并删除了重复的 `base_link→base_link_fake` 静态桥（由 `fake_vel_transform` 独占发布）。详见 `docs/tf_interface_contract.md`。
+> **TF/话题契约（T1–T5 已实施，2026-09）**：① 两套 LIO 的里程计话题在 bringup 内统一 remap 为 **`/odom`**；② 新增 **`lio_tf_adapter`** 把 LIO 位姿转成标准 **`odom→base_link`**；③ sim URDF 关闭了 Gazebo 的 `publish_odom_tf`，使 LIO 成为**唯一位姿来源**（仿真不再依赖真值 TF）；④ 静态帧桥改为**仅在 `mode:=nav` 且未选任何重定位模块**时启动（amcl/slam_toolbox/ICP 都自发布 `map→odom`，不得叠加），并删除了重复的 `base_link→base_link_fake` 静态桥；⑤ `icp_registration` 的 `range_odom_frame_id` 修正为 `odom`，其 `map→odom` 才真正生效。剩余 T6（nav2 `robot_base_frame` 去 `base_link_fake`）待实跑后处理。详见 `docs/tf_interface_contract.md`。
 
 ---
 

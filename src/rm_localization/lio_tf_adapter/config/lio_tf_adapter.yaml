@@ -1,0 +1,8 @@
+/**:
+  ros__parameters:
+    odom_topic: /odom      # 统一后的里程计话题（bringup 已对 fast_lio/point_lio 做 remap）
+    odom_frame: odom       # 输出 TF 的父帧
+    base_frame: base_link  # 输出 TF 的子帧
+    # 可选补偿：LIO 内部 body 帧 相对 底盘 base_link 的小外参（默认按重合处理）
+    xyz: [0.0, 0.0, 0.0]
+    rpy: [0.0, 0.0, 0.0]

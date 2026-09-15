@@ -28,7 +28,7 @@
 | `src/rm_perception/pointcloud_to_laserscan` | Paul Bovbel（ros-perception） | 见包内 `LICENSE`（BSD） | 本仓直接管理 | 参数外置 |
 | `src/rm_perception/imu_complementary_filter` | ccny-ros-pkg/imu_tools（© DFKI 2021 / CUNY 2015 / Willow Garage 2012 等） | **BSD-3-Clause**（LICENSE 已补，见 §四-4） | 本仓直接管理 | 参数外置 |
 | `src/rm_simulation/hzmi_rm_simulation` | 本项目（场地/机器人模型改编自 PB 与 RM 公开场地资源） | 随本仓（见 §四-5） | 本仓直接管理 | 更名、2026 场地、参数外置 |
-| `src/rm_navigation/fake_vel_transform`、`src/rm_localization/icp_registration`、`src/rm_navigation/rm_navigation`、`src/rm_nav_bringup` | 本项目（思路参考 CSU-RM-Sentry 等） | 随本仓（package.xml 待填，见 §四-5） | 本仓直接管理 | 编排、参数回归、接口适配 |
+| `src/rm_navigation/fake_vel_transform`、`src/rm_localization/icp_registration`、`src/rm_localization/lio_tf_adapter`、`src/rm_navigation/rm_navigation`、`src/rm_nav_bringup` | 本项目（思路参考 CSU-RM-Sentry 等） | 随本仓（MIT） | 本仓直接管理 | 编排、参数回归、接口适配、TF 契约适配 |
 | `third_party/fast_lio` | hku-mars/FAST_LIO | GPL-2.0 | 原版参考（不编译） | — |
 | `third_party/point_lio` | hku-mars/Point-LIO | BSD-3-Clause | 原版参考（不编译） | — |
 | `third_party/cartographer` | cartographer-project/cartographer | Apache-2.0 | 原版参考（不编译） | — |

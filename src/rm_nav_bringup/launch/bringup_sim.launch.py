@@ -270,12 +270,24 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}]
     )
 
-    # T1：帧桥仅在「nav + localization:=icp + 启用 LIO」时启动
-    # （icp_registration 不发布 map→odom，需要它把 LIO 的 camera_init/body 桥到 map/odom 以闭合帧树）
-    # amcl / slam_toolbox（mapping 模式亦然）自己发布 map→odom，绝不能再叠加静态桥，否则 map/odom 出现多父边
+    # T3：LIO 位姿 → 标准帧树适配（odom→base_link），启用 LIO 时启动
+    # （配合 T4 关闭 Gazebo 的 odom→base_link，使其成为唯一位姿来源；T2 已把里程计话题统一为 /odom）
+    lio_tf_adapter_node = Node(
+        condition = LaunchConfigurationNotEquals('lio', 'none'),
+        package='lio_tf_adapter',
+        executable='lio_tf_adapter_node',
+        name='lio_tf_adapter',
+        output='screen',
+        parameters=[os.path.join(get_package_share_directory('lio_tf_adapter'), 'config', 'lio_tf_adapter.yaml'),
+                    {'use_sim_time': use_sim_time}]
+    )
+
+    # T1（修正版）：帧桥只在「nav + 未选择任何重定位模块 + 启用 LIO」时启动，
+    # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
+    # amcl / slam_toolbox / icp_registration 三者都会自行发布 map→odom，绝不能再叠加静态桥（否则 map/odom 多父边）。
     icp_frame_bridge_condition = IfCondition(PythonExpression([
         "'", LaunchConfiguration('mode'), "' == 'nav' and '",
-        LaunchConfiguration('localization'), "' == 'icp' and '",
+        LaunchConfiguration('localization'), "' == '' and '",
         LaunchConfiguration('lio'), "' != 'none'"]))
 
     tf_bridge_node = Node(
@@ -364,6 +376,7 @@ def generate_launch_description():
     
     ld.add_action(start_localization_group)
     ld.add_action(bringup_fake_vel_transform_node)
+    ld.add_action(lio_tf_adapter_node)
     ld.add_action(start_mapping)
     ld.add_action(start_cartographer_mapping)
     ld.add_action(start_navigation2)

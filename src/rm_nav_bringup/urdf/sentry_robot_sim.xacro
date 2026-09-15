@@ -224,7 +224,8 @@
 
       <!-- Set if odom required -->
       <publish_odom>true</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
+      <!-- T4: 关闭 Gazebo 的 odom→base_link TF（否则与 LIO 的 lio_tf_adapter 抢同一条边）；/odom 话题保留供对比 -->
+      <publish_odom_tf>false</publish_odom_tf>
 
       <!-- Frame IDs -->
       <odometry_frame>odom</odometry_frame>

@@ -6,7 +6,9 @@
     pcd_path: ""
     map_frame_id: "map"
     odom_frame_id: "odom"
-    range_odom_frame_id: "lidar_odom"
+    # T5: 用标准 odom 帧（原 "lidar_odom" 依赖已删除的静态桥，导致 ICP lookup 失败、map→odom 从未发布）
+    # 数学上：T_map←odom = T_map←livox(ICP 结果) · T_livox←odom(由 TF 链提供)
+    range_odom_frame_id: "odom"
     laser_frame_id: "livox_frame"
     pointcloud_topic: "/livox/lidar/pointcloud"
     thresh: 0.1
