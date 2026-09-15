@@ -101,7 +101,7 @@ rm_nav_bringup/                          # 总装层（无 config/：参数已�
 | `icp_registration_sim.yaml` | `rm_localization/icp_registration/config/` | ✅ |
 | `segmentation_sim.yaml` | `rm_perception/.../linefit_ground_segmentation_ros/config/` | ✅ |
 | `mapper_params_*_sim.yaml` | `rm_localization/slam_toolbox/config/` | ✅ |
-| `nav2_params_sim.yaml` | `rm_navigation/rm_navigation/params/` | ✅ |
+| `nav2_params_sim_{rpp,dwb,teb}.yaml` | `rm_navigation/rm_navigation/params/` | ✅（由 `nav:=` 选择） |
 | `cartographer.lua` / `cartographer_localization.lua` | `rm_localization/cartographer_ros/configuration_files/`（官方示例同目录） | ✅ |
 | imu 滤波 / laserscan / fake_vel 参数（原 launch 内嵌） | 各自包 `config/` | ✅ |
 | `measurement_params_sim.yaml` | `rm_simulation/hzmi_rm_simulation/config/`（**平台参数，规则③**） | ✅ 已归平台包 |
@@ -210,6 +210,8 @@ tools/scripts/control/start_sentinel.sh
 | `world` | `RMUC` / `RMUL` / `RMUL2026`（默认） | 场地（同时决定 map/PCD 前缀） |
 | `mode` | `mapping` / `nav` | 边建图边导航 / 已知地图导航 |
 | `lio` | `fastlio`（默认） / `pointlio` / **`none`** | 里程计实现选择；**`none` = 不启动任何 LIO**（须由外部提供 odom/TF，如轮式里程计或 cartographer；此时 LIO 相关的静态 TF 桥不会启动） |
+| `nav` | `rpp`（默认） / `dwb` / `teb` | **局部规划器变体**：对应 `rm_navigation/params/nav2_params_sim_<nav>.yaml`（全局规划统一为 Navfn） |
+| `mapper` | `slam_toolbox`（默认） / `cartographer` | **2D 建图后端**（仅 `mode:=mapping` 生效）：slam_toolbox(async) 或 cartographer（建图 lua） |
 | `localization` | `slam_toolbox` / `amcl` / `icp`（仅 nav 模式） | 重定位方式 |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | 可视化开关 |
 

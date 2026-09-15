@@ -1,64 +1,80 @@
 #!/usr/bin/env python3
 # Cartographer 2D SLAM 启动文件 - 适配 Livox MID360
+# 支持两种用法：
+#   1) 建图：configuration_basename:=cartographer.lua（默认）
+#   2) 纯定位：configuration_basename:=cartographer_localization.lua \
+#              load_state_filename:=<xxx.pbstream> load_frozen_state:=true
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
+
+def _cartographer_nodes(context, *args, **kwargs):
+    """按参数动态拼 cartographer_node 的 arguments（load_state_filename 可选）。"""
+    config_dir = LaunchConfiguration('configuration_directory').perform(context)
+    config_base = LaunchConfiguration('configuration_basename').perform(context)
+    load_state = LaunchConfiguration('load_state_filename').perform(context)
+    frozen = LaunchConfiguration('load_frozen_state').perform(context)
+
+    arguments = ['-configuration_directory', config_dir,
+                 '-configuration_basename', config_base]
+    if load_state.strip():                       # 纯定位模式：加载已有 pbstream
+        arguments += ['-load_state_filename', load_state.strip()]
+        if str(frozen).lower() in ('true', '1'):
+            arguments += ['-load_frozen_state', 'true']
+
+    cartographer_node = Node(
+        package='cartographer_ros',
+        executable='cartographer_node',
+        name='cartographer_node',
+        output='screen',
+        parameters=[{'use_sim_time': True}],
+        arguments=arguments,
+        remappings=[
+            ('points2', '/livox/lidar'),   # Livox MID360 点云话题
+            ('imu', '/livox/imu'),          # IMU 话题
+        ]
+    )
+
+    occupancy_grid_node = Node(
+        package='cartographer_ros',
+        executable='cartographer_occupancy_grid_node',
+        name='cartographer_occupancy_grid_node',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'resolution': 0.05,          # 5cm 分辨率
+        }],
+        remappings=[('map', '/cartographer_map')]
+    )
+
+    return [cartographer_node, occupancy_grid_node]
+
+
 def generate_launch_description():
-    # 配置参数
-    # lua 已回归 cartographer_ros 包 configuration_files/（官方 ament 源码 vendored，colcon 编译覆盖 apt）
-    configuration_directory = LaunchConfiguration('configuration_directory')
-    configuration_basename = LaunchConfiguration('configuration_basename')
-    use_bag_play = LaunchConfiguration('use_bag_play', default='false')
-    
     return LaunchDescription([
-        # 声明参数
         DeclareLaunchArgument(
             'configuration_directory',
             default_value=PathJoinSubstitution([FindPackageShare('cartographer_ros'), 'configuration_files']),
             description='Full path to directory containing the .lua configuration file'
         ),
-        
         DeclareLaunchArgument(
             'configuration_basename',
             default_value='cartographer.lua',
-            description='Basename of the .lua configuration file'
+            description='Basename of the .lua configuration file (建图: cartographer.lua；纯定位: cartographer_localization.lua)'
         ),
-        
-        # Cartographer 节点
-        Node(
-            package='cartographer_ros',
-            executable='cartographer_node',
-            name='cartographer_node',
-            output='screen',
-            parameters=[{
-                'use_sim_time': True,
-            }],
-            arguments=[
-                '-configuration_directory', configuration_directory,
-                '-configuration_basename', configuration_basename,
-            ],
-            remappings=[
-                ('points2', '/livox/lidar'),  # Livox MID360 点云话题
-                ('imu', '/livox/imu'),         # IMU 话题
-            ]
+        DeclareLaunchArgument(
+            'load_state_filename',
+            default_value='',
+            description='纯定位用：已有 .pbstream 的完整路径（留空=纯建图模式）'
         ),
-        
-        #  occupancy grid 节点（将子图转换为栅格地图）
-        Node(
-            package='cartographer_ros',
-            executable='cartographer_occupancy_grid_node',
-            name='cartographer_occupancy_grid_node',
-            output='screen',
-            parameters=[{
-                'use_sim_time': True,
-                'resolution': 0.05,  # 5cm 分辨率
-            }],
-            remappings=[
-                ('map', '/cartographer_map'),
-            ]
+        DeclareLaunchArgument(
+            'load_frozen_state',
+            default_value='true',
+            description='纯定位用：是否冻结已加载的状态（配合 load_state_filename）'
         ),
+        OpaqueFunction(function=_cartographer_nodes),
     ])

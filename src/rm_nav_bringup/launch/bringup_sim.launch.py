@@ -7,7 +7,7 @@ from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, TimerAction
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
 from launch.conditions import LaunchConfigurationEquals, LaunchConfigurationNotEquals, IfCondition
 
 def generate_launch_description():
@@ -58,8 +58,11 @@ def generate_launch_description():
     ################################### navigation2 parameters start ##################################
     nav2_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world]), ".yaml"
     empty_map_dir = os.path.join(rm_nav_bringup_dir, 'map', 'empty_map.yaml')
-    # nav2 参数已回归自研 rm_navigation 包 params/（R1）
-    nav2_params_file_dir = os.path.join(get_package_share_directory('rm_navigation'), 'params', 'nav2_params_sim.yaml')
+    # nav2 参数已回归自研 rm_navigation 包 params/（R1）；按 nav 选择局部规划器变体
+    nav2_params_file_dir = PathJoinSubstitution([
+        get_package_share_directory('rm_navigation'), 'params',
+        PythonExpression(["'nav2_params_sim_' + '", LaunchConfiguration('nav'), "' + '.yaml'"])
+    ])
     ################################### navigation2 parameters end ####################################
 
     ################################ icp_registration parameters start ################################
@@ -104,6 +107,17 @@ def generate_launch_description():
         default_value='fastlio',
         description='Choose lio algorithm: fastlio | pointlio | none '
                     '(none = 不启动任何 LIO，需外部提供 odom/TF，如轮式里程计或 cartographer)')
+
+    declare_nav_cmd = DeclareLaunchArgument(
+        'nav',
+        default_value='rpp',
+        description='Choose local planner variant: rpp | dwb | teb '
+                    '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml)')
+
+    declare_mapper_cmd = DeclareLaunchArgument(
+        'mapper',
+        default_value='slam_toolbox',
+        description='Choose 2D mapping backend (only mode:=mapping): slam_toolbox | cartographer')
 
     # Specify the actions
     start_rm_simulation = IncludeLaunchDescription(
@@ -286,8 +300,16 @@ def generate_launch_description():
     # 在mapping模式下也需要启动map_server来显示静态地图（如果存在）
     # 但只在nav模式下才加载静态地图进行定位
     # 对于mapping模式，我们主要依赖LIO的点云地图
+    # 2D 建图后端二选一（mapper:=slam_toolbox|cartographer，仅 mode:=mapping 生效）
+    slam_mapping_condition = IfCondition(PythonExpression([
+        "'", LaunchConfiguration('mode'), "' == 'mapping' and '",
+        LaunchConfiguration('mapper'), "' == 'slam_toolbox'"]))
+    carto_mapping_condition = IfCondition(PythonExpression([
+        "'", LaunchConfiguration('mode'), "' == 'mapping' and '",
+        LaunchConfiguration('mapper'), "' == 'cartographer'"]))
+
     start_mapping = Node(
-        condition = LaunchConfigurationEquals('mode', 'mapping'),
+        condition = slam_mapping_condition,
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
         name='slam_toolbox',
@@ -295,6 +317,12 @@ def generate_launch_description():
             slam_toolbox_mapping_file_dir,
             {'use_sim_time': use_sim_time,}
         ],
+    )
+
+    start_cartographer_mapping = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
+        condition = carto_mapping_condition,
+        launch_arguments={'configuration_basename': 'cartographer.lua'}.items()
     )
 
     start_navigation2 = IncludeLaunchDescription(
@@ -319,6 +347,8 @@ def generate_launch_description():
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)
+    ld.add_action(declare_nav_cmd)
+    ld.add_action(declare_mapper_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
@@ -334,6 +364,7 @@ def generate_launch_description():
     ld.add_action(start_localization_group)
     ld.add_action(bringup_fake_vel_transform_node)
     ld.add_action(start_mapping)
+    ld.add_action(start_cartographer_mapping)
     ld.add_action(start_navigation2)
 
     return ld
