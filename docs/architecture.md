@@ -21,7 +21,7 @@
 | `third_party/` | **官方原版第三方库参考**（只读对照，不编译） | ❌（`COLCON_IGNORE`） |
 | `tools/` | 工具脚本：`tools/*.py`＝Python 工具；`tools/scripts/`＝Shell 脚本 | ❌（无 package） |
 | `docs/` | 规划/清单/操作指南文档 | ❌ |
-| `archive/` | 一次性报告归档 | ❌ |
+| `archive/` | 一次性报告归档 + `reality_frozen/`（真车配置冻结快照） | ❌ |
 | `build/` `install/` `log/` | colcon 构建产物（已 gitignore） | — |
 | `dockerfile`、`.devcontainer/` | 容器化开发环境 | — |
 | `.docs/` | README 引用的图片/GIF | — |
@@ -51,7 +51,7 @@
 | | `teb_local_planner` / `teb_msgs` | TEB 局部规划器（Nav2 插件） | git 子模块 |
 | | `costmap_converter` / `costmap_converter_msgs` | TEB 依赖（costmap→几何图形） | git 子模块 |
 | | `fake_vel_transform` | 云台旋转速度补偿胶水 | 本仓直接管理 |
-| `rm_nav_bringup/` | `rm_nav_bringup` | **总装层**：launch 入口 + 平台参数 + 地图/PCD/rviz 资产 | 本仓直接管理 |
+| `rm_nav_bringup/` | `rm_nav_bringup` | **总装层**：launch 入口 + 地图/PCD/rviz/urdf 资产（**无 config/**，参数已全部回归各包） | 本仓直接管理 |
 
 > 19 个 colcon 包 = 上表除子模块内嵌包外的全部；`slam_toolbox/lib/karto_sdk` 由 slam_toolbox 自带、不单独出现在 colcon 列表。
 
@@ -75,19 +75,18 @@ Gazebo(hzmi_rm_simulation 世界 + 机器人)
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
-rm_nav_bringup/
+rm_nav_bringup/                          # 总装层（无 config/：参数已全部回归各包）
 ├── launch/
 │   ├── bringup_sim.launch.py        # 仿真总入口（world/mode/lio/localization 参数）
-│   ├── bringup_real.launch.py       # 真车入口（reality 已冻结）
 │   └── cartographer_sim.launch.py   # cartographer 专用启动（默认引包内 lua）
-├── config/
-│   ├── simulation/measurement_params_sim.yaml   # ★平台外参（不属于算法，按规则留此）
-│   └── reality/                                 # ★冻结快照（FROZEN.md），不再维护
 ├── map/        # 各场地地图产物 + empty_map（mapping 模式用）
 ├── PCD/        # 3D 点云图（icp_registration 用）
 ├── rviz/       # fastlio/pointlio 可视化配置
-└── urdf/       # 机器人描述（sim/real）
+└── urdf/       # 机器人描述（sim）
 ```
+
+> 平台外参已移至 `src/rm_simulation/hzmi_rm_simulation/config/measurement_params_sim.yaml`；
+> 真车配置与入口已归档至 `archive/reality_frozen/`。
 
 ---
 
@@ -105,8 +104,10 @@ rm_nav_bringup/
 | `nav2_params_sim.yaml` | `rm_navigation/rm_navigation/params/` | ✅ |
 | `cartographer.lua` / `cartographer_localization.lua` | `rm_localization/cartographer_ros/configuration_files/`（官方示例同目录） | ✅ |
 | imu 滤波 / laserscan / fake_vel 参数（原 launch 内嵌） | 各自包 `config/` | ✅ |
-| `measurement_params_sim.yaml` | `rm_nav_bringup/config/simulation/`（**平台参数，规则③**） | 保留 |
-| `config/reality/*` | `rm_nav_bringup/config/reality/`（**冻结，规则④**） | 冻结 |
+| `measurement_params_sim.yaml` | `rm_simulation/hzmi_rm_simulation/config/`（**平台参数，规则③**） | ✅ 已归平台包 |
+| reality 全套（原 `config/reality/*`） | `archive/reality_frozen/`（**冻结归档，规则④**） | 已归档 |
+
+> **`rm_nav_bringup/config/` 已清空移除**（2026-09）：平台外参→仿真平台包；reality→archive；lua→cartographer_ros。`bringup_sim.launch.py` 是当前唯一仿真入口。
 
 **地图产物配对铁律**：`.pgm`→AMCL ｜ `.posegraph`→slam_toolbox(localization) ｜ `.pcd`→icp_registration ｜ `.pbstream`→Cartographer 纯定位。
 

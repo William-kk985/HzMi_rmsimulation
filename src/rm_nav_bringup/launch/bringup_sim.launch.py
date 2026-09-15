@@ -23,8 +23,9 @@ def generate_launch_description():
     use_nav_rviz = LaunchConfiguration('nav_rviz')
 
     ################################ robot_description parameters start ###############################
+    # 平台外参（base_link↔livox）随仿真平台包 hzmi_rm_simulation 存放（规则③）
     launch_params = yaml.safe_load(open(os.path.join(
-    get_package_share_directory('rm_nav_bringup'), 'config', 'simulation', 'measurement_params_sim.yaml')))
+    get_package_share_directory('hzmi_rm_simulation'), 'config', 'measurement_params_sim.yaml')))
     robot_description = Command(['xacro ', os.path.join(
     get_package_share_directory('rm_nav_bringup'), 'urdf', 'sentry_robot_sim.xacro'),
     ' xyz:=', launch_params['base_link2livox_frame']['xyz'], ' rpy:=', launch_params['base_link2livox_frame']['rpy']])

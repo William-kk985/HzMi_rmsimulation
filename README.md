@@ -211,7 +211,9 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
     nav_rviz:=True
     ```
 
-### 3.3 真实模式示例
+### 3.3 真实模式示例（已归档，仅历史参考）
+
+> ⚠️ 按 R5，真车入口与配置已归档到 [`archive/reality_frozen/`](archive/reality_frozen/)（含 `bringup_real.launch.py`），不参与构建；本仓库只维护仿真，真车部署配置在"部署导出"阶段生成。以下示例仅作历史参考。
 
 - 边建图边导航
 
@@ -226,7 +228,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 
     Tips:
 
-    1. 保存点云 pcd 文件：需先在 [fastlio_mid360.yaml](src/rm_nav_bringup/config/reality/fastlio_mid360_real.yaml) 中 将 `pcd_save_en` 改为 `true`，并设置 .pcd 文件的路径，运行时新开终端输入命令 `ros2 service call /map_save std_srvs/srv/Trigger`，即可保存点云文件。
+    1. 保存点云 pcd 文件：需先在 [fastlio_mid360.yaml](archive/reality_frozen/fastlio_mid360_real.yaml) 中 将 `pcd_save_en` 改为 `true`，并设置 .pcd 文件的路径，运行时新开终端输入命令 `ros2 service call /map_save std_srvs/srv/Trigger`，即可保存点云文件。
     2. 保存地图：请参考 [如何保存 .pgm 和 .posegraph 地图？](https://gitee.com/SMBU-POLARBEAR/HzMi_rmsimulation/issues/I9427I)。地图名需要与 `YOUR_WORLD_NAME` 保持一致。
 
 - 已知全局地图导航
@@ -253,21 +255,21 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 1. 雷达 ip
 
-    本导航包已内置 [livox_ros_driver2](https://gitee.com/SMBU-POLARBEAR/livox_ros_driver2_humble)，可直接修改 [MID360_config.json](./src/rm_nav_bringup/config/reality/MID360_config.json) - `lidar_configs` - `ip`
+    本导航包已内置 [livox_ros_driver2](https://gitee.com/SMBU-POLARBEAR/livox_ros_driver2_humble)，可直接修改 [MID360_config.json](./archive/reality_frozen/MID360_config.json) - `lidar_configs` - `ip`
 
 2. 测量机器人底盘正中心到雷达的相对坐标
 
     x, y 距离比较重要，将影响云台旋转时解算到 base_link 的坐标准确性
 
-    填入 [measurement_params_real.yaml](./src/rm_nav_bringup/config/reality/measurement_params_real.yaml)
+    填入 [measurement_params_real.yaml](./archive/reality_frozen/measurement_params_real.yaml)
 
-    若雷达倾斜放置，无需在此处填入 rpy，而是将点云旋转角度填入 [MID360_config.json](./src/rm_nav_bringup/config/reality/MID360_config.json) - `extrinsic_parameter`
+    若雷达倾斜放置，无需在此处填入 rpy，而是将点云旋转角度填入 [MID360_config.json](./archive/reality_frozen/MID360_config.json) - `extrinsic_parameter`
 
 3. 测量雷达与地面的垂直距离
 
     此参数影响点云分割效果
 
-    填入 [segmentation_real.yaml](./src/rm_nav_bringup/config/reality/segmentation_real.yaml) - `sensor_height`
+    填入 [segmentation_real.yaml](./archive/reality_frozen/segmentation_real.yaml) - `sensor_height`
 
 4. nav2_params
 

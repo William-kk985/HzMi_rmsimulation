@@ -148,7 +148,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 ### 4.1 主要参数
 
-在 `src/rm_nav_bringup/config/simulation/` 目录下：
+参数已回归各算法包（详见 `docs/params_ownership_checklist.md`），例如：
 
 #### 1. **nav2_params_sim.yaml** - 导航参数
 - `robot_radius`: 机器人半径（默认 0.2 米）
@@ -168,10 +168,10 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 ```bash
 # 编辑导航参数
-vim src/rm_nav_bringup/config/simulation/nav2_params_sim.yaml
+vim src/rm_navigation/rm_navigation/params/nav2_params_sim.yaml
 
 # 编辑 LIO 参数
-vim src/rm_nav_bringup/config/simulation/fastlio_mid360_sim.yaml
+vim src/rm_localization/FAST_LIO/config/fastlio_mid360_sim.yaml
 
 # 重新编译使配置生效
 cd ~/HzMi_rmsimulation

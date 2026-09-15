@@ -11,12 +11,12 @@
 |---|---|
 | ① 有源码的包 | 参数文件放进**该包自己的 config/ 目录**，由包 CMakeLists 安装到 install，launch 通过 `FindPackageShare('该包')` 引用 |
 | ② 原"apt 无源码 → variants/" 方案 **已取消（2026-09）** | 改为：**apt 包源码化进 src**（vendored/submodule），源码编译覆盖 apt，参数照常归包内 config/；实在不源码化的（如 nav2 全家 30+ 包）本体放 `third_party/nav2` 参考、参数归自研装配包（rm_navigation/params） |
-| ③ 平台参数（雷达安装外参等） | **不属于算法**：留在机器人描述/装配处（当前 `measurement_params_sim.yaml`），不搬 |
-| ④ config/reality 全家 | 按 R5 冻结：不回归、不维护、不再双份同步（真车配置将来在部署导出阶段另行生成） |
+| ③ 平台参数（雷达安装外参等） | **不属于算法**：已随仿真平台包存放 `hzmi_rm_simulation/config/measurement_params_sim.yaml`（2026-09 执行） |
+| ④ reality 全家 | 按 R5 冻结并**已归档** `archive/reality_frozen/`（含 `bringup_real.launch.py`）；真车配置在部署导出阶段另行生成 |
 
 ---
 
-## 1. 待回归清单（rm_nav_bringup/config/simulation → 目标归属）
+## 1. 回归清单（原 `rm_nav_bringup/config/*` → 目标归属；该目录已清空移除）
 
 | # | 配置文件（现在位置） | 参数属于谁 | 谁在引用（launch 位置） | 回归目标 | 回归需同步改 |
 |---|---|---|---|---|---|
@@ -28,8 +28,8 @@
 | 6 | ~~`config/simulation/mapper_params_localization_sim.yaml`~~ → `slam_toolbox/config/mapper_params_localization_sim.yaml`（**✅ 已回归**） | **slam_toolbox**（同上源码化） | 同上 | ① 同上 | 完成 |
 | 7 | ~~`config/simulation/nav2_params_sim.yaml`~~ → `rm_navigation/params/nav2_params_sim.yaml`（**✅ 已回归**） | **nav2 组装参数**（nav2 本体不源码化，仅 third_party 参考；参数归自研 rm_navigation） | bringup_sim 改引 `get_package_share_directory('rm_navigation')/params/...` | ① rm_navigation/params/（CMake 本装 params） | 完成 |
 | 8 | ~~`config/lua/*.lua`~~ → **`cartographer_ros/configuration_files/`**（官方示例同目录） | **cartographer_ros**（**官方 ament 源码 vendored，colcon 编译覆盖 apt**） | `cartographer_sim.launch.py` 默认引 `FindPackageShare('cartographer_ros')/configuration_files` | ① 完成：ros2-gbp humble(ament) 源码 vendored，lua 随包安装，全量 19 包编译通过 | **✅ 完成（2026-09）** |
-| 9 | `config/simulation/measurement_params_sim.yaml` | **平台外参**（base_link↔livox） | bringup 拼 robot_description | ③ 留在装配层/机器人描述，不搬 | — |
-| — | `config/reality/*.yaml`（9 个） | 真车 | bringup_real | ④ 冻结 | — |
+| 9 | ~~`config/simulation/measurement_params_sim.yaml`~~ → `hzmi_rm_simulation/config/measurement_params_sim.yaml`（**✅ 已归平台包**） | **平台外参**（base_link↔livox） | bringup_sim 改引 `get_package_share_directory('hzmi_rm_simulation')/config/...` | ③ 仿真平台包 | 完成 |
+| — | `archive/reality_frozen/*`（原 `config/reality` 9 份 + `bringup_real.launch.py`） | 真车 | 不参与构建 | ④ 冻结归档 | 已归档 |
 
 ---
 
@@ -64,7 +64,7 @@ nav2_params = os.path.join(get_package_share_directory('rm_nav_bringup') 或 var
 - [x] #4 segmentation 参数回归（**2026-09 完成**）：yaml 入 `linefit_ground_segmentation_ros/config/`，CMake 加装 config，bringup 改引包 share
 - [x] a/b/c launch 内嵌参数回归（**2026-09 完成**）：imu/laserscan/fake_vel 各自 config yaml + CMake 安装 + launch 引用
 - [x] d point_lio 覆盖参数并入 pointlio_mid360_sim.yaml（**2026-09 完成**）
-- [x] reality 分支冻结标记（**2026-09**）：`config/reality/FROZEN.md`
+- [x] reality 冻结归档（**2026-09**）：全套迁至 `archive/reality_frozen/`（含 `bringup_real.launch.py`）；`rm_nav_bringup/config/` 已清空移除
 - [x] #5/#6 slam_toolbox 参数回归（**2026-09 完成**）：slam_toolbox 已**源码化 vendored 进 src**（编译覆盖 apt），mapper 参数入其 config/
 - [x] #7 nav2 参数拆分（**2026-09 完成**）：nav2 本体**不源码化**（30+ 包过大），完整源码放 `third_party/nav2` 参考；参数归自研 `rm_navigation/params/`
 - [x] #8 cartographer lua（**2026-09 完成**）：换用 **ros2-gbp humble 官方 ament 源码**（非 catkin 版），vendored 进 src 并 colcon 编译覆盖 apt；lua 随 `cartographer_ros/configuration_files/` 安装，wrapper launch 默认即可用
