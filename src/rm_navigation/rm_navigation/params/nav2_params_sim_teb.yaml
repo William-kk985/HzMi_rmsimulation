@@ -114,7 +114,7 @@ controller_server:
       yaw_goal_tolerance: 0.25
     
     # 局部规划器变体：TEB（nav:=teb）
-    # ⚠️ odom_topic 依赖 T2（统一 /odom 话题）；未做 T2 前请按所用 LIO 改成 /Odometry 或 aft_mapped_to_init
+    # odom_topic 由 T2 统一为 /odom（bringup 已对 fast_lio/point_lio 做 remap）
     FollowPath:
       plugin: "teb_local_planner::TebLocalPlannerROS"
       odom_topic: /odom

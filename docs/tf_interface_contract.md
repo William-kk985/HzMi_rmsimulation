@@ -69,8 +69,8 @@ map ──(重定位：AMCL / slam_toolbox / ICP 之一发布)──► odom ─
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **T1** | 落 C：静态桥按 `localization` 条件化；删除重复的 `base_link→base_link_fake` 静态桥（保留 `fake_vel_transform` 的那条） | `view_frames` 无多父；amcl/slam_toolbox 模式 TF 正常 |
-| **T2** | 统一话题：bringup 里把 `fast_lio` 的 `/Odometry`、`point_lio` 的 `aft_mapped_to_init` 都 **remap 为 `/odom`** | `ros2 topic hz /odom` 在两种 LIO 下都连续 |
+| **T1 ✅（2026-09 已实施）** | 帧桥改为**仅 `mode:=nav` + `localization:=icp` + 启用 LIO** 时启动；删除重复的静态 `base_link→base_link_fake`（由 `fake_vel_transform` 20Hz 独占发布） | P1/P4 消除：amcl/slam_toolbox 模式不再与静态桥争 `map`/`odom` |
+| **T2 ✅（2026-09 已实施）** | 统一里程计话题：bringup 把 `fast_lio` 的 `/Odometry`、`point_lio` 的 `aft_mapped_to_init` 都 **remap 为 `/odom`** | `ros2 topic hz /odom` 在两种 LIO 下都连续；TEB 变体的 `odom_topic: /odom` 生效 |
 | **T3** | 新增 `lio_tf_adapter`，输出标准 `odom→base_link`；删除全部静态桥 | `tf_echo odom base_link` 连续；帧树只剩标准边 |
 | **T4** | sim URDF 关闭 Gazebo `publish_odom_tf`（真值仅保留 `/odom` 话题供对比） | 无"双发布者"警告；LIO 定位成为唯一位姿源 |
 | **T5** | 启用 `icp_registration` 的 `map→odom` 广播（修好被注释的定时器/或改为每次配准后发布） | `localization:=icp` 时 `map→odom` 由 ICP 提供 |

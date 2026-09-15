@@ -170,6 +170,8 @@ def generate_launch_description():
                     {'runtime_pos_log_enable': False}
                 ],
                 output='screen',
+                # T2：统一里程计话题为 /odom（源话题 /Odometry）
+                remappings=[('/Odometry', '/odom')],
                 # 添加额外的参数以避免崩溃
                 arguments=['--ros-args', '--log-level', 'info']
             ),
@@ -194,6 +196,8 @@ def generate_launch_description():
                     # 算法调参键已并入 pointlio_mid360_sim.yaml（R1），此处仅留装配级 use_sim_time
                     {'use_sim_time': use_sim_time}
                 ],
+                # T2：统一里程计话题为 /odom（源话题 aft_mapped_to_init）
+                remappings=[('/aft_mapped_to_init', '/odom'), ('aft_mapped_to_init', '/odom')],
             ),
             Node(
                 package='rviz2',
@@ -266,11 +270,16 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}]
     )
 
-    # 添加TF桥接节点，将LIO的frame映射到标准frame
-    # 注意：这些桥仅在启用 LIO 时才有意义（lio:=none 时应由外部里程计提供 odom/TF，避免假 TF 抢占）
-    lio_enabled = LaunchConfigurationNotEquals('lio', 'none')
+    # T1：帧桥仅在「nav + localization:=icp + 启用 LIO」时启动
+    # （icp_registration 不发布 map→odom，需要它把 LIO 的 camera_init/body 桥到 map/odom 以闭合帧树）
+    # amcl / slam_toolbox（mapping 模式亦然）自己发布 map→odom，绝不能再叠加静态桥，否则 map/odom 出现多父边
+    icp_frame_bridge_condition = IfCondition(PythonExpression([
+        "'", LaunchConfiguration('mode'), "' == 'nav' and '",
+        LaunchConfiguration('localization'), "' == 'icp' and '",
+        LaunchConfiguration('lio'), "' != 'none'"]))
+
     tf_bridge_node = Node(
-        condition=lio_enabled,
+        condition=icp_frame_bridge_condition,
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_bridge_camera_init_to_map',
@@ -279,7 +288,7 @@ def generate_launch_description():
     )
     
     tf_bridge_node2 = Node(
-        condition=lio_enabled,
+        condition=icp_frame_bridge_condition,
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_bridge_body_to_odom',
@@ -287,15 +296,8 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}]
     )
 
-    # 只保留必要的静态TF变换（LIO 的 base_link ↔ 导航用 base_link_fake）
-    static_tf_base_link_to_base_link_fake = Node(
-        condition=lio_enabled,
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_base_link_to_base_link_fake',
-        arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'base_link_fake'],
-        parameters=[{'use_sim_time': use_sim_time}]
-    )
+    # 注：base_link→base_link_fake 由 fake_vel_transform 以 20Hz 发布（含云台转角），
+    # 原先这里的静态桥是重复发布（P4），已删除。
     
     # 在mapping模式下也需要启动map_server来显示静态地图（如果存在）
     # 但只在nav模式下才加载静态地图进行定位
@@ -356,10 +358,9 @@ def generate_launch_description():
     ld.add_action(bringup_pointcloud_to_laserscan_node)
     ld.add_action(bringup_LIO_group)
     
-    # 添加TF桥接节点
+    # T1：ICP 模式的帧桥（由条件控制，仅 nav+icp+LIO 时生效）
     ld.add_action(tf_bridge_node)
     ld.add_action(tf_bridge_node2)
-    ld.add_action(static_tf_base_link_to_base_link_fake)
     
     ld.add_action(start_localization_group)
     ld.add_action(bringup_fake_vel_transform_node)

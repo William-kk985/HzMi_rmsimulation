@@ -216,6 +216,8 @@ tools/scripts/control/start_sentinel.sh
 | `lio_rviz` / `nav_rviz` | `True` / `False` | 可视化开关 |
 
 > `lio:=none` 的用途：跑**纯 2D 组合**（例如 cartographer 自带前端，或轮式里程计）时避免 LIO 与之争抢位姿/TF。注意 2D 定位/导航链仍需要 `odom→base_link` 与 `map→odom`，`none` 只是"不由本工程提供"，需另接来源。
+>
+> **TF/话题契约（T1/T2 已实施，2026-09）**：两套 LIO 的里程计话题在 bringup 内统一 remap 为 **`/odom`**；原先"无条件启动"的三条静态 TF 桥现改为 **仅 `mode:=nav` + `localization:=icp` + 启用 LIO** 时启动（amcl/slam_toolbox 自己发 `map→odom`，不得再叠加），并删除了重复的 `base_link→base_link_fake` 静态桥（由 `fake_vel_transform` 独占发布）。详见 `docs/tf_interface_contract.md`。
 
 ---
 
