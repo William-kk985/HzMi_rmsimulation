@@ -3,6 +3,8 @@
 赫兹矩阵RM仿真导航
 
 > 本项目基于 [深圳北理莫斯科大学 北极熊战队](https://gitee.com/SMBU-POLARBEAR/HzMi_rmsimulation) 的 RM 哨兵导航仿真项目（原 `PB_RM_Simulation` / `pb_rm_simulation`）改造而来，在此向原作者 Lihan Chen 及北极熊战队致以诚挚感谢。
+>
+> 📄 **第三方组件署名与许可证：见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)**（本仓仅做集成与适配，核心算法版权归各上游原作者）。
 
 ## 一. 项目介绍
 
