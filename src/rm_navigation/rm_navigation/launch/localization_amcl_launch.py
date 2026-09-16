@@ -20,20 +20,24 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     autostart = LaunchConfiguration('autostart')
     params_file = LaunchConfiguration('params_file')
+    map_yaml_file = LaunchConfiguration('map')
     use_composition = LaunchConfiguration('use_composition')
     container_name = LaunchConfiguration('container_name')
     container_name_full = (namespace, '/', container_name)
     use_respawn = LaunchConfiguration('use_respawn')
     log_level = LaunchConfiguration('log_level')
 
-    lifecycle_nodes = ['amcl']
+    # 关键：map_server 与 amcl 必须由【同一个】lifecycle_manager 管理，
+    # 否则会出现两个同名 lifecycle_manager_localization 冲突 → map_server 无法激活 → amcl 永远 Waiting for map
+    lifecycle_nodes = ['map_server', 'amcl']
 
     remappings = [('/tf', 'tf'),
                   ('/tf_static', 'tf_static')]
 
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {
-        'use_sim_time': use_sim_time}
+        'use_sim_time': use_sim_time,
+        'yaml_filename': map_yaml_file}
 
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -81,9 +85,24 @@ def generate_launch_description():
         'log_level', default_value='info',
         description='log level')
 
+    declare_map_yaml_cmd = DeclareLaunchArgument(
+        'map',
+        default_value='',
+        description='用于 map_server 的栅格地图 yaml 路径（由 bringup 传入）')
+
     load_nodes = GroupAction(
         condition=IfCondition(PythonExpression(['not ', use_composition])),
         actions=[
+            Node(
+                package='nav2_map_server',
+                executable='map_server',
+                name='map_server',
+                output='screen',
+                respawn=use_respawn,
+                respawn_delay=2.0,
+                parameters=[configured_params],
+                arguments=['--ros-args', '--log-level', log_level],
+                remappings=remappings),
             Node(
                 package='nav2_amcl',
                 executable='amcl',
@@ -110,6 +129,12 @@ def generate_launch_description():
         condition=IfCondition(use_composition),
         target_container=container_name_full,
         composable_node_descriptions=[
+            ComposableNode(
+                package='nav2_map_server',
+                plugin='nav2_map_server::MapServer',
+                name='map_server',
+                parameters=[configured_params],
+                remappings=remappings),
             ComposableNode(
                 package='nav2_amcl',
                 plugin='nav2_amcl::AmclNode',
@@ -141,6 +166,7 @@ def generate_launch_description():
     ld.add_action(declare_container_name_cmd)
     ld.add_action(declare_use_respawn_cmd)
     ld.add_action(declare_log_level_cmd)
+    ld.add_action(declare_map_yaml_cmd)
 
     # Add the actions to launch all of the localiztion nodes
     ld.add_action(load_nodes)

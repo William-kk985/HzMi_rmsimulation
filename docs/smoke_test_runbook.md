@@ -278,6 +278,8 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 | `view_frames` 里看到 `camera_init→body` 孤立小岛 | LIO 仍广播内部帧；T3 后导航层不再使用（`odom→base_link` 由 `lio_tf_adapter` 提供） | 正常现象，无需处理（回退用法 `localization:=''` 仍依赖它；T6 阶段可一并移除） |
 | `Robot is out of bounds of the costmap!`（仅启动时出现几次） | slam_toolbox 地图尚在生长、global_costmap 正在 resize 的瞬态 | 若**持续刷屏**再排查 `map→odom`（`ros2 run tf2_ros tf2_echo map base_link`） |
 | RViz 里**车/雷达看起来是斜的**，但 Gazebo 里车是正的 | spawn 高度过高：RMUL/RMUL2026 原来写 `z=1.16`，而地面在 z≈0（轮半径 0.06 → 落地时 base_link 仅 0.06 m），机器人**悬空 1.1 m 落下**，FAST-LIO 在坠落中做重力初始化 → 地图/位姿倾斜 | **已于 2026-09 修复**：`rm_simulation.launch.py` 中 RMUL / RMUL2026 的 spawn `z` 改为 **0.2**。验证：`ros2 run tf2_ros tf2_echo odom base_link` 的 roll/pitch 应≈0 |
+| nav 模式卡在 `amcl: Waiting for map....` / `global_costmap: Invalid frame ID "map"` | `map_server_launch.py` 与 `localization_amcl_launch.py` **各起了一个同名 `lifecycle_manager_localization`** → 管理器冲突、map_server 未激活、地图从未发布 | **已于 2026-09 修复**：`localization_amcl_launch.py` 现在同时启动并管理 `map_server` + `amcl`（单一 lifecycle_manager）；`bringup_sim` 仅在 `icp`/未选重定位时单独起 map_server |
+| `spawn_entity: Spawn status: ... timed out waiting for entity to appear` | RMUL2026 世界加载慢，spawn 默认超时过短（实体其实已生成） | **已于 2026-09 修复**：spawn 参数加 `-timeout 60.0` |
 | `Timed out waiting for transform from base_link to map` | `map→odom` 缺失 | nav 模式必须指定 `localization:=amcl\|slam_toolbox\|icp` |
 | `Invalid frame ID "base_link"` / fake_vel 报 `Could not transform odom to base_link` | `/odom` 无数据 → LIO 或 `lio_tf_adapter` 未启动 | 查终端 A 是否打印 `lio_tf_adapter 启动` |
 | `Found two parents` / 帧树分叉 | 旧进程残留 | 执行 §0.2 清理后重跑 |

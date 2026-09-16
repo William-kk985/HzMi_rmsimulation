@@ -227,8 +227,10 @@ def generate_launch_description():
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir,'localization_amcl_launch.py')),
                 condition = LaunchConfigurationEquals('localization', 'amcl'),
+                # amcl_launch 现在同时启动 map_server + amcl（同一个 lifecycle_manager），故需传入地图
                 launch_arguments = {
                     'use_sim_time': use_sim_time,
+                    'map': nav2_map_dir,
                     'params_file': nav2_params_file_dir}.items()
             ),
 
@@ -252,7 +254,11 @@ def generate_launch_description():
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'map_server_launch.py')),
-                condition = LaunchConfigurationNotEquals('localization', 'slam_toolbox'),
+                # 仅 icp / 未选重定位时需要单独起 map_server；
+                # amcl 由 localization_amcl_launch 一并管理，slam_toolbox 自带地图发布，都不能重复启动
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('localization'), "' != 'slam_toolbox' and '",
+                    LaunchConfiguration('localization'), "' != 'amcl'"])),
                 launch_arguments={
                     'use_sim_time': use_sim_time,
                     'map': nav2_map_dir,

@@ -146,7 +146,9 @@ def generate_launch_description():
                         '-x', world_config['x'],
                         '-y', world_config['y'],
                         '-z', world_config['z'],
-                        '-Y', world_config['yaw']
+                        '-Y', world_config['yaw'],
+                        # RMUL2026 世界加载较慢，默认超时会导致 spawn 提前放弃（实体其实已生成）
+                        '-timeout', '60.0',
                     ],
                 ),
                 IncludeLaunchDescription(
