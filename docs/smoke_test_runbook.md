@@ -37,6 +37,13 @@ ls /opt/ros/humble/share | grep -c "^nav2"      # 期望 20+（只装基础件�
 ```
 另外 teb 编译依赖 `ros-humble-dwb-critics`（若尚未安装：`sudo apt install -y ros-humble-dwb-critics`）。
 
+**③ 不要激活仓库里的 `.venv`**
+`.venv/` 是工具链（MCP 等）用的隔离 Python 环境（`include-system-site-packages = false`），**与 ROS 无关**：激活后 `which python3` 会指向 `.venv/bin/python3`，`import numpy / rclpy` 全部失败。
+```bash
+deactivate                    # 若提示符是 (.venv)，先退出
+which python3                 # 必须是 /usr/bin/python3，而不是 .../.venv/bin/python3
+```
+
 ### 0.1 环境（每个新终端都要做）
 ```bash
 cd ~/HzMi_rmsimulation
