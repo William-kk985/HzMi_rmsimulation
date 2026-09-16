@@ -8,6 +8,29 @@
 
 ## 0. 前置
 
+### 0.0 依赖前提（首次务必确认）
+
+**① 系统 python 必须是 3.10（不能用 conda）**
+ROS Humble 的 `rclpy` 等 C 扩展是 **cpython-310** 编译的；conda base 若是 3.13 等版本，**无法通过 pip 补齐**（`import rclpy` 直接失败），并且 `spawn_entity.py` 会因 conda python 缺 numpy 而崩溃 → 机器人不生成。
+```bash
+conda deactivate            # 方式一：退出 conda
+# 方式二（不退出 conda，让系统 python 优先）：
+export PATH=/usr/bin:$PATH
+which python3               # 必须 /usr/bin/python3
+```
+推荐在 `~/.bashrc` 里加别名，之后每个终端执行 `rosenv` 即可：
+```bash
+alias rosenv='export PATH=/usr/bin:$PATH; source /opt/ros/humble/setup.bash; source ~/HzMi_rmsimulation/install/setup.bash'
+```
+
+**② Nav2 主体包必须安装**（否则组件与 RViz 面板全部加载失败）
+```bash
+sudo apt update
+sudo apt install -y ros-humble-navigation2 ros-humble-nav2-bringup ros-humble-nav2-rviz-plugins
+ls /opt/ros/humble/share | grep -c "^nav2"      # 期望 20+（只装基础件时只有 7）
+```
+另外 teb 编译依赖 `ros-humble-dwb-critics`（若尚未安装：`sudo apt install -y ros-humble-dwb-critics`）。
+
 ### 0.1 环境（每个新终端都要做）
 ```bash
 cd ~/HzMi_rmsimulation
@@ -239,6 +262,10 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 | `nav:=teb` 插件找不到 | 未 source 工作区 | `source install/setup.bash`（teb 已编译） |
 | `TF_OLD_DATA` | 仿真时间不一致 | 确认 `use_sim_time:=True`（launch 默认） |
 | `Unable to parse the value of parameter robot_description as yaml` | launch_ros 把 URDF(XML) 当 YAML 解析（Humble 行为） | **已于 2026-09 修复**：`hzmi_rm_simulation/launch/rm_simulation.launch.py` 用 `ParameterValue(robot_description, value_type=str)` 包裹；若仍出现，说明用的是修复前的 launch |
+| `ModuleNotFoundError: No module named 'numpy'` 且 `spawn_entity` 退出 | 用了 conda 的 python（ROS Humble 需系统 python 3.10） | 见 §0.0①：`conda deactivate` 或 `export PATH=/usr/bin:$PATH` |
+| `Could not find requested resource in ament index`（nav2 组件成批加载失败） | Nav2 主体包未安装 | 见 §0.0②：apt 安装 navigation2 / nav2-bringup / nav2-rviz-plugins |
+| RViz 报 `nav2_rviz_plugins/... does not exist` | 缺 `nav2-rviz-plugins` | 同上 |
+| `New subscription discovered on topic '/scan', requesting incompatible QoS` | costmap `obstacle_layer` 默认 reliable，而 `/scan` 是 best-effort | **已于 2026-09 修复**：三份 `nav2_params_sim_{rpp,dwb,teb}.yaml` 的 scan 源加了 `reliability_policy: best_effort`；若仍出现，检查是否有其它 reliable 订阅者（AMCL/自定义节点） |
 | cartographer 纯定位报找不到状态文件 | pbstream 路径错或文件为空 | 用绝对路径；`RMUL2026.pbstream` 疑空，改用 `RMUL` |
 
 ---

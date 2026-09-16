@@ -157,6 +157,9 @@ local_costmap:
         observation_sources: scan
         scan:
           topic: /scan
+          # /scan 由 pointcloud_to_laserscan 以 SensorDataQoS(best-effort) 发布，这里必须匹配，否则收不到数据
+          reliability_policy: "best_effort"
+          qos_policy: "best_effort"
           raytrace_max_range: 6.0
           obstacle_max_range: 6.0
           obstacle_min_range: 0.1
