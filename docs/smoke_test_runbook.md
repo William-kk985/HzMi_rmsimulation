@@ -22,6 +22,11 @@ conda deactivate
 # 方式三：不退出 conda，只让系统 python 优先
 export PATH=/usr/bin:$PATH
 ```
+**保底做法**：若新终端里 `which python3` 仍是 `~/miniconda3/bin/python3`，在 `~/.bashrc` **末尾**追加一行即可（conda 的 init 块会把 PATH 插到前面，末尾覆盖最稳）：
+```bash
+echo 'export PATH=/usr/bin:$PATH' >> ~/.bashrc && source ~/.bashrc
+```
+（当前终端若已残留 conda PATH：`conda deactivate; export PATH=/usr/bin:$PATH; hash -r`）
 验证（必须全部满足）：
 ```bash
 which python3                                   # 必须是 /usr/bin/python3
