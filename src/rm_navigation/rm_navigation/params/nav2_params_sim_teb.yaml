@@ -297,8 +297,8 @@ recoveries_server:
 map_server:
   ros__parameters:
     use_sim_time: False
-    # 移除 yaml_filename 的空值设置，让launch文件通过参数替换来设置
-    # yaml_filename: ""
+    # 必须保留该键：nav2 的 RewrittenYaml 只会替换“已存在的键”，launch 会把实际地图路径写进来
+    yaml_filename: ""
 
 velocity_smoother:
   ros__parameters:

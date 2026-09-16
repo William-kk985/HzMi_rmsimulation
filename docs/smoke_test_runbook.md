@@ -117,9 +117,20 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 ros2 run tf2_ros tf2_echo map odom           # 期望：由 amcl 提供
 ros2 lifecycle get /controller_server        # 期望：active
 ros2 lifecycle get /planner_server           # 期望：active
-ros2 service call /reinitialize_global_localization std_srvs/srv/Empty   # 可选
+ros2 topic echo /map --once --field info     # 期望：272 X 210（map_server 已激活）
 ros2 action list | grep navigate_to_pose
 ```
+
+> ⚠️ **AMCL 必须先给初始位姿**：`set_initial_pose` 默认为 false，在收到 `/initialpose` 之前 **amcl 不发布 `map→odom`**，
+> 于是 global_costmap 会一直刷 `Timed out waiting for transform from base_link to map`。
+> 两种给初值方式（任选其一）：
+> ```bash
+> # ① RViz：工具栏 "2D Pose Estimate" 在地图上点机器人实际位置并拖出朝向
+> # ② 命令行：RMUL/RMUL2026 出生点约 (4.3, 3.35, yaw=0)
+> ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+> "{header: {frame_id: map}, pose: {pose: {position: {x: 4.3, y: 3.35, z: 0.0}, orientation: {w: 1.0}}, covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0.0685,0,0,0, 0,0,0,0,0.0685,0, 0,0,0,0,0,0.0685, 0,0,0,0,0,0]}}"
+> ```
+> 想免手动给初值，可在 `nav2_params_sim_*.yaml` 的 `amcl:` 段加 `set_initial_pose: true` + `initial_pose`（注意 RMUC 出生点是 (6.35, 7.6)，需同步改）。
 
 ---
 
@@ -278,7 +289,8 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 | `view_frames` 里看到 `camera_init→body` 孤立小岛 | LIO 仍广播内部帧；T3 后导航层不再使用（`odom→base_link` 由 `lio_tf_adapter` 提供） | 正常现象，无需处理（回退用法 `localization:=''` 仍依赖它；T6 阶段可一并移除） |
 | `Robot is out of bounds of the costmap!`（仅启动时出现几次） | slam_toolbox 地图尚在生长、global_costmap 正在 resize 的瞬态 | 若**持续刷屏**再排查 `map→odom`（`ros2 run tf2_ros tf2_echo map base_link`） |
 | RViz 里**车/雷达看起来是斜的**，但 Gazebo 里车是正的 | spawn 高度过高：RMUL/RMUL2026 原来写 `z=1.16`，而地面在 z≈0（轮半径 0.06 → 落地时 base_link 仅 0.06 m），机器人**悬空 1.1 m 落下**，FAST-LIO 在坠落中做重力初始化 → 地图/位姿倾斜 | **已于 2026-09 修复**：`rm_simulation.launch.py` 中 RMUL / RMUL2026 的 spawn `z` 改为 **0.2**。验证：`ros2 run tf2_ros tf2_echo odom base_link` 的 roll/pitch 应≈0 |
-| nav 模式卡在 `amcl: Waiting for map....` / `global_costmap: Invalid frame ID "map"` | `map_server_launch.py` 与 `localization_amcl_launch.py` **各起了一个同名 `lifecycle_manager_localization`** → 管理器冲突、map_server 未激活、地图从未发布 | **已于 2026-09 修复**：`localization_amcl_launch.py` 现在同时启动并管理 `map_server` + `amcl`（单一 lifecycle_manager）；`bringup_sim` 仅在 `icp`/未选重定位时单独起 map_server |
+| nav 模式卡在 `amcl: Waiting for map....` / `global_costmap: Invalid frame ID "map"` | ① `map_server_launch.py` 与 `localization_amcl_launch.py` **各起了一个同名 `lifecycle_manager_localization`**（冲突）；② `nav2_params_sim_*.yaml` 里 `yaml_filename` 被注释掉，而 nav2 的 `RewrittenYaml` **只替换已存在的键** → map_server 报 `parameter 'yaml_filename' is not initialized` | **已于 2026-09 修复**：① amcl launch 现在用**单一 lifecycle_manager 同时管理 `map_server`+`amcl`**，bringup 仅在 `icp`/未选重定位时单独起 map_server；② 三份 nav2 参数恢复 `yaml_filename: ""` 键（launch 会注入实际地图路径） |
+| Nav2 在 `odom`/`map` 出现前就激活，刷 `Timed out waiting for transform ...` | Gazebo 生成机器人 + LIO 初始化需要数秒，而 Nav2 立即启动 | **已于 2026-09 缓解**：`bringup_sim` 中定位链延后 **4s**、mapping 后端延后 **4s**、Nav2 延后 **10s** 启动 |
 | `spawn_entity: Spawn status: ... timed out waiting for entity to appear` | RMUL2026 世界加载慢，spawn 默认超时过短（实体其实已生成） | **已于 2026-09 修复**：spawn 参数加 `-timeout 60.0` |
 | `Timed out waiting for transform from base_link to map` | `map→odom` 缺失 | nav 模式必须指定 `localization:=amcl\|slam_toolbox\|icp` |
 | `Invalid frame ID "base_link"` / fake_vel 报 `Could not transform odom to base_link` | `/odom` 无数据 → LIO 或 `lio_tf_adapter` 未启动 | 查终端 A 是否打印 `lio_tf_adapter 启动` |
