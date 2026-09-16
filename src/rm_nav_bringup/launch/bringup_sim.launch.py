@@ -63,6 +63,16 @@ def generate_launch_description():
         get_package_share_directory('rm_navigation'), 'params',
         PythonExpression(["'nav2_params_sim_' + '", LaunchConfiguration('nav'), "' + '.yaml'"])
     ])
+    # AMCL 初值（map 系，米/弧度）：sim 出生点固定，按 world 自动注入，省掉手动发 /initialpose。
+    # 依据（用场地 STL 世界包围盒 vs pgm 已知区域比对得出，见 docs/smoke_test_runbook.md §0.5）：
+    #   RMUC / RMUL 的 pgm 是 sim 建图导出 → map 原点 = 机器人出生点 → (0, 0, 0)
+    #   RMUL2026 的 pgm 是场地几何生成     → map 系 = world 系     → (4.3, 3.35, 0)
+    amcl_init_x = PythonExpression([
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 4.3}['",
+        LaunchConfiguration('world'), "']"])
+    amcl_init_y = PythonExpression([
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 3.35}['",
+        LaunchConfiguration('world'), "']"])
     ################################### navigation2 parameters end ####################################
 
     ################################ icp_registration parameters start ################################
@@ -231,7 +241,11 @@ def generate_launch_description():
                 launch_arguments = {
                     'use_sim_time': use_sim_time,
                     'map': nav2_map_dir,
-                    'params_file': nav2_params_file_dir}.items()
+                    'params_file': nav2_params_file_dir,
+                    'initial_pose_x': amcl_init_x,
+                    'initial_pose_y': amcl_init_y,
+                    'initial_pose_z': '0.0',
+                    'initial_pose_yaw': '0.0'}.items()
             ),
 
             TimerAction(

@@ -81,6 +81,42 @@ sleep 2
 | `mapper` | `slam_toolbox` / `cartographer`（仅 mapping） | `slam_toolbox` |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
 
+### 0.4 看哪块 RViz（别把两个都关掉）
+
+| 你想看什么 | 用哪个 | 打开的配置 | 里面有什么 |
+|---|---|---|---|
+| **LIO 点云 / 建图效果**（mapping 模式） | `lio_rviz:=True` | `rm_nav_bringup/rviz/fastlio.rviz` / `pointlio.rviz` | 原始点云、`cloud_registered`、体素地图 |
+| **导航效果**（nav 模式，**推荐**） | `nav_rviz:=True`（默认） | `rm_navigation/rviz/nav2.rviz` | `RobotModel`(`/robot_description`)、`Map`(`/map`)、本地/全局代价地图、`/scan`、TF、**Navigation2 面板**、**2D Pose Estimate / 2D Goal Pose 工具**（Fixed Frame = `map`） |
+
+- ⚠️ **两个都给 `False` = 屏幕上什么可视化都没有**（Gazebo 里还有机器人，但没法判断导航效果）；
+- 两个都给 `True` = 两个 RViz 同时抢 GPU，RMUL2026 这种重场景容易卡死/闪退，**只开一个**；
+- 定目标/给初值：nav 模式下直接用 `nav2.rviz` 的工具栏按钮，比命令行方便。
+
+### 0.5 三个场地的地图资产现状（`rm_nav_bringup/map/`）
+
+| world | 栅格地图 | `origin` / 尺寸 | map 系约定 | **AMCL 初值（map 系）** | 可用重定位 | 备注 |
+|---|---|---|---|---|---|---|
+| `RMUC` | `RMUC.pgm` 577×301 | `(-6.35,-7.6)` | **出生点系** | `(0, 0, 0)` | AMCL / slam_toolbox(`.posegraph`) / ICP(`.data`) | 最全 |
+| `RMUL` | `RMUL.pgm` 272×210 | `(-3.75,-4.54)` | **出生点系** | `(0, 0, 0)` | AMCL / slam_toolbox(`.posegraph`) | |
+| `RMUL2026` | `RMUL2026.pgm` 240×169 | `(2.68, 0.228)` | **世界系** ⚠️ 与上两者不同 | `(4.3, 3.35, 0)` | **仅 AMCL** | 无 `.posegraph`、无 `.pcd`；`RMUL2026.pbstream` 仅 526 B（空，cartographer 纯定位不可用） |
+
+#### 怎么判定出来的（别再靠猜）
+
+用**场地 STL 的世界包围盒**与 **pgm 已知区域（非 205 像素）包围盒**比对，尺寸与位置两项都对上才算数：
+
+| world | 场地 mesh 世界包围盒 | pgm 已知区域 bbox | 判定 |
+|---|---|---|---|
+| `RMUC` | x[0.00, 29.20] y[0.00, 15.20] | x[-6.35, 22.50] y[-7.60, 7.45] | mesh − spawn(6.35,7.6) = x[-6.35,22.85] y[-7.60,7.60] ≈ pgm → **出生点系** |
+| `RMUL` | x[0.51, 14.23] y[-1.25, 9.30] | x[-3.75, 9.80] y[-4.49, 5.96] | mesh − spawn(4.30,3.35) = x[-3.79,9.93] y[-4.60,5.95] ≈ pgm → **出生点系** |
+| `RMUL2026` | x[2.20, 14.80] y[0.20, 8.80] | x[2.68, 14.68] y[0.23, 8.43] | mesh **直接**等于 pgm（无 spawn 偏移）→ **世界系** |
+
+推论与注意事项：
+1. **`RMUL`/`RMUC` 的 pgm 是 sim 建图导出**（slam_toolbox 的 map 原点 = LIO 起点 = 机器人出生点），所以地图坐标里机器人在 `(0,0)`。之前按世界出生点 `(4.3,3.35)` 给 AMCL 初值是**错的**，会把机器人放到地图里偏差 5.4 m 的位置——这与你「rviz 看不出来、判断不了效果」直接相关。
+2. `RMUL`/`RMUC` 的 `.posegraph`（slam_toolbox 纯定位的 `map_start_pose`）与 `.data`/pcd（ICP 的 `initial_pose`）本来就是 `[0,0,0]`，与 ① 一致 → **这两套资产内部自洽，不要动**。
+3. ⚠️ **`RMUL2026` 是唯一的例外**：pgm 是世界系，而它没有 posegraph/pcd。将来若用 sim 建图给 RMUL2026 生成 `.posegraph`/`.pcd`，那些产物会变成**出生点系**，与现有 pgm 差 `(4.3, 3.35)` → 三种重定位模式会各自用不同的 map 系。**建议：做一次 RMUL2026 建图，用 `tools/scripts/mapping/save_grid_map.sh` 重新导出 pgm+posegraph，让该场地也统一成出生点系**（届时把 `bringup_sim.launch.py` 里 `amcl_init_x/y` 的 RMUL2026 也改成 `0.0`）。
+4. 当前初值由 `bringup_sim.launch.py` 按 `world` **自动注入**（`amcl.ros__parameters.initial_pose.*` + `set_initial_pose: true`），无需手动发 `/initialpose`；运行中仍可用 `/initialpose` 或 RViz 的 `2D Pose Estimate` 覆盖。
+
+
 ---
 
 ## 1. 场景一：mapping + fastlio（先跑这个）
@@ -121,22 +157,19 @@ ros2 topic echo /map --once --field info     # 期望：272 X 210（map_server �
 ros2 action list | grep navigate_to_pose
 ```
 
-> ⚠️ **AMCL 必须先给初始位姿**：`set_initial_pose` 默认为 false，在收到 `/initialpose` 之前 **amcl 不发布 `map→odom`**，
-> 于是 global_costmap 会一直刷 `Timed out waiting for transform from base_link to map`。
-> 两种给初值方式（任选其一）：
+> ✅ **初值已自动化**：`amcl` 参数里 `set_initial_pose: true`，初值由 `bringup_sim` 按 `world` 注入
+> （`RMUC/RMUL → (0,0,0)`，`RMUL2026 → (4.3,3.35)`，依据见 §0.5），**不需要再手敲 `/initialpose`**。
+> 想手动纠正（例如机器人被撞偏了）：RViz 工具栏 **"2D Pose Estimate"**，或
 > ```bash
-> # ① RViz：工具栏 "2D Pose Estimate" 在地图上点机器人实际位置并拖出朝向
-> # ② 命令行：RMUL/RMUL2026 出生点约 (4.3, 3.35, yaw=0)
+> # 以 RMUL 为例：map 系原点就是出生点，所以给 (0,0)
 > ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
-> "{header: {frame_id: map}, pose: {pose: {position: {x: 4.3, y: 3.35, z: 0.0}, orientation: {w: 1.0}}, covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0.0685,0,0,0, 0,0,0,0,0.0685,0, 0,0,0,0,0,0.0685, 0,0,0,0,0,0]}}"
+> "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}, covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0.0685,0,0,0, 0,0,0,0,0.0685,0, 0,0,0,0,0,0.0685, 0,0,0,0,0,0]}}"
 > ```
-> 想免手动给初值，可在 `nav2_params_sim_*.yaml` 的 `amcl:` 段加 `set_initial_pose: true` + `initial_pose`（注意 RMUC 出生点是 (6.35, 7.6)，需同步改）。
 >
-> 📌 **实测补充**：启动后立刻发 `/initialpose` 会看到
+> 📌 若在启动早期手动发 `/initialpose`，可能看到
 > `amcl: Failed to transform initial pose in time (Lookup would require extrapolation into the future ...)` —
-> 这是因为位姿时间戳取 `now()`，而 10 Hz 的 `odom→base_link` 最新帧落后几十毫秒，tf2 不外推未来。
-> **可忽略**，amcl 随后仍会打印 `Setting pose (...)`；想彻底没有这条告警，就等
-> `ros2 run tf2_ros tf2_echo odom base_link` 能持续输出后再发初值（或直接用 RViz 的 2D Pose Estimate）。
+> 位姿时间戳取 `now()`，而 10 Hz 的 `odom→base_link` 最新帧落后几十毫秒，tf2 不外推未来。
+> **可忽略**（下一行仍会 `Setting pose (...)`）；想彻底没有这条告警，等 `tf2_echo odom base_link` 能持续输出后再发。
 
 ---
 
@@ -341,4 +374,5 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 | 2026-09 | 一 mapping+fastlio | `mode:=mapping lio:=fastlio` | ✅ `/odom` 连续、`odom→base_link` 连续；曾修：Gazebo 里程计抢 `/odom`（remap 到 `/odom_ground_truth`）、出生 z=1.16 自由落体致 RViz 车体倾斜（改 z=0.2） |
 | 2026-09 | 二 nav+amcl | `mode:=nav localization:=amcl nav:=rpp` | ✅ `Managed nodes are active`；`map_server 272×210` → `amcl Received a 272 X 210 map`。启动期约 4s 刷 `Timed out waiting for transform from base_link_fake to map` 与 `extrapolation` 属**瞬态**（TF 各帧刚建立、10Hz LIO TF 略滞后于 `now()`），给完 `/initialpose` 后自行恢复，不影响激活 |
 | 2026-09 | 二 关机 | Ctrl-C | `fastlio_mapping` / `component_container_mt` 退出码 **-11** 属 Humble 关机期已知现象（进程已 Deactivate/Cleanup，非运行期崩溃） |
+| 2026-09 | 二 地图系排查 | `world:=RMUL` 下按「世界出生点」给 AMCL 初值 | ❌ **判断错误已修正**：RMUL/RMUC 的 pgm 是**出生点系**（初值必须 `(0,0,0)`），只有 RMUL2026 是**世界系**（`(4.3,3.35)`）。判定方法与证据见 §0.5；已改为 launch 按 `world` 自动注入初值 |
 

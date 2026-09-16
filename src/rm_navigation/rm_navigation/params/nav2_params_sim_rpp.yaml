@@ -38,6 +38,17 @@ amcl:
     z_rand: 0.5
     z_short: 0.05
     scan_topic: scan
+    # sim 自动初值（map 系原点约定见 docs/smoke_test_runbook.md §0.5）：
+    #   RMUC / RMUL 的 pgm 由 sim 建图导出 → map 原点 = 机器人出生点 → 初值 (0,0)
+    #   RMUL2026 的 pgm 由场地几何生成     → map 系 = world 系      → 初值 (4.3,3.35)
+    # 实际数值由 bringup_sim.launch.py 按 world 参数用 RewrittenYaml 全路径覆盖
+    set_initial_pose: true
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+    always_reset_initial_pose: false
 
 amcl_map_client:
   ros__parameters:

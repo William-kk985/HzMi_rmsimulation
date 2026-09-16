@@ -26,6 +26,10 @@ def generate_launch_description():
     container_name_full = (namespace, '/', container_name)
     use_respawn = LaunchConfiguration('use_respawn')
     log_level = LaunchConfiguration('log_level')
+    initial_pose_x = LaunchConfiguration('initial_pose_x')
+    initial_pose_y = LaunchConfiguration('initial_pose_y')
+    initial_pose_z = LaunchConfiguration('initial_pose_z')
+    initial_pose_yaw = LaunchConfiguration('initial_pose_yaw')
 
     # 关键：map_server 与 amcl 必须由【同一个】lifecycle_manager 管理，
     # 否则会出现两个同名 lifecycle_manager_localization 冲突 → map_server 无法激活 → amcl 永远 Waiting for map
@@ -35,9 +39,15 @@ def generate_launch_description():
                   ('/tf_static', 'tf_static')]
 
     # Create our own temporary YAML files that include substitutions
+    # 注意：RewrittenYaml 对 param_rewrites 会先做「叶子名」匹配，再做「全路径」匹配；
+    # 这里用全路径，避免 'x'/'y' 这类短名误伤全局同名叶子参数。
     param_substitutions = {
         'use_sim_time': use_sim_time,
-        'yaml_filename': map_yaml_file}
+        'yaml_filename': map_yaml_file,
+        'amcl.ros__parameters.initial_pose.x': initial_pose_x,
+        'amcl.ros__parameters.initial_pose.y': initial_pose_y,
+        'amcl.ros__parameters.initial_pose.z': initial_pose_z,
+        'amcl.ros__parameters.initial_pose.yaw': initial_pose_yaw}
 
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -89,6 +99,21 @@ def generate_launch_description():
         'map',
         default_value='',
         description='用于 map_server 的栅格地图 yaml 路径（由 bringup 传入）')
+
+    # AMCL 初值（map 系）。sim 里出生点固定，故由 bringup 按 world 自动传入；
+    # 运行中仍可用 /initialpose 或 RViz 的 2D Pose Estimate 覆盖。
+    declare_initial_pose_x_cmd = DeclareLaunchArgument(
+        'initial_pose_x', default_value='0.0',
+        description='AMCL 初始位姿 x（map 系，米）')
+    declare_initial_pose_y_cmd = DeclareLaunchArgument(
+        'initial_pose_y', default_value='0.0',
+        description='AMCL 初始位姿 y（map 系，米）')
+    declare_initial_pose_z_cmd = DeclareLaunchArgument(
+        'initial_pose_z', default_value='0.0',
+        description='AMCL 初始位姿 z（map 系，米）')
+    declare_initial_pose_yaw_cmd = DeclareLaunchArgument(
+        'initial_pose_yaw', default_value='0.0',
+        description='AMCL 初始位姿 yaw（map 系，弧度）')
 
     load_nodes = GroupAction(
         condition=IfCondition(PythonExpression(['not ', use_composition])),
@@ -167,6 +192,10 @@ def generate_launch_description():
     ld.add_action(declare_use_respawn_cmd)
     ld.add_action(declare_log_level_cmd)
     ld.add_action(declare_map_yaml_cmd)
+    ld.add_action(declare_initial_pose_x_cmd)
+    ld.add_action(declare_initial_pose_y_cmd)
+    ld.add_action(declare_initial_pose_z_cmd)
+    ld.add_action(declare_initial_pose_yaw_cmd)
 
     # Add the actions to launch all of the localiztion nodes
     ld.add_action(load_nodes)
