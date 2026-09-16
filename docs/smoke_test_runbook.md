@@ -127,6 +127,31 @@ sleep 2
 4. 当前初值由 `bringup_sim.launch.py` 按 `world` **自动注入**（`amcl.ros__parameters.initial_pose.*` + `set_initial_pose: true`），无需手动发 `/initialpose`；运行中仍可用 `/initialpose` 或 RViz 的 `2D Pose Estimate` 覆盖。
 
 
+### 0.6 ⚠️ 选测试目标点：**先验连通域，别靠眼估**
+
+nav2 全局规划把「障碍 + `robot_radius` 内切膨胀带」视为不可通行，**地图上 1 像素（5cm）宽的虚线就足以把一条走廊彻底封死** → `planner_server: failed to generate a valid path` → BT 反复跑恢复行为（`/cmd_vel` 只会出现 `-0.05` 的 BackUp 和 `spin_speed` 的旋转）。
+
+```bash
+# 检查"某个目标点从起点是否可达"（最常用）
+/usr/bin/python3 tools/check_map_reachable.py --map src/rm_nav_bringup/map/RMUL2026.yaml \
+  --start 4.3 3.35 --goal 6.0 3.4
+# 让工具推荐一批可达且离墙够远的目标点
+/usr/bin/python3 tools/check_map_reachable.py --map src/rm_nav_bringup/map/RMUL2026.yaml --start 4.3 3.35
+```
+> `--start` 用**该场地 map 系**的起点：`RMUC/RMUL` 是 `0 0`，`RMUL2026` 是 `4.3 3.35`（依据见 §0.5）。
+> 工具还会报"地图被切成几块"——切成多块时，目标点跨块必然规划失败。
+
+**RMUL2026 的实测结论（重要）**：该场地被切成 3 块（#2=24246 格 / #1=3692 格 / #0=693 格），
+起点在 #2，而 **`(6.0, 3.4)` 落在 #1 → 必然规划失败**。原因是 `RMUL2026.pgm` 里存在一道 **x≈5.2 的竖直虚线（1 像素宽、带小缺口，从 y≈1.8 延伸到 6.0）**，
+而 **RMUL2026 世界网格在该处完全没有几何**（逐顶点核对：x∈[5.05,5.35]、y∈[2.8,4.0] 的顶点数 = 0）——
+即 **pgm 里有世界不存在的"幽灵墙"**，膨胀后把走廊封死。这与 §0.5 的结论一致：`RMUL2026.pgm` 更像**官方场地平面图**（含分区虚线），而不是在 sim 里建出来的图。
+
+**因此：**
+1. 立刻验证导航链路 → 用**同一连通域**的目标点，例如 `(4.01, 4.70)`（1.38m）、`(3.91, 5.40)`（2.09m）、`(8.26, 5.45)`（4.48m，会绕行，可验证长路径）；
+2. 彻底解决 → **在 sim 里重新给 RMUL2026 建一次图**（`mode:=mapping` + `tools/scripts/mapping/save_grid_map.sh`），
+   得到与世界一致、且与 RMUL/RMUC 统一成"出生点系"的 `pgm+posegraph`（同时替换掉 526 B 的空 `RMUL2026.pbstream`），
+   之后把 `bringup_sim.launch.py` 里 RMUL2026 的 `amcl_init_x/y` 改回 `0.0`。
+
 ---
 
 ## 1. 场景一：mapping + fastlio（先跑这个）
@@ -389,6 +414,7 @@ ros2 topic info /scan --verbose                                              # �
 | costmap 刷屏 `Sensor origin at (x,y) is out of map bounds`（数值在 spawn 坐标与 LIO 估计间跳变） | **同一 `odom` 有两个来源**：Gazebo 真值 + LIO 都发到 `/odom`，`lio_tf_adapter` 交替收到两者 → `odom→base_link` 抖动 | **已于 2026-09 修复**：`sentry_robot_sim.xacro` 把 Gazebo 真值 remap 到 **`/odom_ground_truth`**（`publish_odom_tf=false`），`/odom` 由 LIO 独占。对比真值请看 `/odom_ground_truth` |
 | RViz 报 `Message Filter dropping message ... queue is full` 且退出时 `rviz2 exit code -11` | RViz 在高频 TF/点云负载下丢帧，退出时崩溃（常见现象，不影响仿真链路） | 可先 `nav_rviz:=False` 验证导航链路；或减少 RViz 中 PointCloud2/STVL 显示项 |
 | **发目标后车不走**，`/cmd_vel` 长时间只有 `linear.x: -0.05`（偶尔 `0` + 角速度） | `-0.05` = nav2 自带 BT `BackUp` 的 `backup_speed="0.05"`（见 `/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml`）→ **BT 进了恢复行为循环**（清代价地图→Spin→Wait→BackUp 轮转），说明 `ComputePathToPose` 或 `FollowPath` 连续失败 | 按顺序查：① 终端 A 里 `planner_server` / `controller_server` 的 WARN/ERROR（**最直接**，会写明原因）；② `ros2 topic echo /plan --once --field poses`（空=规划失败）；③ `ros2 topic echo /odom_ground_truth --field pose.pose.position --once` 与 `/amcl_pose` 对比（RMUL2026 的 map 系=世界系，两者必须接近）；④ `spin_speed:=0.0` 重跑（见 §0.4.1） |
+| `planner_server: GridBased: failed to create plan with tolerance 0.50` / `Planning algorithm GridBased failed to generate a valid path to (x, y)` | **目标点与起点不在同一连通域**（中间被墙隔开），或起点/终点落在膨胀带内。地图上 1 像素宽的虚线经 `robot_radius` 膨胀后就能封死走廊 | 先跑 `tools/check_map_reachable.py --map <map.yaml> --start <map 系起点> --goal <目标>` 判定；换用同一连通域的目标点（§0.6）。若是**地图资产**问题（例：RMUL2026.pgm 的 x≈5.2 幽灵虚线，世界网格里没有实体）→ 重新建图 |
 | 参数写在 `nav2_params_*.yaml` 里却"没生效" | **节点名对不上**：nav2 跨版本改过名（如 Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`）。对不上的整段被**静默忽略**，节点改用内置默认值 | 拿 `/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml` 的顶层键做参照逐个核对；**已于 2026-09 修复**三份 sim 变体的 `recoveries_server` 段。判断某段是否生效的最快办法：看节点启动日志（如 `behavior_server: Creating behavior plugin ...` 的**个数/名字**是否与 yaml 一致） |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
 | cartographer 纯定位报找不到状态文件 | pbstream 路径错或文件为空 | 用绝对路径；`RMUL2026.pbstream` 疑空，改用 `RMUL` |
@@ -426,4 +452,5 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 | 2026-09 | 二 nav+amcl @ **RMUL2026**（用户机实跑） | `world:=RMUL2026 mode:=nav lio:=fastlio localization:=amcl nav:=rpp nav_rviz:=True` | ✅ **全链路通过**：`/controller_server`+`/planner_server` = active；`/map` 240×169 origin(2.68,0.228)；`map→odom` = **(4.294, 3.357, 0.052)**、RPY (-0.30°,-0.03°,-0.07°)；`/amcl_pose` = **(4.300,3.350)**（=注入初值）；`/scan` 1 pub + 3 sub（amcl/local_costmap/rviz）**QoS 全 BEST_EFFORT 匹配** |
 | 2026-09 | 二 `/amcl_pose` 的 covariance ≈ 0 | nav2 `set_initial_pose` 路径**不填协方差**（`amcl_node.cpp` L271-281 只设 position/orientation） | 正常现象：初始粒子云是**零散布单点**。位置给对无影响；若初值给错，AMCL 难以自行纠回 → 必须用 RViz `2D Pose Estimate` 重给 |
 | 2026-09 | 二 发目标 @ RMUL2026 | `/cmd_vel` 长时间 `linear.x: -0.05`、`/cmd_vel_chassis` 出现 `angular.z: 5.0` | ⚠️ **未通过**：`-0.05` = BT `BackUp` 的 `backup_speed`，`5.0` = `fake_vel_params.yaml` 的 `spin_speed` → 命令链通、小陀螺生效，但 Nav2 卡在**恢复行为循环**（路径/控制失败）。顺带查出 `recoveries_server` 段（Galactic 名字）被 Humble 静默忽略，已改为 `behavior_server` |
+| 2026-09 | 二 发目标 @ RMUL2026（第二轮，带日志） | `planner_server: failed to generate a valid path to (6.00, 3.40)`；`odom_ground_truth=(4.2226,3.3442)` vs `amcl_pose=(4.300,3.350)` 差 8cm | ✅ **根因确定**：定位/地图坐标系没问题（真值与 amcl 一致），失败在于**目标点被地图上不存在的"幽灵墙"隔开**——`RMUL2026.pgm` 在 x≈5.2 有一条 1 像素宽虚线（y≈1.8→6.0），而世界网格在该处**零顶点**；经 `robot_radius=0.2m` 膨胀后走廊被封死（r=0.15m 时同一点即可达），地图被切成 3 块、目标落在另一块。已新增 `tools/check_map_reachable.py` 用于选点前验证 |
 
