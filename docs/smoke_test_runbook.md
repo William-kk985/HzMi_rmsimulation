@@ -131,6 +131,12 @@ ros2 action list | grep navigate_to_pose
 > "{header: {frame_id: map}, pose: {pose: {position: {x: 4.3, y: 3.35, z: 0.0}, orientation: {w: 1.0}}, covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0.0685,0,0,0, 0,0,0,0,0.0685,0, 0,0,0,0,0,0.0685, 0,0,0,0,0,0]}}"
 > ```
 > 想免手动给初值，可在 `nav2_params_sim_*.yaml` 的 `amcl:` 段加 `set_initial_pose: true` + `initial_pose`（注意 RMUC 出生点是 (6.35, 7.6)，需同步改）。
+>
+> 📌 **实测补充**：启动后立刻发 `/initialpose` 会看到
+> `amcl: Failed to transform initial pose in time (Lookup would require extrapolation into the future ...)` —
+> 这是因为位姿时间戳取 `now()`，而 10 Hz 的 `odom→base_link` 最新帧落后几十毫秒，tf2 不外推未来。
+> **可忽略**，amcl 随后仍会打印 `Setting pose (...)`；想彻底没有这条告警，就等
+> `ros2 run tf2_ros tf2_echo odom base_link` 能持续输出后再发初值（或直接用 RViz 的 2D Pose Estimate）。
 
 ---
 
@@ -325,3 +331,14 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 ```
 
 **优先验证顺序**：场景一（确认 `/odom` 与 `odom→base_link` 存在） → 场景三（确认 ICP 能发 `map→odom`） → 其余场景。
+
+---
+
+## 12. 实测记录
+
+| 日期 | 场景 | 命令要点 | 结果 |
+|---|---|---|---|
+| 2026-09 | 一 mapping+fastlio | `mode:=mapping lio:=fastlio` | ✅ `/odom` 连续、`odom→base_link` 连续；曾修：Gazebo 里程计抢 `/odom`（remap 到 `/odom_ground_truth`）、出生 z=1.16 自由落体致 RViz 车体倾斜（改 z=0.2） |
+| 2026-09 | 二 nav+amcl | `mode:=nav localization:=amcl nav:=rpp` | ✅ `Managed nodes are active`；`map_server 272×210` → `amcl Received a 272 X 210 map`。启动期约 4s 刷 `Timed out waiting for transform from base_link_fake to map` 与 `extrapolation` 属**瞬态**（TF 各帧刚建立、10Hz LIO TF 略滞后于 `now()`），给完 `/initialpose` 后自行恢复，不影响激活 |
+| 2026-09 | 二 关机 | Ctrl-C | `fastlio_mapping` / `component_container_mt` 退出码 **-11** 属 Humble 关机期已知现象（进程已 Deactivate/Cleanup，非运行期崩溃） |
+

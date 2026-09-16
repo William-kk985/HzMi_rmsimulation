@@ -74,7 +74,19 @@ map ──(重定位：AMCL / slam_toolbox / ICP 之一发布)──► odom ─
 | **T3 ✅（2026-09 已实施）** | 新增自研包 `src/rm_localization/lio_tf_adapter`：订阅统一后的 `/odom`，广播标准 **`odom→base_link`**；`lio:=none` 时不启动 | LIO 成为导航唯一里程计来源；帧树不再出现 `camera_init/body/aft_mapped` |
 | **T4 ✅（2026-09 已实施）** | sim URDF 关闭 Gazebo `publish_odom_tf`（`/odom` 话题保留供对比） | 无"双发布者"：`odom→base_link` 仅由 `lio_tf_adapter` 发布 |
 | **T5 ✅（2026-09 已实施）** | 修正 `icp_registration_sim.yaml`：`range_odom_frame_id: "odom"`（原 `lidar_odom` 已失效） | `localization:=icp` 时 `map→odom` 真正由 ICP 提供（需实跑确认） |
-| **T6** | nav2 `robot_base_frame` 由 `base_link_fake` 改回 `base_link`（并回归 footprint/速度参数） | nav2 各组合实跑通过（**留到实跑后**，风险最高） |
+| ~~T6~~ ❌ **已撤销** | ~~nav2 `robot_base_frame` 由 `base_link_fake` 改回 `base_link`~~ | **不改**，理由见下 |
+
+### T6 撤销说明（2026-09，实跑后修正）
+
+原判断「`base_link_fake` 是上游遗留脏帧」**错误**。`base_link_fake` 是**哨兵云台（gimbal）机制的载体**，不是 bug：
+
+- `fake_vel_transform` 以 **20 Hz** 发布 `base_link → base_link_fake`，旋转量为 `current_angle_`（由 `/local_plan` 的 TEB 朝向 − 底盘朝向算出）；
+- Nav2 在 **`base_link_fake`（云台朝向系）**里规划与控制，输出的 `/cmd_vel` 再由该节点旋转到**底盘系** `/cmd_vel_chassis` 下发；角速度指令非零时按 `spin_speed`（-6.0）**原地转底盘**，使云台对准路径方向——这是 RM 哨兵「小陀螺」行为的实现；
+- 若把 `robot_base_frame` 改成 `base_link`，等于让底盘系直接跟随路径朝向，**小陀螺与云台解耦行为全部丢失**，且 `/cmd_vel` → `/cmd_vel_chassis` 的旋转链路失效。
+
+因此 nav2 参数中 4 处 `robot_base_frame: base_link_fake` **保留**（三份 sim 变体 + 归档 real 参数一致）。同理，bringup 中不再重复发布静态 `base_link→base_link_fake`（P4 已消除）这条修复仍然有效。
+
+> 后续若要研究「底盘系直接导航」这一对照组，应作为**新的算法变体**引入（例如 `gimbal:=off`），而不是替换默认契约。
 
 ---
 
