@@ -183,9 +183,12 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
     - 真实环境
         - 自定，world 等价于 `.pcd(ICP使用的点云图)` 文件和 `.yaml(Nav使用的栅格地图)` 的名称
 
-2. `mode`（必填）:
-   - `mapping` - 边建图边导航
-   - `nav` - 已知全局地图导航（**必须同时指定 `localization`**）
+2. `mode`（必填）—— **场景形态**，三种形态启动的节点集不同：
+   - `mapping` - **纯建图**（Gazebo + LIO + 在线 SLAM 后端；**不起导航栈**，省 CPU 让建图更稳）
+   - `slam_nav` - **边建图边导航**（在线 SLAM 直接把 `/map` 与 `map→odom` 喂给 costmap；不加载磁盘地图、不起重定位模块）
+   - `nav` - **先建图后导航**（加载磁盘地图 + 必须同时指定 `localization`）
+
+   三者对照表见 `docs/architecture.md`「三种场景形态的启动集」与 `docs/smoke_test_runbook.md` §0.7。
 
 3. `lio`（默认 `fastlio`）—— 里程计/连续定位实现:
    - `fastlio` - 使用 [Fast_LIO](https://github.com/LihanChen2004/FAST_LIO/tree/ROS2)，里程计约 10Hz
@@ -198,11 +201,11 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
    - `icp` - 使用 [icp_registration](https://github.com/baiyeweiguang/CSU-RM-Sentry/tree/main/src/rm_localization/icp_registration)，仅在第一次启动或者手动设置 /initialpose 时进行点云配准。获得初始位姿后只依赖 LIO 进行定位，没有回环检测，在长时间运行后可能会出现累积误差。
 
     Tips:
-    1. 若使用 AMCL 算法定位时，启动后需要在 rviz2 中手动给定初始位姿。
+    1. AMCL 的初始位姿已由 launch **按 `world` 自动注入**（`set_initial_pose: true`，RMUC/RMUL 为 `(0,0)`、RMUL2026 为 `(4.3,3.35)`，依据见 `docs/smoke_test_runbook.md` §0.5），无需再手动给；运行中仍可用 rviz2 的 `2D Pose Estimate` 或 `/initialpose` 覆盖。
     2. 若使用 slam_toolbox 定位，需要提供 .posegraph 地图，详见 [如何保存 .pgm 和 .posegraph 地图？](https://gitee.com/SMBU-POLARBEAR/HzMi_rmsimulation/issues/I9427I)
     3. 若使用 ICP_Localization 定位，需要提供 .pcd 点云图
 
-5. `mapper`（默认 `slam_toolbox`，仅 `mode:=mapping` 有效）—— 2D 建图后端:
+5. `mapper`（默认 `slam_toolbox`，`mode:=mapping` / `mode:=slam_nav` 有效）—— 在线 2D 建图后端:
    - `slam_toolbox` - online_async 建图（产出 `.pgm` + `.posegraph`）
    - `cartographer` - Cartographer 建图（产出 `.pgm` + `.pbstream`）
 
@@ -220,13 +223,26 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 
 ### 3.2 仿真模式示例
 
-- 边建图边导航
+- 纯建图（只建图，不起导航栈）
 
     ```sh
     ros2 launch rm_nav_bringup bringup_sim.launch.py \
-    world:=RMUL \
+    world:=RMUL2026 \
     mode:=mapping \
     lio:=fastlio \
+    mapper:=slam_toolbox \
+    lio_rviz:=False \
+    nav_rviz:=True
+    ```
+
+- 边建图边导航（在线 SLAM 直接喂 costmap）
+
+    ```sh
+    ros2 launch rm_nav_bringup bringup_sim.launch.py \
+    world:=RMUL2026 \
+    mode:=slam_nav \
+    lio:=fastlio \
+    mapper:=slam_toolbox \
     lio_rviz:=False \
     nav_rviz:=True
     ```

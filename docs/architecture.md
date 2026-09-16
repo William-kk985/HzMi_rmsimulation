@@ -149,6 +149,7 @@ rm_nav_bringup/                          # 总装层（无 config/：参数已�
 
 ```
 tools/
+├── check_map_reachable.py   # ★地图可达性/目标点检查（选测试目标点前必跑，含连通域判定）
 ├── *.py                     # Python 工具（评测/后处理等，按需新增）
 └── scripts/                 # Shell 脚本（原顶层 scripts/ 已合并至此）
     ├── build.sh
@@ -166,6 +167,8 @@ tools/
 ```bash
 tools/scripts/control/start_sentinel.sh                      # 默认 RMUL2026 + mapping + fastlio
 tools/scripts/control/start_sentinel.sh -w RMUC -m nav --lio pointlio
+# 选导航测试目标点前先验证可达性（避免目标点被墙隔开导致规划失败）
+/usr/bin/python3 tools/check_map_reachable.py --map src/rm_nav_bringup/map/RMUL.yaml --start 0 0 --goal 1.68 3.44
 # 或手动
 source install/setup.bash
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping lio:=fastlio
@@ -211,16 +214,28 @@ tools/scripts/control/start_sentinel.sh
 | 参数 | 取值 | 说明 |
 |---|---|---|
 | `world` | `RMUC` / `RMUL` / `RMUL2026`（默认） | 场地（同时决定 map/PCD 前缀） |
-| `mode` | `mapping` / `nav` | 边建图边导航 / 已知地图导航 |
+| `mode` | **`mapping`（纯建图）/ `slam_nav`（边建图边导航）/ `nav`（先建图后导航）** | 三种**场景形态**，启动的节点集明显不同，见下表；`localization` 仅 `nav` 生效 |
 | `lio` | `fastlio`（默认） / `pointlio` / **`none`** | 里程计实现选择；**`none` = 不启动任何 LIO**（须由外部提供 odom/TF，如轮式里程计或 cartographer；此时 LIO 相关的静态 TF 桥不会启动） |
-| `nav` | `rpp`（默认） / `dwb` / `teb` | **局部规划器变体**：对应 `rm_navigation/params/nav2_params_sim_<nav>.yaml`（全局规划统一为 Navfn） |
-| `mapper` | `slam_toolbox`（默认） / `cartographer` | **2D 建图后端**（仅 `mode:=mapping` 生效）：slam_toolbox(async) 或 cartographer（建图 lua） |
-| `localization` | `slam_toolbox` / `amcl` / `icp`（仅 nav 模式） | 重定位方式 |
+| `nav` | `rpp`（默认） / `dwb` / `teb` | **局部规划器变体**：对应 `rm_navigation/params/nav2_params_sim_<nav>.yaml`（全局规划统一为 Navfn）；`nav`/`slam_nav` 形态生效 |
+| `mapper` | `slam_toolbox`（默认） / `cartographer` | **在线 2D 建图后端**：`mapping`/`slam_nav` 生效 |
+| `localization` | `slam_toolbox` / `amcl` / `icp`（**仅 `nav` 生效**） | 重定位方式；留空 = 回退用法（LIO 当绝对定位 + 静态桥补帧） |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | 可视化开关 |
+| `spin_speed` | `5.0`（默认，上游哨兵语义）/ `0.0` | `fake_vel_transform` 的小陀螺固定角速度；**仿真排查导航问题先用 `0.0`**（角速度直通） |
+
+**三种场景形态的启动集（2026-09 拆分）**：
+
+| `mode` | 在线 SLAM 后端 | 导航栈 nav2 | `map_server` | 重定位模块 | `map→odom` 来源 |
+|---|---|---|---|---|---|
+| `mapping` 纯建图 | ✅ | ❌ **不启动**（省 CPU） | ❌ | ❌ | 在线 SLAM（供离线保存） |
+| `slam_nav` 边建图边导航 | ✅ | ✅ | ❌ | ❌ | 在线 SLAM 直接喂 costmap |
+| `nav` 先建图后导航 | ❌ | ✅ | 仅 `icp` / 留空时 | ✅ 按 `localization` | 所选重定位模块 |
+
+> 设计要点：**"地图从哪来"是这两条导航链唯一的分界**——在线 SLAM（含回环优化，`map→odom` 会跳变）vs 磁盘地图 + 重定位（`map→odom` 平滑）。三种形态下 `/map` 都只有一个发布者。
+
 
 > `lio:=none` 的用途：跑**纯 2D 组合**（例如 cartographer 自带前端，或轮式里程计）时避免 LIO 与之争抢位姿/TF。注意 2D 定位/导航链仍需要 `odom→base_link` 与 `map→odom`，`none` 只是"不由本工程提供"，需另接来源。
 >
-> **TF/话题契约（T1–T5 已实施，2026-09）**：① 两套 LIO 的里程计话题在 bringup 内统一 remap 为 **`/odom`**；② 新增 **`lio_tf_adapter`** 把 LIO 位姿转成标准 **`odom→base_link`**；③ sim URDF 关闭了 Gazebo 的 `publish_odom_tf`，使 LIO 成为**唯一位姿来源**（仿真不再依赖真值 TF）；④ 静态帧桥改为**仅在 `mode:=nav` 且未选任何重定位模块**时启动（amcl/slam_toolbox/ICP 都自发布 `map→odom`，不得叠加），并删除了重复的 `base_link→base_link_fake` 静态桥；⑤ `icp_registration` 的 `range_odom_frame_id` 修正为 `odom`，其 `map→odom` 才真正生效。剩余 T6（nav2 `robot_base_frame` 去 `base_link_fake`）待实跑后处理。详见 `docs/tf_interface_contract.md`。
+> **TF/话题契约（T1–T5 已实施，2026-09）**：① 两套 LIO 的里程计话题在 bringup 内统一 remap 为 **`/odom`**；② 新增 **`lio_tf_adapter`** 把 LIO 位姿转成标准 **`odom→base_link`**；③ sim URDF 关闭了 Gazebo 的 `publish_odom_tf`，使 LIO 成为**唯一位姿来源**（仿真不再依赖真值 TF）；④ 静态帧桥改为**仅在 `mode:=nav` 且未选任何重定位模块**时启动（amcl/slam_toolbox/ICP 都自发布 `map→odom`，不得叠加），并删除了重复的 `base_link→base_link_fake` 静态桥；⑤ `icp_registration` 的 `range_odom_frame_id` 修正为 `odom`，其 `map→odom` 才真正生效。~~剩余 T6（nav2 `robot_base_frame` 去 `base_link_fake`）~~ **T6 已撤销**：`base_link_fake` 是哨兵云台机制的载体（`fake_vel_transform` 20Hz 发布 + `/cmd_vel`→`/cmd_vel_chassis` 旋转链路），改为 `base_link` 会丢掉小陀螺与云台解耦。详见 `docs/tf_interface_contract.md`。
 
 ---
 

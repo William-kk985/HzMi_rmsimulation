@@ -74,22 +74,13 @@ sleep 2
 | 参数 | 取值 | 默认 |
 |---|---|---|
 | `world` | `RMUC` / `RMUL` / `RMUL2026` | `RMUL2026` |
-| `mode` | `mapping` / `nav` | 空（**必填**） |
+| `mode` | **`mapping`（纯建图）/ `slam_nav`（边建边导）/ `nav`（先建后导）** | 空（**必填**） |
 | `lio` | `fastlio` / `pointlio` / `none` | `fastlio` |
-| `localization` | `amcl` / `slam_toolbox` / `icp`（仅 nav） | 空（nav 模式**必选**） |
-| `nav` | `rpp` / `dwb` / `teb` | `rpp` |
-| `mapper` | `slam_toolbox` / `cartographer`（仅 mapping） | `slam_toolbox` |
+| `localization` | `amcl` / `slam_toolbox` / `icp`（**仅 `mode:=nav`** 生效） | 空 |
+| `nav` | `rpp` / `dwb` / `teb`（`nav` / `slam_nav` 生效） | `rpp` |
+| `mapper` | `slam_toolbox` / `cartographer`（`mapping` / `slam_nav` 生效） | `slam_toolbox` |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
 | `spin_speed` | 任意（rad/s） | `5.0` |
-
-### 0.4.1 `spin_speed`：小陀螺在仿真里的陷阱
-
-`fake_vel_transform` 把 nav2 的角速度指令**替换成固定角速度** `spin_speed`（`/cmd_vel` 里角速度非零 → `/cmd_vel_chassis` 就用 `spin_speed`）。
-
-- **真实哨兵**：电控本来就让底盘持续自转，nav2 的角速度只是"增减"信号，云台机械补偿保证雷达朝向稳定；
-- **仿真**：`planar_move` 没有基线自转，任何一点角速度修正都会让底盘以 **5 rad/s（≈286°/s）** 旋转，而**仿真里没有云台补偿，雷达跟着底盘一起转** → 10 Hz 的 FAST-LIO 每帧要承受约 29° 旋转，跟踪容易退化，进而"控制器看不到进展 → 进恢复行为 → 越转越糟"。
-
-所以排查导航问题时**先用 `spin_speed:=0.0`**（角速度直通，等价普通 nav2），确认基础导航链路通了之后，再打开 `5.0` 做小陀螺对比实验。日志判据：`/cmd_vel_chassis` 里出现 `angular.z: 5.0` 就说明小陀螺在动作（那是 `spin_speed` 的值，不是 nav2 发的角速度）。
 
 ### 0.4 看哪块 RViz（别把两个都关掉）
 
@@ -101,6 +92,15 @@ sleep 2
 - ⚠️ **两个都给 `False` = 屏幕上什么可视化都没有**（Gazebo 里还有机器人，但没法判断导航效果）；
 - 两个都给 `True` = 两个 RViz 同时抢 GPU，RMUL2026 这种重场景容易卡死/闪退，**只开一个**；
 - 定目标/给初值：nav 模式下直接用 `nav2.rviz` 的工具栏按钮，比命令行方便。
+
+### 0.4.1 `spin_speed`：小陀螺在仿真里的陷阱
+
+`fake_vel_transform` 把 nav2 的角速度指令**替换成固定角速度** `spin_speed`（`/cmd_vel` 里角速度非零 → `/cmd_vel_chassis` 就用 `spin_speed`）。
+
+- **真实哨兵**：电控本来就让底盘持续自转，nav2 的角速度只是"增减"信号，云台机械补偿保证雷达朝向稳定；
+- **仿真**：`planar_move` 没有基线自转，任何一点角速度修正都会让底盘以 **5 rad/s（≈286°/s）** 旋转，而**仿真里没有云台补偿，雷达跟着底盘一起转** → 10 Hz 的 FAST-LIO 每帧要承受约 29° 旋转，跟踪容易退化，进而"控制器看不到进展 → 进恢复行为 → 越转越糟"。
+
+所以排查导航问题时**先用 `spin_speed:=0.0`**（角速度直通，等价普通 nav2），确认基础导航链路通了之后，再打开 `5.0` 做小陀螺对比实验。日志判据：`/cmd_vel_chassis` 里出现 `angular.z: 5.0` 就说明小陀螺在动作（那是 `spin_speed` 的值，不是 nav2 发的角速度）。
 
 ### 0.5 三个场地的地图资产现状（`rm_nav_bringup/map/`）
 
@@ -154,6 +154,21 @@ nav2 全局规划把「障碍 + `robot_radius` 内切膨胀带」视为不可通
 
 ---
 
+### 0.7 三种场景形态（`mode`）各起什么 —— 别混用
+
+| `mode` | 中文 | Gazebo+LIO | 在线 SLAM 后端 | 导航栈 nav2 | `map_server` | 重定位模块 | `map→odom` 来源 |
+|---|---|---|---|---|---|---|---|
+| `mapping` | **纯建图** | ✅ | ✅ `mapper:=slam_toolbox\|cartographer` | ❌ **不启动** | ❌ | ❌ | 在线 SLAM（离线保存用） |
+| `slam_nav` | **边建图边导航** | ✅ | ✅ 同上 | ✅ | ❌ | ❌ | 在线 SLAM 直接喂 costmap |
+| `nav` | **先建图后导航** | ✅ | ❌ | ✅ | 仅 `localization:=icp` 或留空时 | `localization:=amcl\|slam_toolbox\|icp` | 所选重定位模块 |
+
+要点：
+- `mapping` 不启动 nav2（2026-09 起）：省下 7 个 nav2 节点 + 两张 costmap，重场景下建图帧率明显更稳；
+- `slam_nav` 与 `nav` 的区别**只在"地图从哪来"**：前者是在线 SLAM（含回环优化，`map→odom` 会随优化跳变），后者是磁盘地图 + 重定位（`map→odom` 由重定位模块平滑给出）；
+- `localization` 只在 `mode:=nav` 生效（`slam_nav`/`mapping` 传了也会被忽略）；
+- `mode:=nav` 留空 `localization` 是**回退用法**：直接用 LIO 当绝对定位，并由 `camera_init→map`、`body→odom` 两条静态桥补帧（只在 `mode=='nav' and localization==''` 时启动）；
+- 三种形态的 `/map` 发布者都只有一个（在线 SLAM 或 map_server），2026-09 已修掉建图模式下 `map_server` 抢 `/map` 的问题（见 §10）。
+
 ## 1. 场景一：mapping + fastlio（建图 / 重建地图）
 
 **终端 A**
@@ -163,7 +178,8 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
   world:=RMUL2026 mode:=mapping lio:=fastlio mapper:=slam_toolbox spin_speed:=0.0
 ```
 > `spin_speed:=0.0`：遥控建图时若底盘按 5 rad/s 跟着角速度指令转，雷达会一起转，LIO 容易退化（见 §0.4.1）。
-> 建图模式下**不会**启动 `map_server`（否则它会把磁盘上的旧 pgm 发到 `/map` 与 slam_toolbox 抢话题，`map_saver_cli` 可能存下旧图 —— 2026-09 已修）。
+> 建图模式（`mapping`）**既不起 `map_server`、也不起导航栈**（2026-09 起）：
+> 前者会拿磁盘旧 pgm 抢 `/map`（`map_saver_cli` 可能存下旧图），后者白白吃掉 7 个 nav2 节点 + 两张 costmap 的 CPU。
 
 **终端 B（检查）**
 ```bash
@@ -204,6 +220,29 @@ ls -l src/rm_nav_bringup/map/RMUL2026.* src/rm_nav_bringup/PCD/RMUL2026.pcd
    `tools/check_map_reachable.py --map src/rm_nav_bringup/map/RMUL2026.yaml --start 0 0`
 2. 新图是**出生点系**（与 RMUL/RMUC 一致）→ 把 `bringup_sim.launch.py` 里 `amcl_init_x/y` 的 **RMUL2026 也改成 `0.0`**
    （同时 `docs/smoke_test_runbook.md` §0.5 的表格要同步更新）。
+
+### 1.2 边建图边导航（`mode:=slam_nav`）
+
+与 §2 的「先建图后导航」是**两条不同的启动装配**（见 §0.7）：这里**不加载磁盘地图、不起任何重定位模块**，
+costmap 的 `static_layer` 直接吃在线 SLAM 发布的 `/map`，`map→odom` 也由在线 SLAM 提供。
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  use_sim_time:=True lio_rviz:=False nav_rviz:=True \
+  world:=RMUL2026 mode:=slam_nav lio:=fastlio mapper:=slam_toolbox nav:=rpp spin_speed:=0.0
+```
+
+```bash
+ros2 topic info /map --verbose | grep -c "PUBLISHER"   # 期望 1（在线 SLAM，无 map_server）
+ros2 run tf2_ros tf2_echo map odom                     # 期望：由 slam_toolbox 提供，随建图/回环缓慢变化
+ros2 lifecycle get /controller_server                  # 期望 active（nav2 延后 10s 起，等 /map 与 map→odom）
+ros2 node list | grep -E "amcl|map_server"             # 期望：**空**（这条形态不该有它们）
+```
+
+判据与注意：
+- RViz 里地图**边建边长**，可以直接用工具栏 `2D Goal Pose` 发目标让车一边探索一边走；
+- 未探索区域是 unknown，`GridBased.allow_unknown: true` 允许穿越未知区；
+- **回环优化会让 `map→odom` 跳变**（SLAM 修正累积误差的正常行为），此时车在 map 里的位置会"瞬移"一下，costmap 随之更新 —— 这与 §2/§3 里重定位模块给出的平滑 `map→odom` 是本质区别。
 
 ---
 
@@ -362,6 +401,18 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC mode:=nav lio:=poin
 ```bash
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio  localization:=amcl
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=pointlio localization:=amcl
+```
+
+### 8.4.1 slam_nav（边建图边导航：3 场地 × 2 LIO × 2 建图后端）
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=slam_nav lio:=fastlio  mapper:=slam_toolbox  nav:=rpp
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=slam_nav lio:=pointlio mapper:=slam_toolbox  nav:=rpp
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=slam_nav lio:=fastlio  mapper:=cartographer   nav:=rpp
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL     mode:=slam_nav lio:=fastlio  mapper:=slam_toolbox  nav:=rpp
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL     mode:=slam_nav lio:=fastlio  mapper:=cartographer   nav:=rpp
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC     mode:=slam_nav lio:=fastlio  mapper:=slam_toolbox  nav:=rpp
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC     mode:=slam_nav lio:=fastlio  mapper:=cartographer   nav:=rpp
+# 局部规划器变体同样适用：在 slam_nav 下追加 nav:=dwb / nav:=teb
 ```
 
 ### 8.5 特殊场景

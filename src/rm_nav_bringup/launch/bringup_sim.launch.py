@@ -117,12 +117,17 @@ def generate_launch_description():
     declare_mode_cmd = DeclareLaunchArgument(
         'mode',
         default_value='',
-        description='Choose mode: nav, mapping')
+        description='场景形态（必填，三选一）: '
+                    'mapping = 纯建图（Gazebo + LIO + 在线 SLAM 后端；【不起导航栈】）| '
+                    'slam_nav = 边建图边导航（在线 SLAM 直接把 /map 与 map→odom 喂给 costmap；'
+                    '不加载磁盘地图、不起任何重定位模块）| '
+                    'nav = 先建图后导航（加载磁盘地图 + 必须指定 localization 重定位模块）')
 
     declare_localization_cmd = DeclareLaunchArgument(
         'localization',
         default_value='',
-        description='Choose localization method: slam_toolbox, amcl, icp')
+        description='仅 mode:=nav 生效。重定位模块: amcl | slam_toolbox（需 .posegraph）| '
+                    'icp（需 PCD/<world>.pcd）；留空 = 回退用法，直接用 LIO 当绝对定位並由静态桥补帧')
 
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
@@ -358,13 +363,29 @@ def generate_launch_description():
     # 在mapping模式下也需要启动map_server来显示静态地图（如果存在）
     # 但只在nav模式下才加载静态地图进行定位
     # 对于mapping模式，我们主要依赖LIO的点云地图
-    # 2D 建图后端二选一（mapper:=slam_toolbox|cartographer，仅 mode:=mapping 生效）
-    slam_mapping_condition = IfCondition(PythonExpression([
-        "'", LaunchConfiguration('mode'), "' == 'mapping' and '",
-        LaunchConfiguration('mapper'), "' == 'slam_toolbox'"]))
-    carto_mapping_condition = IfCondition(PythonExpression([
-        "'", LaunchConfiguration('mode'), "' == 'mapping' and '",
-        LaunchConfiguration('mapper'), "' == 'cartographer'"]))
+    # ===== 场景形态（mode）三种，启动集明显不同 =====
+    #   mapping  : Gazebo + LIO(+RViz) + 在线 SLAM 后端         —— 无导航栈、无地图加载、无重定位
+    #   slam_nav : 上述 + 导航栈（costmap 直接吃在线 SLAM 的 /map 与 map→odom）—— 无 map_server、无重定位
+    #   nav      : Gazebo + LIO + 重定位(amcl/slam_toolbox-loc/icp) + 导航栈 —— 无在线 SLAM 后端
+    mode_nav = ["'", LaunchConfiguration('mode'), "' == 'nav'"]
+    mode_slam_nav = ["'", LaunchConfiguration('mode'), "' == 'slam_nav'"]
+    mode_mapping = ["'", LaunchConfiguration('mode'), "' == 'mapping'"]
+
+    # 导航栈：先建后导(nav) + 边建边导(slam_nav)；纯建图(mapping)不启动，省下 7 个 nav2 节点与两张 costmap
+    nav_stack_condition = IfCondition(PythonExpression(
+        ['('] + mode_nav + [' or '] + mode_slam_nav + [')']))
+
+    # 在线 SLAM 后端（slam_toolbox async / cartographer 在线建图）：纯建图 + 边建边导
+    online_mapping_condition = IfCondition(PythonExpression(
+        ['('] + mode_mapping + [' or '] + mode_slam_nav + [')']))
+
+    # 2D 建图后端二选一（mapper:=slam_toolbox|cartographer，mode:=mapping 或 slam_nav 生效）
+    slam_mapping_condition = IfCondition(PythonExpression(
+        ['('] + mode_mapping + [' or '] + mode_slam_nav + [") and '",
+         LaunchConfiguration('mapper'), "' == 'slam_toolbox'"]))
+    carto_mapping_condition = IfCondition(PythonExpression(
+        ['('] + mode_mapping + [' or '] + mode_slam_nav + [") and '",
+         LaunchConfiguration('mapper'), "' == 'cartographer'"]))
 
     start_mapping = Node(
         condition = slam_mapping_condition,
@@ -385,6 +406,8 @@ def generate_launch_description():
 
     start_navigation2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'bringup_rm_navigation.py')),
+        # 只在 nav / slam_nav 下启动；纯建图(mapping)不需要规划控制，省 CPU（重场景 RTF 本来就紧张）
+        condition = nav_stack_condition,
         launch_arguments={
             'use_sim_time': use_sim_time,
             'map': empty_map_dir,
