@@ -9,6 +9,7 @@ from launch.substitutions import LaunchConfiguration, Command
 from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.conditions import LaunchConfigurationEquals
 from launch.conditions import IfCondition
 from launch.actions.append_environment_variable import AppendEnvironmentVariable
@@ -101,7 +102,8 @@ def generate_launch_description():
         name='joint_state_publisher',
         parameters=[{
             'use_sim_time': use_sim_time,
-            'robot_description': robot_description
+            # URDF 是 XML，必须显式声明为字符串，否则 launch_ros 会按 YAML 解析而报错
+            'robot_description': ParameterValue(robot_description, value_type=str)
         }],
         output='screen'
     )
@@ -112,7 +114,7 @@ def generate_launch_description():
         name='robot_state_publisher',
         parameters=[{
             'use_sim_time': use_sim_time,
-            'robot_description': robot_description
+            'robot_description': ParameterValue(robot_description, value_type=str)
         }],
         output='screen'
     )
