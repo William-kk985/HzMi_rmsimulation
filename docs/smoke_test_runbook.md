@@ -12,15 +12,21 @@
 
 **① 系统 python 必须是 3.10（不能用 conda）**
 ROS Humble 的 `rclpy` 等 C 扩展是 **cpython-310** 编译的；conda base 若是 3.13 等版本，**无法通过 pip 补齐**（`import rclpy` 直接失败），并且 `spawn_entity.py` 会因 conda python 缺 numpy 而崩溃 → 机器人不生成。
+
+**本项目统一采用"全跟系统 python"方案**，推荐做法（一次配置，永久生效）：
 ```bash
-conda deactivate            # 方式一：退出 conda
-# 方式二（不退出 conda，让系统 python 优先）：
+# 方式一（推荐）：关闭 conda base 自动激活 —— 新终端直接就是系统 python
+conda config --set auto_activate_base false      # 重开终端生效；需要时再 conda activate base
+# 方式二：每个 ROS 终端手动退出
+conda deactivate
+# 方式三：不退出 conda，只让系统 python 优先
 export PATH=/usr/bin:$PATH
-which python3               # 必须 /usr/bin/python3
 ```
-推荐在 `~/.bashrc` 里加别名，之后每个终端执行 `rosenv` 即可：
+验证（必须全部满足）：
 ```bash
-alias rosenv='export PATH=/usr/bin:$PATH; source /opt/ros/humble/setup.bash; source ~/HzMi_rmsimulation/install/setup.bash'
+which python3                                   # 必须是 /usr/bin/python3
+python3 -c "import rclpy, numpy; print('OK', numpy.__version__)"   # 必须是 3.10 的 numpy 1.x
+grep -n "vision\|hzmirmvision" ~/.bashrc        # 若有旧的 vision 工作区 source 行，建议删掉（会污染 AMENT_PREFIX_PATH）
 ```
 
 **② Nav2 主体包必须安装**（否则组件与 RViz 面板全部加载失败）
