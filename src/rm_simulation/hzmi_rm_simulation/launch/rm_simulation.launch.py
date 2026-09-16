@@ -32,7 +32,9 @@ def get_world_config(world_type):
         WorldType.RMUL: {
             'x': '4.3',
             'y': '3.35',
-            'z': '1.16',
+            # 原来写 1.16：场地地面在 z≈0，机器人会悬空 1.1m 落下，
+            # 导致 FAST-LIO 在坠落中做重力初始化 → 地图/位姿倾斜。轮半径 0.06 → 落到 0.06，取 0.2 留余量
+            'z': '0.2',
             'yaw': '0.0',
             'world_path': 'RMUL2024_world/RMUL2024_world.world'
             # 'world_path': 'RMUL2024_world/RMUL2024_world_dynamic_obstacles.world'
@@ -40,7 +42,7 @@ def get_world_config(world_type):
         WorldType.RMUL2026: {
             'x': '4.3',
             'y': '3.35',
-            'z': '1.16',
+            'z': '0.2',
             'yaw': '0.0',
             'world_path': 'RMUL2026_world/RMUL2026_world.world'
         }
