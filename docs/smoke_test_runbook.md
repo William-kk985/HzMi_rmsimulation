@@ -310,13 +310,46 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 
 ## 9. 判据速查
 
+### 9.1 「导航到底就绪没有」一把梭（在终端 B 依次跑）
+
+```bash
+ros2 node list | grep -E "amcl|map_server|controller_server|planner_server"
+ros2 lifecycle get /controller_server; ros2 lifecycle get /planner_server     # 期望 active
+ros2 topic echo /map --once --field info                                     # 期望 宽x高 与你选的场地一致
+ros2 topic hz /scan                                                          # ★ 期望稳定有频率（关键！见 9.2）
+ros2 run tf2_ros tf2_echo odom base_link                                     # LIO 里程计
+ros2 run tf2_ros tf2_echo map odom                                           # ★ 重定位模块输出
+ros2 topic echo /amcl_pose --once                                            # amcl 模式下：position 应≈初值
+ros2 topic info /scan --verbose                                              # 看订阅者与其 QoS（排查 incompatible QoS）
+```
+
+### 9.2 ⚠️ `map→odom` 依赖 `/scan`（源码级结论，实测确认）
+
+`nav2_amcl` 里 `sendMapToOdomTransform()`（`amcl_node.cpp` L1007）**只被 `laserReceived()` 调用**（L716/L728），
+且开头 `if (!initial_pose_is_known_) return;`。所以：
+
+> **amcl 必须同时满足 ①已加载地图 ②已知初始位姿 ③收到 `/scan`，才会发布 `map→odom`。三条缺一，`map` 帧就根本不存在。**
+
+沙箱无头实测（只跑 map_server+amcl，无 Gazebo）：
+
+| 条件 | `tf2_echo map odom` |
+|---|---|
+| 有地图 + 自动初值，**无 `/scan`** | `Invalid frame ID "map" ... frame does not exist` ← 与"看起来没反应"完全一致 |
+| 再补上 `/scan` | 立刻输出 `map→odom = 平移(4.3, 3.35)`，`/amcl_pose` = `x:4.30 y:3.35` ✅ |
+
+所以出现 `map` 帧不存在时，**先查 `ros2 topic hz /scan`**，而不是怀疑初值。
+
+### 9.3 常规判据
+
 | 检查 | 正常表现 |
 |---|---|
 | `tf2_echo odom base_link` | 持续输出、随车移动，无 `Invalid frame ID` |
-| `tf2_echo map odom`（nav 模式） | 由所选重定位模块提供（amcl / slam_toolbox / icp） |
+| `tf2_echo map odom`（nav 模式） | 由所选重定位模块提供（amcl / slam_toolbox / icp）；**前提见 9.2** |
 | `topic hz /odom` | fastlio ≈10Hz；pointlio 更高（数十~100Hz） |
-| `view_frames` | 主链 `map→odom→base_link→livox_frame…`；`camera_init→body` 为孤岛（正常） |
+| `view_frames` | 主链 `map→odom→base_link→base_link_fake→…`、`base_link→livox_frame…`；`camera_init→body` 为孤岛（正常） |
 | `lifecycle get /controller_server` | `active` |
+| `/map` 的 `info` | 宽高 = 对应场地的 pgm 尺寸（map_server 加载**磁盘上的既有地图**，不是实时扫描结果） |
+
 
 ---
 
@@ -340,7 +373,9 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 | `ModuleNotFoundError: No module named 'numpy'` 且 `spawn_entity` 退出 | 用了 conda 的 python（ROS Humble 需系统 python 3.10） | 见 §0.0①：`conda deactivate` 或 `export PATH=/usr/bin:$PATH` |
 | `Could not find requested resource in ament index`（nav2 组件成批加载失败） | Nav2 主体包未安装 | 见 §0.0②：apt 安装 navigation2 / nav2-bringup / nav2-rviz-plugins |
 | RViz 报 `nav2_rviz_plugins/... does not exist` | 缺 `nav2-rviz-plugins` | 同上 |
-| `New subscription discovered on topic '/scan', requesting incompatible QoS` | costmap `obstacle_layer` 默认 reliable，而 `/scan` 是 best-effort | **已于 2026-09 修复**：三份 `nav2_params_sim_{rpp,dwb,teb}.yaml` 的 scan 源加了 `reliability_policy: best_effort`；若仍出现，检查是否有其它 reliable 订阅者（AMCL/自定义节点） |
+| `New subscription discovered on topic '/scan', requesting incompatible QoS` | ① costmap `obstacle_layer` 默认 reliable，而 `/scan` 是 best-effort；②**残留的上一轮进程/RViz** 用旧参数（reliable）订阅 | ① **已于 2026-09 修复**：三份 `nav2_params_sim_{rpp,dwb,teb}.yaml` 的 scan 源加了 `reliability_policy/qos_policy: best_effort`；② 跑之前先执行 §0.2 清理；③ 用 `ros2 topic info /scan --verbose` 看清订阅者，本仓库内 `nav2.rviz` 对 `/scan`、`/particle_cloud` 都声明的是 **Best Effort**（与 best-effort 发布方兼容），这条告警多为 RViz 启动瞬间的瞬态，不影响链路 |
+| `tf2_echo map odom` 报 `Invalid frame ID "map" ... frame does not exist`，但 `/map` 有数据 | **amcl 还没发布 `map→odom`**：缺 `/scan`、或初值未知、或地图未收到 —— 三者任一都会导致 `map` 帧不存在（源码级解释与实测见 §9.2） | 先 `ros2 topic hz /scan`；再 `ros2 param get /amcl set_initial_pose`；再确认 amcl 日志有 `Received a W X H map` 与 `Setting pose (...)` |
+| **RViz 里一开始就有很完整的地图**，不是慢慢扫出来的 | nav 模式下那是 `map_server` 加载的**磁盘既有 pgm**（`src/rm_nav_bringup/map/<world>.pgm`），不是实时建图 | 正常。想看实时建图用 `mode:=mapping`（slam_toolbox/cartographer）；nav 模式要判断定位对不对，看 **scan/costmap 与这张地图的墙体是否重合** |
 | costmap 刷屏 `Sensor origin at (x,y) is out of map bounds`（数值在 spawn 坐标与 LIO 估计间跳变） | **同一 `odom` 有两个来源**：Gazebo 真值 + LIO 都发到 `/odom`，`lio_tf_adapter` 交替收到两者 → `odom→base_link` 抖动 | **已于 2026-09 修复**：`sentry_robot_sim.xacro` 把 Gazebo 真值 remap 到 **`/odom_ground_truth`**（`publish_odom_tf=false`），`/odom` 由 LIO 独占。对比真值请看 `/odom_ground_truth` |
 | RViz 报 `Message Filter dropping message ... queue is full` 且退出时 `rviz2 exit code -11` | RViz 在高频 TF/点云负载下丢帧，退出时崩溃（常见现象，不影响仿真链路） | 可先 `nav_rviz:=False` 验证导航链路；或减少 RViz 中 PointCloud2/STVL 显示项 |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
@@ -375,4 +410,5 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 | 2026-09 | 二 nav+amcl | `mode:=nav localization:=amcl nav:=rpp` | ✅ `Managed nodes are active`；`map_server 272×210` → `amcl Received a 272 X 210 map`。启动期约 4s 刷 `Timed out waiting for transform from base_link_fake to map` 与 `extrapolation` 属**瞬态**（TF 各帧刚建立、10Hz LIO TF 略滞后于 `now()`），给完 `/initialpose` 后自行恢复，不影响激活 |
 | 2026-09 | 二 关机 | Ctrl-C | `fastlio_mapping` / `component_container_mt` 退出码 **-11** 属 Humble 关机期已知现象（进程已 Deactivate/Cleanup，非运行期崩溃） |
 | 2026-09 | 二 地图系排查 | `world:=RMUL` 下按「世界出生点」给 AMCL 初值 | ❌ **判断错误已修正**：RMUL/RMUC 的 pgm 是**出生点系**（初值必须 `(0,0,0)`），只有 RMUL2026 是**世界系**（`(4.3,3.35)`）。判定方法与证据见 §0.5；已改为 launch 按 `world` 自动注入初值 |
+| 2026-09 | 无头 amcl 单测（砂箱，无 Gazebo/RViz） | 只起 map_server+amcl，注入 `initial_pose_x/y=4.3/3.35` | ✅ **自动初值生效**（`/amcl_pose` = 4.30, 3.35）；且证明 **无 `/scan` 时 `map` 帧根本不存在**，补上 `/scan` 后立刻出现 `map→odom`（见 §9.2） |
 
