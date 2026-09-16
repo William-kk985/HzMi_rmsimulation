@@ -1,5 +1,0 @@
-1789550731.6901338 [INFO] [launch]: All log files can be found below /home/weicheng/HzMi_rmsimulation/.tmp_roslog/2026-09-16-17-25-31-689566-weicheng-20
-1789550731.6902354 [INFO] [launch]: Default logging verbosity is set to INFO
-1789550731.7742355 [INFO] [map_server-1]: process started with pid [22]
-1789550731.7743335 [INFO] [amcl-2]: process started with pid [24]
-1789550731.7743678 [INFO] [lifecycle_manager-3]: process started with pid [26]

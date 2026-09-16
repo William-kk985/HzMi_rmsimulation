@@ -411,4 +411,6 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 | 2026-09 | 二 关机 | Ctrl-C | `fastlio_mapping` / `component_container_mt` 退出码 **-11** 属 Humble 关机期已知现象（进程已 Deactivate/Cleanup，非运行期崩溃） |
 | 2026-09 | 二 地图系排查 | `world:=RMUL` 下按「世界出生点」给 AMCL 初值 | ❌ **判断错误已修正**：RMUL/RMUC 的 pgm 是**出生点系**（初值必须 `(0,0,0)`），只有 RMUL2026 是**世界系**（`(4.3,3.35)`）。判定方法与证据见 §0.5；已改为 launch 按 `world` 自动注入初值 |
 | 2026-09 | 无头 amcl 单测（砂箱，无 Gazebo/RViz） | 只起 map_server+amcl，注入 `initial_pose_x/y=4.3/3.35` | ✅ **自动初值生效**（`/amcl_pose` = 4.30, 3.35）；且证明 **无 `/scan` 时 `map` 帧根本不存在**，补上 `/scan` 后立刻出现 `map→odom`（见 §9.2） |
+| 2026-09 | 二 nav+amcl @ **RMUL2026**（用户机实跑） | `world:=RMUL2026 mode:=nav lio:=fastlio localization:=amcl nav:=rpp nav_rviz:=True` | ✅ **全链路通过**：`/controller_server`+`/planner_server` = active；`/map` 240×169 origin(2.68,0.228)；`map→odom` = **(4.294, 3.357, 0.052)**、RPY (-0.30°,-0.03°,-0.07°)；`/amcl_pose` = **(4.300,3.350)**（=注入初值）；`/scan` 1 pub + 3 sub（amcl/local_costmap/rviz）**QoS 全 BEST_EFFORT 匹配** |
+| 2026-09 | 二 `/amcl_pose` 的 covariance ≈ 0 | nav2 `set_initial_pose` 路径**不填协方差**（`amcl_node.cpp` L271-281 只设 position/orientation） | 正常现象：初始粒子云是**零散布单点**。位置给对无影响；若初值给错，AMCL 难以自行纠回 → 必须用 RViz `2D Pose Estimate` 重给 |
 
