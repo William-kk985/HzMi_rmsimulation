@@ -80,6 +80,16 @@ sleep 2
 | `nav` | `rpp` / `dwb` / `teb` | `rpp` |
 | `mapper` | `slam_toolbox` / `cartographer`（仅 mapping） | `slam_toolbox` |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
+| `spin_speed` | 任意（rad/s） | `5.0` |
+
+### 0.4.1 `spin_speed`：小陀螺在仿真里的陷阱
+
+`fake_vel_transform` 把 nav2 的角速度指令**替换成固定角速度** `spin_speed`（`/cmd_vel` 里角速度非零 → `/cmd_vel_chassis` 就用 `spin_speed`）。
+
+- **真实哨兵**：电控本来就让底盘持续自转，nav2 的角速度只是"增减"信号，云台机械补偿保证雷达朝向稳定；
+- **仿真**：`planar_move` 没有基线自转，任何一点角速度修正都会让底盘以 **5 rad/s（≈286°/s）** 旋转，而**仿真里没有云台补偿，雷达跟着底盘一起转** → 10 Hz 的 FAST-LIO 每帧要承受约 29° 旋转，跟踪容易退化，进而"控制器看不到进展 → 进恢复行为 → 越转越糟"。
+
+所以排查导航问题时**先用 `spin_speed:=0.0`**（角速度直通，等价普通 nav2），确认基础导航链路通了之后，再打开 `5.0` 做小陀螺对比实验。日志判据：`/cmd_vel_chassis` 里出现 `angular.z: 5.0` 就说明小陀螺在动作（那是 `spin_speed` 的值，不是 nav2 发的角速度）。
 
 ### 0.4 看哪块 RViz（别把两个都关掉）
 
@@ -378,6 +388,8 @@ ros2 topic info /scan --verbose                                              # �
 | **RViz 里一开始就有很完整的地图**，不是慢慢扫出来的 | nav 模式下那是 `map_server` 加载的**磁盘既有 pgm**（`src/rm_nav_bringup/map/<world>.pgm`），不是实时建图 | 正常。想看实时建图用 `mode:=mapping`（slam_toolbox/cartographer）；nav 模式要判断定位对不对，看 **scan/costmap 与这张地图的墙体是否重合** |
 | costmap 刷屏 `Sensor origin at (x,y) is out of map bounds`（数值在 spawn 坐标与 LIO 估计间跳变） | **同一 `odom` 有两个来源**：Gazebo 真值 + LIO 都发到 `/odom`，`lio_tf_adapter` 交替收到两者 → `odom→base_link` 抖动 | **已于 2026-09 修复**：`sentry_robot_sim.xacro` 把 Gazebo 真值 remap 到 **`/odom_ground_truth`**（`publish_odom_tf=false`），`/odom` 由 LIO 独占。对比真值请看 `/odom_ground_truth` |
 | RViz 报 `Message Filter dropping message ... queue is full` 且退出时 `rviz2 exit code -11` | RViz 在高频 TF/点云负载下丢帧，退出时崩溃（常见现象，不影响仿真链路） | 可先 `nav_rviz:=False` 验证导航链路；或减少 RViz 中 PointCloud2/STVL 显示项 |
+| **发目标后车不走**，`/cmd_vel` 长时间只有 `linear.x: -0.05`（偶尔 `0` + 角速度） | `-0.05` = nav2 自带 BT `BackUp` 的 `backup_speed="0.05"`（见 `/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml`）→ **BT 进了恢复行为循环**（清代价地图→Spin→Wait→BackUp 轮转），说明 `ComputePathToPose` 或 `FollowPath` 连续失败 | 按顺序查：① 终端 A 里 `planner_server` / `controller_server` 的 WARN/ERROR（**最直接**，会写明原因）；② `ros2 topic echo /plan --once --field poses`（空=规划失败）；③ `ros2 topic echo /odom_ground_truth --field pose.pose.position --once` 与 `/amcl_pose` 对比（RMUL2026 的 map 系=世界系，两者必须接近）；④ `spin_speed:=0.0` 重跑（见 §0.4.1） |
+| 参数写在 `nav2_params_*.yaml` 里却"没生效" | **节点名对不上**：nav2 跨版本改过名（如 Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`）。对不上的整段被**静默忽略**，节点改用内置默认值 | 拿 `/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml` 的顶层键做参照逐个核对；**已于 2026-09 修复**三份 sim 变体的 `recoveries_server` 段。判断某段是否生效的最快办法：看节点启动日志（如 `behavior_server: Creating behavior plugin ...` 的**个数/名字**是否与 yaml 一致） |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
 | cartographer 纯定位报找不到状态文件 | pbstream 路径错或文件为空 | 用绝对路径；`RMUL2026.pbstream` 疑空，改用 `RMUL` |
 
@@ -413,4 +425,5 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 | 2026-09 | 无头 amcl 单测（砂箱，无 Gazebo/RViz） | 只起 map_server+amcl，注入 `initial_pose_x/y=4.3/3.35` | ✅ **自动初值生效**（`/amcl_pose` = 4.30, 3.35）；且证明 **无 `/scan` 时 `map` 帧根本不存在**，补上 `/scan` 后立刻出现 `map→odom`（见 §9.2） |
 | 2026-09 | 二 nav+amcl @ **RMUL2026**（用户机实跑） | `world:=RMUL2026 mode:=nav lio:=fastlio localization:=amcl nav:=rpp nav_rviz:=True` | ✅ **全链路通过**：`/controller_server`+`/planner_server` = active；`/map` 240×169 origin(2.68,0.228)；`map→odom` = **(4.294, 3.357, 0.052)**、RPY (-0.30°,-0.03°,-0.07°)；`/amcl_pose` = **(4.300,3.350)**（=注入初值）；`/scan` 1 pub + 3 sub（amcl/local_costmap/rviz）**QoS 全 BEST_EFFORT 匹配** |
 | 2026-09 | 二 `/amcl_pose` 的 covariance ≈ 0 | nav2 `set_initial_pose` 路径**不填协方差**（`amcl_node.cpp` L271-281 只设 position/orientation） | 正常现象：初始粒子云是**零散布单点**。位置给对无影响；若初值给错，AMCL 难以自行纠回 → 必须用 RViz `2D Pose Estimate` 重给 |
+| 2026-09 | 二 发目标 @ RMUL2026 | `/cmd_vel` 长时间 `linear.x: -0.05`、`/cmd_vel_chassis` 出现 `angular.z: 5.0` | ⚠️ **未通过**：`-0.05` = BT `BackUp` 的 `backup_speed`，`5.0` = `fake_vel_params.yaml` 的 `spin_speed` → 命令链通、小陀螺生效，但 Nav2 卡在**恢复行为循环**（路径/控制失败）。顺带查出 `recoveries_server` 段（Galactic 名字）被 Humble 静默忽略，已改为 `behavior_server` |
 

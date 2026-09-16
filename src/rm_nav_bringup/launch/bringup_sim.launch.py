@@ -21,6 +21,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     use_lio_rviz = LaunchConfiguration('lio_rviz')
     use_nav_rviz = LaunchConfiguration('nav_rviz')
+    spin_speed = LaunchConfiguration('spin_speed')
 
     ################################ robot_description parameters start ###############################
     # 平台外参（base_link↔livox）随仿真平台包 hzmi_rm_simulation 存放（规则③）
@@ -96,6 +97,13 @@ def generate_launch_description():
         'nav_rviz',
         default_value='True',
         description='Visualize navigation2 if true')
+
+    declare_spin_speed_cmd = DeclareLaunchArgument(
+        'spin_speed',
+        default_value='5.0',
+        description='fake_vel_transform 的小陀螺固定角速度 (rad/s)。'
+                    '5.0 = 复现上游哨兵小陀螺行为；0.0 = 角速度直通（等价普通 nav2，'
+                    '仿真里排查导航问题先用 0.0）')
 
     declare_world_cmd = DeclareLaunchArgument(
         'world',
@@ -285,9 +293,14 @@ def generate_launch_description():
         package='fake_vel_transform',
         executable='fake_vel_transform_node',
         output='screen',
-        # spin_speed 已回归 fake_vel_transform 包 config/（R1），此处仅留装配级 use_sim_time
+        # spin_speed 已回归 fake_vel_transform 包 config/（R1），此处仅留装配级 use_sim_time。
+        # spin_speed 是「小陀螺」语义：nav2 只要发了非零角速度，底盘就按该固定角速度旋转
+        # （真实机器人上电控本来就在自转，此值用于增减；仿真里没有云台补偿，雷达会跟着底盘一起转）。
+        # 仿真调参建议：先用 spin_speed:=0.0（角速度直通，等价普通 nav2）把导航链路跑通，
+        # 再打开 5.0 复现小陀螺行为做对比实验。
         parameters=[os.path.join(get_package_share_directory('fake_vel_transform'), 'config', 'fake_vel_params.yaml'),
-                    {'use_sim_time': use_sim_time}]
+                    {'use_sim_time': use_sim_time,
+                     'spin_speed': spin_speed}]
     )
 
     # T3：LIO 位姿 → 标准帧树适配（odom→base_link），启用 LIO 时启动
@@ -377,6 +390,7 @@ def generate_launch_description():
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_lio_rviz_cmd)
     ld.add_action(declare_nav_rviz_cmd)
+    ld.add_action(declare_spin_speed_cmd)
     ld.add_action(declare_world_cmd)
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
