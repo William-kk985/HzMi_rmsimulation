@@ -14,6 +14,7 @@ cd ~/HzMi_rmsimulation
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 # 若 shell 里有 conda/miniconda 干扰 ROS 工具：export PATH=/usr/bin:$PATH
+# 若终端启动时提示 xxx/vision_ws/install/setup.bash 不存在：那是 ~/.bashrc 里遗留的旧工作区路径，无害，可自行清理
 ```
 
 ### 0.2 清理残留进程（切换场景前执行一次）
@@ -237,6 +238,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 | `Found two parents` / 帧树分叉 | 旧进程残留 | 执行 §0.2 清理后重跑 |
 | `nav:=teb` 插件找不到 | 未 source 工作区 | `source install/setup.bash`（teb 已编译） |
 | `TF_OLD_DATA` | 仿真时间不一致 | 确认 `use_sim_time:=True`（launch 默认） |
+| `Unable to parse the value of parameter robot_description as yaml` | launch_ros 把 URDF(XML) 当 YAML 解析（Humble 行为） | **已于 2026-09 修复**：`hzmi_rm_simulation/launch/rm_simulation.launch.py` 用 `ParameterValue(robot_description, value_type=str)` 包裹；若仍出现，说明用的是修复前的 launch |
 | cartographer 纯定位报找不到状态文件 | pbstream 路径错或文件为空 | 用绝对路径；`RMUL2026.pbstream` 疑空，改用 `RMUL` |
 
 ---
