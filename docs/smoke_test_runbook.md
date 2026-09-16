@@ -154,23 +154,56 @@ nav2 全局规划把「障碍 + `robot_radius` 内切膨胀带」视为不可通
 
 ---
 
-## 1. 场景一：mapping + fastlio（先跑这个）
+## 1. 场景一：mapping + fastlio（建图 / 重建地图）
 
 **终端 A**
 ```bash
 ros2 launch rm_nav_bringup bringup_sim.launch.py \
   use_sim_time:=True lio_rviz:=False nav_rviz:=True \
-  world:=RMUL2026 mode:=mapping lio:=fastlio mapper:=slam_toolbox
+  world:=RMUL2026 mode:=mapping lio:=fastlio mapper:=slam_toolbox spin_speed:=0.0
 ```
+> `spin_speed:=0.0`：遥控建图时若底盘按 5 rad/s 跟着角速度指令转，雷达会一起转，LIO 容易退化（见 §0.4.1）。
+> 建图模式下**不会**启动 `map_server`（否则它会把磁盘上的旧 pgm 发到 `/map` 与 slam_toolbox 抢话题，`map_saver_cli` 可能存下旧图 —— 2026-09 已修）。
 
 **终端 B（检查）**
 ```bash
 ros2 topic hz /odom                          # 期望 ≈10Hz（fastlio）
-ros2 topic hz /livox/lidar                   # 期望：有数据
+ros2 topic hz /livox/lidar                   # 期望 10Hz（CustomMsg，FAST-LIO 的输入）
 ros2 topic echo /scan --once                 # 期望：一帧 LaserScan
 ros2 run tf2_ros tf2_echo odom base_link     # 期望：持续输出，无 Invalid frame ID
-ros2 run tf2_tools view_frames               # 生成 ~/HzMi_rmsimulation/frames.pdf
+ros2 topic echo /map --once --field info     # 期望：宽高随建图增长（只有 slam_toolbox 一个发布者）
 ```
+
+**终端 C（遥控走遍场地）**
+```bash
+tools/scripts/control/improved_teleop.sh      # 键盘遥控（建议速度慢一点、覆盖整场、回到起点附近收尾）
+```
+
+### 1.1 落盘三件套（.pgm/.yaml + .posegraph + .pcd）
+
+> ⚠️ **先备份**：`save_grid_map.sh` 会**覆盖** `map/RMUL2026.{pgm,yaml}`。
+
+```bash
+cp src/rm_nav_bringup/map/RMUL2026.pgm  src/rm_nav_bringup/map/RMUL2026_official.pgm
+cp src/rm_nav_bringup/map/RMUL2026.yaml src/rm_nav_bringup/map/RMUL2026_official.yaml
+
+# ① 栅格地图（map_saver_cli -f src/rm_nav_bringup/map/<world>）
+tools/scripts/mapping/save_grid_map.sh
+
+# ② 位姿图（slam_toolbox 纯定位与 nav 模式 map_start_pose 都靠它）
+ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph \
+  "{filename: '/home/weicheng/HzMi_rmsimulation/src/rm_nav_bringup/map/RMUL2026'}"
+
+# ③ 点云底图（ICP 重定位用；路径由 bringup 按 world 自动设为 PCD/<world>.pcd）
+ros2 service call /map_save std_srvs/srv/Trigger
+ls -l src/rm_nav_bringup/map/RMUL2026.* src/rm_nav_bringup/PCD/RMUL2026.pcd
+```
+
+建完图后**务必做两件事**：
+1. 用可达性工具确认全场连通、记下可用的测试目标点：
+   `tools/check_map_reachable.py --map src/rm_nav_bringup/map/RMUL2026.yaml --start 0 0`
+2. 新图是**出生点系**（与 RMUL/RMUC 一致）→ 把 `bringup_sim.launch.py` 里 `amcl_init_x/y` 的 **RMUL2026 也改成 `0.0`**
+   （同时 `docs/smoke_test_runbook.md` §0.5 的表格要同步更新）。
 
 ---
 

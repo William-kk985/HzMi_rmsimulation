@@ -78,6 +78,10 @@ def generate_launch_description():
 
     ################################ icp_registration parameters start ################################
     icp_pcd_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'PCD', world]), ".pcd"
+    # FAST-LIO 的 pcd 落盘路径（/map_save 服务写入），与 ICP 的底图同一路径 → 建图产物直接可被复用
+    fastlio_pcd_out = PathJoinSubstitution([
+        rm_nav_bringup_dir, 'PCD',
+        PythonExpression(["'", LaunchConfiguration('world'), "' + '.pcd'"])])
     # 参数已回归 icp_registration 包自身 config/（R1），经 ament_auto_package INSTALL_TO_SHARE 安装
     icp_registration_params_dir = os.path.join(get_package_share_directory('icp_registration'), 'config', 'icp_registration_sim.yaml')
     ################################# icp_registration parameters end #################################
@@ -185,7 +189,11 @@ def generate_launch_description():
                 parameters=[
                     fastlio_mid360_params,
                     {use_sim_time: use_sim_time},
-                    {'runtime_pos_log_enable': False}
+                    {'runtime_pos_log_enable': False},
+                    # 装配级：pcd 落盘路径按 world 自动指向 PCD/<world>.pcd
+                    # （= icp_registration 的底图路径，建图产物直接可被重定位复用）。
+                    # FAST-LIO 只在 /map_save 服务被调用时写这个文件，启动不加载它，所以不会"接着旧图建"。
+                    {'map_file_path': fastlio_pcd_out}
                 ],
                 output='screen',
                 # T2：统一里程计话题为 /odom（源话题 /Odometry）
@@ -276,10 +284,13 @@ def generate_launch_description():
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'map_server_launch.py')),
-                # 仅 icp / 未选重定位时需要单独起 map_server；
-                # amcl 由 localization_amcl_launch 一并管理，slam_toolbox 自带地图发布，都不能重复启动
+                # 仅 nav 模式 + icp（或未选重定位）时才单独起 map_server。
+                # ⚠️ 必须带 mode=='nav'：建图模式下 localization 为空，若不判断 mode，
+                # map_server 会把【磁盘上的旧 pgm】发到 /map，与 slam_toolbox/cartographer
+                # 抢同一个话题，导致 map_saver_cli 可能存下旧图（幽灵墙就是这么留下的）。
                 condition = IfCondition(PythonExpression([
-                    "'", LaunchConfiguration('localization'), "' != 'slam_toolbox' and '",
+                    "'", LaunchConfiguration('mode'), "' == 'nav' and '",
+                    LaunchConfiguration('localization'), "' != 'slam_toolbox' and '",
                     LaunchConfiguration('localization'), "' != 'amcl'"])),
                 launch_arguments={
                     'use_sim_time': use_sim_time,
