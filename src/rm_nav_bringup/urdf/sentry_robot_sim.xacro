@@ -214,7 +214,9 @@
         <namespace>/</namespace>
         <!-- Remap the default topic -->
         <remapping>cmd_vel:=cmd_vel_chassis</remapping>
-        <remapping>odom:=odom</remapping>
+        <!-- 真值里程计改到独立话题：/odom 已由 LIO（经 T2 remap）独占，
+             否则真值与 LIO 估计会在同一话题交替，导致 odom→base_link 抖动、costmap 报 out of bounds -->
+        <remapping>odom:=odom_ground_truth</remapping>
       </ros>
 
       <!-- Set control loop update rate -->

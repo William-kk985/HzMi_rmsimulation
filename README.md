@@ -97,6 +97,17 @@
     rosdep install -r --from-paths src --ignore-src --rosdistro $ROS_DISTRO -y
     ```
 
+    **额外必需的系统包**（apt 里不会由 rosdep 补齐的 Nav2 主体与 TEB 依赖）：
+    ```sh
+    sudo apt update
+    sudo apt install -y ros-humble-navigation2 ros-humble-nav2-bringup ros-humble-nav2-rviz-plugins ros-humble-dwb-critics
+    ```
+
+    ⚠️ **python 环境要求（重要）**：本工程统一使用**系统 python 3.10**（ROS Humble 的 C 扩展是 cpython-310 编译的）。
+    - 若使用 conda：`conda config --set auto_activate_base false`，或在 ROS 终端 `export PATH=/usr/bin:$PATH`（conda base 若是 3.11+ **无法用 pip 补齐**，`import rclpy` 会失败）；
+    - **不要**激活仓库里的 `.venv`（它是工具链用的隔离环境，与 ROS 无关）；
+    - 验证：`which python3` → `/usr/bin/python3`，且 `python3 -c "import rclpy, numpy"` 通过。
+
 4. 编译
 
     ```sh
@@ -107,7 +118,12 @@
 
 > 📁 项目布局：启动/工具脚本在 `tools/scripts/`（控制类 `tools/scripts/control/`、建图类 `tools/scripts/mapping/`），文档在 `docs/`（建图 `docs/mapping/`、配置包 `docs/package/`），一次性报告归档在 `archive/`。
 >
-> 🏗️ **目录架构总览见 [`docs/architecture.md`](docs/architecture.md)**（角色域、参数归属、third_party、子模块、构建运行要点）。
+> 📚 **文档导航**：
+> - [`docs/architecture.md`](docs/architecture.md) —— 目录架构总览（角色域 / 参数归属 / 子模块）
+> - [`docs/smoke_test_runbook.md`](docs/smoke_test_runbook.md) —— **实跑验证手册**（各组合原生 launch 指令、判据、错误对照、环境前提）
+> - [`docs/tf_interface_contract.md`](docs/tf_interface_contract.md) —— TF/接口契约（T1–T6 改造记录）
+> - [`docs/params_ownership_checklist.md`](docs/params_ownership_checklist.md) —— 参数归属清单
+> - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) —— 第三方组件署名与许可证
 
 ### 方式一：使用便捷启动脚本（推荐）
 
@@ -155,24 +171,28 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 
 ### 3.1 可选参数
 
-1. `world`:
+> 完整说明与组合矩阵见 [`docs/smoke_test_runbook.md`](docs/smoke_test_runbook.md) §0.3 与 §8。
+
+1. `world`（默认 `RMUL2026`）:
 
     - 仿真模式
+        - `RMUL2026` - 2026 赛季 RMUL 场地（默认）
         - `RMUL` - [2024 Robomaster 3V3 场地](https://bbs.robomaster.com/forum.php?mod=viewthread&tid=22942&extra=page%3D1)
         - `RMUC` - [2024 Robomaster 7V7 场地](https://bbs.robomaster.com/forum.php?mod=viewthread&tid=22942&extra=page%3D1)
 
     - 真实环境
         - 自定，world 等价于 `.pcd(ICP使用的点云图)` 文件和 `.yaml(Nav使用的栅格地图)` 的名称
 
-2. `mode`:
+2. `mode`（必填）:
    - `mapping` - 边建图边导航
-   - `nav` - 已知全局地图导航
+   - `nav` - 已知全局地图导航（**必须同时指定 `localization`**）
 
-3. `lio`:
+3. `lio`（默认 `fastlio`）—— 里程计/连续定位实现:
    - `fastlio` - 使用 [Fast_LIO](https://github.com/LihanChen2004/FAST_LIO/tree/ROS2)，里程计约 10Hz
    - `pointlio` - 使用 [Point_LIO](https://github.com/LihanChen2004/Point-LIO/tree/RM2024_SMBU_auto_sentry)，可以输出100+Hz的Odometry，对导航更友好，但相对的，CPU占用会更高
+   - `none` - **不启动任何 LIO**（需外部提供 odom/TF，例如轮式里程计或 cartographer；此时 LIO 相关静态帧桥不会启动）
 
-4. `localization` (仅 `mode:=nav` 时本参数有效)
+4. `localization` (仅 `mode:=nav` 时本参数有效) —— 重定位实现:
    - `slam_toolbox` - 使用 [slam_toolbox](https://github.com/SteveMacenski/slam_toolbox) localization 模式定位，动态场景中效果更好
    - `amcl` - 使用 [AMCL](https://navigation.ros.org/configuration/packages/configuring-amcl.html) 经典算法定位
    - `icp` - 使用 [icp_registration](https://github.com/baiyeweiguang/CSU-RM-Sentry/tree/main/src/rm_localization/icp_registration)，仅在第一次启动或者手动设置 /initialpose 时进行点云配准。获得初始位姿后只依赖 LIO 进行定位，没有回环检测，在长时间运行后可能会出现累积误差。
@@ -182,10 +202,20 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
     2. 若使用 slam_toolbox 定位，需要提供 .posegraph 地图，详见 [如何保存 .pgm 和 .posegraph 地图？](https://gitee.com/SMBU-POLARBEAR/HzMi_rmsimulation/issues/I9427I)
     3. 若使用 ICP_Localization 定位，需要提供 .pcd 点云图
 
-5. `lio_rviz`:
+5. `mapper`（默认 `slam_toolbox`，仅 `mode:=mapping` 有效）—— 2D 建图后端:
+   - `slam_toolbox` - online_async 建图（产出 `.pgm` + `.posegraph`）
+   - `cartographer` - Cartographer 建图（产出 `.pgm` + `.pbstream`）
+
+6. `nav`（默认 `rpp`）—— 局部规划器变体:
+   - `rpp` - Regulated Pure Pursuit（默认）
+   - `dwb` - DWB
+   - `teb` - TEB（时间弹性带）
+   - 对应参数文件：`rm_navigation/params/nav2_params_sim_{rpp,dwb,teb}.yaml`
+
+7. `lio_rviz`:
    - `True` - 可视化 FAST_LIO 或 Point_LIO 的点云图
 
-6. `nav_rviz`:
+8. `nav_rviz`:
    - `True` - 可视化 navigation2
 
 ### 3.2 仿真模式示例
