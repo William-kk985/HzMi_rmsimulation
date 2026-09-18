@@ -73,6 +73,40 @@ Gazebo(hzmi_rm_simulation 世界 + 机器人)
                                           fake_vel_transform ─► /cmd_vel ─► 底盘
 ```
 
+### 3.2.1 三层职责：`lio` / `localization` / `mapper` 各管一段
+
+**`lio` 管"相对起点走了多少"（局部、连续）→ `localization` 管"我在场地里的哪个位置"（全局、不漂）→ `mapper` 管"把场地地图造出来"。**
+三者恰好对应 TF 树上三条不同的边（nav2 只用合成的 `map→base_link`，但这条链必须由两层各出一段）：
+
+```
+map ──[localization（已知地图）或 在线 mapper（边建边用）]──► odom ──[lio]──► base_link ──[fake_vel_transform]──► base_link_fake ──► livox_frame
+     全局：不漂、低频修正                                          局部：连续、高频、会漂
+```
+
+| 层 | 参数 | 发布哪条边 | 输入 | 输出 | 特性 | 取值 |
+|---|---|---|---|---|---|---|
+| **里程计** | `lio` | `odom → base_link` | `/livox/lidar`(CustomMsg 10Hz) + `/imu/data`(100Hz) | `/odom`（≈10Hz）→ 由 `lio_tf_adapter` 转成 TF | **高频连续**；无全局参考、**有累积漂移**；只回答"相对起点" | `fastlio` / `pointlio` / `none` |
+| **重定位** | `localization` | `map → odom` | **磁盘地图资产** + `/scan`(或点云) + `odom→base_link` | `map→odom` TF（amcl 另有 `/amcl_pose`） | **低频修正、全局不漂**；amcl/icp 需要初值 | `amcl` / `slam_toolbox`(localization 模式) / `icp`；留空 = 回退（LIO 当绝对定位 + 静态桥补帧） |
+| **建图** | `mapper` | `/map`（在线建图时**同时**发 `map→odom`） | `odom→base_link` + `/scan`（或点云） | `/map`(OccupancyGrid)；离线落盘 `.pgm/.yaml` | **造地图**；含回环优化（`map→odom` 会跳变） | `slam_toolbox`(online_async) / `cartographer` |
+
+最容易混的三点：
+
+1. **同一条 `map→odom` 边，`localization` 和"在线 `mapper`"都会发**：前者是"用已知地图去对齐"，后者是"边造地图边给"。
+   **两者绝不能同时开**（会出现两个 `map→odom` 父边），这正是把形态拆成 `nav`（重定位）与 `slam_nav`（在线 SLAM）的根本原因（见 §九 启动集表）。
+2. **`mapper` 是"生产地图"，`localization` 是"消费地图"**：`mapper` 离线产出资产，`localization` 加载资产。**资产与模块必须配对**，配错的表现是"参数传了但模块不工作"。
+3. **`lio` 不依赖任何地图资产**，三种形态、所有场地都能跑；`localization` 强依赖磁盘资产；`mapper` 什么都不依赖（从零开始）。
+
+**地图资产 ↔ 生产者 ↔ 消费者**（`rm_nav_bringup/map/`、`PCD/`）：
+
+| 资产 | 生产者 | 消费者 | 备注 |
+|---|---|---|---|
+| `.pgm` + `.yaml` | `mapper`（或 `map_saver_cli`） | `localization:=amcl`（经 `map_server`） | 纯 2D 栅格 |
+| `.posegraph` | `mapper:=slam_toolbox`（`/slam_toolbox/serialize_map`） | `localization:=slam_toolbox` | 带位姿图，可续建/精定位 |
+| `.pcd` | LIO（`/map_save` 服务，路径 `PCD/<world>.pcd` 由 bringup 注入） | `localization:=icp` | 3D 点云配准 |
+| `.pbstream` | `mapper:=cartographer` | cartographer 纯定位模式 | 含子图+位姿图 |
+
+**生效条件**：`mapper` 仅 `mapping` / `slam_nav`；`localization` 仅 `nav`；`lio` 三种形态都生效（`none` = 由外部提供 odom/TF）。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
