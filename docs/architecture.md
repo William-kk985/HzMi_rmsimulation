@@ -113,6 +113,49 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 > （① mapper 在线 SLAM ② LIO 点云投影 ③ 外部/官方平面图）。实测 RMUL.pcd 投影图与 slam_toolbox 的
 > `map/RMUL.pgm` 在同一坐标系、±1 格容差下参考图墙覆盖率 84.7%。
 
+### 3.2.2 2D / 2.5D / 3D：降维到底发生在哪一层
+
+**先厘清一个常被混淆的点**：地面机器人的**配置空间本身就是 SE(2)**（x, y, yaw）——高度/俯仰/横滚被地面约束。
+所以"导航都用 2D"不是偷懒，而是规划维度与机器人自由度同维；被降维的是**传感器与环境的表示**，不是机器人状态。
+
+本工程里降维发生**两次**，而 3D 信息**在两处被保留**：
+
+| 环节 | 做什么 | 3D 是否保留 | 本工程的位置/参数 |
+|---|---|---|---|
+| ① 传感器端 | 3D 点云 → 压成**一个高度切片**的 `/scan` | ❌ 只留一层 | `pointcloud_to_laserscan`：`min_height: -1.0`、`max_height: 0.1`（相对 `livox_frame`，该帧在车顶 ≈0.275 m）→ `/scan` 供 AMCL/slam_toolbox/local_costmap |
+| ② 地面分割 | 在 3D 里**剔除地面**，留下障碍点云 | ✅ 保留 3D | `linefit_ground_segmentation`：`sensor_height: 0.275`、坡度 ±0.4、`max_dist_to_line: 0.1` → `/segmentation/obstacle` |
+| ③ 代价地图 | **3D 体素栅格**按高度带筛选后**投影成 2D costmap**（取 max） | ✅ 体素在层内保留 | `global_costmap.stvl_layer`：`voxel_size: 0.05`、`voxel_decay: 0.5`(s，线性衰减)、`min_obstacle_height: 0.2`、`max_obstacle_height: 2.0`、`publish_voxel_map: true`（RViz 可直接看 3D 体素） |
+| ④ 全局 3D 地图 | LIO 的 3D 点云地图落盘 | ✅ 全保留 | `PCD/<world>.pcd`（`/map_save`） |
+
+**"伪 2D / 2.5D"指的就是 ③ 这种做法**：索引仍是 2D 栅格，但每格背后堆着体素/高度信息，投影时才做取舍。
+三条技术路线：
+
+| 路线 | 环境表示 | 规划器 | 能表达 / 丢失 | 典型场景 |
+|---|---|---|---|---|
+| **2D 平面** | 单层 `OccupancyGrid` | NavFn/A*/RPP/DWB（SE(2)） | 丢失"多高"：低矮可跨越结构会误判为障碍，悬垂可穿过结构也误判 | 平地 + 竖直墙（**RM 哨兵正是这类**） |
+| **2.5D**（伪 2D） | 2D 索引 + 每格高度/坡度/多层体素（`grid_map`/`elevation_mapping`/STVL） | 吃可通行性的规划器 | 保留"多高/多陡"→ 可判可跨越性；仍不能表达真悬垂/桥下 | 越野、四足、坡道 |
+| **真 3D** | 体素/八叉树（OctoMap） | 3D lattice / OMPL | 全部几何；但算力高一个量级、需 3D 碰撞模型 | 无人机、机械臂、立体机动 |
+
+**什么时候"降维"会真出错**（也是调参判据）：
+
+1. **低矮但可跨越**（飞坡边缘、路沿）→ 2D 会把它们标成障碍，机器人绕路甚至无路可走。
+   本工程靠 ①③ 的高度带滤掉：`min_obstacle_height: 0.2`（低于 0.2 m 不算障碍）。
+   实验：把它调到 `0.4`，看 0.2~0.4 m 的低矮结构是否被忽略。
+2. **悬垂/桥下可穿过** → 2D 投影必然误判；只能靠 2.5D 分层或真 3D。
+3. **坡道/起伏地形** → 2D 无法表达坡度，需要高程图（2.5D）。
+4. **瞬时障碍（人/车）** → 靠 STVL 的 `voxel_decay`（0.5 s 线性衰减）自动清除过期占据。
+
+**"能不能不降维？"** 可以，三条可落地路径（按改动量排序）：
+
+1. **只把 3D 用在避障、规划仍 2D**（最小改动）：保留 STVL 体素，自己加 3D 碰撞检查
+   （注意 nav2 的 `use_collision_detection` 是 2D 的，不能直接提供 3D 语义）；
+2. **上 2.5D 高程图**：用 `grid_map`/`elevation_mapping` 产出带高度/坡度的 2D 图，替换 costmap 的
+   static/obstacle 层，规划器改用吃可通行性的实现 —— 这也是本工程"以后要加的 2.5D 角色槽位"的正路；
+3. **真 3D**：OctoMap + 3D lattice 规划器。对平整场地 + 竖直矮墙的哨兵场景，性价比低。
+
+> 结论：**降维不是缺陷，而是"与配置空间同维"的必然选择**；关键是高度带（`min/max_obstacle_height`、
+> `pointcloud_to_laserscan` 的 `min/max_height`）要按机器人实际能跨越的高度来定，必要时把 2D 升级成 2.5D。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
