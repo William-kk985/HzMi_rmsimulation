@@ -337,6 +337,80 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 **要点**：nav2 是**唯一有"标准 2D 契约"**的那一层；2.5D/3D 各有实现但接口不统一 —— 这也是为什么
 "想让 nav2 用上 3D"最现实的做法是**在 costmap 上游加图层（2.5D）**，而不是期待 nav2 直接吃 3D。
 
+### 3.2.6 插件协议、降维调参、算力量级、行业分层实践
+
+#### ① 我们用了 2.5D/3D 规划器吗？—— 没有
+
+本工程只有 **nav2 的 2D 栈**（NavFn 全局 + RPP/DWB/TEB 局部 + behavior/smoother）。
+3D 只出现在**感知与表示**侧（LIO 的 PCD、STVL 体素），进入决策前都被压成了 2D costmap。
+
+#### ② "我给 2.5D 加个协议不就行了？" —— 可以，而 nav2 的协议就是**插件（pluginlib）**
+
+nav2 的扩展点（都是插件）：`nav2_costmap_2d::Layer` / `CostmapFilter`（keepout/speed/preferred lanes）、
+`nav2_core::GlobalPlanner` / `Controller` / `Behavior` / `Smoother` / `GoalChecker` / `ProgressChecker`、
+`nav2_behavior_tree::BTPlugin`。两条实现 2.5D/3D 的路子：
+
+| 路子 | 怎么做 | 改动 | 一致性 | 适合 |
+|---|---|---|---|---|
+| **A. 加图层**（我推荐的"上游加图层"） | 写一个 `Layer` 插件，把 3D/高程信息**投影成 2D 代价**写进 master grid | 小（不改 planner/BT/controller） | **好**：规划、控制、行为看同一份 2D 真值 | 高度影响可通行性；想少踩坑 |
+| **B. 加规划器插件** | 写 `GlobalPlanner` 插件：**接口仍是 2D**（收 `Costmap2DROS` + start/goal），但插件内部**自己订阅 3D 数据**（体素/ESDF）做 2.5D/3D 搜索，输出 `nav_msgs/Path` | 大（自己写规划器） | 差：BT 的 `IsPathValid`/清代价地图、behavior、controller 仍按 2D 走，你得自己保证两边不打架 | 真的要"坡度/高度最优"或 3D 穿越 |
+
+两个关键事实：
+- **插件是组件节点，能自己订阅任何话题** —— 所以"nav2 只能 2D"说的是**默认契约**，不是硬限制；
+- **`nav_msgs/Path` 本身就是 3D 的**（`PoseStamped` 带 z 与完整姿态），卡点在**输入侧**（costmap 是 2D）和**控制/行为侧**（它们只吃 2D 局部图）。
+  所以"协议留了口子，但只在输出侧"。
+
+#### ③ 算力量级（数量级估计，用于判断"小电脑够不够"）
+
+| 结构 | 规模 | 备注 |
+|---|---|---|
+| 局部 2D costmap | 5×5 m @0.02 = **6.3 万格**，20 Hz | 很轻 |
+| 全局 2D costmap | 13×10 m @0.04 = **8 万格**，5 Hz | 很轻 |
+| 2.5D 图层（投影） | 每更新遍历一遍上游体素/高程 | 增量式几乎免费 |
+| **2.5D lattice 搜索** | 5×5 m @0.1 × 8 朝向 = **2 万状态** | 轻（这就是"2.5D 便宜"的原因） |
+| STVL 体素 | 20×20×3 m @0.05 ≈ **960 万体素**（稀疏+衰减） | **nav2 里最重的图层**，常是 CPU 大头 |
+| 3D lattice | 同上加 20 层高度 → **40 万状态**，×26 邻域 | 比 2.5D 重 **10~50 倍** |
+| 3D ESDF（voxblox/nvblox） | 增量维护距离场 | CPU 每帧 ~10~100 ms；GPU(nvblox) 可实时 |
+
+结论：**2.5D 图层在小电脑上是"舒服"的；真正吃力的是 3D ESDF/轨迹优化**（那才需要 GPU 或更强算力）。
+
+#### ④ 3D→2D/2.5D 的"降维内容"要调什么
+
+**要调，而且必须按机器人+场地调**。要调的旋钮（都在本工程现有文件里）：
+
+| 环节 | 参数 | 决定 |
+|---|---|---|
+| 切片 | `pointcloud_to_laserscan.min_height/max_height` | 哪一段高度进入 `/scan` |
+| 地面 | `linefit.sensor_height/min_slope/max_slope/max_dist_to_line` | 什么算"地面（可走）" |
+| 体素 | `stvl.voxel_size/voxel_decay` | 分辨率与"障碍多久过期" |
+| **高度准入** | `stvl.min/max_obstacle_height`、`obstacle_layer.max_obstacle_height` | **可跨越 vs 阻挡**（最关键） |
+| 范围 | `obstacle_max_range/raytrace_max_range` | 看多远、能否清除 |
+| 膨胀 | `inflation_radius/cost_scaling_factor`（global/local 不同） | 离墙多远的代价梯度 |
+| 栅格 | `resolution/robot_radius(or footprint)/track_unknown_space` | 几何精度与未知区语义 |
+| 一致性 | global 与 local 的**高度带/范围/膨胀成对** | 避免"全局路径穿过局部认为的障碍" |
+
+**调参方法论**（本工程已具备的工具）：
+1. 离线先看：`tools/pcd_to_grid_map.py --min-z/--max-z` 扫几个高度带，**秒级**看清"哪些几何在哪个高度"；
+2. 由机器人碰撞体高度定 `min/max_obstacle_height`（能跨过的要排除、挡得住的要包含）；
+3. 用 `tools/check_map_reachable.py` 验证降维后**可通行区没被切碎**（连通域、可达目标点）；
+4. 场景用例回归：能跨的矮台/坡道**不该绕路**，挡得住的墙**必须绕**，悬垂结构单独测；
+5. global/local 都跑一遍同一用例，确认两者判断一致。
+
+#### ⑤ 行业是"公认一套"还是"混搭"？
+
+- **分层是共识，实现是混搭**：`里程计 → 建图 → 定位/重定位 → 世界模型(代价/高程) → 规划 → 控制 → 行为` 每层可替换，
+  没有哪家把全栈写成一个包；
+- **nav2 是"2D 导航胶水层"的事实标准**（研究、教育、轻量 AMR 大量使用），但工业 AGV/AMR 常自研或买商业栈；
+- **自动驾驶是另一套**（Autoware/Apollo：感知-预测-决策-规划-控制，规划多用 lattice/优化 + 更重的世界模型）；无人机=3D 栈；腿足=2.5D 高程；机械臂=MoveIt2；
+- **LIO/SLAM 包不集成导航**：FAST-LIO/Cartographer 只做"里程计+地图(+重定位)"，**故意不做规划控制** ——
+  这是正交性设计，保证任一层可替换（也正是本工程 bench 的基础）；
+- 近期趋势是把"**定位 + 地图 + 世界模型**"打成模块（Autoware 的 map/localization、Isaac 的 nav2+cuVSLAM），
+  但"规划/控制吃 2D 还是 3D"仍按平台分（地面 2D、越野/腿足 2.5D、空中 3D）。
+
+> 对本工程的启示：**保持现在的分层**（lio / localization / mapper / costmap / planner / controller），
+> 想加 2.5D 就先加**图层插件**；只有当你确实要做"坡度/高度最优"或"云台瞄准"这类任务时，
+> 才写**规划器插件**（接口 2D、内部 2.5D/3D），并接受"要与 BT/behavior/controller 的 2D 视图保持一致"这项额外成本。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
