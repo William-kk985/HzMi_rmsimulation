@@ -107,6 +107,12 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 
 **生效条件**：`mapper` 仅 `mapping` / `slam_nav`；`localization` 仅 `nav`；`lio` 三种形态都生效（`none` = 由外部提供 odom/TF）。
 
+> **补充：LIO 不只能做定位。** FAST-LIO/Point-LIO 是 LiDAR-Inertial SLAM，跑里程计的同时就在建 3D 点云地图
+> （`PCD/<world>.pcd`，RMUL 为 159 万点）——本工程已把它当资产用（ICP 底图），另外可用
+> `tools/pcd_to_grid_map.py` 切层投影成 `.pgm/.yaml` 直接喂 AMCL，于是存在第三条 2D 地图来源
+> （① mapper 在线 SLAM ② LIO 点云投影 ③ 外部/官方平面图）。实测 RMUL.pcd 投影图与 slam_toolbox 的
+> `map/RMUL.pgm` 在同一坐标系、±1 格容差下参考图墙覆盖率 84.7%。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```

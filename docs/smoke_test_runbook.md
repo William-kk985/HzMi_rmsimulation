@@ -221,6 +221,28 @@ ls -l src/rm_nav_bringup/map/RMUL2026.* src/rm_nav_bringup/PCD/RMUL2026.pcd
 2. 新图是**出生点系**（与 RMUL/RMUC 一致）→ 把 `bringup_sim.launch.py` 里 `amcl_init_x/y` 的 **RMUL2026 也改成 `0.0`**
    （同时 `docs/smoke_test_runbook.md` §0.5 的表格要同步更新）。
 
+### 1.1.1 另一条拿到 2D 地图的路线：LIO 点云切层投影
+
+`FAST-LIO/Point-LIO` 本身就是 LiDAR-Inertial **SLAM**：跑里程计的同时维护着一张三 3D 点云地图，
+`/map_save` 落盘的 `PCD/<world>.pcd`（例：RMUL 是 **159 万点**）就是它建的图。**它不只能做定位**。
+把它沿 z 切一层投影，就能直接得到 nav2/AMCL 能吃的 2D 栅格图（**不依赖 slam_toolbox/cartographer**）：
+
+```bash
+/usr/bin/python3 tools/pcd_to_grid_map.py --pcd src/rm_nav_bringup/PCD/RMUL.pcd \
+  --out src/rm_nav_bringup/map/RMUL_frompcd --min-z 0.10 --max-z 0.50 \
+  --compare src/rm_nav_bringup/map/RMUL.yaml
+```
+
+实跑验证（RMUL.pcd → 2D 图 vs slam_toolbox 的 `map/RMUL.pgm`）：
+- 两图**同一坐标系**（bbox 重合，最佳平移仅 1~2 格 = 5~10cm）；
+- **±1 格容差下参考图的墙被覆盖 84.7%** → 场地结构一致；
+- 严格 IoU 只有 0.21，因为 3D→2D 投影的墙更厚、且把切层内的立体结构都算进来了。
+
+**这工具的第二个用途：独立核对地图资产。** 怀疑某张官方图有"世界不存在的墙"（§0.6 的幽灵墙）时，
+用 LIO 的 pcd 投影一张同场地的图，一比就知道那道墙在**实际观测**里存不存在。
+切层用 `--min-z/--max-z` 控制（贴近平面的 0.10~0.50 最接近 2D 雷达视角）；自由空间由起点洪泛得到，
+所以**若墙有缺口会外漏**，必要时先看投影图的墙是否闭合。
+
 ### 1.2 边建图边导航（`mode:=slam_nav`）
 
 与 §2 的「先建图后导航」是**两条不同的启动装配**（见 §0.7）：这里**不加载磁盘地图、不起任何重定位模块**，
