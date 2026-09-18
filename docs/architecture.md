@@ -208,6 +208,68 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 > 所以"3D 怎么用"的实用答案是：**先把 3D 用在"能不能走"（A/B）上，只有当"高度/姿态本身就是任务"（飞行、攀爬、瞄准）时，才升级到 C/D。**
 > 本工程若要开这条研究线，最自然的入口是给 costmap 加一个**高程/分层层**（B），而不是直接上 3D 规划器。
 
+### 3.2.4 感知与决策的接口：谁吃什么、以什么形式吃
+
+**一句话**：**规划器吃的是"表示"，不是数据。** nav2 的规划/控制插件只拿到 **2D costmap**（`OccupancyGrid`），
+它根本看不到点云；点云在各种"感知/建图层"里被加工成 costmap，才进入决策。
+
+#### 本工程真实的消费树（注意：原始数据是**多路并行消费**的）
+
+```
+/livox/lidar (CustomMsg 10Hz) ─► fast_lio / point_lio ─┬─► /odom(≈10Hz) ─► lio_tf_adapter ─► TF odom→base_link
+                                                       └─► /cloud_registered(3D 地图) ─► Rviz；/map_save ─► PCD/<world>.pcd
+/livox/imu (100Hz) ─► imu_complementary_filter ─► /imu/data ─┘（FAST-LIO 的 imu_topic；point_lio 直接用 /livox/imu）
+
+/livox/lidar/pointcloud (PointCloud2 10Hz) ─┬─► linefit 地面分割 ─► /segmentation/obstacle（3D 障碍点云）
+                                            │        ├─► pointcloud_to_laserscan（切高度带 z∈[-1.0, 0.1]）─► /scan（2D）
+                                            │        │        ├─► local_costmap.obstacle_layer
+                                            │        │        ├─► amcl（仅 mode:=nav + localization:=amcl）
+                                            │        │        └─► Rviz
+                                            │        └─► global_costmap.stvl_layer（3D 体素，高度带 0.2~2.0m）
+                                            └─► icp_registration（仅 localization:=icp）─► TF map→odom
+
+汇聚点（唯一的"统一表示"）：costmap 2D = static_layer + stvl/obstacle + inflation 在该节点内合并
+        ├─► planner_server(NavFn) ─► /plan
+        ├─► controller_server(RPP/DWB/TEB) ─► /cmd_vel ─► fake_vel_transform ─► /cmd_vel_chassis ─► Gazebo
+        └─► behavior_server(spin/backup/drive_on_heading/wait)
+定位合成：map→odom（amcl / icp / slamTB-loc / 在线 SLAM） × odom→base_link（lio_tf_adapter） = map→base_link
+```
+
+**结论：感知侧是"分别处理"（同一份点云被 3~4 个节点各自加工成各自的表示），只有 costmap 是"汇合后的统一表示"。**
+
+#### 抽象阶梯：每上一层，丢信息、换可规划性
+
+| 层 | 表示 | 谁产出 | 谁消费 | 丢掉了什么 |
+|---|---|---|---|---|
+| 原始 | `PointCloud2`（3 万点/帧 @10Hz） | 雷达插件 | LIO / 地面分割 / ICP / Rviz | — |
+| 3D 障碍 | 去地面的障碍点云 | `linefit` | p2l / STVL | 地面、强度、时间 |
+| 2D 切片 | `LaserScan` | `pointcloud_to_laserscan` | AMCL / local costmap | **高度**、3D 形状 |
+| 体素 | 3D 占据 + 时间衰减 | `stvl_layer` | （投影给 costmap） | 精确形状（离散化） |
+| **2D 代价栅格** | `OccupancyGrid`(int8 0~255) | costmap | **planner / controller / behavior** | 高度、速度、语义 |
+| 路径 | `nav_msgs/Path` | planner | controller | 全局路径不含时间/动力学 |
+| 指令 | `Twist` | controller | 底盘 | — |
+
+#### nav2 的"2D 契约"有多硬
+
+| 插件接口 | 入参 | 所以 |
+|---|---|---|
+| `nav2_core::GlobalPlanner` / `Controller` / `Behavior` | `Costmap2DROS`（2D costmap）+ start/goal | **只能 2D**；想喂 3D 只能通过**图层**（STVL/高程层）把 3D 信息"投影/筛选"进 costmap（=2.5D） |
+| 3D 规划器（OMPL、3D lattice/SBPL、无人机栈 EGO-Planner 等） | 3D 体素 / ESDF / 连续空间 | 它们是**另一套决策子系统**，不共享 nav2 的 costmap/BT |
+
+所以准确的判断是：**"决策层能不能吃 3D"取决于你选了哪套决策层**——nav2 = 2D 契约；3D 规划器 = 3D 契约；
+想让 nav2 用上 3D，只有两条路：① 在 costmap 上游加 3D/2.5D **图层**（推荐，改动小）；② 换掉整条规划子系统（改动大）。
+
+#### 多路并行处理的代价：**一致性风险**（本工程就有实例）
+
+- `local_costmap.obstacle_layer` 吃的是 `/scan`，高度带 **z∈[-1.0, +0.1] m（相对车顶 livox_frame）**；
+- `global_costmap.stvl_layer` 吃的是 `/segmentation/obstacle`，高度带 **z∈[0.2, 2.0] m**；
+- 两者**准入门槛不同** → 一个 0.1 m 高的矮台：local 切片看得见（会绕），global 视而不见（会直接规划穿过去）。
+  这类"不同消费者看到的世界不一样"是分别处理架构的固有代价，调参时要**成对校准高度带**。
+
+**什么时候该换成"统一世界模型"**：当消费者变多（导航 + 瞄准 + 决策 + 学习型模块）、或需要跨模块一致性保证时，
+应引入单一环境表示节点（2D costmap / 3D ESDF / 语义+可通行性图），所有下游只读这一份。
+本工程目前是"半统一"：**对导航而言 costmap 是统一表示**，但 costmap 之外（AMCL、ICP、LIO、Rviz）各自又直接吃点云/scan。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
