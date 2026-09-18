@@ -411,6 +411,65 @@ nav2 的扩展点（都是插件）：`nav2_costmap_2d::Layer` / `CostmapFilter`
 > 想加 2.5D 就先加**图层插件**；只有当你确实要做"坡度/高度最优"或"云台瞄准"这类任务时，
 > 才写**规划器插件**（接口 2D、内部 2.5D/3D），并接受"要与 BT/behavior/controller 的 2D 视图保持一致"这项额外成本。
 
+### 3.2.7 上坡/下坡/过隧道：2.5D 要做什么、放哪里
+
+#### ① 为什么"只按高度切点云"一定不够
+
+切高度只产出**布尔/代价**（"这一格有没有落在高度带内的点"），它能表达"挡/不挡"，**不能表达"多陡/多高/多糙"**：
+
+| 场景 | 只用高度带的失败模式 |
+|---|---|
+| **上坡/下坡** | 坡面点被地面分割剔除 → 2D 图上就是"自由"，规划器**直接规划上去/横穿**，不管坡度多大、会不会翻；想"能上但别太陡"需要**代价随坡度变化**，布尔图无从表达；横穿陡坡 vs 直上直下的姿态安全差异也表达不了；下坡还要按坡度限速（涉及控制器） |
+| **隧道/悬垂** | 天花板若落在高度带内 → 投影把**整条通道**标成障碍（能过的地方被自己封死）；把 `max_obstacle_height` 抬高把天花板排除 → 真正的墙也一起漏掉。**阈值不可能两边都对** |
+
+隧道/悬垂的唯一出路是**净空图（clearance / passable height）**：每格记"地面到最低天花板的高度"，低于车高即致命。
+所以 2.5D 的两种典型产物是：**高程+坡度+粗糙度图**（坡道）与**净空图**（隧道/悬垂）。
+
+#### ② 什么时候"加图层就够"，什么时候"必须换规划器"
+
+| 需求 | 表示要有 | nav2 加图层够吗 | 换规划器吗 |
+|---|---|---|---|
+| 只区分"可跨越/阻挡" | 高度带（**已有**） | ✅ | ❌ |
+| 优先走缓坡 / 避开陡坡 | 每格**坡度** → 代价 | ✅（NavFn 按累计代价绕开高代价区） | ❌ |
+| 隧道 / 悬垂 | 每格**净空高度** → 低于车高记致命 | ✅ | ❌ |
+| 坡度影响速度 / 禁止横穿陡坡 / 限制俯仰 | 坡度 + 机器人爬坡能力模型 | ❌ 代价表达不了运动学 | ✅ 2.5D lattice 规划器（+ 控制器按坡度限速） |
+| 多层空间（真悬垂穿越） | 体素/多层 | ❌ | ✅ 3D 规划器 |
+
+> 代价图层的**天花板**：NavFn/Smac 只做"累计代价最短"，它能避开高代价区，但**不会因为"横穿陡坡"这个方向性危险而拒绝**，也不会按坡度限速 —— 那要规划器与控制器配合。
+
+#### ③ 我们现在有什么（3D）／没有什么（2.5D）
+
+**有 3D**：LIO 的 3D 点云地图（`PCD/<world>.pcd`、`/cloud_registered`）；`linefit` 的 3D 障碍点云 `/segmentation/obstacle`；
+**STVL 的 3D 体素栅格**（带时间衰减）——但它是 **apt 第三方插件**，且**只输出投影后的 2D 代价**，不对外提供"每格高度/坡度/净空"。
+
+**没有 2.5D**：仓库里没有高程图/坡度图/粗糙度/台阶高度/净空图。
+唯一带 "slope" 的是 `linefit` 的地面线坡度阈值（那是"算不算地面"的判据，不是可通行性图）。
+
+#### ④ 这些代码现在在哪／要加的话放哪
+
+| 层 | 现在的位置 |
+|---|---|
+| 3D 里程计/建图 | `src/rm_localization/FAST_LIO/`、`src/rm_localization/point_lio/`（原版对照在 `third_party/`） |
+| 地面分割 / 点云→scan / IMU 滤波 | `src/rm_perception/{linefit_ground_segementation_ros2, pointcloud_to_laserscan, imu_complementary_filter}/` |
+| 3D 体素层（STVL） | **apt 第三方**（`/opt/ros/humble/share/spatio_temporal_voxel_layer`）；参数在 `src/rm_navigation/rm_navigation/params/nav2_params_sim_*.yaml` 的 `stvl_layer` |
+| 2D costmap / 规划 / 控制装配 | `src/rm_navigation/rm_navigation/`（launch/params/rviz）；`fake_vel_transform/`、`teb_local_planner/`、`costmap_converter/` |
+| 离线工具 | `tools/pcd_to_grid_map.py`（2D 投影，**不是 2.5D**）、`tools/check_map_reachable.py` |
+
+**要做 2.5D，建议这样落位**（符合"目录=角色域"约定）：
+
+| 新组件 | 放哪 | 做什么 |
+|---|---|---|
+| 2.5D 表示生产者 | `src/rm_perception/rm_elevation_map/`（新包） | 从点云/体素产出高程、坡度、粗糙度、**净空**图（ROS 话题形式） |
+| costmap 图层插件 | `src/rm_navigation/rm_costmap_layers/`（新包） | 实现 `nav2_costmap_2d::Layer`：净空<车高→致命；坡度>阈值→代价↑/致命 |
+| （可选）2.5D 规划器 | `src/rm_navigation/rm_planner_25d/`（新包） | 实现 `nav2_core::GlobalPlanner`：坡度相关的运动约束 |
+
+#### ⑤ 最小可行路线（三步，可独立验收）
+
+1. **先把表示做出来（离线即可，最省）**：用 `tools/pcd_to_grid_map.py` 扩展出 `--mode elevation|slope|clearance`，
+   把 LIO 的 `PCD/<world>.pcd` 变成 2.5D 图并**扫一眼坡道/隧道处这些量的分布**（不用跑仿真）；
+2. **再加图层**：写 `Layer` 插件（净空/坡度 → 代价或致命），用"坡道/隧道用例"回归；
+3. **按需升级规划器**：若出现"横穿陡坡 / 坡上不减速 / 隧道内姿态不对"，再做 2.5D lattice 规划器 + 控制器坡度限速。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
