@@ -270,6 +270,73 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 应引入单一环境表示节点（2D costmap / 3D ESDF / 语义+可通行性图），所有下游只读这一份。
 本工程目前是"半统一"：**对导航而言 costmap 是统一表示**，但 costmap 之外（AMCL、ICP、LIO、Rviz）各自又直接吃点云/scan。
 
+### 3.2.5 一张点云被切成很多份 / 2D 栅格为何能承载 3D / 两张 costmap 的分工
+
+#### ① 一份点云被切成多份，是**需求不同**而不是浪费
+
+| 消费者 | 吃哪一路 | 为什么必须是这一种形式 |
+|---|---|---|
+| FAST-LIO / Point-LIO | `/livox/lidar`（**CustomMsg**） | 需要**逐点时间戳**做运动去畸变 + 与 100Hz IMU 同步 |
+| 地面分割 | `/livox/lidar/pointcloud`（PointCloud2） | 需要完整 3D 坐标做地面拟合 |
+| `pointcloud_to_laserscan` → `/scan` | `/segmentation/obstacle` | AMCL/local costmap 要 **2D + 高频 + 轻量** |
+| STVL | `/segmentation/obstacle` | 要 **3D + 时间衰减**（体素） |
+| ICP 重定位 | `/livox/lidar/pointcloud` | 要**原始精度**做配准（不能被切层/降采样） |
+| Rviz | 各路 | 人看 |
+
+> 同一个点云被多路并行加工，是"各自最合适"的工程折中；代价是重复计算与**一致性风险**（见 §3.2.4 的高度带实例）。
+
+#### ② 2D 栅格能承载 3D 信息，中间"隐藏"了这五个机制
+
+1. **高度准入（band-pass）——最关键**：障碍判定发生在**图层内部**，2D 图只承载**结论**。
+   `min/max_obstacle_height` 本质是"机器人碰撞体的高度范围"：本工程 global 取 **0.2~2.0 m**
+   （低于 0.2 m 可跨越 → 不算障碍；高于 2.0 m 忽略），local 的 `/scan` 是**相对车顶 z∈[-1.0, +0.1] m 的一片切片**。
+2. **地面分割**：先在 3D 里把"地面"从"障碍"中剔除（`linefit`：`sensor_height 0.275`、坡度 ±0.4）。
+   所以 2D 图上"自由"的语义其实是"**可行驶地面**"，而不是"没有点"。
+3. **体素→最大值投影（STVL）**：3D 体素保留在层内部（`voxel_size 0.05`、`voxel_decay 0.5 s`），
+   投影到 2D 时取该列 max → "这一列任意高度有障碍，则这一格贵"。于是 2D 图实际是 **(x,y,z,t) 的有损投影**。
+4. **代价而非布尔 + 膨胀层**：栅格是 0~255 的**代价**，`inflation_layer` 把"离障碍的距离"编码成代价梯度
+   （global `r=0.7/scale=8`，local `r=0.6/scale=5`）→ 2D 图承载了一张 **2D 距离场**（ESDF 的 2D 轻量版），
+   这就是"贴着墙走会变贵"的来源。
+5. **多图层合并**：`static + stvl + inflation` 在**同一个 costmap 节点内**按规则合并（STVL `combination_method: 1` = max），
+   多个 3D 信息源因此统一表达在一张 2D 图上。
+
+> 一句话：**"能不能走"这个 3D 判断被提前做掉了，2D 图只留结论 + 代价。** 所以 2D 规划器能在 3D 环境里避障，
+> 但它对"低矮可跨越 / 悬垂可穿过"这类几何的判断完全依赖上面那组高度阈值。
+
+#### ③ global_costmap 与 local_costmap：**同一套代码，两个独立实例，目的不同**
+
+| | `global_costmap` | `local_costmap` |
+|---|---|---|
+| 坐标系 | **`map`**（全局一致） | **`odom`**（局部连续） |
+| 范围 | 整张地图（不 rolling） | **rolling 5×5 m**（贴着机器人） |
+| 分辨率 | 0.04 m | 0.02 m（更细） |
+| 更新/发布 | 5 Hz / 2 Hz | **20 Hz / 10 Hz**（更新鲜） |
+| 图层 | `static + stvl + inflation` | `obstacle(/scan) + inflation` |
+| 障碍来源 | `/segmentation/obstacle`，z∈[0.2, 2.0]（3D 体素） | `/scan`，相对车顶 z∈[-1.0, 0.1]（2D 切片） |
+| 膨胀 | r=0.7, scale=8 | r=0.6, scale=5 |
+| 谁消费 | `planner_server`(NavFn 全局找路) | `controller_server`(RPP/DWB/TEB) + `behavior_server`（`local_costmap/costmap_raw`） |
+| 目的 | **找路**：全局一致、记得住远处静态障碍 | **避障跟踪**：新鲜、高频、只管身边 |
+
+**为什么坐标系故意不同（这是最容易忽略的设计）**：
+
+- **local 用 `odom`**：局部避障必须相对**连续里程计**做。若局部图挂 `map`，一旦重定位修正导致 `map→odom` 跳变，
+  机器人周围的障碍会"瞬移"，控制器立刻做出错误的避障动作。→ 局部图只依赖 `odom→base_link`（LIO）。
+- **global 用 `map`**：全局路径必须与地图墙体在同一坐标系里才能规划。→ 全局图依赖 `map→odom`（重定位模块）。
+
+**两张图可以"看到不同的世界"**（本工程实例）：0.1 m 高的矮台，local（切片含它）会绕，global（z≥0.2 不算障碍）会直接规划穿过去。
+调参时 **高度带要成对校准**，否则会出现"全局路径穿过局部认为存在的障碍"这类难查现象。
+
+#### ④ "2.5D / 3D 有正式规划器吗"
+
+| 层 | 正式/主流规划器与表示 | 契约 |
+|---|---|---|
+| 2D | **Nav2**（NavFn/Smac/RPP/DWB/TEB）、`costmap_2d` | 2D costmap + start/goal，标准插件接口 |
+| 2.5D | `grid_map`(ANYbotics) + 可通行性代价、`elevation_mapping` + 腿足规划（free_gait/towr）、各家越野 traversability 规划器 | **碎片化**：多为自研"高程图 + 图搜索"，没有 nav2 那样的统一插件契约 |
+| 3D | `OMPL`(RRT*/BIT*)、`SBPL`(3D lattice)、`mav_planning`/`mav_trajectory_generation`、`Fast-Planner`/`EGO-Planner`(无人机)、`OctoMap`/`voxblox`/`nvblox`(表示与 ESDF)、`MoveIt2`(机械臂，n 维) | 3D 体素/ESDF + 动力学约束，状态空间与碰撞检查都不同 |
+
+**要点**：nav2 是**唯一有"标准 2D 契约"**的那一层；2.5D/3D 各有实现但接口不统一 —— 这也是为什么
+"想让 nav2 用上 3D"最现实的做法是**在 costmap 上游加图层（2.5D）**，而不是期待 nav2 直接吃 3D。
+
 ### 3.3 `rm_nav_bringup`（总装层）内部
 
 ```
