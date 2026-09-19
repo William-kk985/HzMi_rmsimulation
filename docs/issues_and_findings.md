@@ -1,0 +1,131 @@
+# 问题与发现汇总（HzMi RM 仿真 bench）
+
+> 本文汇总本轮仿真联调中**实际踩到的问题**（现象 → 根因 → 修复 → 证据）、**静默失效类坑**、
+> **地图资产/坐标系结论**、**架构改动**与**概念澄清索引**，最后是**未完成事项**。
+> 详细复现命令见 `docs/smoke_test_runbook.md`，分层设计见 `docs/architecture.md`。
+
+---
+
+## 一、运行时故障：根因 → 修复
+
+| # | 现象 | 根因 | 修复 | 证据 / 落点 |
+|---|---|---|---|---|
+| 1 | `Unable to parse the value of parameter robot_description as yaml` | launch_ros 把 URDF(XML) 当 YAML 解析（Humble 行为） | `ParameterValue(robot_description, value_type=str)` 包裹 | `hzmi_rm_simulation/launch/rm_simulation.launch.py` |
+| 2 | `spawn_entity` 报 `No module named 'numpy'` | conda 的 python(3.13) 抢占 PATH；ROS Humble 需系统 python 3.10 | `conda config --set auto_activate_base false` + `~/.bashrc` 末尾 `export PATH=/usr/bin:$PATH` | 用户环境；**不要激活 `.venv`** |
+| 3 | 成批 `Could not find requested resource in ament index`（nav2 组件）+ 缺 `nav2_rviz_plugins` | nav2 主体包未安装 | `apt install ros-humble-navigation2 nav2-bringup nav2-rviz-plugins`（+ `dwb-critics`） | 装后组件正常加载 |
+| 4 | `/scan` 报 `incompatible QoS` | costmap `obstacle_layer` 订阅 reliable，而 `/scan` 是 best-effort | 三份 `nav2_params_sim_*.yaml` 的 scan 源加 `reliability_policy/qos_policy: best_effort` | `ros2 topic info /scan --verbose`：1 pub + 3 sub **全 BEST_EFFORT** |
+| 5 | costmap 刷屏 `Sensor origin ... out of map bounds` + `odom→base_link` 抖动 | `odom` 有两个来源：Gazebo 真值 + LIO 都发 `/odom` | sim URDF 把 Gazebo 真值 remap 到 **`/odom_ground_truth`**，`publish_odom_tf=false`（T4） | `/odom` 由 LIO 独占 |
+| 6 | RViz 里车/雷达**倾斜**（Gazebo 里是正的） | spawn `z=1.16` 而地面在 z≈0 → 悬空 1.1 m 坠落，FAST-LIO 在坠落中做重力初始化 | RMUL/RMUL2026 spawn `z` 改 **0.2** | `tf2_echo odom base_link` RPY ≈ (0.34°,0.23°,-0.35°) |
+| 7 | `Package 'rm_nav_bringup' not found ... searching: ['/opt/ros/humble']` | 新终端只 source 了 /opt/ros | `source install/setup.bash` | runbook §0.1 |
+| 8 | nav+amcl 卡在 `amcl: Waiting for map....` / `global_costmap: Invalid Frame "map"` | ① `map_server_launch.py` 与 `localization_amcl_launch.py` **各起了一个同名 `lifecycle_manager_localization`**；② `nav2_params_sim_*.yaml` 里 `yaml_filename` 被注释，而 nav2 的 `RewrittenYaml` **只替换已存在的键** → `parameter 'yaml_filename' is not initialized` | ① amcl launch 用**单一 manager 同时管 `map_server`+`amcl`**；② 恢复 `yaml_filename: ""` 键 | 沙箱实测：`Read map RMUL.pgm: 272 X 210` → `amcl: Received a 272 X 210 map` → 双双 Activating |
+| 9 | `tf2_echo map odom` 报 `frame does not exist` | **amcl 只在收到 `/scan` 之后才发 `map→odom`**（`sendMapToOdomTransform` 只被 `laserReceived` 调用，且 `initial_pose_is_known_` 为假时 return） | 判据改为"先查 `ros2 topic hz /scan`" | 无头实测：无 `/scan` → 无 `map` 帧；补 `/scan` → `map→odom` 立现 |
+| 10 | 发目标后车不走，`/cmd_vel` 只有 `linear.x: -0.05` + 旋转 | `-0.05` = nav2 BT `BackUp backup_speed`；根因是 **`planner_server: failed to generate a valid path`** → BT 恢复行为循环 | 见 §三（幽灵墙）；并新增 `tools/check_map_reachable.py` 选点前验证 | 用户机日志 + 工具判定 |
+| 11 | 场景三(nav+ICP) 里 `map`/`odom` 帧一直不存在，Nav2 无法激活 | `spawn_entity: Spawn service failed` 后机器人晚 ~4 s 才插入，期间 LIO 尚未吐 `/odom`；**RMUL 场地网格 44 万三角面**（RMUL2026 仅 3187）加载慢 | 等 30~60 s 再判断；按 `/livox/lidar → /livox/imu → /imu/data → /odom` 逐段定位 | ICP 本身正常：`pcd point size: 97642, 4866`、`icp_registration initialized` |
+| 12 | `ros2 topic hz /livox/lidar` 只有 ~1 Hz + 2.8 s 抖动 | **测量假象**：CustomMsg 每帧 3 万点，`topic hz` 反序列化跟不上 | 看 `/scan`（轻量）或 `/odom` 判断频率 | `/odom` = 8.1 Hz 正常 |
+| 13 | `/amcl_pose` 的 covariance ≈ 0 | nav2 `set_initial_pose` 路径**不填协方差**（`amcl_node.cpp` 只设 position/orientation） | 正常现象；但初值给错时 AMCL 难以自纠 → 用 RViz `2D Pose Estimate` 重给 | 源码 L271-281 |
+
+---
+
+## 二、静默失效类（最危险：不报错但不生效）
+
+| 现象 | 根因 | 修复 |
+|---|---|---|
+| 参数写在 yaml 里却"没生效" | **节点名跨版本改名**：Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`。对不上的整段被**静默忽略** | 三份 sim 变体已改名并把 `robot_base_frame` 改回 `base_link_fake`、`max_rotational_vel: 3.0`。**佐证**：日志里创建了 4 个插件（=代码默认列表），而 yaml 只写了 2 个 |
+| **建图模式下 `/map` 被旧图抢占** | `map_server` 的启动条件只判断 `localization`（建图模式为空 → 条件成立）→ 它把磁盘旧 pgm 发到 `/map`，与 slam_toolbox 抢；`map_saver_cli` 可能存下**旧图** | 条件加 `mode=='nav'`（已修，5 种组合验证） |
+| `/map_save` 无处可写 | `fastlio_mid360_sim.yaml` 里 `map_file_path` 被注释 → ICP 在 RMUL2026 上没有底图 | bringup 按 `world` 自动注入 `PCD/<world>.pcd`（与 ICP 的 `pcd_path` 同路径） |
+| `nav_rviz`/`lio_rviz` 都给 `False` | 屏幕上一个可视化都没有（曾误判"没有机器人"） | runbook §0.4：mapping 用 `lio_rviz`，nav 用 `nav_rviz`（默认 True），**只开一个** |
+| `velocity_smoother.odom_topic: "Odometry"` | T2 已把里程计统一为 `/odom`，旧键名是遗留 | 改为 `odom` |
+| **T6 撤销**：`base_link_fake` 不是脏帧 | `fake_vel_transform` 20 Hz 发 `base_link→base_link_fake`（含云台转角），并做 `/cmd_vel → /cmd_vel_chassis` 旋转；角速度非零时按 `spin_speed` 原地转底盘 = **哨兵小陀螺**。改成 `base_link` 会丢功能 | `docs/tf_interface_contract.md` 已撤销 T6 并写明理由 |
+
+---
+
+## 三、地图资产与坐标系（含"幽灵墙"完整证据链）
+
+### 3.1 三场地的 map 系约定不同（**关键坑**）
+
+判定方法：**场地 STL 的世界包围盒** vs **pgm 已知区域（非 205 像素）包围盒**，尺寸 + 位置双证据：
+
+| world | 场地 mesh 世界 bbox | pgm 已知区域 bbox | 判定 | **AMCL 初值** |
+|---|---|---|---|---|
+| `RMUC` | x[0,29.20] y[0,15.20] | x[-6.35,22.50] y[-7.60,7.45] | mesh−spawn(6.35,7.6) ≈ pgm → **出生点系** | **(0,0,0)** |
+| `RMUL` | x[0.51,14.23] y[-1.25,9.30] | x[-3.75,9.80] y[-4.49,5.96] | mesh−spawn(4.30,3.35) ≈ pgm → **出生点系** | **(0,0,0)** |
+| `RMUL2026` | x[2.20,14.80] y[0.20,8.80] | x[2.68,14.68] y[0.23,8.43] | mesh **直接**等于 pgm → **世界系** | **(4.3,3.35,0)** |
+
+→ 已实现 **按 `world` 自动注入 AMCL 初值**（`set_initial_pose: true` + `RewrittenYaml` **全路径** `amcl.ros__parameters.initial_pose.*`，避免叶子短名误伤）。
+
+### 3.2 RMUL2026 的"幽灵墙"（规划失败的根因）
+
+- `RMUL2026.pgm` 在 **x≈5.2** 有一条 **1 像素宽竖直虚线**（y≈1.8→6.0，带小缺口）；
+- **RMUL2026 世界网格在该处零顶点**（x∈[5.05,5.35]、y∈[2.8,4.0] 顶点数 = **0**，任何 z）→ 世界不存在这道墙；
+- 经 `robot_radius=0.2` 内切膨胀后走廊被封死：**r=0.20 目标不可达 / r=0.15 可达**；
+- 地图被切成 **3 块连通域**（24246 / 3692 / 693 格），目标点落在另一块 → 必然 `failed to generate a valid path`；
+- 结论：该 pgm 更像**官方场地平面图**（含分区虚线），不是 sim 建图产物 → **应在 sim 里重建**（见 §六）。
+
+### 3.3 "一开始就有完整地图"是正常的
+
+nav 模式的地图来自 `map_server` 加载的**磁盘既有 pgm**（`src/rm_nav_bringup/map/<world>.pgm`），不是实时扫描。实时建图要 `mode:=mapping`。
+
+---
+
+## 四、架构改动与新增工具
+
+### 4.1 `mode` 拆成三种场景形态（"地图从哪来"是分界线）
+
+| `mode` | 中文 | 在线 SLAM | nav2 | `map_server` | 重定位 | `map→odom` 来源 |
+|---|---|---|---|---|---|---|
+| `mapping` | 纯建图 | ✅ | ❌ **不启动**（省 CPU） | ❌ | ❌ | 在线 SLAM |
+| `slam_nav` | 边建图边导航 | ✅ | ✅ | ❌ | ❌ | 在线 SLAM 直接喂 costmap |
+| `nav` | 先建图后导航 | ❌ | ✅ | 仅 `icp` / 留空 | ✅ | 所选重定位模块 |
+
+- 真值表已逐组合验证（8 种 `mode`×`mapper`×`localization`）；
+- QoS 已核：slam_toolbox 与 cartographer occupancy_grid 的 `/map` 均 `transient_local`，与 costmap `static_layer` 订阅匹配。
+
+### 4.2 新增装配级参数 `spin_speed`
+
+`fake_vel_transform` 的小陀螺固定角速度：**仿真的 `planar_move` 没有基线自转**，任何角速度修正都会让底盘按 5 rad/s 转，而**仿真里没有云台补偿、雷达跟着转**（10 Hz LIO 每帧承受 ~29°）→ 排查导航问题先用 `spin_speed:=0.0`。
+
+### 4.3 新增工具
+
+| 工具 | 作用 | 验证 |
+|---|---|---|
+| `tools/check_map_reachable.py` | 地图连通域/目标点可达性/推荐可达目标点（含净空）；也可当**幽灵墙检测器** | RMUL2026 判出 3 块连通域、目标不可达；RMUL 用起点 (0,0) 落在 64.5% 大连通域（反向印证出生点系） |
+| `tools/pcd_to_grid_map.py` | LIO 的 3D `.pcd` 切层投影 → `.pgm/.yaml`（**第三条 2D 地图来源**），带与已有图的比对指标 | RMUL.pcd → 与 slam_toolbox 的图**同一坐标系**（最佳平移 1~2 格 = 5~10cm），±1 格容差下参考图墙覆盖 **84.7%** |
+
+### 4.4 文档新增索引
+
+- `docs/architecture.md`：§3.2.1 三层职责（lio/localization/mapper）、§3.2.2 2D/2.5D/3D 与降维、§3.2.3 "3D 怎么用"、§3.2.4 感知与决策接口、§3.2.5 点云多路切分/2D 为何能承载 3D/两张 costmap、§3.2.6 插件协议与调参/算力/行业实践、§3.2.7 坡道隧道的 2.5D 方案与落位；
+- `docs/smoke_test_runbook.md`：§0.4 RViz 开关、§0.4.1 spin_speed、§0.5 地图资产与坐标系、§0.6 选点先验连通域、§0.7 三形态对照、§1.1.1 LIO 点云投影、§1.2 边建图边导航、§9.1/9.2 判据、§10 错误对照（新增多行）、§12 实测记录；
+- `docs/tf_interface_contract.md`：T1–T5 已实施，**T6 撤销**。
+
+---
+
+## 五、概念澄清（本轮讨论的结论速记）
+
+1. **三层职责**：`lio` 出 `odom→base_link`（高频连续、会漂）；`localization` 出 `map→odom`（低频、全局不漂）；`mapper` 造 `/map`（在线建图时**兼任**发 `map→odom`，因此 `slam_nav` 与 `nav` 的重定位模块**绝不能同时开**）。
+2. **LIO 不只能定位**：FAST-LIO/Point-LIO 是 LiDAR-Inertial SLAM，跑里程计同时维护 **3D 点云地图**（`PCD/<world>.pcd`）。2D 地图有三条来源：① 在线 2D SLAM ② LIO 点云切层投影 ③ 外部/官方平面图。
+3. **降维的判据**：降维是否无损，取决于**被丢掉的维度是否影响决策正确性**。平地 → 无损（z 只影响"挡不挡"）；坡道（z 的变化率）、隧道（z 的分布）→ 有损 → 需要 2.5D/3D。
+4. **2D 栅格不"承载"3D 信息**：它只存**一个由 3D 算出的判断**（占据/自由/未知的**类别编码**）；3D 语义藏在**规则**里（高度带、地面分割、投影、时间衰减）。单格无法区分"横梁 z=1.5"和"纸箱 z=0.1"。
+5. **代价的数值从哪来**：不是降维给的，而是后续图层给的 —— `static_layer` 翻译值域 → 多层按 **max** 合并 → `inflation_layer` 生成 `252·exp(−scale·(d−r_in))` 的梯度（global `scale=8, r_in=0.2`；0.24m→183、0.40m→50、0.60m→10）。
+6. **`/map` 与 costmap 标尺不同**：`/map` 是 **-1/0~100**（未知/自由/占据概率），costmap 是 **0~255**（0 自由、1~252 代价、253 内切、254 致命、255 未知）。**灰色能不能走由 `allow_unknown` 决定**（我们设 true）。
+7. **205 像素的灰/白**：`free_thresh=0.25` 时 `occ=0.196<0.25` → **自由(白)**；经典 `free_thresh=0.196` 时才判为**未知(灰)**。这解释了"调着调着灰变白"。
+8. **时间维 vs 刷新率**：刷新率 = 多久重算/发布（costmap update/publish）；时间维 = 表示里带不带"何时观测/何时过期"（STVL `voxel_decay`、raytrace 清除）。要把三个率分开：**传感器率**（触发 mark/clear）、**update_frequency**（写主图、结算衰减）、**publish_frequency**（仅可视化）。
+9. **nav2 的 2D 契约**：规划/控制/行为插件只拿 2D costmap。想用 3D：① 加**图层插件**（改动小、一致性最好）② 加**规划器插件**（接口仍 2D，插件内部自订阅 3D，但 BT/behavior/controller 仍按 2D 走）。`nav_msgs/Path` 本身是 3D 的，卡点在输入侧与控制侧。
+10. **sim2real**：能迁的是**架构/接口/选型/参数初值/地图/工具流程**；不能迁的是**鲁棒性**。三大杀手及解法：
+    - **标定/时间同步** → LI-Init/lidar_align 标外参；PPS+触发或 `time_sync_en`；判据=静止点云不分层、闭合路径误差 cm 级；
+    - **打滑/延迟** → 用 LIO 替轮速（已做）、标定"指令速度 vs 实际速度"、缩短链路、提控制频率、`velocity_smoother` 切 CLOSED_LOOP、控制器选 DWB/TEB；
+    - **感知噪声→幽灵障碍** → 建图期 SOR/多帧一致性/射线清除/多走两遍；建图后形态学+小团块过滤+可达性检查；运行时静态层只放确认结构、临时物交给带时间维的层（静态图**不会自愈**）。
+    - **最高价值用法**：在仿真里**注入缺陷**（`cmd_vel` 延迟/丢包、摩擦/打滑、点云离群点）→ 选型阶段就筛出鲁棒算法。
+
+---
+
+## 六、待办（未完成）
+
+| 优先级 | 事项 | 说明 |
+|---|---|---|
+| ★★★ | **重建 RMUL2026 地图** | `mode:=mapping` + 遥控 + 落盘三件套（`.pgm/.yaml`、`.posegraph`、`PCD/RMUL2026.pcd`）；落盘前备份旧图。建完跑 `check_map_reachable.py --start 0 0`，并把 RMUL2026 的 `amcl_init_x/y` 改为 `0.0`（新图为出生点系）、同步 §0.5 表格 |
+| ★★★ | **场景三 nav+ICP @ RMUL 重跑** | 等 30~60 s；按 `/livox/lidar→/livox/imu→/imu/data→/odom` 逐段定位；必要时 `lio:=pointlio` 做 A/B |
+| ★★ | 场景 4/5/6/7 未测 | slam_toolbox 纯定位、cartographer 建图/纯定位、`nav:=dwb|teb` |
+| ★★ | 在新图上验证"发目标能走" | 之前被幽灵墙挡住，未真正验证循迹与小陀螺 |
+| ★ | 工具增强 | `pcd_to_grid_map.py` 加 SOR + 小团块过滤 + 形态学细化 + 用 `/path` 做射线清除（把"洪泛 free"升级为"射线 free"） |
+| ★ | 退化测试槽位 | 写 `cmd_vel` 延迟/丢包注入节点；摩擦/打滑与点云离群点注入 |
+| ★ | 未来 2.5D / 3D 槽位 | 高程/坡度/净空图生产（`src/rm_perception/rm_elevation_map/`）+ costmap 图层插件（`src/rm_navigation/rm_costmap_layers/`）；云台瞄准（2–3 DOF）规划 |
