@@ -468,11 +468,15 @@ ros2 run tf2_ros tf2_echo map odom                    # 有输出（由 cartogra
 ros2 topic echo /map --once --field info              # 宽高随建图增长
 ros2 run tf2_tools view_frames                        # ★ 帧树：body 只能有一个父(camera_init)，odom 下只应有 base_link
 ```
-> **2026-09 修了三处致命对接问题**（这就是仓库里 `RMUL2026.pbstream` 只有 526 B 的原因）：
+> **2026-09 修了四处致命对接问题**（这就是仓库里 `RMUL2026.pbstream` 只有 526 B 的原因）：
 > ① 输入类型：`points2` 原 remap 到 `/livox/lidar`（**CustomMsg**，cartographer_ros 不支持）→ 改为吃
 > `/scan`（`num_laser_scans=1`）；② 帧契约：原 `published_frame="body"`+`provide_odom_frame=true`
 > 会与 FAST-LIO 争 `body` 的子帧 → 改为 `published_frame="odom"`+`provide_odom_frame=false`（只发 `map→odom`）；
-> ③ 高度带：`min_z/max_z` 是**相对传感器**的（不是相对地面），原 0.05~0.8 只切到墙顶 → 改回 -0.8~2.0。
+> ③ 高度带：`min_z/max_z` 是**相对传感器**的（不是相对地面），原 0.05~0.8 只切到墙顶 → 改回 -0.8~2.0；
+> ④ **IMU 帧必须与 `tracking_frame` 重合**：`sensor_bridge.cpp:136` 有硬 CHECK（平移 < 1e-5 m），
+> 不满足**直接 abort（exit -6）**。我们 URDF 的 `livox_frame` 与 `imu_link` 相差 5cm（该 5cm 是
+> FAST-LIO `extrinsic_T` 依赖的，不能改 URDF）→ `tracking_frame` 由 `livox_frame` 改为 **`imu_link`**
+> （官方 `mir-100-mapping.lua` 同做法）。同时 `TRAJECTORY_BUILDER_2D.min_range` 0.45→0.2（与 p2l 对齐）。
 
 **落盘**（三件套都可用；字段名已核对）
 ```bash
@@ -753,6 +757,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | nav 模式卡在 `amcl: Waiting for map....` / `global_costmap: Invalid frame ID "map"` | ① `map_server_launch.py` 与 `localization_amcl_launch.py` **各起了一个同名 `lifecycle_manager_localization`**（冲突）；② `nav2_params_sim_*.yaml` 里 `yaml_filename` 被注释掉，而 nav2 的 `RewrittenYaml` **只替换已存在的键** → map_server 报 `parameter 'yaml_filename' is not initialized` | **已于 2026-09 修复**：① amcl launch 现在用**单一 lifecycle_manager 同时管理 `map_server`+`amcl`**，bringup 仅在 `icp`/未选重定位时单独起 map_server；② 三份 nav2 参数恢复 `yaml_filename: ""` 键（launch 会注入实际地图路径） |
 | Nav2 在 `odom`/`map` 出现前就激活，刷 `Timed out waiting for transform ...` | Gazebo 生成机器人 + LIO 初始化需要数秒，而 Nav2 立即启动 | **已于 2026-09 缓解**：`bringup_sim` 中定位链延后 **4s**、mapping 后端延后 **4s**、Nav2 延后 **10s** 启动 |
 | `spawn_entity: Spawn status: ... timed out waiting for entity to appear` | RMUL2026 世界加载慢，spawn 默认超时过短（实体其实已生成） | **已于 2026-09 修复**：spawn 参数加 `-timeout 60.0` |
+| `cartographer_node` 启动几秒后 `exit code -6`，日志 `Check failed: ... The IMU frame must be colocated with the tracking frame` | `tracking_frame="livox_frame"`，而 `/livox/imu` 的 frame 是 `imu_link`，URDF 里两者差 5cm → cartographer 的 **IMU 共位硬 CHECK** 失败（`sensor_bridge.cpp:136`） | **2026-09-21 已修**：`tracking_frame = "imu_link"`（官方 `mir-100-mapping.lua` 同做法）。沙箱 A/B 验证：隔离 domain + 合成 TF/IMU 消息下，旧配置必 abort、新配置通过 |
 | `spawn_entity: Spawn service failed. Exiting.` + 随后 `local_costmap: ... "odom" ... frame does not exist` 一直刷、Nav2 永不激活 | `spawn_entity` 放弃后**机器人其实晚了 3~5 秒才被插入**（gzserver 仍会打印 `mecanum_controller: Subscribed to [/cmd_vel_chassis]`、`LivoxPointsPlugin: ros topic name: /livox/lidar`）。而 Nav2 在 `odom` 帧出现前激活不了；若在此期间 LIO 还没吐 `/odom`，就一直是这个循环。**RMUL 场地网格 44 万三角面（RMUL2026 仅 3187），加载明显更慢** | 不要 20 秒就下结论：**给 30~60 秒**再判断。用 `ros2 topic hz /livox/lidar`（CustomMsg 10Hz）→ `/livox/imu`（100Hz）→ `/imu/data`（互补滤波输出 100Hz，FAST-LIO 的 `imu_topic`）→ `/odom`（≈10Hz）**逐段定位**；`/odom` 一出，`odom` 帧即有、local_costmap 立即恢复、Nav2 自行激活。若 `/livox/lidar` 有数据而 `/odom` 始终没有 → 换 `lio:=pointlio` 做 A/B（它用原始 `/livox/imu`）以区分是雷达侧还是 FAST-LIO+互补滤波支路 |
 | `Timed out waiting for transform from base_link to map` | `map→odom` 缺失 | nav 模式必须指定 `localization:=amcl\|slam_toolbox\|icp\|cartographer` |
 | `Invalid frame ID "base_link"` / fake_vel 报 `Could not transform odom to base_link` | `/odom` 无数据 → LIO 或 `lio_tf_adapter` 未启动 | 查终端 A 是否打印 `lio_tf_adapter 启动` |

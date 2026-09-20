@@ -23,6 +23,7 @@
 | 11 | 场景三(nav+ICP) 里 `map`/`odom` 帧一直不存在，Nav2 无法激活 | `spawn_entity: Spawn service failed` 后机器人晚 ~4 s 才插入，期间 LIO 尚未吐 `/odom`；**RMUL 场地网格 44 万三角面**（RMUL2026 仅 3187）加载慢 | 等 30~60 s 再判断；按 `/livox/lidar → /livox/imu → /imu/data → /odom` 逐段定位 | ICP 本身正常：`pcd point size: 97642, 4866`、`icp_registration initialized` |
 | 12 | `ros2 topic hz /livox/lidar` 只有 ~1 Hz + 2.8 s 抖动 | **测量假象**：CustomMsg 每帧 3 万点，`topic hz` 反序列化跟不上 | 看 `/scan`（轻量）或 `/odom` 判断频率 | `/odom` = 8.1 Hz 正常 |
 | 13 | `/amcl_pose` 的 covariance ≈ 0 | nav2 `set_initial_pose` 路径**不填协方差**（`amcl_node.cpp` 只设 position/orientation） | 正常现象；但初值给错时 AMCL 难以自纠 → 用 RViz `2D Pose Estimate` 重给 | 源码 L271-281 |
+| 14 | `cartographer_node` 启动数秒后 `exit code -6`，日志 `Check failed: sensor_to_tracking->translation().norm() < 1e-5 The IMU frame must be colocated with the tracking frame` | lua 里 `tracking_frame = "livox_frame"`，而 `/livox/imu` 的 `frame_id` 是 **`imu_link`**（URDF：livox 在 `base_link+(0.12,0,0.175)`、imu 在 `+(0.12,0,0.125)`，差 **5cm**；而这 5cm 是 FAST-LIO 的 `extrinsic_T=[0,0,0.05]` 依赖的，**不能靠改 URDF 消除**）→ `sensor_bridge.cpp:136` 的 IMU 共位硬 CHECK 失败 → abort | **2026-09-21 修复**：`tracking_frame = "imu_link"`（官方 `mir-100-mapping.lua` 用 `imu_frame` 同做法）；`/scan` 由 URDF 静态 TF 转到 `imu_link`（纯 5cm 平移）。同时 `TRAJECTORY_BUILDER_2D.min_range` 0.45→0.2（与 p2l 对齐） | **A/B 证据**（沙箱，隔离 `ROS_DOMAIN_ID=42` + 合成 TF/IMU 消息）：旧配置 → `Check failed` + 中止；新配置 → 无 `Check failed`、`Added trajectory with ID '0'` 正常 |
 
 ---
 

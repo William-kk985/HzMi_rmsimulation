@@ -13,7 +13,14 @@ options = {
   -- 旧配置 published_frame="body" + provide_odom_frame=true 会额外发 odom→body，
   -- 而 body 已被 FAST-LIO 占用（laserMapping.cpp 的 child_frame_id="body"）-> TF 多父边。
   map_frame = "map",
-  tracking_frame = "livox_frame",          -- 雷达/IMU 所在坐标系（到 base_link 的变换由 URDF 提供）
+  -- ⚠️ tracking_frame 必须取 **IMU 所在帧**，不能取雷达帧：
+  --   sensor_bridge.cpp 对 IMU 有一条硬 CHECK ——「IMU 帧必须与 tracking_frame 重合（平移 < 1e-5 m），
+  --   否则把线加速度转到 tracking_frame 会不准」，不满足直接 abort（exit code -6，2026-09-21 实际踩到）。
+  --   本工程 URDF：livox_frame 在 base_link+(0.12,0,0.175)、imu_link 在 +(0.12,0,0.125)，相差 5cm；
+  --   而这 5cm 是**故意**的（FAST-LIO 的 extrinsic_T=[0,0,0.05] 就是它）→ 不能靠改 URDF 消除。
+  --   官方 mir-100-mapping.lua 同样拿 IMU 帧（"imu_frame"）当 tracking_frame，是标准做法。
+  --   代价只是：/scan 在 livox_frame 里，cartographer 会用 URDF 静态 TF 把它转到 imu_link（纯 5cm 平移）。
+  tracking_frame = "imu_link",
   published_frame = "odom",                -- 只发布到 odom，即 map→odom 由本节点提供
   odom_frame = "odom",
   provide_odom_frame = false,              -- 不再自造 odom→xxx，避免与 LIO 争 body 的子帧
@@ -57,10 +64,14 @@ TRAJECTORY_BUILDER_2D.use_imu_data = true
 TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 1.0  -- 减小，更快响应
 
 -- 点云范围过滤 (适配 RMUL 赛场 PVC 地胶)
-TRAJECTORY_BUILDER_2D.min_range = 0.45          -- 最小距离 0.45m，避开 38cm 的地面最近点
+-- ⚠️ min_range 由 0.45 改 0.2：原值理由是"避开 38cm 的地面最近点"，但我们吃的是感知域 p2l 的 /scan
+--    （已去地面 + 已切高度带的平面点），该理由不成立；0.45 会把 p2l 保留的 0.2~0.45m 近点又丢掉
+--    → 地图里看不见近处障碍，而 costmap（直接读 /scan）却看得见，两者不一致。
+TRAJECTORY_BUILDER_2D.min_range = 0.2
 TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高稳定性
 -- 高度过滤 (基于机器人高度和 PVC 地面特性)
--- ⚠️ min_z/max_z 是**相对 tracking_frame（雷达）**的高度带，不是相对地面！
+-- ⚠️ min_z/max_z 是**相对 tracking_frame**的高度带，不是相对地面！
+-- （tracking_frame=imu_link，与雷达 livox_frame 只差 5cm，所以数值不用动）
 -- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
 TRAJECTORY_BUILDER_2D.min_z = -0.8
 TRAJECTORY_BUILDER_2D.max_z = 2.0

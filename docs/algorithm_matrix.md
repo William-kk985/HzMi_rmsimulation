@@ -211,4 +211,5 @@
 | 2026-09-16 | 修 `global_obstacle:=scan` 的量程隐患：global 的 scan 源 `obstacle/raytrace_max_range` 由照抄 local 的 6.0 改为 **10.0**（与 p2l `range_max` 对齐），否则全图 6 m 外的旧标记永不清除 → 幽灵障碍 |
 | 2026-09-16 | **决策：不按 2D/3D 物理重组目录**（维度与技术域正交：目录按域分、维度用文档标注）；后续算法情况一律在本文件更新 |
 | 2026-09-21 | 新增装配级槽位 **`local_obstacle`**（`scan`/`cloud`/`both`，默认 `scan` 行为不变）：局部代价地图可加第二路（点云直投，不经 `p2l`）→ 破 `p2l` 单点、消 45cm 盲区；组合数 672 → **1968**（含回退 2292） |
+| 2026-09-21 | 修 **`cartographer` 启动即 abort**（`exit -6`）：`tracking_frame` 由 `livox_frame` 改 **`imu_link`**（`sensor_bridge.cpp:136` 要求 IMU 帧与 tracking_frame 重合；URDF 两者差 5cm 且该 5cm 是 FAST-LIO extrinsic 依赖的）；`min_range` 0.45→0.2。已用隔离 ROS domain + 合成 TF/IMU 做 A/B 验证 |
 | 2026-09-21 | 修**静默失效**：所有障碍源加 `expected_update_rate: 0.5`（原默认 0=不检查）→ 源停即 WARN + 拒绝算速度 + `velocity_timeout` 1s 停车；另修 `p2l` 的 `range_min: 0.45 → 0.2`（45cm 盲区会被反向清成 free）、`scan_time: 0.3333 → 0.1` |
