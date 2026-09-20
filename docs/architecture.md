@@ -54,6 +54,8 @@
 | | `fake_vel_transform` | 云台旋转速度补偿胶水 | 本仓直接管理 |
 | `rm_nav_bringup/` | `rm_nav_bringup` | **总装层**：launch 入口 + 地图/PCD/rviz/urdf 资产（**无 config/**，参数已全部回归各包） | 本仓直接管理 |
 
+> **维度（2D/2.5D/3D）标注与算法组合现状不在这张表里**，统一维护在 `docs/algorithm_matrix.md`（§一.1 维度归类、§三 资产、§四 实测状态）；本表只管「哪个域有哪些包」。
+>
 > 19 个 colcon 包 = 上表除子模块内嵌包外的全部；`slam_toolbox/lib/karto_sdk` 由 slam_toolbox 自带、不单独出现在 colcon 列表。
 
 ### 3.2 数据流（仿真，默认 mapping/nav 组合）
