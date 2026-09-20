@@ -108,6 +108,14 @@
 `local` 用 `/scan`（相对车顶 `z∈[-1.0, +0.1]`），`global` 用 STVL（`z∈[0.2, 2.0]`）→
 同一个 0.1 m 矮台，local 会绕、global 视而不见（见 architecture §3.2.4 的一致性风险）。
 
+**global 改用 `/scan` 后的注意点（2026-09 实测发现一个）**：
+
+| 注意点 | 原因 | 处理 |
+|---|---|---|
+| **量程必须按场地尺度设** | global 是全图（RMUL 13×10 m），而 raytrace 只能清 `raytrace_max_range` 以内的旧标记 → 照抄 local 的 6 m 会累积幽灵障碍 | 与 `p2l` 的 `range_max` 对齐（**10 m**）：能看到多远，就能清多远 |
+| 失去高度判别 | 高度带在 `p2l` 一处定死，global 无法独立判断多高算障碍 | 平地可接受；需要高度判别时用 `global_obstacle:=stvl` |
+| 新增单点依赖 | global 的实时障碍也依赖 `p2l` 这一环（p2l 挂了 global 也没实时障碍） | 监控 `/scan` 频率 |
+
 **改进方向（低成本 → 彻底）**：
 1. **阈值成对校准**并把"成对"写进注释；
 2. **统一来源 —— 已实现为可切换槽位**（2026-09）：`global_obstacle:=stvl|scan|none`，
