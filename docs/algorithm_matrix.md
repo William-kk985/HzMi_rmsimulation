@@ -159,7 +159,7 @@
 **推论（当前的"硬约束"）**：
 - **AMCL 路线三个场地都能跑**（RMUL2026 的图需先重建，否则发目标会规划失败）；
 - **slam_toolbox 纯定位 / ICP 只能 RMUC、RMUL**；
-- **cartographer 纯定位目前无场地可用**（三个 pbstream 都不存在/为空）→ 必须先 `tools/scripts/mapping/generate_cartographer_pbstream.sh` 生成；
+- **cartographer 纯定位目前无场地可用**（三个 pbstream 都不存在/为空）→ 必须先按 `docs/smoke_test_runbook.md` §5 跑一次 cartographer 建图，再 `finish_trajectory` + `write_state` 导出；
 - RMUL/RMUC 的地图是**出生点系**（AMCL 初值 `(0,0)`），RMUL2026 是**世界系**（`(4.3,3.35)`）——判定依据见 `docs/smoke_test_runbook.md` §0.5。
 
 ## 四、实测状态（每跑通一个组合就加一行）

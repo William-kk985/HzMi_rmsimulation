@@ -3,6 +3,7 @@
 > 结论先说：**"伪 2D"不是某一家的做法，而是整个生态的通用套路** —— 所有地面导航栈都在某个环节做
 > "高度带筛选 + 水平投影"，差别只在**在哪一层做、用什么投影规则、自由空间怎么定**。
 > 本文按系统里实际装了/源码在手的实现逐个对照（带源码位置），最后给出自己写这类模块的清单。
+> **§二 先分清两种降维哲学（"几何 2D" vs "体素 2D"）**，§三 起才是共性旋钮与逐条对照。
 
 ---
 
@@ -16,7 +17,7 @@
 | nav2 `VoxelLayer` | costmap 图层 | **3D 体素列**（每列 32 位）+ **计数阈值**决定 2D 格 | `z_voxels 10`、`z_resolution 0.2`、`origin_z 0.0`、`mark_threshold 0` | 体素内 raytrace |
 | `spatio_temporal_voxel_layer`（apt，本工程 global costmap 用） | costmap 图层（**2.5D**） | 3D 体素 + **时间衰减** + `combination_method: max` 投影到 2D | `voxel_size 0.05`、`voxel_decay 0.5`、`min/max_obstacle_height 0.2/2.0`、`mark_threshold 0` | raytrace + 衰减 |
 | **cartographer 2D** | **SLAM 内部** | 在**重力对齐系**里 `CropRangeData(min_z, max_z)` + voxel filter；**输入可以是 PointCloud2 也可以是 LaserScan** | `min_z = -0.8`、`max_z = 2.0`（⚠️ **相对传感器**，不是相对地面） | 射线插入（hit/miss 概率） |
-| cartographer 3D | SLAM 内部 | 自适应体素滤波 + range 限制 | `high_resolution_max_range` 等 | 3D 概率栅格 |
+| **cartographer 3D** | SLAM 内部（**3D 后端**）→ 输出时再投影一次 | 3D hybrid grid（high/low 两套分辨率的概率体素）+ 自适应体素滤波；对外仍发 2D 栅格：`Submap3D::AddToTextureProto` 做 **"X-ray view through the hybrid_grid, aligned to the xy-plane"** —— 按 (x,y) 列累积 `min_z/max_z/count`，**列厚度 < 3 个体素就判透明**，否则按平均占据概率出像素 | `TRAJECTORY_BUILDER_3D.num_accumulated_range_data`（backpack_3d: 160）、`submaps.high_resolution`、`high_resolution_max_range`；输入必须 `num_point_clouds ≥ 1`（PointCloud2） | 3D 概率体素（hit/miss 累积）；投影出的 2D 图里"透明"**不等于**射线测得的 free |
 | `slam_toolbox` | — | **不做** 3D 处理，只吃 `LaserScan` | `scan_topic` | 2D 射线 |
 | `nav2_amcl` | — | **不做** 3D 处理，只吃 `LaserScan` + 栅格图 | `scan_topic`、`laser_max_range` | 似然场 |
 | `octomap_server`（**未安装**，需要时 apt 装） | 独立建图节点 | 八叉树 + 射线清除，直接发 `projected_map`（2D） | `occupancy_min_z/max_z`、`filter_ground` | **射线清除** |
@@ -29,10 +30,56 @@
 - `third_party/nav2/nav2_costmap_2d/plugins/obstacle_layer.cpp` L470/L476（高度带 continue）
 - `third_party/nav2/nav2_costmap_2d/plugins/voxel_layer.cpp` L213-224（体素标记）+ `third_party/nav2/nav2_voxel_grid/include/nav2_voxel_grid/voxel_grid.hpp` L99-116（列计数阈值）
 - `third_party/cartographer/configuration_files/trajectory_builder_2d.lua` L19-20（`min_z/max_z`）+ `cartographer/mapping/internal/2d/local_trajectory_builder_2d.cc` L54-66（裁剪）
+- `third_party/cartographer/cartographer/mapping/3d/submap_3d.cc` `AddToTextureProto` / `ComputePixelValues`（3D → 2D 的 X-ray 投影；`kMinZDifference = 3.f`、`kFreeSpaceWeight = 0.15f`）
+- `third_party/cartographer/cartographer/mapping/2d/submap_2d.cc`（2D 子图真身：概率栅格 + 射线插入）
 
 ---
 
-## 二、五个共性旋钮（"伪 2D"的通用配方）
+## 二、"几何 2D" vs "体素 2D"：同一朵点云，两种降维哲学（**两道关，不是二选一**）
+
+| | **几何 2D**（几何化：点云 → 射线） | **体素 2D**（体素化：点云 → 体素列） |
+|---|---|---|
+| 代表 | `pointcloud_to_laserscan`、`depthimage_to_laserscan` | nav2 `VoxelLayer`、STVL |
+| 发生在**哪一层** | **感知层**（SLAM 之前） | **地图层**（costmap 图层，SLAM 之后） |
+| 产物 | 一帧若干 `range`（`LaserScan`） | 每个 (x,y) 列一串 3D 体素 |
+| 测量的语义 | **射线**：`range` 之前的空间必为 free | **体素**：列里哪些格子被占据 |
+| 高度信息 | **销毁**（只剩 range/角度） | **保留**（点的 z 就是障碍自己的高度） |
+| 投影规则 | 高度带 + **每角度取最小**（近处优先） | **计数阈值**（`mark_threshold`）/ **取最大**（STVL `combination_method: max`） |
+| 自由空间 | **物理测量**（射线） | **推断**（raytrace 清除 / 时间衰减） |
+| 时间维 | 无（帧间独立） | 有（`voxel_decay`、观察持久化） |
+| 谁消费 | SLAM / 定位（slam_toolbox、AMCL、cartographer-2D、ICP）+ costmap | **只有 costmap**（SLAM/定位吃不到） |
+| 代价 | 便宜（一帧几百个数，2D 匹配） | 贵（每帧 3D 点云写入体素网格；STVL 还带衰减） |
+| 典型失效 | 一次决策、**全局承担、不可逆**：高度带切掉某类障碍，地图与 costmap 就都永远看不到它 | 每个消费者各做一遍 3D 处理；对建图/定位**零贡献** |
+
+**一句话分工：几何 2D 决定"地图里有什么"，体素 2D 决定"路上躲什么"。**
+
+在本工程里它们是**串联的两道关** —— 这正是 `global_obstacle:=scan|stvl` 只切第二道关、
+不影响建图与定位的原因：
+
+```
+3D 点云 ──[第一道关：几何化]──> /scan ──┬──> SLAM / 定位（写进地图）
+                                        └──> local/global costmap 障碍层
+        └─[第二道关：体素化]──> STVL / VoxelLayer ──> costmap 障碍层（仅此一路）
+```
+
+**四个容易搞混的点**：
+
+1. **不是所有 SLAM 都必须走几何 2D**：`slam_toolbox` / `nav2_amcl` **只**吃 `LaserScan`（必须过第一道关）；
+   而 **cartographer 2D 两种输入都吃**（`num_laser_scans` 或 `num_point_clouds`，后者由它自己在重力对齐系里做高度带）
+   —— "cartographer 能不能直接吃点云"的答案是"能"，但它一样会先降成 2D 再匹配。
+2. **体素 2D 救不了建图**：地图是 SLAM 写的，而 SLAM 只看 `/scan`；体素层再精细也不进地图。
+3. **不可逆性是本工程最容易踩的坑**：`p2l` 的高度带一次定死，之后 global/local costmap、AMCL、
+   slam_toolbox 全在这个"结论"上工作 —— **高度准入（决策）做了、高度信息（数据）没留**
+   （见 `architecture.md` §3.2.5）。
+4. **扫描内运动补偿也在第一道关丢失**：`p2l` 把 `time_increment` 写成 0
+   （`pointcloud_to_laserscan_node.cpp` L150），即不去畸变。仿真里无所谓（Gazebo ray sensor
+   一次 update 的所有点用同一瞬时位姿，本来就不建模扫描内运动）；**真机**上 Livox 逐点扫描 +
+   小陀螺旋转是真实畸变源 → 迁移时要么建图期 `spin_speed:=0.0`，要么在第一道关之前补去畸变
+   （例：改用 LIO 去畸变后的点云当 `p2l` 输入，代价是感知链从此依赖 LIO）。
+
+---
+
+## 三、五个共性旋钮（"伪 2D"的通用配方）
 
 | # | 旋钮 | 各家叫法 |
 |---|---|---|
@@ -46,7 +93,7 @@
 
 ---
 
-## 三、三个反直觉但值得学的细节
+## 四、三个反直觉但值得学的细节
 
 1. **nav2 `VoxelLayer` 把低于 `origin_z` 的点"夹进最底层体素"**（`worldToMap3D(x, y, origin_z, ...)`），
    而不是丢弃 —— 地面附近的点不会凭空消失（`voxel_layer.cpp` L213-214）；
@@ -57,7 +104,7 @@
 
 ---
 
-## 四、自己写这类模块时的检查清单（照抄上面的做法）
+## 五、自己写这类模块时的检查清单（照抄上面的做法）
 
 1. 先定"**机器人碰撞体的高度范围**" → 得出高度带（下界=能跨越的高度，上界=车身净空）；
 2. 选**投影规则**并明确"哪些高度算障碍"（并集 / 计数阈值 / 取最大）；
@@ -67,7 +114,7 @@
 
 ---
 
-## 五、对本工程的对照与可借鉴点
+## 六、对本工程的对照与可借鉴点
 
 - 我们现在的链路与 cartographer/nav2 **同源**：`linefit`（3D 去地面）→ `p2l`（高度带切片→`/scan`）/ STVL（体素→max 投影）；
 - **可借鉴的三点**：
@@ -80,7 +127,7 @@
 
 ---
 
-## 六、本工程里 3D→2D **分布在哪几个域**（为什么"看着很依赖 nav"）
+## 七、本工程里 3D→2D **分布在哪几个域**（为什么"看着很依赖 nav"）
 
 **答案：降维发生两次，一次在感知域（我们自己的代码），一次在导航域（第三方 costmap 图层，我们只给参数）。**
 

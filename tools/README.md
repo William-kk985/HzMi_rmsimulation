@@ -10,7 +10,7 @@ tools/
 └── scripts/        # sh 脚本
     ├── build.sh
     ├── control/        # 启动/控制（start_sentinel.sh、improved_teleop.sh）
-    ├── mapping/        # 建图工具（cartographer 快捷、存图、存 pcd）
+    ├── mapping/        # 建图工具（存图、存 pcd）
     ├── create_config_package.sh
     └── setup_from_package.sh
 ```

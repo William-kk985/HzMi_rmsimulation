@@ -43,10 +43,10 @@
 | **时间维 / 衰减（decay）** | 表示里带"何时观测、何时过期"：STVL 的 `voxel_decay`、raytrace 清除。**与"刷新率"是两件事** | `architecture.md` §3.2.6 |
 | **降维 / 3D→2D** | 把 3D 数据变成 2D 表示。本工程发生在三处（`p2l`、STVL、离线投影）+ 感知域的地面分割 | `3d_to_2d_survey.md` |
 | **2D / 2.5D / 3D** | 2D=单层栅格；2.5D=2D 索引+每格高度/坡度/多层体素；3D=体素/八叉树 | `architecture.md` §3.2.2 |
-| **高度带（band-pass）** | "哪个高度区间算障碍"的判定（`min/max_obstacle_height`、`min_z/max_z`、`min/max_height`） | `3d_to_2d_survey.md` §二 |
+| **高度带（band-pass）** | "哪个高度区间算障碍"的判定（`min/max_obstacle_height`、`min_z/max_z`、`min/max_height`） | `3d_to_2d_survey.md` §三 |
 | **地面分割（ground segmentation）** | 在 3D 里把地面从障碍中剔除（我们 `linefit`：高度+坡度模型）→ 2D 图上的"自由"其实是"可行驶地面" | `3d_to_2d_survey.md` §一 |
-| **射线清除 vs 洪泛** | 射线清除=沿射线把障碍前的格子标"空"（可信 free）；洪泛=从起点连通填充（近似，会外漏）。**这是自由空间质量的分水岭** | `3d_to_2d_survey.md` §二 |
-| **占据概率 / log-odds** | 用概率累积多帧观测再阈值化，比"单点命中即占据"抗噪 | `3d_to_2d_survey.md` §二 |
+| **射线清除 vs 洪泛** | 射线清除=沿射线把障碍前的格子标"空"（可信 free）；洪泛=从起点连通填充（近似，会外漏）。**这是自由空间质量的分水岭** | `3d_to_2d_survey.md` §三 |
+| **占据概率 / log-odds** | 用概率累积多帧观测再阈值化，比"单点命中即占据"抗噪 | `3d_to_2d_survey.md` §三 |
 
 ## 三、导航与规划
 

@@ -14,7 +14,7 @@
 | 理解"为什么这样分层、为什么降维" | `architecture.md` | §3.2.1–§3.2.7 |
 | 查某个名词是什么意思 | `glossary.md` | 按主题四组检索 |
 | 排查某个诡异现象 | `issues_and_findings.md` + `smoke_test_runbook.md` §10.1 | 「现象 → 归属」表 |
-| 改感知/代价图层、换 3D→2D 做法 | `3d_to_2d_survey.md` | §二 共性旋钮 / §六 本工程分布 |
+| 改感知/代价图层、换 3D→2D 做法 | `3d_to_2d_survey.md` | §二 两种降维哲学 / §三 共性旋钮 / §七 本工程分布 |
 | 挑算法（选型池） | `rm_algorithm_catalog.md` | §〇.0 前端 vs 系统 / 各章候选 |
 | 改 TF/话题契约 | `tf_interface_contract.md` | T1–T5 已实施、T6 撤销 |
 

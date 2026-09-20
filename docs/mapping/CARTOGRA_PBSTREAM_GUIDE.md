@@ -1,7 +1,7 @@
 # 🎯 Cartographer .pbstream 生成指南
 
 > ⚠️ **需谨慎对待**：现行 pbstream 生成做法是「cartographer 建图 → `finish_trajectory` + `write_state`」
-> （runbook §5、`tools/scripts/mapping/generate_cartographer_pbstream.sh`）；本文的"由 png/yaml 转换"路线未经验证。
+> （runbook §5，两条服务调用，无脚本）；本文的"由 png/yaml 转换"路线未经验证。
 
 
 ## 📋 目标
@@ -12,14 +12,18 @@
 
 ## ⚡ 快速开始（推荐方案）
 
-### 一键启动脚本
+### 推荐做法（现行，无脚本）
 
 ```bash
-cd ~/HzMi_rmsimulation
-./generate_cartographer_pbstream.sh
+# 建图（runbook §5）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping lio:=fastlio mapper:=cartographer spin_speed:=0.0
+# 走完一圈后导出
+ros2 service call /finish_trajectory cartographer_ros_msgs/srv/FinishTrajectory "{trajectory_id: 0}"
+ros2 service call /write_state cartographer_ros_msgs/srv/WriteState "{filename: '<绝对路径>/src/rm_nav_bringup/map/RMUL2026.pbstream', include_unfinished_submaps: false}"
 ```
 
-脚本会自动引导您完成以下步骤！
+> 原 `generate_cartographer_pbstream.sh` / `quick_start_cartographer.sh` 已于 2026-09 删除：
+> 它们引用的是已被裁掉的中央 `config/lua` 目录（lua 已回归 `cartographer_ros/configuration_files/`）。
 
 ---
 

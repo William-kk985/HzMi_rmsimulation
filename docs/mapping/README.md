@@ -10,7 +10,7 @@
 |---|---|---|
 | `建图操作指南.md` | 当时"已启动仿真"的操作快照（遥控建图流程） | 历史快照 → 看 runbook §1 |
 | `立即开始建图.md` | 更简版的上手快照 | 历史快照 → 看 runbook §1 / §0.9 |
-| `CARTOGRA_PBSTREAM_GUIDE.md` | Cartographer `.pbstream` 生成思路 | **需谨慎**：现行做法是"用 cartographer 建图后 `finish_trajectory` + `write_state` 导出"（见 runbook §5 与 `tools/scripts/mapping/generate_cartographer_pbstream.sh`）；该文里的"由 `.png/.yaml` 转换"路线属绕过性尝试，未验证可作为纯定位输入 |
+| `CARTOGRA_PBSTREAM_GUIDE.md` | Cartographer `.pbstream` 生成思路 | **需谨慎**：现行做法是"用 cartographer 建图后 `finish_trajectory` + `write_state` 导出"（见 runbook §5，三条原生 ros2 命令）；该文里的"由 `.png/.yaml` 转换"路线属绕过性尝试，未验证可作为纯定位输入 |
 | `快速参考卡片.txt` | 实为**离线配置包**的快速参考卡片 | 分类归属应为 `docs/package/`（未移动，仅说明） |
 
-> 落盘相关脚本：`tools/scripts/mapping/{save_grid_map.sh, save_pcd.sh, generate_cartographer_pbstream.sh}`。
+> 落盘相关脚本：`tools/scripts/mapping/{save_grid_map.sh, save_pcd.sh}`（pbstream 不用脚本，见 runbook §5）。

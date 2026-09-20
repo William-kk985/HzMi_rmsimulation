@@ -229,7 +229,7 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 | `localization` | `amcl` / `slam_toolbox` / `icp` / `cartographer` / 空 | 空 | **仅 `mode:=nav` 生效**；空 = 回退用法（LIO 当绝对定位 + 静态桥） |
 | `mapper` | `slam_toolbox` / `cartographer` | `slam_toolbox` | 在线 2D 建图后端；`mapping`/`slam_nav` 生效 |
 | `nav` | `rpp` / `dwb` / `teb` | `rpp` | 局部规划器变体；`nav`/`slam_nav` 生效 |
-| **`global_obstacle`** | `stvl` / `scan` / `none` | `stvl` | 全局代价地图的实时障碍来源（A/B 槽位，见 `docs/3d_to_2d_survey.md` §六） |
+| **`global_obstacle`** | `stvl` / `scan` / `none` | `stvl` | 全局代价地图的实时障碍来源（A/B 槽位，见 `docs/3d_to_2d_survey.md` §七） |
 | `spin_speed` | 任意（rad/s） | `5.0` | `fake_vel_transform` 小陀螺固定角速度；排查导航先用 `0.0`（§0.4.1） |
 | `lio_rviz` | `True` / `False` | `False` | 开 LIO 点云 RViz |
 | `nav_rviz` | `True` / `False` | `True` | 开 nav2 RViz（`mode:=mapping` 也会给一块） |
@@ -503,8 +503,8 @@ ros2 lifecycle get /controller_server                 # active
 > （但那样没有仿真/LIO/nav2，仅适合看 cartographer 自身日志）。
 
 > ⚠️ **资产前提（当前阻塞）**：三个场地**都没有可用的 pbstream** —— RMUL/RMUC 没有该文件，
-> `RMUL2026.pbstream` 仅 526 B（空壳）。**本场景必须先自己生成**：
-> `tools/scripts/mapping/generate_cartographer_pbstream.sh`（或按 `docs/mapping/` 流程建图后 `write_state`）。
+> `RMUL2026.pbstream` 仅 526 B（空壳）。**本场景必须先自己生成** —— 方法就在本场景下方
+> （`/finish_trajectory` → `/write_state` 两条服务调用，无需任何脚本）。
 > 纯定位时若另有 `map_server` 在发先验 `/map`，请加 `occupancy_grid_topic:=/cartographer_map`，
 > 避免两个发布者抢 `/map`（该参数默认已改为 `map`）。
 
@@ -555,7 +555,7 @@ ros2 param set /global_costmap/global_costmap.obstacle_layer.enabled true
 
 > 下面矩阵是**核心维度**（场地 × LIO × 重定位/建图后端 × 局部规划器）。另外两个装配级开关会成倍影响行为，
 > A/B 时**一次只动一个**：`spin_speed`（5.0 哨兵小陀螺 / 0.0 直通，见 §0.4.1）、
-> `global_obstacle`（stvl / scan / none，见 §0.7 与 `docs/3d_to_2d_survey.md` §六）。
+> `global_obstacle`（stvl / scan / none，见 §0.7 与 `docs/3d_to_2d_survey.md` §七）。
 
 ### 8.1 mapping（3 场地 × 2 LIO）
 ```bash
@@ -702,7 +702,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | `planner_server: GridBased: failed to create plan with tolerance 0.50` / `Planning algorithm GridBased failed to generate a valid path to (x, y)` | **目标点与起点不在同一连通域**（中间被墙隔开），或起点/终点落在膨胀带内。地图上 1 像素宽的虚线经 `robot_radius` 膨胀后就能封死走廊 | 先跑 `tools/check_map_reachable.py --map <map.yaml> --start <map 系起点> --goal <目标>` 判定；换用同一连通域的目标点（§0.6）。若是**地图资产**问题（例：RMUL2026.pgm 的 x≈5.2 幽灵虚线，世界网格里没有实体）→ 重新建图 |
 | 参数写在 `nav2_params_*.yaml` 里却"没生效" | **节点名对不上**：nav2 跨版本改过名（如 Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`）。对不上的整段被**静默忽略**，节点改用内置默认值 | 拿 `/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml` 的顶层键做参照逐个核对；**已于 2026-09 修复**三份 sim 变体的 `recoveries_server` 段。判断某段是否生效的最快办法：看节点启动日志（如 `behavior_server: Creating behavior plugin ...` 的**个数/名字**是否与 yaml 一致） |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
-| cartographer 纯定位报找不到状态文件 | **三个场地都没有可用 pbstream**（RMUL/RMUC 无该文件；`RMUL2026.pbstream` 仅 526 B 空壳） | 先用 `tools/scripts/mapping/generate_cartographer_pbstream.sh` 生成；路径用绝对路径（见 §6） |
+| cartographer 纯定位报找不到状态文件 | **三个场地都没有可用 pbstream**（RMUL/RMUC 无该文件；`RMUL2026.pbstream` 仅 526 B 空壳） | 先按 §5 跑一次 cartographer 建图并 `finish_trajectory` + `write_state` 导出（路径用绝对路径，见 §6） |
 
 ### 10.1 现象 → 归属（先分类，再查上表）
 
