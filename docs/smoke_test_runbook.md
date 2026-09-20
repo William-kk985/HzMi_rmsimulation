@@ -113,7 +113,7 @@ sleep 2
 |---|---|---|---|---|---|---|
 | `RMUC` | `RMUC.pgm` 577×301 | `(-6.35,-7.6)` | **出生点系** | `(0, 0, 0)` | AMCL / slam_toolbox(`.posegraph`) / ICP(`.data`) | 最全 |
 | `RMUL` | `RMUL.pgm` 272×210 | `(-3.75,-4.54)` | **出生点系** | `(0, 0, 0)` | AMCL / slam_toolbox(`.posegraph`) | |
-| `RMUL2026` | `RMUL2026.pgm` 240×169 | `(2.68, 0.228)` | **世界系** ⚠️ 与上两者不同 | `(4.3, 3.35, 0)` | **仅 AMCL** | 无 `.posegraph`、无 `.pcd`；`RMUL2026.pbstream` 仅 526 B（空，cartographer 纯定位不可用） |
+| `RMUL2026` | `RMUL2026.pgm` 240×169 | `(2.68, 0.228)` | **世界系** ⚠️ 与上两者不同 | `(4.3, 3.35, 0)` | **仅 AMCL** | 无 `.posegraph`、无 `.pcd`；`RMUL2026.pbstream` 仅 526 B（空，cartographer 纯定位不可用）。⚠️ 用 cartographer/slam_toolbox **重建**后新图变**出生点系**（初值改 `(0,0,0)`）；新旧图差 `(4.3,3.35)`，**不可混用**（§5/§6） |
 
 #### 怎么判定出来的（别再靠猜）
 
@@ -445,6 +445,18 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 > 栅格话题 **2026-09 已修正为 `/map`**（原先硬 remap 到 `/cartographer_map`，会让 nav2 的 `static_layer`、
 > `map_saver_cli`、RViz 的 Map 显示项全都吃不到图）。
 
+> **cartographer 2D 三个 mode 的跑通顺序**（严格按序；中间产物不可跨次混用）：
+>
+> | 序 | 命令 | 通过判据 | 落盘 |
+> |---|---|---|---|
+> | ① | `mode:=mapping mapper:=cartographer`（本节） | `/map` 宽高随建图增长；`/scan` 的订阅者里有 `cartographer_node`；`tf2_echo map odom` 有输出 | **pgm + pbstream，必须同一次运行存** |
+> | ② | 同①但 `mode:=slam_nav`（是否 `spin_speed:=0.0` 按 §0.4.1 决定） | nav2 起来；`ros2 topic info /map --verbose` 订阅者含 `global_costmap`；`ros2 lifecycle get /planner_server` = active；发目标能规划出路径 | 不落盘（边建边导） |
+> | ③ | §6：`mode:=nav localization:=cartographer` | pbstream 加载成功；`map→odom` 由 cartographer 发；`/map` 来自 `map_server`；`/cartographer_map` 是 cartographer 自己那张 | — |
+>
+> ⚠️ **pgm 与 pbstream 必须来自同一次建图**：cartographer 的 `map` 系原点 = 建图时机器人的起点（**出生点系**），
+> 所以它导出的 pgm 与 pbstream 天然同一套坐标；若拿**旧 pgm**（现有 `RMUL2026.pgm` 是**世界系**）配**新 pbstream**，
+> 两者差一个常量平移（RMUL2026 是 `(4.3, 3.35)`）→ 现象是 RViz 里先验图整体偏移、costmap 与定位错位。
+
 **终端 B**
 ```bash
 ros2 node list | grep cartographer                    # cartographer_node + cartographer_occupancy_grid_node
@@ -469,6 +481,9 @@ ros2 service call /write_state cartographer_ros_msgs/srv/WriteState \
 # 可选：直接导出子图栅格
 ros2 service call /write_assets cartographer_ros_msgs/srv/WriteAssets "{stem: '/tmp/<world>_carto', image_format: 'png'}"
 ```
+> 注：`cartographer_occupancy_grid_node` 的 `/map` 发布器是 `QoS(10).transient_local()`（已核对源码
+> `occupancy_grid_node_main.cpp`）→ nav2 `static_layer`（默认 `map_subscribe_transient_local: true`）与
+> `map_saver_cli` 都能收到，nav2 晚启动也不会漏图。
 
 ---
 
@@ -487,7 +502,12 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 - cartographer 加载 `map/<world>.pbstream`（`load_frozen_state:=true`）→ **只发 `map→odom`**（契约与 amcl/icp 一致）；
 - `odom→base_link` 仍由 LIO 提供；
 - 它的栅格发到 **`/cartographer_map`**，`/map` 留给 `map_server` 的先验栅格图（避免双发布者）；
-- 纯定位默认以 `map` 原点为起始猜测 —— 本工程的图是**出生点系**，起点即原点，天然吻合。
+- 纯定位默认以 `map` 原点为起始猜测；而 cartographer 的 `map` 系原点 = **建图时的起点**，所以
+  **建图与定位两次的出生点应一致**（`RMUL` / `RMUL2026` 都是 world 出生点 `(4.3, 3.35)`，两次同点起步即天然吻合）。
+  出生点不同时只能靠全局搜索（`POSE_GRAPH.global_constraint_search_after_n_seconds`）——慢且可能失败；
+  此时可用 `start_trajectory` 服务显式给初值（该 srv 有 `use_initial_pose` + `initial_pose` 字段）。
+- ⚠️ **不要混用坐标系**：现有 `RMUL2026.pgm` 是**世界系**，而 cartographer 导出的 pgm/pbstream 是**出生点系**。
+  重建 RMUL2026 后，§0.5 表里的 AMCL 初值也要从 `(4.3, 3.35)` 改成 `(0, 0)`。
 
 **终端 B**
 ```bash
