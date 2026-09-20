@@ -447,14 +447,28 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 
 **终端 B**
 ```bash
-ros2 topic list | grep cartographer
-ros2 topic info /map --verbose | grep -c PUBLISHER   # 期望 1（cartographer occupancy_grid）
-ros2 run tf2_ros tf2_echo map odom
-ros2 topic echo /map --once --field info             # 宽高随建图增长
+ros2 node list | grep cartographer                    # cartographer_node + cartographer_occupancy_grid_node
+ros2 topic info /scan --verbose | grep "Node name"    # ★ 必须看到 cartographer_node（证明输入类型/话题对上了）
+ros2 topic info /map --verbose | grep -c PUBLISHER    # 期望 1（cartographer occupancy_grid）
+ros2 run tf2_ros tf2_echo map odom                    # 有输出（由 cartographer 发）
+ros2 topic echo /map --once --field info              # 宽高随建图增长
+ros2 run tf2_tools view_frames                        # ★ 帧树：body 只能有一个父(camera_init)，odom 下只应有 base_link
 ```
-**落盘**：栅格用 `tools/scripts/mapping/save_grid_map.sh`；**pbstream** 用
-`ros2 service call /finish_trajectory ...` + `ros2 service call /write_state cartographer_ros_msgs/srv/WriteState "{filename: ...}"`
-（完整流程见 `tools/scripts/mapping/generate_cartographer_pbstream.sh`）。
+> **2026-09 修了三处致命对接问题**（这就是仓库里 `RMUL2026.pbstream` 只有 526 B 的原因）：
+> ① 输入类型：`points2` 原 remap 到 `/livox/lidar`（**CustomMsg**，cartographer_ros 不支持）→ 改为吃
+> `/scan`（`num_laser_scans=1`）；② 帧契约：原 `published_frame="body"`+`provide_odom_frame=true`
+> 会与 FAST-LIO 争 `body` 的子帧 → 改为 `published_frame="odom"`+`provide_odom_frame=false`（只发 `map→odom`）；
+> ③ 高度带：`min_z/max_z` 是**相对传感器**的（不是相对地面），原 0.05~0.8 只切到墙顶 → 改回 -0.8~2.0。
+
+**落盘**（三件套都可用；字段名已核对）
+```bash
+tools/scripts/mapping/save_grid_map.sh                                            # /map -> map/<world>.pgm+yaml
+ros2 service call /finish_trajectory cartographer_ros_msgs/srv/FinishTrajectory "{trajectory_id: 0}"
+ros2 service call /write_state cartographer_ros_msgs/srv/WriteState \
+  "{filename: '/home/weicheng/HzMi_rmsimulation/src/rm_nav_bringup/map/RMUL2026.pbstream', include_unfinished_submaps: false}"
+# 可选：直接导出子图栅格
+ros2 service call /write_assets cartographer_ros_msgs/srv/WriteAssets "{stem: '/tmp/<world>_carto', image_format: 'png'}"
+```
 
 ---
 
@@ -670,6 +684,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | **发目标后车不走**，`/cmd_vel` 长时间只有 `linear.x: -0.05`（偶尔 `0` + 角速度） | `-0.05` = nav2 自带 BT `BackUp` 的 `backup_speed="0.05"`（见 `/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml`）→ **BT 进了恢复行为循环**（清代价地图→Spin→Wait→BackUp 轮转），说明 `ComputePathToPose` 或 `FollowPath` 连续失败 | 按顺序查：① 终端 A 里 `planner_server` / `controller_server` 的 WARN/ERROR（**最直接**，会写明原因）；② `ros2 topic echo /plan --once --field poses`（空=规划失败）；③ `ros2 topic echo /odom_ground_truth --field pose.pose.position --once` 与 `/amcl_pose` 对比（RMUL2026 的 map 系=世界系，两者必须接近）；④ `spin_speed:=0.0` 重跑（见 §0.4.1） |
 | `mapper:=cartographer` 时 costmap 没有静态图 / `map_saver_cli` 存不到图 | cartographer 的栅格被硬 remap 到 `/cartographer_map`，而 nav2 `static_layer` 与 `map_saver_cli` 都订阅 `/map` | **已于 2026-09 修复**：`cartographer_sim.launch.py` 默认发 `/map`；纯定位另有 `map_server` 时用 `occupancy_grid_topic:=/cartographer_map` 覆盖 |
 | 纯建图 `mode:=mapping` 下 `nav_rviz:=True` 却没有任何 RViz | 三种形态拆分后 `mapping` 不再启动 nav2，而 RViz 原先由 nav2 的 `rviz_launch` 带起 | **已于 2026-09 修复**：bringup 为 `mode=='mapping' and nav_rviz=='True'` 单独补一个 RViz（`nav2.rviz`） |
+| `mapper:=cartographer` 建出来的图**几乎是空的**（526 B pbstream / `/map` 没东西） | 三处对接错误：① `points2` 被 remap 到 `/livox/lidar`（**CustomMsg**，cartographer_ros 只支持 `sensor_msgs/PointCloud2`）→ **静默收不到数据**；② `published_frame="body"` + `provide_odom_frame=true` 与 FAST-LIO 争 `body` 子帧；③ `min_z/max_z` 被当成“相对地面”（实际**相对传感器**）→ 只切到墙顶 | **已于 2026-09 修复**（改走 `/scan`、`published_frame="odom"`、带改回 -0.8~2.0）；判据：`ros2 topic info /scan --verbose` 里应出现 `cartographer_node` |
 | `planner_server: GridBased: failed to create plan with tolerance 0.50` / `Planning algorithm GridBased failed to generate a valid path to (x, y)` | **目标点与起点不在同一连通域**（中间被墙隔开），或起点/终点落在膨胀带内。地图上 1 像素宽的虚线经 `robot_radius` 膨胀后就能封死走廊 | 先跑 `tools/check_map_reachable.py --map <map.yaml> --start <map 系起点> --goal <目标>` 判定；换用同一连通域的目标点（§0.6）。若是**地图资产**问题（例：RMUL2026.pgm 的 x≈5.2 幽灵虚线，世界网格里没有实体）→ 重新建图 |
 | 参数写在 `nav2_params_*.yaml` 里却"没生效" | **节点名对不上**：nav2 跨版本改过名（如 Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`）。对不上的整段被**静默忽略**，节点改用内置默认值 | 拿 `/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml` 的顶层键做参照逐个核对；**已于 2026-09 修复**三份 sim 变体的 `recoveries_server` 段。判断某段是否生效的最快办法：看节点启动日志（如 `behavior_server: Creating behavior plugin ...` 的**个数/名字**是否与 yaml 一致） |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
