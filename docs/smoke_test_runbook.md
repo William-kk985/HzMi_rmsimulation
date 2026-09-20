@@ -181,6 +181,7 @@ nav2 全局规划把「障碍 + `robot_radius` 内切膨胀带」视为不可通
 | `docs/smoke_test_runbook.md` | **本文件**：怎么跑、怎么判、错了怎么查 |
 | `docs/algorithm_matrix.md` | **算法现状唯一真值来源**：有哪些算法/组合、资产齐不齐、实测状态、阻塞项 |
 | `docs/architecture.md` | 目录/分层/参数/概念（§3.2.1–3.2.7 是概念长文） |
+| `docs/glossary.md` | **术语表**：名词一句话定义 + 指向详述（子图/回环/ESDF/2.5D/降维/代价…） |
 | `docs/issues_and_findings.md` | 踩过的坑与根因汇总（含 RMUL2026 幽灵墙证据链） |
 | `docs/tf_interface_contract.md` | TF/接口契约（T1–T5 已实施，T6 撤销） |
 
