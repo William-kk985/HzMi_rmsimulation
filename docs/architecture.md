@@ -584,6 +584,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping l
 |---|---|
 | `docs/architecture.md` | **本文件**：当前目录架构总览 |
 | `docs/glossary.md` | **术语表**：里程计/LIO/回环/子图/位姿图/ESDF/体素/2.5D/降维/代价语义/槽位… 一句话定义 + 指向详述章节 |
+| `docs/glossary.md` | **术语表**：里程计/LIO/回环/子图/位姿图/ESDF/体素/2.5D/降维/代价语义/槽位… 一句话定义 + 指向详述章节 |
 | `docs/3d_to_2d_survey.md` | **3D→2D 各家实现对照**：pointcloud_to_laserscan / nav2 obstacle+voxel / STVL / cartographer 2D / octomap 的降维机制与参数（带源码位置） |
 | `docs/algorithm_matrix.md` | **算法组合总表**：角色槽位 × 实现 × 资产可用性 × 实测状态 × 扩展位 |
 | `docs/issues_and_findings.md` | **问题与发现汇总**：实际踩到的故障（根因/修复/证据）、静默失效坑、地图坐标系与幽灵墙结论、待办清单 |
