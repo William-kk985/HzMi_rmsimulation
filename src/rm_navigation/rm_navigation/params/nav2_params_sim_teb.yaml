@@ -177,7 +177,10 @@ local_costmap:
       height: 5
       resolution: 0.02
       robot_radius: 0.2
-      plugins: ["obstacle_layer", "inflation_layer"]
+      # 局部障碍来源 = 两个可切换图层（bench 槽位，launch 用 local_obstacle 参数切 enabled）：
+      #   obstacle_layer       = /scan（几何 2D；链路单点，且 p2l 有 45cm 盲区）
+      #   obstacle_cloud_layer = /segmentation/obstacle 点云直投（不经 p2l；默认关，A/B 用）
+      plugins: ["obstacle_layer", "obstacle_cloud_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -187,6 +190,10 @@ local_costmap:
           # /scan 由 pointcloud_to_laserscan 以 SensorDataQoS(best-effort) 发布，这里必须匹配，否则收不到数据
           reliability_policy: "best_effort"
           qos_policy: "best_effort"
+          # ★ 失效检测：超过该间隔没更新 → isCurrent()=false → layer current_=false →
+          #   nav2 控制器/规划器拒绝算速度，velocity_smoother 的 velocity_timeout(1.0s) 发零速停车，
+          #   同时日志出 WARN。0（默认）= 不检查 → costmap 会冻在最后一帧且毫无提示（静默失效）。
+          expected_update_rate: 0.5
           raytrace_max_range: 6.0
           obstacle_max_range: 6.0
           obstacle_min_range: 0.1
@@ -195,6 +202,25 @@ local_costmap:
           marking: true
           inf_is_valid: true
           data_type: "LaserScan"
+      # 第二路（3D 点云直投）：**不经过 p2l** → 无 45cm 盲区，且 p2l 挂了这路还在（破单点）。
+      # 输入 /segmentation/obstacle 已由 linefit 去地面，所以这里不再靠高度带去地面；
+      # min_obstacle_height 只用于兜底：odom 的 z=0 ≈ base_link 起始高度（地面约 -0.05），
+      # 万一 linefit 地面模型失效、地面点混进来，这一层还能挡住。
+      obstacle_cloud_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: false                      # 默认关（launch 按 local_obstacle 覆盖）；A/B 验证过再开
+        observation_sources: cloud
+        cloud:
+          topic: /segmentation/obstacle
+          data_type: "PointCloud2"
+          min_obstacle_height: -0.02
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.0           # ★ 从 0 起 → 消掉 p2l 的 45cm 盲区
+          obstacle_max_range: 3.0
+          raytrace_max_range: 4.0
+          clearing: true
+          marking: true
+          expected_update_rate: 0.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
@@ -235,11 +261,11 @@ global_costmap:
           raytrace_max_range: 10.0
           obstacle_min_range: 0.1
           max_obstacle_height: 2.0
+          expected_update_rate: 0.5           # ★ 失效检测（0=不检查 → 静默失效）
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
         enabled: true                       # 默认开（launch 按 global_obstacle 覆盖）
         # https://github.com/SteveMacenski/spatio_temporal_voxel_layer
-        enabled:                  true
         voxel_decay:              0.5                               # 如果是线性衰减，单位为秒；如果是指数衰减，则为 e 的 n 次方
         decay_model:              0                                 # 衰减模型，0=线性，1=指数，-1=持久
         voxel_size:               0.05                              # 每个体素的尺寸，单位为米
@@ -261,7 +287,7 @@ global_costmap:
           obstacle_range: 3.0                                       # meters
           min_obstacle_height: 0.2                                  # default 0, meters
           max_obstacle_height: 2.0                                  # default 3, meters
-          expected_update_rate: 0.0                                 # default 0, if not updating at this rate at least, remove from buffer
+          expected_update_rate: 0.5                                 # ★ 0=不检查(默认)→静默失效；0.5=源超时即告警
           observation_persistence: 0.0                              # default 0, use all measurements taken during now-value, 0=latest
           inf_is_valid: false                                       # default false, for laser scans
           filter: "voxel"                                           # default passthrough, apply "voxel", "passthrough", or no filter to sensor data, recommend on

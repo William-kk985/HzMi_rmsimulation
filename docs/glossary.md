@@ -68,7 +68,7 @@
 | 术语 | 一句话定义 | 详见 |
 |---|---|---|
 | **三种场景形态（`mode`）** | `mapping` 纯建图 / `slam_nav` 边建图边导航 / `nav` 先建图后导航；区别**只在"地图从哪来"与"是否跑导航栈"** | `architecture.md` §九、`smoke_test_runbook.md` §0.7 |
-| **角色槽位** | `lio` 里程计 / `mapper` 在线建图 / `localization` 重定位 / `nav` 局部规划 / `global_obstacle` 全局障碍来源 / `spin_speed` / `world` | `algorithm_matrix.md` §一 |
+| **角色槽位** | `lio` 里程计 / `mapper` 在线建图 / `localization` 重定位 / `nav` 局部规划 / `global_obstacle` 全局障碍来源 / `local_obstacle` 局部障碍来源 / `spin_speed` / `world` | `algorithm_matrix.md` §一 |
 | **小陀螺 / `fake_vel_transform` / `base_link_fake`** | 哨兵机制：nav2 在"云台系"`base_link_fake` 里规划，角速度非零时底盘按 `spin_speed` 原地自转；**仿真里没有云台补偿，雷达会跟着转** | `architecture.md` §0.4.1、`smoke_test_runbook.md` §0.4.1 |
 | **出生点系 vs 世界系** | 地图坐标约定：RMUC/RMUL 的 pgm 原点=机器人出生点（AMCL 初值 `(0,0)`）；RMUL2026 的 pgm 是世界系（初值 `(4.3,3.35)`） | `smoke_test_runbook.md` §0.5 |
 | **幽灵墙 / 幽灵障碍** | 地图上存在但真实世界没有的结构（RMUL2026 的 x≈5.2 虚线）；会导致规划永久失败。也指实时的"旧标记没被清除" | `issues_and_findings.md` §三 |

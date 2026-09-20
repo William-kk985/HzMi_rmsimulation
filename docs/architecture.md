@@ -620,6 +620,7 @@ tools/scripts/control/start_sentinel.sh
 | `mapper` | `slam_toolbox`（默认） / `cartographer` | **在线 2D 建图后端**：`mapping`/`slam_nav` 生效 |
 | `localization` | `amcl` / `slam_toolbox` / `icp` / **`cartographer`**（**仅 `nav` 生效**） | 重定位方式；留空 = 回退用法（LIO 当绝对定位 + 静态桥补帧） |
 | `global_obstacle` | `stvl`（默认）/ `scan` / `none` | **全局代价地图的实时障碍来源**（bench 槽位）：`stvl`=3D 体素层；`scan`=2D `/scan`（与 local 同源 → 降维只在感知域一处）；`none`=只 static+inflation。见 `docs/3d_to_2d_survey.md` §七 |
+| `local_obstacle` | `scan`（默认）/ `cloud` / `both` | **局部代价地图的障碍来源**（bench 槽位）：`scan`=`/scan`（原行为）；`cloud`=`/segmentation/obstacle` 点云直投（不经 `p2l`，无 45cm 盲区）；`both`=双源冗余。见 runbook §7.2 |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | 可视化开关 |
 | `spin_speed` | `5.0`（默认，上游哨兵语义）/ `0.0` | `fake_vel_transform` 的小陀螺固定角速度；**仿真排查导航问题先用 `0.0`**（角速度直通） |
 

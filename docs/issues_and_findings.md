@@ -39,6 +39,8 @@
 | **纯建图 `mode:=mapping` 下 `nav_rviz:=True` 却没有任何 RViz** | 三形态拆分后 `mapping` 不再启动 nav2，而 RViz 原先由 nav2 的 `rviz_launch` 带起 | **2026-09 修复**：bringup 为 `mode=='mapping' and nav_rviz=='True'` 单独补一块 RViz（`nav2.rviz`） |
 | **`global_obstacle:=scan` 时 global 图累积幽灵障碍** | 新增该槽位时把 local 的 `obstacle/raytrace_max_range: 6.0` 照搬到 global；而 global 是**全图**（13×10 m），raytrace 只能清 6 m 内的旧标记 | **2026-09 修复**：改为 **10.0 m**（与 `p2l` 的 `range_max` 对齐）——「扫描能看到多远，就要能清多远」 |
 | **T6 撤销**：`base_link_fake` 不是脏帧 | `fake_vel_transform` 20 Hz 发 `base_link→base_link_fake`（含云台转角），并做 `/cmd_vel → /cmd_vel_chassis` 旋转；角速度非零时按 `spin_speed` 原地转底盘 = **哨兵小陀螺**。改成 `base_link` 会丢功能 | `docs/tf_interface_contract.md` 已撤销 T6 并写明理由 |
+| **感知链断掉 → costmap 冻在最后一帧：无报错、不停车（静默失效）** | ① nav2 障碍源的 `expected_update_rate` 默认 **0 = 不检查**（`observation_buffer.cpp` 的 `isCurrent()` 直接 return true）；② `ObservationBuffer` 在 `observation_keep_time=0` 时**永远保留最后一条**（`purgeStaleObservations()` 只 `erase(++begin, end)`）→ 每轮 costmap 更新把**同一帧旧点云**重新 mark；③ `/scan` 是**串行单点**（插件 → `linefit` → `p2l`），local 没有第二来源 | **2026-09 修复**：① 所有障碍源加 `expected_update_rate: 0.5` → 源停即 `current_=false` → `controller_server.cpp` / `planner_server.cpp` 拒绝算速度 → 已有 `velocity_smoother.velocity_timeout: 1.0` 发零速停车 + 日志 WARN；② 新增 `local_obstacle:=scan\|cloud\|both` 槽位（`cloud` = 点云直投，不经 `p2l`，作第二来源）。验证：`pkill -f pointcloud_to_laserscan` 后应出现 WARN 且 ~1 s 内停车 |
+| **`p2l` 的 `range_min: 0.45` ⇒ 贴身 45cm 既看不见、又被清成 free** | 小于 `range_min` 的点被 **丢弃**（`pointcloud_to_laserscan_node.cpp` 的 `continue`），该角度 bin 保持 `inf`；`inf_is_valid: true` 时 nav2 把 `inf` 换成 `range_max-ε`（=10 m，`obstacle_layer.cpp` 的 `laserScanValidInfCallback`）→ 沿射线**一路 clear**。原值 0.45 的理由是"避开 38cm 地面最近点"，但 `p2l` 的输入已是 `linefit` **去地面后**的 `/segmentation/obstacle`，该理由不成立 | **2026-09 修复**：`range_min: 0.45 → 0.2`（与车体半径 0.20、`linefit` 的 `r_min` 对齐 → 盲区缩到车体内部）；同时 `scan_time: 0.3333 → 0.1`（与 10 Hz 传感器一致） |
 
 ---
 
@@ -130,6 +132,7 @@ nav 模式的地图来自 `map_server` 加载的**磁盘既有 pgm**（`src/rm_n
 | ★★ | 场景 4/5/6/7 未测 | slam_toolbox 纯定位、cartographer 建图/纯定位、`nav:=dwb|teb` |
 | ★★ | 在新图上验证"发目标能走" | 之前被幽灵墙挡住，未真正验证循迹与小陀螺 |
 | ★★ | **`global_obstacle` A/B** | 同一场地/目标点分别跑 `stvl` 与 `scan`，比较：全局路径是否绕开临时障碍、CPU 占用、0.1 m 矮台在 local/global 的判断是否一致（结果记入 `algorithm_matrix.md` §四） |
+| ★★ | **`local_obstacle` A/B + 降级验证** | 同一场景跑 `scan` / `cloud` / `both`：① 贴墙 0.3 m 时 local 是否看到（`scan` 应看不到）；② `pkill -f pointcloud_to_laserscan` 后是否 WARN + 1 s 内停车（runbook §7.3）；③ CPU 增量 |
 | ★ | 工具增强 | `pcd_to_grid_map.py` 加 SOR + 小团块过滤 + 形态学细化 + 用 `/path` 做射线清除（把"洪泛 free"升级为"射线 free"） |
 | ★ | 退化测试槽位 | 写 `cmd_vel` 延迟/丢包注入节点；摩擦/打滑与点云离群点注入 |
 | ★ | 未来 2.5D / 3D 槽位 | 高程/坡度/净空图生产（`src/rm_perception/rm_elevation_map/`）+ costmap 图层插件（`src/rm_navigation/rm_costmap_layers/`）；云台瞄准（2–3 DOF）规划 |

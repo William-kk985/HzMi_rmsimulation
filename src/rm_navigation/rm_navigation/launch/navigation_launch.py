@@ -67,12 +67,27 @@ def generate_launch_description():
     stvl_enabled = PythonExpression([
         "'", LaunchConfiguration('global_obstacle'), "' == 'stvl'"])
     gc = 'global_costmap.global_costmap.ros__parameters.'
+
+    # 局部代价地图的障碍来源同样是可切换槽位（默认 scan = 保持原行为）：
+    #   scan  : 只吃 /scan（几何 2D；链路是串行单点，且 p2l 有 45cm 盲区）
+    #   cloud : 只吃 /segmentation/obstacle（3D 点云直投；不经 p2l，无盲区）
+    #   both  : 双源冗余（任一路挂掉仍能避障）—— 建议先单独验证 cloud 再上
+    # 实现方式同 global：两个图层都写进 plugins，只用 enabled 切换 → 便于 A/B。
+    local_scan_enabled = PythonExpression([
+        "'", LaunchConfiguration('local_obstacle'), "' == 'scan' or '",
+        LaunchConfiguration('local_obstacle'), "' == 'both'"])
+    local_cloud_enabled = PythonExpression([
+        "'", LaunchConfiguration('local_obstacle'), "' == 'cloud' or '",
+        LaunchConfiguration('local_obstacle'), "' == 'both'"])
+    lc = 'local_costmap.local_costmap.ros__parameters.'
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {
         'use_sim_time': use_sim_time,
         'autostart': autostart,
         gc + 'obstacle_layer.enabled': obstacle_enabled,
-        gc + 'stvl_layer.enabled': stvl_enabled}
+        gc + 'stvl_layer.enabled': stvl_enabled,
+        lc + 'obstacle_layer.enabled': local_scan_enabled,
+        lc + 'obstacle_cloud_layer.enabled': local_cloud_enabled}
 
     configured_params = RewrittenYaml(
             source_file=params_file,
@@ -97,6 +112,12 @@ def generate_launch_description():
         'global_obstacle',
         default_value='stvl',
         description='全局代价地图实时障碍来源: stvl(3D体素,默认) | scan(2D /scan,与 local 同源) | none'
+    )
+
+    declare_local_obstacle_cmd = DeclareLaunchArgument(
+        'local_obstacle',
+        default_value='scan',
+        description='局部代价地图障碍来源: scan(/scan,默认=原行为) | cloud(3D点云直投,无45cm盲区) | both(双源冗余)'
     )
 
     declare_params_file_cmd = DeclareLaunchArgument(
@@ -276,6 +297,7 @@ def generate_launch_description():
     ld.add_action(declare_namespace_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_global_obstacle_cmd)
+    ld.add_action(declare_local_obstacle_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_autostart_cmd)
     ld.add_action(declare_use_composition_cmd)

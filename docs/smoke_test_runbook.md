@@ -85,6 +85,7 @@ sleep 2
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
 | `spin_speed` | 任意（rad/s） | `5.0` |
 | **`global_obstacle`** | `stvl`（3D 体素层）/ `scan`（2D，与 local 同源）/ `none` | `stvl` |
+| **`local_obstacle`** | `scan`（`/scan`，原行为）/ `cloud`（3D 点云直投，不经 `p2l`）/ `both`（双源冗余） | `scan` |
 
 ### 0.4 看哪块 RViz（别把两个都关掉）
 
@@ -230,6 +231,7 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 | `mapper` | `slam_toolbox` / `cartographer` | `slam_toolbox` | 在线 2D 建图后端；`mapping`/`slam_nav` 生效 |
 | `nav` | `rpp` / `dwb` / `teb` | `rpp` | 局部规划器变体；`nav`/`slam_nav` 生效 |
 | **`global_obstacle`** | `stvl` / `scan` / `none` | `stvl` | 全局代价地图的实时障碍来源（A/B 槽位，见 `docs/3d_to_2d_survey.md` §七） |
+| **`local_obstacle`** | `scan` / `cloud` / `both` | `scan` | 局部代价地图障碍来源（A/B 槽位，§7.2）：`cloud` 用点云直投破 `p2l` 单点并消 45cm 盲区；`both` = 双源冗余 |
 | `spin_speed` | 任意（rad/s） | `5.0` | `fake_vel_transform` 小陀螺固定角速度；排查导航先用 `0.0`（§0.4.1） |
 | `lio_rviz` | `True` / `False` | `False` | 开 LIO 点云 RViz |
 | `nav_rviz` | `True` / `False` | `True` | 开 nav2 RViz（`mode:=mapping` 也会给一块） |
@@ -571,11 +573,62 @@ ros2 param set /global_costmap/global_costmap.obstacle_layer.enabled true
 
 ---
 
+### 7.2 局部障碍来源 A/B（`local_obstacle`，2026-09 新增槽位）
+
+```bash
+# A：只吃 /scan（默认 = 原行为）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
+  localization:=amcl nav:=rpp spin_speed:=0.0 local_obstacle:=scan
+# B：只吃点云直投（不经 p2l → 无 45cm 盲区）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
+  localization:=amcl nav:=rpp spin_speed:=0.0 local_obstacle:=cloud
+# C：双源冗余（任一路挂掉仍能避障）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
+  localization:=amcl nav:=rpp spin_speed:=0.0 local_obstacle:=both
+```
+
+**这一槽位解决什么**：`/scan` 是**串行单点**（插件 → `linefit` → `p2l`），且 `p2l` 有 45 cm 盲区；
+`cloud` 这一路直接吃 `/segmentation/obstacle`（3D 障碍点云），**绕过 `p2l`** → 破单点 + 消盲区。
+注意它是**部分冗余**：仍依赖 `linefit`（点云来源），只是不再依赖 `p2l`。
+
+运行期也能切（两个图层都支持 `enabled` 动态参数，不必重启整场仿真）：
+```bash
+ros2 param set /local_costmap/local_costmap.obstacle_layer.enabled false
+ros2 param set /local_costmap/local_costmap.obstacle_cloud_layer.enabled true
+```
+
+**验证要点**：
+1. `ros2 topic info /segmentation/obstacle --verbose | grep "Node name"` → 应出现 local costmap（`both`/`cloud` 时）；
+2. 把车停到**离墙 0.3 m**（`scan` 模式看不见）→ `cloud`/`both` 模式下 local costmap 应出现障碍格；
+3. 比 CPU（多一个 3D 点云消费者）。
+
+---
+
+### 7.3 失效检测 / 降级验证（`expected_update_rate`，2026-09 修复）
+
+**为什么要有**：障碍源停发时 nav2 默认**不检查**（`expected_update_rate: 0`），缓存会永远重放最后一帧
+→ costmap 冻住、无报错、车继续走（**静默失效**）。修复后应变成"报警 + 停车"。
+
+```bash
+# ① 正常：/scan 在发
+ros2 topic hz /scan
+# ② 手动断掉感知链（也可以断更上游：pkill -f ground_segmentation）
+pkill -f pointcloud_to_laserscan
+# ③ 期望：
+#    - 日志出现 The /scan observation buffer has not been updated for X seconds,
+#      and it should be updated every 0.50 seconds.
+#    - ~1 s 内 /cmd_vel 归零（velocity_smoother 的 velocity_timeout: 1.0）
+ros2 topic hz /cmd_vel
+```
+
+---
+
 ## 8. 全矩阵指令
 
-> 下面矩阵是**核心维度**（场地 × LIO × 重定位/建图后端 × 局部规划器）。另外两个装配级开关会成倍影响行为，
+> 下面矩阵是**核心维度**（场地 × LIO × 重定位/建图后端 × 局部规划器）。另外三个装配级开关会成倍影响行为，
 > A/B 时**一次只动一个**：`spin_speed`（5.0 哨兵小陀螺 / 0.0 直通，见 §0.4.1）、
-> `global_obstacle`（stvl / scan / none，见 §0.7 与 `docs/3d_to_2d_survey.md` §七）。
+> `global_obstacle`（stvl / scan / none，见 §0.7 与 `docs/3d_to_2d_survey.md` §七）、
+> `local_obstacle`（scan / cloud / both，见 §7.2）。
 
 ### 8.1 mapping（3 场地 × 2 LIO）
 ```bash
@@ -684,6 +737,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | `tools/check_map_reachable.py` | 选目标点前跑：能判"起点/目标是否同一连通域"、推荐可达点、也能当**幽灵墙检测器**（连通域被切成多块=异常） |
 | `tools/pcd_to_grid_map.py` | 离线把 LIO 的 `.pcd` 投成 `.pgm`（第三条建图路线）；`--compare` 可与已有栅格图比对结构一致性 |
 | `global_obstacle` 生效确认 | `ros2 param get /global_costmap/global_costmap.{stvl_layer,obstacle_layer}.enabled` —— 两个里恰有一个 True |
+| `local_obstacle` 生效确认 | `ros2 param get /local_costmap/local_costmap.{obstacle_layer,obstacle_cloud_layer}.enabled` —— `scan` → 前者 True；`both` → 都 True |
 
 
 ---
@@ -736,6 +790,8 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | 位姿**高频小抖**（cm/度级来回） | **时序 / 刷新** | 时间戳不同步、TF 与 costmap 更新节奏不匹配 |
 | 位姿**连续缓慢漂** | **里程计（LIO）** | 与 `/odom_ground_truth` 比，误差随距离增长 |
 | 目标点规划失败（`failed to generate a valid path`） | **地图资产 / 选点** | 先 `check_map_reachable.py`；再看地图有没有幽灵结构 |
+| **costmap 冻住**：车照原速继续走、日志无报错、RViz 里 costmap 还在刷新 | **静默失效**：障碍源（`/scan` 链）已断，而 nav2 的 `expected_update_rate` 默认 `0` = 不检查；`ObservationBuffer` 会一直重放最后一帧 | **2026-09 已修**：障碍源加 `expected_update_rate: 0.5` → 源停即 WARN + 拒绝算速度 + 1 s 内停车（`velocity_timeout`）。定位顺序：`ros2 topic hz /scan`（发了吗）→ `ros2 topic info /scan --verbose`（谁在收）→ `ros2 node list`（`linefit`/`p2l` 还在吗）→ §7.3 |
+| 贴身 0.3 m 的障碍看不见、且那个方向被清成 free | `p2l` 的 `range_min`（原 0.45）把近点**丢弃**，bin 保持 `inf`，而 `inf_is_valid: true` 让 nav2 当"10 m 处有回波"→ 沿射线清空 | **2026-09 已修**：`range_min: 0.45 → 0.2`（与车体半径/`linefit r_min` 对齐）；需要更早发现就用 `local_obstacle:=cloud\|both`（点云直投无此盲区） |
 | 车不走但 `/cmd_vel` 有 -0.05 + 旋转 | **BT 恢复行为循环** | 说明规划或控制连续失败（见上表对应行） |
 | `/cmd_vel_chassis` 出现 `angular.z: 5.0` | **小陀螺在动作** | 那是 `spin_speed`，不是 nav2 发的角速度（§0.4.1） |
 

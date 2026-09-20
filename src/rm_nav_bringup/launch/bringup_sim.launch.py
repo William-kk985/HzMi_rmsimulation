@@ -153,6 +153,14 @@ def generate_launch_description():
                     'scan = 2D 障碍层(吃 /scan，与 local_costmap 同源，把"什么算障碍"收敛到感知域 p2l 一处) | '
                     'none = 只用 static+inflation（全局看不到实时障碍）')
 
+    declare_local_obstacle_cmd = DeclareLaunchArgument(
+        'local_obstacle',
+        default_value='scan',
+        description='局部代价地图障碍来源（bench 可切换槽位）: '
+                    'scan = 只吃 /scan（默认，原行为；链路单点 + p2l 有 45cm 盲区） | '
+                    'cloud = 只吃 /segmentation/obstacle 点云直投（不经 p2l，无盲区） | '
+                    'both = 双源冗余（任一路挂掉仍能避障）')
+
     declare_mapper_cmd = DeclareLaunchArgument(
         'mapper',
         default_value='slam_toolbox',
@@ -452,6 +460,7 @@ def generate_launch_description():
             'map': empty_map_dir,
             'params_file': nav2_params_file_dir,
             'global_obstacle': LaunchConfiguration('global_obstacle'),
+            'local_obstacle': LaunchConfiguration('local_obstacle'),
             'nav_rviz': use_nav_rviz}.items()
     )
 
@@ -472,6 +481,7 @@ def generate_launch_description():
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_mapper_cmd)
     ld.add_action(declare_global_obstacle_cmd)
+    ld.add_action(declare_local_obstacle_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)

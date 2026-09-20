@@ -137,6 +137,7 @@
 | ② | `pointcloud_to_laserscan` | **感知** `src/rm_perception/` | 本仓 | 3D 障碍点云 → **2D `/scan`**（高度带 + 每角度取最小） | 包内 `config/laserscan_params.yaml` |
 | ③ | `global_costmap.stvl_layer` | **导航** `src/rm_navigation/` | **apt 第三方插件**（STVL），我们只配参 | 3D 障碍点云 → **2D 代价**（体素 + 高度带 + max 投影） | `params/nav2_params_sim_*.yaml` |
 | ④ | `local_costmap.obstacle_layer` | **导航** `src/rm_navigation/` | nav2 官方插件，我们只配参 | `/scan`（已是 2D）→ 2D 代价（mark/clear） | 同上 |
+| ④b | `local_costmap.obstacle_cloud_layer` | **导航** `src/rm_navigation/` | nav2 官方插件，我们只配参 | 3D 障碍点云 → **2D 代价**（不经 `p2l`；**第二来源**，默认关，`local_obstacle:=cloud\|both` 开） | 同上 |
 | ⑤ | `tools/pcd_to_grid_map.py` | **工具**（离线） | 本仓 | 3D `.pcd` → `.pgm/.yaml` | CLI 参数 |
 
 **所以"用到挺多 nav 的东西"是正常的**：nav2 的代价地图本身就是**图层化**架构，"
@@ -154,6 +155,11 @@
 **代价（本工程已经踩到）**：两处降维 → **阈值不一致**：
 `local` 用 `/scan`（相对车顶 `z∈[-1.0, +0.1]`），`global` 用 STVL（`z∈[0.2, 2.0]`）→
 同一个 0.1 m 矮台，local 会绕、global 视而不见（见 architecture §3.2.4 的一致性风险）。
+
+**2026-09 新增的第二来源**：local 也可以直吃点云（`obstacle_cloud_layer`，吃 `/segmentation/obstacle`，
+**不经 `p2l`**）→ 目的是**破单点**（`p2l` 挂了 local 仍有实时障碍）并**消掉 `p2l` 的 45cm 盲区**。
+用 `local_obstacle:=scan`（默认，原行为）/ `cloud`（只走点云）/ `both`（双源冗余）切换；
+注意它是"**部分冗余**"：仍依赖 `linefit`（点云来源），只是绕过了 `p2l` 这一环。
 
 **global 改用 `/scan` 后的注意点（2026-09 实测发现一个）**：
 
@@ -206,3 +212,6 @@ ros2 topic info /scan --verbose | grep "Node name"                          # lo
    只用 `enabled` 切换，因此**可以逐项 A/B**（甚至运行期 `ros2 param set ... enabled` 动态切换）；
 3. **彻底分层**：把"环境表示"（栅格 + 2.5D 高程/净空 + 体素）全部放在感知域产出，nav 侧只留一个薄图层插件消费它 ——
    这正是 `src/rm_perception/rm_elevation_map/` + `src/rm_navigation/rm_costmap_layers/` 的规划（architecture §3.2.7）。
+4. **破单点 / 补冗余 —— 已实现**（2026-09）：`local_obstacle:=scan|cloud|both`。`cloud` 让 local 直接吃
+   `/segmentation/obstacle`（3D 点云），**绕过 `p2l`** → 同时解决"`p2l` 单点"与"45cm 盲区"（注意是部分冗余：
+   仍依赖 `linefit`）。失效检测统一由 `expected_update_rate` 负责（源停 → WARN + 停车，见 runbook §7.3）。

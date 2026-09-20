@@ -29,6 +29,7 @@
 | **全局规划器** | —（固定） | `NavfnPlanner` | `nav2_navfn_planner` | 同上 |
 | **场地** | `world` | `RMUC` / `RMUL` / `RMUL2026` | `hzmi_rm_simulation` 世界 + `map/<world>.*` + `PCD/<world>.pcd` | 全形态 |
 | **全局障碍来源** | `global_obstacle` | `stvl`（3D 体素层，默认）/ `scan`（2D `/scan`，与 local 同源）/ `none`（只 static+inflation） | `nav` / `slam_nav` |
+| **局部障碍来源** | `local_obstacle` | `scan`（`/scan`，默认=原行为）/ `cloud`（`/segmentation/obstacle` 点云直投，不经 `p2l`）/ `both`（双源冗余） | `nav` / `slam_nav` |
 | **小陀螺** | `spin_speed` | `5.0`（哨兵语义）/ `0.0`（角速度直通，排查用） | `fake_vel_transform` | 全形态 |
 | 可视化 | `lio_rviz` / `nav_rviz` | True/False | `fastlio.rviz` / `pointlio.rviz` / `nav2.rviz` | 全形态 |
 
@@ -129,22 +130,22 @@
 | `mapping` | **12** | 3 场地 × 2 LIO × 2 mapper |
 | `slam_nav` | **36** | 3 × 2 × 2 × 3 局部规划器 |
 | `nav` | **72** | 3 × 2 × **4 重定位**(amcl/slamTB/icp/cartographer) × 3 局部规划器 |
-| **合计** | **120** | 不含 `spin_speed`/`global_obstacle`/`*_rviz` 等开关 |
+| **合计** | **120** | 不含 `spin_speed`/`global_obstacle`/`local_obstacle`/`*_rviz` 等开关 |
 
 另有特殊用法：`lio:=none`（需外部 odom/TF，例如轮式里程计或纯 2D 组合）、`mode:=nav localization:=''`（LIO 当绝对定位的静态桥回退用法）。
 
 **加上"回退用法"（`mode:=nav` 且 `localization` 留空）**：nav 变为 3×2×**5**×3 = 90 → 合计 **138**。
 
-**两个"装配级开关"会成倍影响行为，A/B 时一次只动一个（注意各自生效范围不同）**：
+**三个"装配级开关"会成倍影响行为，A/B 时一次只动一个（注意各自生效范围不同）**：
 
-| 形态 | 核心组合 | `spin_speed`(×2) | `global_obstacle`(×3) | 小计 |
-|---|---|---|---|---|
-| `mapping` | 12 | ✅ 生效 | ❌ 不起 nav2，不适用 | **24** |
-| `slam_nav` | 36 | ✅ | ✅ | **216** |
-| `nav` | 72 | ✅ | ✅ | **432** |
-| **合计** | **120** | | | **672** |
+| 形态 | 核心组合 | `spin_speed`(×2) | `global_obstacle`(×3) | `local_obstacle`(×3) | 小计 |
+|---|---|---|---|---|---|
+| `mapping` | 12 | ✅ 生效 | ❌ 不起 nav2，不适用 | ❌ 不适用 | **24** |
+| `slam_nav` | 36 | ✅ | ✅ | ✅ | **648** |
+| `nav` | 72 | ✅ | ✅ | ✅ | **1296** |
+| **合计** | **120** | | | | **1968** |
 
-（若把 `localization:=''` 回退用法计入，nav 变 90 → 合计 **780**；`*_rviz` 属纯可视化开关，不计入。）
+（若把 `localization:=''` 回退用法计入，nav 变 90 → 合计 **2292**；`*_rviz` 属纯可视化开关，不计入。）
 
 ## 三、资产可用性矩阵（决定组合"能不能真跑"）
 
@@ -207,6 +208,7 @@
 | 2026-09-16 | 建文件：§一 槽位与实现（102 个核心组合）、§一.1 维度归类、§三 资产可用性矩阵、§四 实测状态、§五 阻塞项、§六 扩展位 |
 | 2026-09-16 | 新增装配级槽位 **`global_obstacle`**（`stvl`/`scan`/`none`，默认 `stvl` 行为不变）：全局代价地图的实时障碍来源可切换，用于 A/B 研究「谁来做 3D→2D」 |
 | 2026-09-16 | 新增 `docs/glossary.md`（术语表）并登记进 architecture/runbook 文档索引 |
-| 2026-09-16 | 新增 `docs/glossary.md`（术语表）并登记进 architecture/runbook 文档索引 |
 | 2026-09-16 | 修 `global_obstacle:=scan` 的量程隐患：global 的 scan 源 `obstacle/raytrace_max_range` 由照抄 local 的 6.0 改为 **10.0**（与 p2l `range_max` 对齐），否则全图 6 m 外的旧标记永不清除 → 幽灵障碍 |
 | 2026-09-16 | **决策：不按 2D/3D 物理重组目录**（维度与技术域正交：目录按域分、维度用文档标注）；后续算法情况一律在本文件更新 |
+| 2026-09-21 | 新增装配级槽位 **`local_obstacle`**（`scan`/`cloud`/`both`，默认 `scan` 行为不变）：局部代价地图可加第二路（点云直投，不经 `p2l`）→ 破 `p2l` 单点、消 45cm 盲区；组合数 672 → **1968**（含回退 2292） |
+| 2026-09-21 | 修**静默失效**：所有障碍源加 `expected_update_rate: 0.5`（原默认 0=不检查）→ 源停即 WARN + 拒绝算速度 + `velocity_timeout` 1s 停车；另修 `p2l` 的 `range_min: 0.45 → 0.2`（45cm 盲区会被反向清成 free）、`scan_time: 0.3333 → 0.1` |

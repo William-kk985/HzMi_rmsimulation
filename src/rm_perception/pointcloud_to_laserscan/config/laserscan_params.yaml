@@ -7,8 +7,13 @@
     angle_min: -3.14159   # -M_PI/2
     angle_max: 3.14159    # M_PI/2
     angle_increment: 0.0043   # M_PI/360.0
-    scan_time: 0.3333
-    range_min: 0.45
+    scan_time: 0.1            # 与仿真插件/MID360 的 10Hz 一致（p2l 内部 time_increment 恒为 0）
+    # ⚠️ range_min 决定"盲区"：小于它的点被**丢弃**（不是标为障碍），且该角度 bin 保持 inf、
+    # 下游 inf_is_valid=true 会把它当"10m 处有回波"→ 沿射线清成 free。
+    # 原 0.45 的理由是"避开 38cm 的地面最近点"，但 p2l 的输入已经是 linefit 去地面后的
+    # /segmentation/obstacle，这个理由不成立；0.45 会让贴身 45cm 内既看不见又被擦成空。
+    # 取 0.2：与车体半径(0.20)和 linefit 的 r_min 对齐 —— 盲区缩到车体内部（那里不可能有真障碍）。
+    range_min: 0.2
     range_max: 10.0
     use_inf: true
     inf_epsilon: 1.0
