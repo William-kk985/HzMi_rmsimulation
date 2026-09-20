@@ -580,23 +580,18 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping l
 
 ## 八、`docs/` 文档索引
 
-| 文档 | 内容 |
+> **完整索引见 [`docs/README.md`](README.md)**（唯一入口，含每份文档的状态与维护约定）。
+> 这里只留"最常用的三份"：
+
+| 你最可能想看的 | 文档 |
 |---|---|
-| `docs/architecture.md` | **本文件**：当前目录架构总览 |
-| `docs/glossary.md` | **术语表**：里程计/LIO/回环/子图/位姿图/ESDF/体素/2.5D/降维/代价语义/槽位… 一句话定义 + 指向详述章节 |
-| `docs/glossary.md` | **术语表**：里程计/LIO/回环/子图/位姿图/ESDF/体素/2.5D/降维/代价语义/槽位… 一句话定义 + 指向详述章节 |
-| `docs/3d_to_2d_survey.md` | **3D→2D 各家实现对照**：pointcloud_to_laserscan / nav2 obstacle+voxel / STVL / cartographer 2D / octomap 的降维机制与参数（带源码位置） |
-| `docs/algorithm_matrix.md` | **算法组合总表**：角色槽位 × 实现 × 资产可用性 × 实测状态 × 扩展位 |
-| `docs/issues_and_findings.md` | **问题与发现汇总**：实际踩到的故障（根因/修复/证据）、静默失效坑、地图坐标系与幽灵墙结论、待办清单 |
-| `docs/smoke_test_runbook.md` | **实跑验证手册**：各组合的原生 `ros2 launch` 指令、判据与错误对照 |
-| `docs/tf_interface_contract.md` | TF/接口契约设计与 T1–T6 改造记录 |
-| `docs/rm_bench_refactor_plan.md` | 实验台改造路线（M0–M4）、现状诊断、已知问题清单 |
-| `docs/params_ownership_checklist.md` | 参数归属清单（R1 逐项状态） |
-| `docs/rm_algorithm_catalog.md` | 2D/3D 建图·重定位算法候选池（含官方链接） |
-| `docs/rm_algorithm_overview.md` | 角色 × 一体性 × 两大场景 |
-| `docs/rm_algolab_plan.md` | 宏架构早期规划（历史草案） |
-| `docs/mapping/*` | 建图操作指南（cartographer 建图/存 pbstream） |
-| `docs/package/*` | 配置包分发说明 |
+| 怎么跑、怎么判、错了怎么查 | `docs/smoke_test_runbook.md` |
+| 现在有哪些算法/能不能跑（真值来源） | `docs/algorithm_matrix.md` |
+| 目录架构与分层概念（§3.2.1–3.2.7） | `docs/architecture.md`（本文件） |
+
+其余：`glossary.md`（术语）、`issues_and_findings.md`（坑与根因）、`3d_to_2d_survey.md`（降维对照）、
+`tf_interface_contract.md`（TF 契约）、`params_ownership_checklist.md`（参数归属）、
+`rm_algorithm_catalog.md`（选型池）、`mapping/`、`package/`（专题），历史草案见索引"状态"列。
 
 ---
 

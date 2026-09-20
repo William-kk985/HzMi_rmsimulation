@@ -1,5 +1,9 @@
 # 🎯 Cartographer .pbstream 生成指南
 
+> ⚠️ **需谨慎对待**：现行 pbstream 生成做法是「cartographer 建图 → `finish_trajectory` + `write_state`」
+> （runbook §5、`tools/scripts/mapping/generate_cartographer_pbstream.sh`）；本文的"由 png/yaml 转换"路线未经验证。
+
+
 ## 📋 目标
 
 将现有的 **RMUL2026.png + .yaml** 地图转换为 Cartographer 的 **.pbstream** 格式，用于另一个项目的纯定位功能。

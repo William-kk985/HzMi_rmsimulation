@@ -1,5 +1,9 @@
 # HzMi_rmsimulation 功能包 / 算法包规划
 
+> ⚠️ **历史草案（2026-08~09）**：宏架构早期规划，保留供回溯。**现行架构以 `docs/architecture.md` 为准**，
+> 算法现状以 `docs/algorithm_matrix.md` 为准。
+
+
 > 项目已由 `pb_rmsimulation` 更名为 `HzMi_rmsimulation`（文件夹/git 仓库名）。
 > ROS2 包名亦已由 `pb_rm_simulation` 更名为 `hzmi_rm_simulation`（遵循 ROS 包名仅小写+下划线的命名规范）。
 
