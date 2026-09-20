@@ -109,7 +109,10 @@
 同一个 0.1 m 矮台，local 会绕、global 视而不见（见 architecture §3.2.4 的一致性风险）。
 
 **改进方向（低成本 → 彻底）**：
-1. **阈值成对校准**并把"成对"写进注释（最小改动，先做这个）；
-2. **统一来源**：要么让 `local_costmap` 也吃 STVL/点云，要么让 `global_costmap` 退回 `/scan` —— 二选一，消除不一致；
+1. **阈值成对校准**并把"成对"写进注释；
+2. **统一来源 —— 已实现为可切换槽位**（2026-09）：`global_obstacle:=stvl|scan|none`，
+   默认 `stvl`（=方案 A，行为不变）；`scan` 即方案 C（global 与 local 同源，都吃 `/scan`，
+   "什么算障碍"只在 `p2l` 一处决策）；`none` 即方案 B。两个图层都写进 `plugins`、
+   只用 `enabled` 切换，因此**可以逐项 A/B**（甚至运行期 `ros2 param set ... enabled` 动态切换）；
 3. **彻底分层**：把"环境表示"（栅格 + 2.5D 高程/净空 + 体素）全部放在感知域产出，nav 侧只留一个薄图层插件消费它 ——
    这正是 `src/rm_perception/rm_elevation_map/` + `src/rm_navigation/rm_costmap_layers/` 的规划（architecture §3.2.7）。

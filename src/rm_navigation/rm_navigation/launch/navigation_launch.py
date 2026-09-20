@@ -57,10 +57,22 @@ def generate_launch_description():
     remappings = [('/tf', 'tf'),
                   ('/tf_static', 'tf_static')]
 
+    # 全局代价地图的"实时障碍来源"可切换（bench 槽位，默认 stvl = 保持原行为）：
+    #   stvl : 3D 体素层（STVL，吃 /segmentation/obstacle，带高度带与时间衰减）
+    #   scan : 2D 障碍层（吃 /scan，与 local_costmap 同源 → "什么算障碍"只在感知域 p2l 决策一处）
+    #   none : 只用 static + inflation（全局规划看不到实时障碍，靠局部兜底）
+    # 实现方式：两个图层都写进 plugins（都支持 enabled 动态开关），只用 enabled 切换 → 便于 A/B 研究。
+    obstacle_enabled = PythonExpression([
+        "'", LaunchConfiguration('global_obstacle'), "' == 'scan'"])
+    stvl_enabled = PythonExpression([
+        "'", LaunchConfiguration('global_obstacle'), "' == 'stvl'"])
+    gc = 'global_costmap.global_costmap.ros__parameters.'
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {
         'use_sim_time': use_sim_time,
-        'autostart': autostart}
+        'autostart': autostart,
+        gc + 'obstacle_layer.enabled': obstacle_enabled,
+        gc + 'stvl_layer.enabled': stvl_enabled}
 
     configured_params = RewrittenYaml(
             source_file=params_file,
@@ -80,6 +92,12 @@ def generate_launch_description():
         'use_sim_time',
         default_value='true',
         description='Use simulation (Gazebo) clock if true')
+
+    declare_global_obstacle_cmd = DeclareLaunchArgument(
+        'global_obstacle',
+        default_value='stvl',
+        description='全局代价地图实时障碍来源: stvl(3D体素,默认) | scan(2D /scan,与 local 同源) | none'
+    )
 
     declare_params_file_cmd = DeclareLaunchArgument(
         'params_file',
@@ -257,6 +275,7 @@ def generate_launch_description():
     # Declare the launch options
     ld.add_action(declare_namespace_cmd)
     ld.add_action(declare_use_sim_time_cmd)
+    ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_autostart_cmd)
     ld.add_action(declare_use_composition_cmd)

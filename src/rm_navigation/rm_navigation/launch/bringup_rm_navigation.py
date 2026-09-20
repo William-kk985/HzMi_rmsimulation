@@ -94,6 +94,12 @@ def generate_launch_description():
         'log_level', default_value='info',
         description='log level')
     
+    declare_global_obstacle_cmd = DeclareLaunchArgument(
+        'global_obstacle',
+        default_value='stvl',
+        description='全局代价地图实时障碍来源: stvl | scan | none（透传给 navigation_launch）'
+    )
+
     declare_nav_rviz_cmd = DeclareLaunchArgument(
         'nav_rviz',
         default_value='True',
@@ -121,6 +127,7 @@ def generate_launch_description():
                               'use_sim_time': use_sim_time,
                               'autostart': autostart,
                               'params_file': params_file,
+                              'global_obstacle': LaunchConfiguration('global_obstacle'),
                               'use_composition': use_composition,
                               'use_respawn': use_respawn,
                               'container_name': 'nav2_container'}.items()),
@@ -148,6 +155,7 @@ def generate_launch_description():
     ld.add_action(declare_use_composition_cmd)
     ld.add_action(declare_use_respawn_cmd)
     ld.add_action(declare_log_level_cmd)
+    ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_nav_rviz_cmd)
 
     # Add the actions to launch all of the navigation nodes

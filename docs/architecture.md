@@ -267,6 +267,8 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 - `global_costmap.stvl_layer` 吃的是 `/segmentation/obstacle`，高度带 **z∈[0.2, 2.0] m**；
 - 两者**准入门槛不同** → 一个 0.1 m 高的矮台：local 切片看得见（会绕），global 视而不见（会直接规划穿过去）。
   这类"不同消费者看到的世界不一样"是分别处理架构的固有代价，调参时要**成对校准高度带**。
+> **2026-09 起这个来源可切换**：`global_obstacle:=stvl`（默认，3D 体素层）/ `scan`（global 与 local 同源，
+> 都吃 `/scan`，"什么算障碍"只在感知域 `p2l` 决策一处，即消除上述不一致）/ `none`（只 static+inflation）。
 
 **什么时候该换成"统一世界模型"**：当消费者变多（导航 + 瞄准 + 决策 + 学习型模块）、或需要跨模块一致性保证时，
 应引入单一环境表示节点（2D costmap / 3D ESDF / 语义+可通行性图），所有下游只读这一份。

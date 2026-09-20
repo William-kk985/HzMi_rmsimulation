@@ -81,6 +81,7 @@ sleep 2
 | `mapper` | `slam_toolbox` / `cartographer`（`mapping` / `slam_nav` 生效） | `slam_toolbox` |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
 | `spin_speed` | 任意（rad/s） | `5.0` |
+| **`global_obstacle`** | `stvl`（3D 体素层）/ `scan`（2D，与 local 同源）/ `none` | `stvl` |
 
 ### 0.4 看哪块 RViz（别把两个都关掉）
 
@@ -504,6 +505,9 @@ ros2 run tf2_ros tf2_echo odom base_link                                     # L
 ros2 run tf2_ros tf2_echo map odom                                           # ★ 重定位模块输出
 ros2 topic echo /amcl_pose --once                                            # amcl 模式下：position 应≈初值
 ros2 topic info /scan --verbose                                              # 看订阅者与其 QoS（排查 incompatible QoS）
+# 全局障碍来源确认（global_obstacle 槽位，二选一生效）
+ros2 param get /global_costmap/global_costmap.stvl_layer.enabled              # stvl 模式应为 True
+ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # scan 模式应为 True
 ```
 
 ### 9.2 ⚠️ `map→odom` 依赖 `/scan`（源码级结论，实测确认）

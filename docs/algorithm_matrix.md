@@ -28,6 +28,7 @@
 | **局部规划器** | `nav` | `rpp` / `dwb` / `teb` | `nav2_regulated_pure_pursuit_controller` / `nav2_dwb_controller` / `teb_local_planner`（+ `costmap_converter`） | `nav` / `slam_nav` |
 | **全局规划器** | —（固定） | `NavfnPlanner` | `nav2_navfn_planner` | 同上 |
 | **场地** | `world` | `RMUC` / `RMUL` / `RMUL2026` | `hzmi_rm_simulation` 世界 + `map/<world>.*` + `PCD/<world>.pcd` | 全形态 |
+| **全局障碍来源** | `global_obstacle` | `stvl`（3D 体素层，默认）/ `scan`（2D `/scan`，与 local 同源）/ `none`（只 static+inflation） | `nav` / `slam_nav` |
 | **小陀螺** | `spin_speed` | `5.0`（哨兵语义）/ `0.0`（角速度直通，排查用） | `fake_vel_transform` | 全形态 |
 | 可视化 | `lio_rviz` / `nav_rviz` | True/False | `fastlio.rviz` / `pointlio.rviz` / `nav2.rviz` | 全形态 |
 
@@ -82,7 +83,7 @@
 | `rm_simulation/livox_laser_simulation_RO2` | 仿真 | **3D 传感器** | 3D 雷达仿真 | 出 CustomMsg + PointCloud2 |
 | `rm_simulation/hzmi_rm_simulation` | 仿真 | **3D 世界** | 世界/URDF/机器人 | — |
 | `rm_driver/livox_ros_driver2` | 驱动 | **3D 传感器** | 真机 3D 雷达 | — |
-| （第三方 apt）`spatio_temporal_voxel_layer` | 导航 | **2.5D** | 3D 体素 → 2D 代价投影 | 唯一现成的 2.5D 环节 |
+| （第三方 apt）`spatio_temporal_voxel_layer` | 导航 | **2.5D** | 3D 体素 → 2D 代价投影 | 现成的 2.5D 环节；**已做成可切换槽位**：`global_obstacle:=stvl`(默认) / `scan` / `none` |
 | **（空缺）** | 感知 | **2.5D** | 高程/坡度/净空图 | 待建 `src/rm_perception/rm_elevation_map/` |
 | **（空缺）** | 导航 | **2.5D** | 把高程/净空变成代价 | 待建 `src/rm_navigation/rm_costmap_layers/` |
 | `tools/pcd_to_grid_map.py` | 工具 | **3D→2D（离线）** | 点云切层投影成栅格 | — |
@@ -191,4 +192,5 @@
 | 日期 | 变更 |
 |---|---|
 | 2026-09-16 | 建文件：§一 槽位与实现（102 个核心组合）、§一.1 维度归类、§三 资产可用性矩阵、§四 实测状态、§五 阻塞项、§六 扩展位 |
+| 2026-09-16 | 新增装配级槽位 **`global_obstacle`**（`stvl`/`scan`/`none`，默认 `stvl` 行为不变）：全局代价地图的实时障碍来源可切换，用于 A/B 研究「谁来做 3D→2D」 |
 | 2026-09-16 | **决策：不按 2D/3D 物理重组目录**（维度与技术域正交：目录按域分、维度用文档标注）；后续算法情况一律在本文件更新 |

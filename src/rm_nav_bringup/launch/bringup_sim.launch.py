@@ -141,6 +141,14 @@ def generate_launch_description():
         description='Choose local planner variant: rpp | dwb | teb '
                     '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml)')
 
+    declare_global_obstacle_cmd = DeclareLaunchArgument(
+        'global_obstacle',
+        default_value='stvl',
+        description='全局代价地图实时障碍来源（bench 可切换槽位）: '
+                    'stvl = 3D 体素层(STVL，吃 /segmentation/obstacle，默认保持原行为) | '
+                    'scan = 2D 障碍层(吃 /scan，与 local_costmap 同源，把"什么算障碍"收敛到感知域 p2l 一处) | '
+                    'none = 只用 static+inflation（全局看不到实时障碍）')
+
     declare_mapper_cmd = DeclareLaunchArgument(
         'mapper',
         default_value='slam_toolbox',
@@ -425,6 +433,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'map': empty_map_dir,
             'params_file': nav2_params_file_dir,
+            'global_obstacle': LaunchConfiguration('global_obstacle'),
             'nav_rviz': use_nav_rviz}.items()
     )
 
@@ -444,6 +453,7 @@ def generate_launch_description():
     ld.add_action(declare_LIO_cmd)
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_mapper_cmd)
+    ld.add_action(declare_global_obstacle_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)

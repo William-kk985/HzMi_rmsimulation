@@ -213,9 +213,29 @@ global_costmap:
       robot_radius: 0.2
       resolution: 0.04
       track_unknown_space: true
-      plugins: ["static_layer", "stvl_layer", "inflation_layer"]
+      # 实时障碍来源二选一（由 launch 的 global_obstacle 参数切 enabled，默认 stvl 保持原行为）：
+      #   stvl_layer     = 3D 体素层（吃 /segmentation/obstacle，高度带 0.2~2.0，带时间衰减）
+      #   obstacle_layer = 2D /scan 障碍层（与 local_costmap 同源 → "什么算障碍"只在感知域 p2l 决策一处）
+      plugins: ["static_layer", "obstacle_layer", "stvl_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: false                      # 默认关（launch 按 global_obstacle 覆盖）
+        observation_sources: scan
+        scan:
+          topic: /scan
+          reliability_policy: "best_effort" # 与 p2l 的 best-effort 发布匹配
+          qos_policy: "best_effort"
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          inf_is_valid: true
+          obstacle_max_range: 6.0
+          raytrace_max_range: 6.0
+          obstacle_min_range: 0.1
+          max_obstacle_height: 2.0
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true                       # 默认开（launch 按 global_obstacle 覆盖）
         # https://github.com/SteveMacenski/spatio_temporal_voxel_layer
         enabled:                  true
         voxel_decay:              0.5                               # 如果是线性衰减，单位为秒；如果是指数衰减，则为 e 的 n 次方
