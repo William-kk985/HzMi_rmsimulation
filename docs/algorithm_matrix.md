@@ -95,6 +95,32 @@
 - **跨维度桥只有三处**：`pointcloud_to_laserscan`（在线 3D→2D）、STVL（3D 体素→2D 代价）、`tools/pcd_to_grid_map.py`（离线 3D→2D）——**"降维发生在哪"就查这三处**；
 - **2.5D 是空缺**：只有 STVL 的体素层算"半个"，高程/坡度/净空图还没有（落位见 architecture §3.2.7）。
 
+## 一.2 为什么 `localization` 只在 `nav` 生效、`mapper` 只在 `mapping|slam_nav` 生效
+
+**先分清两个词**：
+- **定位（localization）** = "我现在在哪" → 输出 `map→odom`。**三种形态都需要**；
+- **重定位（relocalization）** = "在**已有的先验地图**里找回我的位置" → 是定位的一种**特殊场景**（有先验图）。
+  `mapping` / `slam_nav` 里没有（或不需要）先验图，所以**不需要重定位模块** —— 它们的定位由**在线 SLAM 自己**提供。
+
+所以三个角色在三种形态下的"在岗情况"是：
+
+| | 谁提供 `odom→base_link` | **谁提供 `map→odom`（全局对齐）** | 地图资产从哪来 |
+|---|---|---|---|
+| `mapping` 纯建图 | LIO | **在线 mapper**（slam_toolbox/cartographer） | 正在实时产出 |
+| `slam_nav` 边建边导 | LIO | **在线 mapper**（同上） | 实时产出、边造边用 |
+| `nav` 先建后导 | LIO | **`localization` 槽位**（amcl/slamTB-loc/icp） | 磁盘（先前建好） |
+
+**于是两条"生效条件"的动机就清楚了**：
+
+1. **`map→odom` 同一时刻只能有一个发布者**（TF 单父边）。在线 mapper 和重定位模块**都会发** `map→odom`，
+   并行就会分叉 → 所以必须由 `mode` 决定"这一形态里归谁"；
+2. **`/map` 同一时刻也只能有一个发布者**。在线 mapper 发 `/map`（建图产物），`map_server` 发 `/map`（先验图），
+   并行就会抢话题（这正是 2026-09 修掉的那个坑）→ 所以 `mapping/slam_nav` 不起 `map_server`、`nav` 才起。
+
+> 结论：**不是"另外两个形态不需要定位"，而是"那里的全局对齐已经由在线 SLAM 承担了"。**
+> 若确实想在建图时也用先验图，正确做法是**序列化**（先 ICP/AMCL 引导一次 → 停发 TF → 交给 SLAM），
+> 而不是让两个模块并行（见 architecture §3.2.7 与"ICP+AMCL handover"讨论）。
+
 ## 二、组合数量（核心组合 = 102）
 
 | 形态 | 组合数 | 算式 |
