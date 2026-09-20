@@ -16,8 +16,9 @@
 | **扫描匹配（scan matching）** | 把当前扫描与已有地图对齐求位姿；相关匹配（correlative，粗）+ 优化匹配（Ceres，精） | — |
 | **分支定界（branch-and-bound）** | Cartographer 找回环的搜索法：在多层分辨率上剪枝，兼顾速度与完备性 | — |
 | **回环（loop closure）** | 识别"我来过这里"并加约束，用于消除累积误差。**没有回环 = 地图会缓慢弯折、闭环处双墙** | `issues_and_findings.md` §10.1 |
+| **优化粒度（optimization granularity）** | 后端优化作用在什么单元上：逐帧（scan node）还是**分块（submap）**。粒度越粗，优化后更新地图越便宜（只挪块），但块内误差越修不了；粒度越细，地图更新越贵 | `glossary.md` 子图条 |
 | **位姿图（pose graph）** | 节点=历史位姿、边=相对约束（含回环）；优化它就能全局修正地图。slam_toolbox 的 `.posegraph` 就是它 | — |
-| **子图（submap）** | Cartographer 的地图基本拼块：一小块局部占据栅格，由 N 帧累积后**冻结**；位姿图负责把它们拼成整张图 | 见上文问答；`rm_algorithm_catalog.md` §〇.0 |
+| **子图（submap）** | Cartographer 的地图基本拼块：一小块局部占据栅格，由 N 帧累积后**冻结**（块内位姿不再变）。**它的核心价值是"优化粒度"，不是省内存**：① 扫描匹配只需在活跃子图（2~3 块）上做 → 算力与地图大小无关；② 回环优化后只需把整块**刚性平移/旋转**，不必重绘栅格 → 全局修正传播廉价。顺带带来 trim（丢弃旧块）/ 增量加载 / 纯定位只留 N 块的能力。代价：块内一旦冻结，块内局部误差就修不了（`num_range_data` 是粒度权衡旋钮） | 见上文问答；`rm_algorithm_catalog.md` §〇.0 |
 | **重定位（relocalization）** | 在**已有先验地图**里找回自己的位姿 → 输出 `map→odom`。与"里程计"是两层 | `architecture.md` §3.2.1 |
 | **全局定位 / kidnapped robot** | 完全不知道初始位姿时找回位置；AMCL 用全域撒粒子，3D 需**全局描述子检索**（Scan Context 等）后再 ICP 精配准 | `architecture.md` §3.2.6 |
 | **漂移（drift）** | 误差随距离/时间**累积**的系统性偏移；与"随机抖动"是两回事 | `smoke_test_runbook.md` §10.1 |
