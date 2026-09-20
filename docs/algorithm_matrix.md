@@ -122,18 +122,18 @@
 > 若确实想在建图时也用先验图，正确做法是**序列化**（先 ICP/AMCL 引导一次 → 停发 TF → 交给 SLAM），
 > 而不是让两个模块并行（见 architecture §3.2.7 与"ICP+AMCL handover"讨论）。
 
-## 二、组合数量（核心组合 = 102）
+## 二、组合数量（核心组合 = 120）
 
 | 形态 | 组合数 | 算式 |
 |---|---|---|
 | `mapping` | **12** | 3 场地 × 2 LIO × 2 mapper |
 | `slam_nav` | **36** | 3 × 2 × 2 × 3 局部规划器 |
-| `nav` | **54** | 3 × 2 × 3 重定位 × 3 局部规划器 |
-| **合计** | **102** | 不含 `spin_speed`/`*_rviz` 等开关（加上会 ×8，但它们不是算法） |
+| `nav` | **72** | 3 × 2 × **4 重定位**(amcl/slamTB/icp/cartographer) × 3 局部规划器 |
+| **合计** | **120** | 不含 `spin_speed`/`global_obstacle`/`*_rviz` 等开关 |
 
 另有特殊用法：`lio:=none`（需外部 odom/TF，例如轮式里程计或纯 2D 组合）、`mode:=nav localization:=''`（LIO 当绝对定位的静态桥回退用法）。
 
-**加上"回退用法"（`mode:=nav` 且 `localization` 留空）**：nav 变为 3×2×**4**×3 = 72 → 核心合计 **120**。
+**加上"回退用法"（`mode:=nav` 且 `localization` 留空）**：nav 变为 3×2×**5**×3 = 90 → 合计 **138**。
 
 **两个"装配级开关"会成倍影响行为，A/B 时一次只动一个（注意各自生效范围不同）**：
 
@@ -141,10 +141,10 @@
 |---|---|---|---|---|
 | `mapping` | 12 | ✅ 生效 | ❌ 不起 nav2，不适用 | **24** |
 | `slam_nav` | 36 | ✅ | ✅ | **216** |
-| `nav` | 54 | ✅ | ✅ | **324** |
-| **合计** | **102** | | | **564** |
+| `nav` | 72 | ✅ | ✅ | **432** |
+| **合计** | **120** | | | **672** |
 
-（若把 `localization:=''` 回退用法计入，nav 变 72 → 合计 **672**；`*_rviz` 属纯可视化开关，不计入。）
+（若把 `localization:=''` 回退用法计入，nav 变 90 → 合计 **780**；`*_rviz` 属纯可视化开关，不计入。）
 
 ## 三、资产可用性矩阵（决定组合"能不能真跑"）
 
@@ -153,7 +153,7 @@
 | `map/<w>.pgm` + `.yaml` | ✅ 577×301 | ✅ 272×210 | ⚠️ 240×169（**含幽灵墙**，见 §五） | `localization:=amcl`（经 `map_server`） |
 | `map/<w>.posegraph` | ✅ 13.7 MB | ✅ 13.8 MB | ❌ **缺** | `localization:=slam_toolbox` |
 | `PCD/<w>.pcd` | ✅ 18 MB | ✅ 50 MB | ❌ **缺**（可用 `/map_save` 现场生成） | `localization:=icp` |
-| `map/<w>.pbstream` | ❌ 缺 | ❌ 缺 | ⚠️ **526 B 空壳** | cartographer 纯定位 |
+| `map/<w>.pbstream` | ❌ 缺 | ❌ 缺 | ⚠️ 526 B 空壳（旧的失败产物） | cartographer 纯定位（`localization:=cartographer`） |
 | `map/<w>.data` | ✅ 8.5 MB | ✅ 4.2 MB | ❌ | 当前流程**未使用**（遗留资产） |
 
 **推论（当前的"硬约束"）**：
@@ -183,7 +183,7 @@
 |---|---|---|
 | **RMUL2026.pgm 幽灵墙**（x≈5.2 的 1 像素虚线，世界网格该处零顶点） | 该场地**任何** nav 组合发目标都会规划失败（地图被切成 3 块） | 在 sim 里重建 RMUL2026 图（pgm+posegraph+pcd 三件套），并把 `amcl_init_x/y` 改回 `0.0` |
 | **RMUL2026 缺 posegraph / pcd** | `localization:=slam_toolbox` / `icp` 在该场地不可用 | 同上，重建时一并落盘 |
-| **无可用 pbstream** | cartographer 纯定位不可用 | 用 `generate_cartographer_pbstream.sh` 生成 |
+| **无可用 pbstream** | `localization:=cartographer` 起不来 | **cartographer 建图的对接 bug 已修**（输入改 `/scan`、帧契约、高度带），现在可 `mode:=mapping mapper:=cartographer` 建图后 `finish_trajectory`+`write_state` 生成 |
 | RMUL 世界加载慢（44 万面） | 组合在 RMUL 上启动易失败 | 等 30~60 s；按话题逐段排查 |
 
 ## 六、下一步要加的槽位（扩展位）

@@ -76,6 +76,9 @@ def generate_launch_description():
         LaunchConfiguration('world'), "']"])
     ################################### navigation2 parameters end ####################################
 
+    # cartographer 纯定位的资产：map/<world>.pbstream（由 cartsographer 建图 + write_state 生成）
+    carto_pbstream_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world]), ".pbstream"
+
     ################################ icp_registration parameters start ################################
     icp_pcd_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'PCD', world]), ".pcd"
     # FAST-LIO 的 pcd 落盘路径（/map_save 服务写入），与 ICP 的底图同一路径 → 建图产物直接可被复用
@@ -127,7 +130,8 @@ def generate_launch_description():
         'localization',
         default_value='',
         description='仅 mode:=nav 生效。重定位模块: amcl | slam_toolbox（需 .posegraph）| '
-                    'icp（需 PCD/<world>.pcd）；留空 = 回退用法，直接用 LIO 当绝对定位並由静态桥补帧')
+                    'icp（需 PCD/<world>.pcd）| cartographer（纯定位，需 map/<world>.pbstream）；'
+                    '留空 = 回退用法，直接用 LIO 当绝对定位并由静态桥补帧')
 
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
@@ -275,6 +279,20 @@ def generate_launch_description():
                     'initial_pose_y': amcl_init_y,
                     'initial_pose_z': '0.0',
                     'initial_pose_yaw': '0.0'}.items()
+            ),
+
+            # localization:=cartographer —— 纯定位（加载 .pbstream，frozen state）
+            # 与本工程契约一致：只发 map→odom（lua 里 published_frame="odom" + provide_odom_frame=false），
+            # odom→base_link 仍由 LIO 提供。栅格发到 /cartographer_map，把 /map 让给 map_server 的先验图，
+            # 避免 /map 双发布者（map_server 的启动条件见下面那段 Include）。
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
+                condition = LaunchConfigurationEquals('localization', 'cartographer'),
+                launch_arguments = {
+                    'configuration_basename': 'cartographer_localization.lua',
+                    'load_state_filename': carto_pbstream_dir,
+                    'load_frozen_state': 'true',
+                    'occupancy_grid_topic': '/cartographer_map'}.items()
             ),
 
             TimerAction(

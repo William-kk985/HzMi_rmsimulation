@@ -79,7 +79,7 @@ sleep 2
 | `world` | `RMUC` / `RMUL` / `RMUL2026` | `RMUL2026` |
 | `mode` | **`mapping`（纯建图）/ `slam_nav`（边建边导）/ `nav`（先建后导）** | 空（**必填**） |
 | `lio` | `fastlio` / `pointlio` / `none` | `fastlio` |
-| `localization` | `amcl` / `slam_toolbox` / `icp`（**仅 `mode:=nav`** 生效） | 空 |
+| `localization` | `amcl` / `slam_toolbox` / `icp` / `cartographer`（**仅 `mode:=nav`** 生效） | 空 |
 | `nav` | `rpp` / `dwb` / `teb`（`nav` / `slam_nav` 生效） | `rpp` |
 | `mapper` | `slam_toolbox` / `cartographer`（`mapping` / `slam_nav` 生效） | `slam_toolbox` |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
@@ -226,7 +226,7 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 | `world` | `RMUC` / `RMUL` / `RMUL2026` | `RMUL2026` | 场地；同时决定 `map/<world>.*` 与 `PCD/<world>.pcd` 前缀 |
 | `mode` | `mapping` / `slam_nav` / `nav` | 空（**必填**） | 场景形态，决定启动哪套节点集（§0.7） |
 | `lio` | `fastlio` / `pointlio` / `none` | `fastlio` | 里程计实现；`none` 需外部提供 odom/TF |
-| `localization` | `amcl` / `slam_toolbox` / `icp` / 空 | 空 | **仅 `mode:=nav` 生效**；空 = 回退用法（LIO 当绝对定位 + 静态桥） |
+| `localization` | `amcl` / `slam_toolbox` / `icp` / `cartographer` / 空 | 空 | **仅 `mode:=nav` 生效**；空 = 回退用法（LIO 当绝对定位 + 静态桥） |
 | `mapper` | `slam_toolbox` / `cartographer` | `slam_toolbox` | 在线 2D 建图后端；`mapping`/`slam_nav` 生效 |
 | `nav` | `rpp` / `dwb` / `teb` | `rpp` | 局部规划器变体；`nav`/`slam_nav` 生效 |
 | **`global_obstacle`** | `stvl` / `scan` / `none` | `stvl` | 全局代价地图的实时障碍来源（A/B 槽位，见 `docs/3d_to_2d_survey.md` §六） |
@@ -249,7 +249,7 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 | §3 nav+ICP | **`PCD/<world>.pcd`**（仅 RMUC/RMUL） | `mode:=nav localization:=icp` | `map→odom` 由 `icp_registration`（T5） |
 | §4 nav+slam_toolbox | **`.posegraph`**（仅 RMUC/RMUL） | `mode:=nav localization:=slam_toolbox` | `map→odom` 由 slam_toolbox；无 map_server/amcl |
 | §5 cartographer 建图 | 无 | `mode:=mapping mapper:=cartographer` | `/map` 1 个发布者（cartographer occupancy_grid） |
-| §6 cartographer 纯定位 | **`.pbstream`（三个场地都缺，需自建）** | 见 §6 | 加载状态成功、`map→odom` 由 cartographer |
+| §6 cartographer 纯定位 | **`.pbstream`（三个场地都缺，需先用 §5 生成）** | `localization:=cartographer`（一键） | 加载状态成功、`map→odom` 由 cartographer、`/map` 仍是 map_server 的先验图 |
 | §7 局部规划变体 | 同 §2 | `nav:=rpp\|dwb\|teb` | 三个都 active 且能发目标 |
 
 > 资产盘点与"哪些组合真能跑"以 `docs/algorithm_matrix.md` §三/§四 为准。
@@ -472,21 +472,35 @@ ros2 service call /write_assets cartographer_ros_msgs/srv/WriteAssets "{stem: '/
 
 ---
 
-## 6. 场景六：cartographer 纯定位（显式加载 pbstream）
+## 6. 场景六：cartographer 纯定位（`localization:=cartographer`，2026-09 接入槽位）
 
-**终端 A**
+**资产前提**：需要 `map/<world>.pbstream`。先用**场景五**跑一次 cartographer 建图并 `finish_trajectory` +
+`write_state` 生成（三个场地目前都还没有）。
+
+**终端 A（一键，与 amcl/slam_toolbox/icp 同构）**
 ```bash
-ros2 launch rm_nav_bringup cartographer_sim.launch.py \
-  configuration_basename:=cartographer_localization.lua \
-  load_state_filename:=$HOME/HzMi_rmsimulation/src/rm_nav_bringup/map/RMUL.pbstream \
-  load_frozen_state:=true
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  use_sim_time:=True lio_rviz:=False nav_rviz:=True \
+  world:=RMUL2026 mode:=nav lio:=fastlio localization:=cartographer nav:=rpp spin_speed:=0.0
 ```
+接线（槽位实现细节）：
+- cartographer 加载 `map/<world>.pbstream`（`load_frozen_state:=true`）→ **只发 `map→odom`**（契约与 amcl/icp 一致）；
+- `odom→base_link` 仍由 LIO 提供；
+- 它的栅格发到 **`/cartographer_map`**，`/map` 留给 `map_server` 的先验栅格图（避免双发布者）；
+- 纯定位默认以 `map` 原点为起始猜测 —— 本工程的图是**出生点系**，起点即原点，天然吻合。
 
 **终端 B**
 ```bash
-ros2 run tf2_ros tf2_echo map odom
-ros2 topic echo /cartographer_map --once
+ros2 node list | grep cartographer                    # cartographer_node + occupancy_grid_node
+ros2 run tf2_ros tf2_echo map odom                    # 由 cartographer 提供
+ros2 topic echo /map --once --field info              # 先验栅格图（map_server，宽高=场地尺寸）
+ros2 topic echo /cartographer_map --once --field info # cartographer 自己的栅格（可视/对比用）
+ros2 lifecycle get /controller_server                 # active
 ```
+
+> 若想脱离 bringup 单独调试 cartographer，可仍用
+> `ros2 launch rm_nav_bringup cartographer_sim.launch.py configuration_basename:=cartographer_localization.lua load_state_filename:=<abs>.pbstream load_frozen_state:=true`
+> （但那样没有仿真/LIO/nav2，仅适合看 cartographer 自身日志）。
 
 > ⚠️ **资产前提（当前阻塞）**：三个场地**都没有可用的 pbstream** —— RMUL/RMUC 没有该文件，
 > `RMUL2026.pbstream` 仅 526 B（空壳）。**本场景必须先自己生成**：
@@ -642,7 +656,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | 检查 | 正常表现 |
 |---|---|
 | `tf2_echo odom base_link` | 持续输出、随车移动，无 `Invalid frame ID` |
-| `tf2_echo map odom`（nav 模式） | 由所选重定位模块提供（amcl / slam_toolbox / icp）；**前提见 9.2** |
+| `tf2_echo map odom`（nav 模式） | 由所选重定位模块提供（amcl / slam_toolbox / icp / cartographer）；**前提见 9.2** |
 | `topic hz /odom` | fastlio ≈10Hz；pointlio 更高（数十~100Hz） |
 | `view_frames` | 主链 `map→odom→base_link→base_link_fake→…`、`base_link→livox_frame…`；`camera_init→body` 为孤岛（正常） |
 | `lifecycle get /controller_server` | `active` |
@@ -666,7 +680,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | Nav2 在 `odom`/`map` 出现前就激活，刷 `Timed out waiting for transform ...` | Gazebo 生成机器人 + LIO 初始化需要数秒，而 Nav2 立即启动 | **已于 2026-09 缓解**：`bringup_sim` 中定位链延后 **4s**、mapping 后端延后 **4s**、Nav2 延后 **10s** 启动 |
 | `spawn_entity: Spawn status: ... timed out waiting for entity to appear` | RMUL2026 世界加载慢，spawn 默认超时过短（实体其实已生成） | **已于 2026-09 修复**：spawn 参数加 `-timeout 60.0` |
 | `spawn_entity: Spawn service failed. Exiting.` + 随后 `local_costmap: ... "odom" ... frame does not exist` 一直刷、Nav2 永不激活 | `spawn_entity` 放弃后**机器人其实晚了 3~5 秒才被插入**（gzserver 仍会打印 `mecanum_controller: Subscribed to [/cmd_vel_chassis]`、`LivoxPointsPlugin: ros topic name: /livox/lidar`）。而 Nav2 在 `odom` 帧出现前激活不了；若在此期间 LIO 还没吐 `/odom`，就一直是这个循环。**RMUL 场地网格 44 万三角面（RMUL2026 仅 3187），加载明显更慢** | 不要 20 秒就下结论：**给 30~60 秒**再判断。用 `ros2 topic hz /livox/lidar`（CustomMsg 10Hz）→ `/livox/imu`（100Hz）→ `/imu/data`（互补滤波输出 100Hz，FAST-LIO 的 `imu_topic`）→ `/odom`（≈10Hz）**逐段定位**；`/odom` 一出，`odom` 帧即有、local_costmap 立即恢复、Nav2 自行激活。若 `/livox/lidar` 有数据而 `/odom` 始终没有 → 换 `lio:=pointlio` 做 A/B（它用原始 `/livox/imu`）以区分是雷达侧还是 FAST-LIO+互补滤波支路 |
-| `Timed out waiting for transform from base_link to map` | `map→odom` 缺失 | nav 模式必须指定 `localization:=amcl\|slam_toolbox\|icp` |
+| `Timed out waiting for transform from base_link to map` | `map→odom` 缺失 | nav 模式必须指定 `localization:=amcl\|slam_toolbox\|icp\|cartographer` |
 | `Invalid frame ID "base_link"` / fake_vel 报 `Could not transform odom to base_link` | `/odom` 无数据 → LIO 或 `lio_tf_adapter` 未启动 | 查终端 A 是否打印 `lio_tf_adapter 启动` |
 | `Found two parents` / 帧树分叉 | 旧进程残留 | 执行 §0.2 清理后重跑 |
 | `nav:=teb` 插件找不到 | 未 source 工作区 | `source install/setup.bash`（teb 已编译） |
