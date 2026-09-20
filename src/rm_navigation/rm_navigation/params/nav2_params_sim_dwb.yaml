@@ -229,8 +229,11 @@ global_costmap:
           clearing: true
           marking: true
           inf_is_valid: true
-          obstacle_max_range: 6.0
-          raytrace_max_range: 6.0
+          # ⚠️ 不能照抄 local 的 6.0：global 是**全图**（RMUL 13×10 m），
+          # raytrace 只能清 raytrace_max_range 以内的旧标记 → 范围太小会累积"幽灵障碍"。
+          # 这里与 p2l 的 range_max 对齐（10 m），即"扫描能看到多远就能清多远"。
+          obstacle_max_range: 10.0
+          raytrace_max_range: 10.0
           obstacle_min_range: 0.1
           max_obstacle_height: 2.0
       stvl_layer:
