@@ -1,7 +1,10 @@
 # 仿真运行验证手册（Smoke Test Runbook）
 
 > 用途：用**原生 `ros2 launch` 指令**逐场景验证仿真链路（含 T1–T5 TF/话题契约改造后的效果）。
-> 配套文档：`docs/architecture.md`（目录架构）、`docs/tf_interface_contract.md`（TF/接口契约设计）、`docs/params_ownership_checklist.md`（参数归属）。
+> 配套文档：`docs/algorithm_matrix.md`（**算法现状唯一真值来源**：槽位/资产/实测状态）、
+> `docs/architecture.md`（目录架构与概念 §3.2.x）、`docs/issues_and_findings.md`（坑与根因汇总）、
+> `docs/3d_to_2d_survey.md`（3D→2D 各家实现对照）、`docs/tf_interface_contract.md`（TF 契约）、
+> `docs/params_ownership_checklist.md`（参数归属）。
 > 说明：本文不使用任何封装脚本，全部为可直接复制的原生命令。
 
 ---
@@ -186,6 +189,48 @@ nav2 全局规划把「障碍 + `robot_radius` 内切膨胀带」视为不可通
 2. `nav + amcl` @ RMUL2026 发目标（§2 + §0.6 选点）；
 3. `nav + slam_toolbox` @ RMUL（§4）与 `nav + icp` @ RMUL（§3）；
 4. `slam_nav` 边建边导（§1.2）；5. cartographer 建图/纯定位（§5/§6，纯定位需先生成 pbstream）；6. `nav:=dwb|teb`（§7）。
+
+---
+
+### 0.9 5 分钟上手（TL;DR）
+
+```bash
+# 0) 环境 + 清理（见 §0.1 / §0.2）
+cd ~/HzMi_rmsimulation && source /opt/ros/humble/setup.bash && source install/setup.bash
+pkill -f gzserver; pkill -f gzclient; pkill -f rviz2; pkill -f component_container; sleep 2
+
+# 1) 起仿真（资产最全、最稳的组合：先建后导 + AMCL）
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  use_sim_time:=True lio_rviz:=False nav_rviz:=True \
+  world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=rpp spin_speed:=0.0
+
+# 2) 等 30~60 s（RMUL 世界重），另开终端跑就绪检查（§9.1 是完整版）
+ros2 lifecycle get /controller_server      # 期望 active
+ros2 run tf2_ros tf2_echo map odom         # 有输出（≈AMCL 初值）
+ros2 topic hz /scan                        # 有稳定频率
+
+# 3) 先验可达性再发目标（§0.6，别靠眼估）
+/usr/bin/python3 tools/check_map_reachable.py --map src/rm_nav_bringup/map/RMUL.yaml --start 0 0 --goal 1.68 3.44
+ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
+"{pose: {header: {frame_id: map}, pose: {position: {x: 1.68, y: 3.44, z: 0.0}, orientation: {w: 1.0}}}}" --feedback
+```
+**判据**：`/cmd_vel` 出现**正向** `linear.x`、Gazebo 里车在动、RViz 里 scan 与地图墙体重合。
+**不通时**：先按 §10.1「现象 → 归属」分类，再查 §10 具体行。
+
+### 0.10 场景 × 资产前提 × 命令（总览）
+
+| 场景 | **必需资产** | 命令要点 | 关键判据 |
+|---|---|---|---|
+| §1 纯建图 | 无（从零） | `mode:=mapping mapper:=slam_toolbox\|cartographer` | `/map` 只有 1 个发布者且边长；落盘见 §1.1 |
+| §1.2 边建图边导航 | 无 | `mode:=slam_nav mapper:=...` | `node list` **无** amcl/map_server；`map→odom` 由在线 SLAM |
+| §2 nav+AMCL | `.pgm`+`.yaml` | `mode:=nav localization:=amcl` | `map→odom` 由 amcl；`/amcl_pose`≈注入初值 |
+| §3 nav+ICP | **`PCD/<world>.pcd`**（仅 RMUC/RMUL） | `mode:=nav localization:=icp` | `map→odom` 由 `icp_registration`（T5） |
+| §4 nav+slam_toolbox | **`.posegraph`**（仅 RMUC/RMUL） | `mode:=nav localization:=slam_toolbox` | `map→odom` 由 slam_toolbox；无 map_server/amcl |
+| §5 cartographer 建图 | 无 | `mode:=mapping mapper:=cartographer` | `/map` 1 个发布者（cartographer occupancy_grid） |
+| §6 cartographer 纯定位 | **`.pbstream`（三个场地都缺，需自建）** | 见 §6 | 加载状态成功、`map→odom` 由 cartographer |
+| §7 局部规划变体 | 同 §2 | `nav:=rpp\|dwb\|teb` | 三个都 active 且能发目标 |
+
+> 资产盘点与"哪些组合真能跑"以 `docs/algorithm_matrix.md` §三/§四 为准。
 
 ---
 
@@ -418,19 +463,24 @@ ros2 topic echo /cartographer_map --once
 ## 7. 局部规划器变体（RPP / DWB / TEB）
 
 ```bash
-# RPP（默认）
-ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=rpp
-# DWB
-ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=dwb
-# TEB
-ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=teb
+# 统一加 spin_speed:=0.0（先把小陀螺关掉，只比控制器本身，见 §0.4.1）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=rpp spin_speed:=0.0
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=dwb spin_speed:=0.0
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio localization:=amcl nav:=teb spin_speed:=0.0
+# 想对比"全局障碍来源"再叠加：global_obstacle:=stvl（默认）/ scan / none
 ```
 
 > 变体文件位置：`src/rm_navigation/rm_navigation/params/nav2_params_sim_{rpp,dwb,teb}.yaml`。
+> **比较控制器时要固定其他维度**（同一场地/同一 LIO/同一重定位/同一 `spin_speed`/同一目标点），
+> 否则比出来的差异不归控制器。
 
 ---
 
 ## 8. 全矩阵指令
+
+> 下面矩阵是**核心维度**（场地 × LIO × 重定位/建图后端 × 局部规划器）。另外两个装配级开关会成倍影响行为，
+> A/B 时**一次只动一个**：`spin_speed`（5.0 哨兵小陀螺 / 0.0 直通，见 §0.4.1）、
+> `global_obstacle`（stvl / scan / none，见 §0.7 与 `docs/3d_to_2d_survey.md` §六）。
 
 ### 8.1 mapping（3 场地 × 2 LIO）
 ```bash
@@ -536,6 +586,9 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | `view_frames` | 主链 `map→odom→base_link→base_link_fake→…`、`base_link→livox_frame…`；`camera_init→body` 为孤岛（正常） |
 | `lifecycle get /controller_server` | `active` |
 | `/map` 的 `info` | 宽高 = 对应场地的 pgm 尺寸（map_server 加载**磁盘上的既有地图**，不是实时扫描结果） |
+| `tools/check_map_reachable.py` | 选目标点前跑：能判"起点/目标是否同一连通域"、推荐可达点、也能当**幽灵墙检测器**（连通域被切成多块=异常） |
+| `tools/pcd_to_grid_map.py` | 离线把 LIO 的 `.pcd` 投成 `.pgm`（第三条建图路线）；`--compare` 可与已有栅格图比对结构一致性 |
+| `global_obstacle` 生效确认 | `ros2 param get /global_costmap/global_costmap.{stvl_layer,obstacle_layer}.enabled` —— 两个里恰有一个 True |
 
 
 ---
@@ -545,7 +598,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `Package 'rm_nav_bringup' not found ... searching: ['/opt/ros/humble']` | 新终端**只 source 了 /opt/ros，没 source 工作区** | `source ~/HzMi_rmsimulation/install/setup.bash`（见 §0.1；可写进 `~/.bashrc`） |
-| `view_frames` 里看到 `camera_init→body` 孤立小岛 | LIO 仍广播内部帧；T3 后导航层不再使用（`odom→base_link` 由 `lio_tf_adapter` 提供） | 正常现象，无需处理（回退用法 `localization:=''` 仍依赖它；T6 阶段可一并移除） |
+| `view_frames` 里看到 `camera_init→body` 孤立小岛 | LIO 仍广播内部帧；T3 后导航层不再使用（`odom→base_link` 由 `lio_tf_adapter` 提供） | 正常现象，无需处理（回退用法 `localization:=''` 仍依赖它；**T6 已撤销**，`base_link_fake` 不再移除） |
 | `Robot is out of bounds of the costmap!`（仅启动时出现几次） | slam_toolbox 地图尚在生长、global_costmap 正在 resize 的瞬态 | 若**持续刷屏**再排查 `map→odom`（`ros2 run tf2_ros tf2_echo map base_link`） |
 | RViz 里**车/雷达看起来是斜的**，但 Gazebo 里车是正的 | spawn 高度过高：RMUL/RMUL2026 原来写 `z=1.16`，而地面在 z≈0（轮半径 0.06 → 落地时 base_link 仅 0.06 m），机器人**悬空 1.1 m 落下**，FAST-LIO 在坠落中做重力初始化 → 地图/位姿倾斜 | **已于 2026-09 修复**：`rm_simulation.launch.py` 中 RMUL / RMUL2026 的 spawn `z` 改为 **0.2**。验证：`ros2 run tf2_ros tf2_echo odom base_link` 的 roll/pitch 应≈0 |
 | nav 模式卡在 `amcl: Waiting for map....` / `global_costmap: Invalid frame ID "map"` | ① `map_server_launch.py` 与 `localization_amcl_launch.py` **各起了一个同名 `lifecycle_manager_localization`**（冲突）；② `nav2_params_sim_*.yaml` 里 `yaml_filename` 被注释掉，而 nav2 的 `RewrittenYaml` **只替换已存在的键** → map_server 报 `parameter 'yaml_filename' is not initialized` | **已于 2026-09 修复**：① amcl launch 现在用**单一 lifecycle_manager 同时管理 `map_server`+`amcl`**，bringup 仅在 `icp`/未选重定位时单独起 map_server；② 三份 nav2 参数恢复 `yaml_filename: ""` 键（launch 会注入实际地图路径） |
@@ -572,7 +625,22 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | `planner_server: GridBased: failed to create plan with tolerance 0.50` / `Planning algorithm GridBased failed to generate a valid path to (x, y)` | **目标点与起点不在同一连通域**（中间被墙隔开），或起点/终点落在膨胀带内。地图上 1 像素宽的虚线经 `robot_radius` 膨胀后就能封死走廊 | 先跑 `tools/check_map_reachable.py --map <map.yaml> --start <map 系起点> --goal <目标>` 判定；换用同一连通域的目标点（§0.6）。若是**地图资产**问题（例：RMUL2026.pgm 的 x≈5.2 幽灵虚线，世界网格里没有实体）→ 重新建图 |
 | 参数写在 `nav2_params_*.yaml` 里却"没生效" | **节点名对不上**：nav2 跨版本改过名（如 Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`）。对不上的整段被**静默忽略**，节点改用内置默认值 | 拿 `/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml` 的顶层键做参照逐个核对；**已于 2026-09 修复**三份 sim 变体的 `recoveries_server` 段。判断某段是否生效的最快办法：看节点启动日志（如 `behavior_server: Creating behavior plugin ...` 的**个数/名字**是否与 yaml 一致） |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
-| cartographer 纯定位报找不到状态文件 | pbstream 路径错或文件为空 | 用绝对路径；`RMUL2026.pbstream` 疑空，改用 `RMUL` |
+| cartographer 纯定位报找不到状态文件 | **三个场地都没有可用 pbstream**（RMUL/RMUC 无该文件；`RMUL2026.pbstream` 仅 526 B 空壳） | 先用 `tools/scripts/mapping/generate_cartographer_pbstream.sh` 生成；路径用绝对路径（见 §6） |
+
+### 10.1 现象 → 归属（先分类，再查上表）
+
+| 现象 | 归属 | 一句话判据 |
+|---|---|---|
+| 点云转瞬即逝 / 手遮挡很明显 | **RViz 显示设置** | PointCloud2 的 Decay Time = 0（只画最新帧），不是地图问题 |
+| 改了"刷新率"后点留住了 | **RViz 显示缓冲** | 那是屏幕缓冲，不是建图（见 `docs/architecture.md` §3.2.6） |
+| 房间点云**跟着车跑** | **帧树 / 显示系 / 里程计** | 显示项是不是车体系？Fixed Frame 对吗？`tf2_echo` 链通吗？ |
+| 地图**缓慢弯折 / 闭环处双墙** | **建图（缺回环）** | 绕一圈看闭环误差与双墙；LIO 无回环 |
+| 位姿**突然跳到另一处** | **重定位** | `tf2_echo map odom` 是"跳"；看 `/particle_cloud` 是否多峰 |
+| 位姿**高频小抖**（cm/度级来回） | **时序 / 刷新** | 时间戳不同步、TF 与 costmap 更新节奏不匹配 |
+| 位姿**连续缓慢漂** | **里程计（LIO）** | 与 `/odom_ground_truth` 比，误差随距离增长 |
+| 目标点规划失败（`failed to generate a valid path`） | **地图资产 / 选点** | 先 `check_map_reachable.py`；再看地图有没有幽灵结构 |
+| 车不走但 `/cmd_vel` 有 -0.05 + 旋转 | **BT 恢复行为循环** | 说明规划或控制连续失败（见上表对应行） |
+| `/cmd_vel_chassis` 出现 `angular.z: 5.0` | **小陀螺在动作** | 那是 `spin_speed`，不是 nav2 发的角速度（§0.4.1） |
 
 ---
 
@@ -591,11 +659,31 @@ ls -l ~/HzMi_rmsimulation/frames.pdf
 ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 ```
 
-**优先验证顺序**：场景一（确认 `/odom` 与 `odom→base_link` 存在） → 场景三（确认 ICP 能发 `map→odom`） → 其余场景。
+**按"归属"收集证据（配合 §10.1）**
+
+```bash
+# 时序/刷新类：看 map→odom 的时间戳是否连续、频率是否稳定
+ros2 topic hz /tf; ros2 run tf2_ros tf2_echo map odom
+# 里程计类：与真值对比（RMUL2026 的 map 系=世界系，可直接比；RMUL/RMUC 只比相对变化）
+ros2 topic echo /odom_ground_truth --field pose.pose.position --once
+ros2 topic echo /amcl_pose --field pose.pose.position --once
+# 重定位类：粒子云是否多峰（RViz 看 /particle_cloud），或 ICP 是否在配准
+ros2 node list | grep -E "amcl|icp_registration"
+# 建图类：闭环误差（绕一圈回起点）与"双墙"
+```
+
+**当前优先验证顺序**（按资产齐备度，见 `docs/algorithm_matrix.md` §五）：
+1. **重建 RMUL2026 地图**（§1 + §1.1）← 解开该场地所有 nav 组合；
+2. `nav+amcl` @ RMUL2026 发目标（§2 + §0.6）；
+3. `nav+slam_toolbox` @ RMUL（§4）、`nav+icp` @ RMUL（§3）；
+4. `slam_nav`（§1.2）→ cartographer 建图/纯定位（§5/§6）→ `nav:=dwb|teb`（§7）。
 
 ---
 
 ## 12. 实测记录
+
+> **实测状态的唯一真值来源是 `docs/algorithm_matrix.md` §四**（每跑通一个组合在那里加一行）。
+> 本表只保留"实跑时特有的、值得复现的现象"。
 
 | 日期 | 场景 | 命令要点 | 结果 |
 |---|---|---|---|
