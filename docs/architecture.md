@@ -578,6 +578,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping l
 | 文档 | 内容 |
 |---|---|
 | `docs/architecture.md` | **本文件**：当前目录架构总览 |
+| `docs/algorithm_matrix.md` | **算法组合总表**：角色槽位 × 实现 × 资产可用性 × 实测状态 × 扩展位 |
 | `docs/issues_and_findings.md` | **问题与发现汇总**：实际踩到的故障（根因/修复/证据）、静默失效坑、地图坐标系与幽灵墙结论、待办清单 |
 | `docs/smoke_test_runbook.md` | **实跑验证手册**：各组合的原生 `ros2 launch` 指令、判据与错误对照 |
 | `docs/tf_interface_contract.md` | TF/接口契约设计与 T1–T6 改造记录 |
