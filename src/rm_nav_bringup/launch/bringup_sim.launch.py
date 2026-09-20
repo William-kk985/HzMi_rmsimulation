@@ -404,6 +404,19 @@ def generate_launch_description():
         launch_arguments={'configuration_basename': 'cartographer.lua'}.items()
     )
 
+    # 纯建图（mode:=mapping）不再启动 nav2，因此 nav2 自带的 rviz_launch 也不会起。
+    # 但建图时最需要的可视化恰恰是 RViz（看 /map 边建边长）→ 这里单独补一个 RViz。
+    mapping_rviz_node = Node(
+        condition = IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mode'), "' == 'mapping' and '",
+            LaunchConfiguration('nav_rviz'), "' == 'True'"])),
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2_mapping',
+        arguments=['-d', os.path.join(get_package_share_directory('rm_navigation'), 'rviz', 'nav2.rviz')],
+        parameters=[{'use_sim_time': use_sim_time}],
+    )
+
     start_navigation2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'bringup_rm_navigation.py')),
         # 只在 nav / slam_nav 下启动；纯建图(mapping)不需要规划控制，省 CPU（重场景 RTF 本来就紧张）
@@ -449,5 +462,7 @@ def generate_launch_description():
     ld.add_action(lio_tf_adapter_node)
     ld.add_action(TimerAction(period=4.0, actions=[start_mapping, start_cartographer_mapping]))
     ld.add_action(TimerAction(period=10.0, actions=[start_navigation2]))
+    # 纯建图模式的 RViz（nav2 未启动时 nav_rviz 仍要能出图）
+    ld.add_action(mapping_rviz_node)
 
     return ld

@@ -26,6 +26,8 @@ def _cartographer_nodes(context, *args, **kwargs):
         if str(frozen).lower() in ('true', '1'):
             arguments += ['-load_frozen_state', 'true']
 
+    occupancy_grid_topic = LaunchConfiguration('occupancy_grid_topic')
+
     cartographer_node = Node(
         package='cartographer_ros',
         executable='cartographer_node',
@@ -48,7 +50,13 @@ def _cartographer_nodes(context, *args, **kwargs):
             'use_sim_time': True,
             'resolution': 0.05,          # 5cm 分辨率
         }],
-        remappings=[('map', '/cartographer_map')]
+        # 栅格话题：**默认发到标准话题 /map**，这样 nav2 的 static_layer、map_saver_cli、
+        # RViz 的 Map 显示项都能直接吃到它（原先硬 remap 到 /cartographer_map，
+        # 结果是"边建边导 mapper:=cartographer 时 costmap 没有静态图"、
+        # "建完图 map_saver_cli 存不到东西"两个静默失效）。
+        # 例外：若纯定位时另有 map_server 在发先验 /map，会形成两个发布者 → 那时传
+        # occupancy_grid_topic:=/cartographer_map 规避（本流程暂不可用，缺 pbstream）。
+        remappings=[('map', occupancy_grid_topic)]
     )
 
     return [cartographer_node, occupancy_grid_node]
@@ -60,6 +68,12 @@ def generate_launch_description():
             'configuration_directory',
             default_value=PathJoinSubstitution([FindPackageShare('cartographer_ros'), 'configuration_files']),
             description='Full path to directory containing the .lua configuration file'
+        ),
+        DeclareLaunchArgument(
+            'occupancy_grid_topic',
+            default_value='map',
+            description='cartographer 栅格输出话题。默认 map（建图/边建边导给 nav2 与 map_saver 用）；'
+                        '若纯定位时另有 map_server 发先验 /map，传 /cartographer_map 避免双发布者'
         ),
         DeclareLaunchArgument(
             'configuration_basename',

@@ -86,9 +86,10 @@ sleep 2
 
 | 你想看什么 | 用哪个 | 打开的配置 | 里面有什么 |
 |---|---|---|---|
-| **LIO 点云 / 建图效果**（mapping 模式） | `lio_rviz:=True` | `rm_nav_bringup/rviz/fastlio.rviz` / `pointlio.rviz` | 原始点云、`cloud_registered`、体素地图 |
-| **导航效果**（nav 模式，**推荐**） | `nav_rviz:=True`（默认） | `rm_navigation/rviz/nav2.rviz` | `RobotModel`(`/robot_description`)、`Map`(`/map`)、本地/全局代价地图、`/scan`、TF、**Navigation2 面板**、**2D Pose Estimate / 2D Goal Pose 工具**（Fixed Frame = `map`） |
+| **LIO 点云**（任何模式） | `lio_rviz:=True` | `rm_nav_bringup/rviz/fastlio.rviz` / `pointlio.rviz` | 原始点云、`cloud_registered`、体素地图 |
+| **建图 / 导航效果**（**推荐**） | `nav_rviz:=True`（默认） | `rm_navigation/rviz/nav2.rviz` | `RobotModel`(`/robot_description`)、`Map`(`/map`)、本地/全局代价地图、`/scan`、TF、**Navigation2 面板**、**2D Pose Estimate / 2D Goal Pose 工具**（Fixed Frame = `map`） |
 
+- `mode:=mapping`（纯建图，不起 nav2）下 `nav_rviz:=True` 也会给一块 RViz（2026-09 起 bringup 单独补的），能看 `/map` 边建边长；
 - ⚠️ **两个都给 `False` = 屏幕上什么可视化都没有**（Gazebo 里还有机器人，但没法判断导航效果）；
 - 两个都给 `True` = 两个 RViz 同时抢 GPU，RMUL2026 这种重场景容易卡死/闪退，**只开一个**；
 - 定目标/给初值：nav 模式下直接用 `nav2.rviz` 的工具栏按钮，比命令行方便。
@@ -168,6 +169,24 @@ nav2 全局规划把「障碍 + `robot_radius` 内切膨胀带」视为不可通
 - `localization` 只在 `mode:=nav` 生效（`slam_nav`/`mapping` 传了也会被忽略）；
 - `mode:=nav` 留空 `localization` 是**回退用法**：直接用 LIO 当绝对定位，并由 `camera_init→map`、`body→odom` 两条静态桥补帧（只在 `mode=='nav' and localization==''` 时启动）；
 - 三种形态的 `/map` 发布者都只有一个（在线 SLAM 或 map_server），2026-09 已修掉建图模式下 `map_server` 抢 `/map` 的问题（见 §10）。
+
+### 0.8 文档地图 & 当前推荐顺序
+
+| 文档 | 用途 |
+|---|---|
+| `docs/smoke_test_runbook.md` | **本文件**：怎么跑、怎么判、错了怎么查 |
+| `docs/algorithm_matrix.md` | **算法现状唯一真值来源**：有哪些算法/组合、资产齐不齐、实测状态、阻塞项 |
+| `docs/architecture.md` | 目录/分层/参数/概念（§3.2.1–3.2.7 是概念长文） |
+| `docs/issues_and_findings.md` | 踩过的坑与根因汇总（含 RMUL2026 幽灵墙证据链） |
+| `docs/tf_interface_contract.md` | TF/接口契约（T1–T5 已实施，T6 撤销） |
+
+**当前推荐顺序**（按资产齐备度排，先解开阻塞再看矩阵）：
+1. **重建 RMUL2026 地图**（§1 建图 + §1.1 落盘三件套）← 解开该场地**所有** nav 组合；
+2. `nav + amcl` @ RMUL2026 发目标（§2 + §0.6 选点）；
+3. `nav + slam_toolbox` @ RMUL（§4）与 `nav + icp` @ RMUL（§3）；
+4. `slam_nav` 边建边导（§1.2）；5. cartographer 建图/纯定位（§5/§6，纯定位需先生成 pbstream）；6. `nav:=dwb|teb`（§7）。
+
+---
 
 ## 1. 场景一：mapping + fastlio（建图 / 重建地图）
 
@@ -304,51 +323,70 @@ ros2 action list | grep navigate_to_pose
 
 ## 3. 场景三：nav + ICP（T5 关键验证点）
 
+**资产前提**：ICP 吃 **3D 点云图** `PCD/<world>.pcd` → 目前只有 **RMUC / RMUL** 有（RMUL2026 需先用 `/map_save` 生成）。
+
 **终端 A**
 ```bash
 ros2 launch rm_nav_bringup bringup_sim.launch.py \
   use_sim_time:=True lio_rviz:=False nav_rviz:=True \
-  world:=RMUL mode:=nav lio:=fastlio localization:=icp nav:=rpp
+  world:=RMUL mode:=nav lio:=fastlio localization:=icp nav:=rpp spin_speed:=0.0
 ```
+> ⚠️ **RMUL 世界重（44 万三角面）：启动后等 30~60 s 再判断**（ICP 节点本身延后 7 s 启动；
+> 过早判断会看到 `odom` 帧尚不存在、Nav2 无法激活，误以为链路坏了）。
 
-**终端 B**
+**终端 B（就绪判据）**
 ```bash
-ros2 run tf2_ros tf2_echo map odom           # 关键：应由 icp_registration 发布（T5 验证）
-ros2 topic echo /initialpose --once          # 可选：给初值，观察 map→odom 是否修正
+ros2 node list | grep icp_registration            # ICP 是否起来
+ros2 topic hz /livox/lidar/pointcloud             # ★ ICP 的输入（必须持续有数据）
+ros2 run tf2_ros tf2_echo odom base_link          # LIO 里程计；无 → LIO 未初始化
+ros2 run tf2_ros tf2_echo map odom                # ★ 关键：应由 icp_registration 发布（T5）
+ros2 topic echo /map --once --field info          # 静态图（RMUL = 272×210）
+ros2 lifecycle get /controller_server             # active
 ```
+**逐段排查**（哪段先没数据，问题就在那一段）：`/livox/lidar`(CustomMsg) → `/livox/imu` → `/imu/data` → `/odom` → `map→odom`。
+若 `/livox/lidar` 有数据而 `/odom` 长时间没有 → 换 `lio:=pointlio` 做 A/B（它吃原始 `/livox/imu`），
+以区分是"雷达/世界侧"还是"FAST-LIO + 互补滤波支路"的问题。
 
 ---
 
-## 4. 场景四：nav + slam_toolbox
+## 4. 场景四：nav + slam_toolbox（纯定位）
 
-**终端 A**
+**资产前提**：`localization:=slam_toolbox` 需要 `.posegraph` → **RMUC / RMUL 有，RMUL2026 没有**（要先建图，见 §1.1）。
+
 ```bash
 ros2 launch rm_nav_bringup bringup_sim.launch.py \
   use_sim_time:=True lio_rviz:=False nav_rviz:=True \
-  world:=RMUL mode:=nav lio:=fastlio localization:=slam_toolbox nav:=rpp
+  world:=RMUL mode:=nav lio:=fastlio localization:=slam_toolbox nav:=rpp spin_speed:=0.0
 ```
-
-**终端 B**
 ```bash
-ros2 run tf2_ros tf2_echo map odom
+ros2 node list | grep -E "map_server|amcl"   # 期望：空（这条形态不需要它们）
+ros2 run tf2_ros tf2_echo map odom           # 由 slam_toolbox 提供
+ros2 lifecycle get /controller_server        # active
 ```
 
 ---
 
 ## 5. 场景五：cartographer 建图
 
-**终端 A**
 ```bash
 ros2 launch rm_nav_bringup bringup_sim.launch.py \
   use_sim_time:=True lio_rviz:=False nav_rviz:=True \
-  world:=RMUL2026 mode:=mapping lio:=fastlio mapper:=cartographer
+  world:=RMUL2026 mode:=mapping lio:=fastlio mapper:=cartographer spin_speed:=0.0
 ```
+> 建图模式**不起 nav2**，但 `nav_rviz:=True` 仍会给一块 RViz（能看 `/map` 边建边长）。
+> 栅格话题 **2026-09 已修正为 `/map`**（原先硬 remap 到 `/cartographer_map`，会让 nav2 的 `static_layer`、
+> `map_saver_cli`、RViz 的 Map 显示项全都吃不到图）。
 
 **终端 B**
 ```bash
 ros2 topic list | grep cartographer
+ros2 topic info /map --verbose | grep -c PUBLISHER   # 期望 1（cartographer occupancy_grid）
 ros2 run tf2_ros tf2_echo map odom
+ros2 topic echo /map --once --field info             # 宽高随建图增长
 ```
+**落盘**：栅格用 `tools/scripts/mapping/save_grid_map.sh`；**pbstream** 用
+`ros2 service call /finish_trajectory ...` + `ros2 service call /write_state cartographer_ros_msgs/srv/WriteState "{filename: ...}"`
+（完整流程见 `tools/scripts/mapping/generate_cartographer_pbstream.sh`）。
 
 ---
 
@@ -368,7 +406,11 @@ ros2 run tf2_ros tf2_echo map odom
 ros2 topic echo /cartographer_map --once
 ```
 
-> 注意：`RMUL2026.pbstream` 目前仅 526B（疑空），纯定位请先用 `RMUL.pbstream` 或重新建图。
+> ⚠️ **资产前提（当前阻塞）**：三个场地**都没有可用的 pbstream** —— RMUL/RMUC 没有该文件，
+> `RMUL2026.pbstream` 仅 526 B（空壳）。**本场景必须先自己生成**：
+> `tools/scripts/mapping/generate_cartographer_pbstream.sh`（或按 `docs/mapping/` 流程建图后 `write_state`）。
+> 纯定位时若另有 `map_server` 在发先验 `/map`，请加 `occupancy_grid_topic:=/cartographer_map`，
+> 避免两个发布者抢 `/map`（该参数默认已改为 `map`）。
 
 ---
 
@@ -521,6 +563,8 @@ ros2 topic info /scan --verbose                                              # �
 | costmap 刷屏 `Sensor origin at (x,y) is out of map bounds`（数值在 spawn 坐标与 LIO 估计间跳变） | **同一 `odom` 有两个来源**：Gazebo 真值 + LIO 都发到 `/odom`，`lio_tf_adapter` 交替收到两者 → `odom→base_link` 抖动 | **已于 2026-09 修复**：`sentry_robot_sim.xacro` 把 Gazebo 真值 remap 到 **`/odom_ground_truth`**（`publish_odom_tf=false`），`/odom` 由 LIO 独占。对比真值请看 `/odom_ground_truth` |
 | RViz 报 `Message Filter dropping message ... queue is full` 且退出时 `rviz2 exit code -11` | RViz 在高频 TF/点云负载下丢帧，退出时崩溃（常见现象，不影响仿真链路） | 可先 `nav_rviz:=False` 验证导航链路；或减少 RViz 中 PointCloud2/STVL 显示项 |
 | **发目标后车不走**，`/cmd_vel` 长时间只有 `linear.x: -0.05`（偶尔 `0` + 角速度） | `-0.05` = nav2 自带 BT `BackUp` 的 `backup_speed="0.05"`（见 `/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml`）→ **BT 进了恢复行为循环**（清代价地图→Spin→Wait→BackUp 轮转），说明 `ComputePathToPose` 或 `FollowPath` 连续失败 | 按顺序查：① 终端 A 里 `planner_server` / `controller_server` 的 WARN/ERROR（**最直接**，会写明原因）；② `ros2 topic echo /plan --once --field poses`（空=规划失败）；③ `ros2 topic echo /odom_ground_truth --field pose.pose.position --once` 与 `/amcl_pose` 对比（RMUL2026 的 map 系=世界系，两者必须接近）；④ `spin_speed:=0.0` 重跑（见 §0.4.1） |
+| `mapper:=cartographer` 时 costmap 没有静态图 / `map_saver_cli` 存不到图 | cartographer 的栅格被硬 remap 到 `/cartographer_map`，而 nav2 `static_layer` 与 `map_saver_cli` 都订阅 `/map` | **已于 2026-09 修复**：`cartographer_sim.launch.py` 默认发 `/map`；纯定位另有 `map_server` 时用 `occupancy_grid_topic:=/cartographer_map` 覆盖 |
+| 纯建图 `mode:=mapping` 下 `nav_rviz:=True` 却没有任何 RViz | 三种形态拆分后 `mapping` 不再启动 nav2，而 RViz 原先由 nav2 的 `rviz_launch` 带起 | **已于 2026-09 修复**：bringup 为 `mode=='mapping' and nav_rviz=='True'` 单独补一个 RViz（`nav2.rviz`） |
 | `planner_server: GridBased: failed to create plan with tolerance 0.50` / `Planning algorithm GridBased failed to generate a valid path to (x, y)` | **目标点与起点不在同一连通域**（中间被墙隔开），或起点/终点落在膨胀带内。地图上 1 像素宽的虚线经 `robot_radius` 膨胀后就能封死走廊 | 先跑 `tools/check_map_reachable.py --map <map.yaml> --start <map 系起点> --goal <目标>` 判定；换用同一连通域的目标点（§0.6）。若是**地图资产**问题（例：RMUL2026.pgm 的 x≈5.2 幽灵虚线，世界网格里没有实体）→ 重新建图 |
 | 参数写在 `nav2_params_*.yaml` 里却"没生效" | **节点名对不上**：nav2 跨版本改过名（如 Galactic `recoveries_server` → Humble **`behavior_server`**；`recovery_plugins` → `behavior_plugins`；插件类型 `nav2_recoveries/*` → `nav2_behaviors/*`）。对不上的整段被**静默忽略**，节点改用内置默认值 | 拿 `/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml` 的顶层键做参照逐个核对；**已于 2026-09 修复**三份 sim 变体的 `recoveries_server` 段。判断某段是否生效的最快办法：看节点启动日志（如 `behavior_server: Creating behavior plugin ...` 的**个数/名字**是否与 yaml 一致） |
 | FAST-LIO 在 `Ctrl+C` 时报 `exit code -11` | FAST-LIO 已知的退出崩溃 | 忽略；不影响运行期 |
@@ -560,5 +604,8 @@ ros2 bag record -o /tmp/smoke /odom /tf /tf_static /scan /cmd_vel
 | 2026-09 | 二 `/amcl_pose` 的 covariance ≈ 0 | nav2 `set_initial_pose` 路径**不填协方差**（`amcl_node.cpp` L271-281 只设 position/orientation） | 正常现象：初始粒子云是**零散布单点**。位置给对无影响；若初值给错，AMCL 难以自行纠回 → 必须用 RViz `2D Pose Estimate` 重给 |
 | 2026-09 | 二 发目标 @ RMUL2026 | `/cmd_vel` 长时间 `linear.x: -0.05`、`/cmd_vel_chassis` 出现 `angular.z: 5.0` | ⚠️ **未通过**：`-0.05` = BT `BackUp` 的 `backup_speed`，`5.0` = `fake_vel_params.yaml` 的 `spin_speed` → 命令链通、小陀螺生效，但 Nav2 卡在**恢复行为循环**（路径/控制失败）。顺带查出 `recoveries_server` 段（Galactic 名字）被 Humble 静默忽略，已改为 `behavior_server` |
 | 2026-09 | 二 发目标 @ RMUL2026（第二轮，带日志） | `planner_server: failed to generate a valid path to (6.00, 3.40)`；`odom_ground_truth=(4.2226,3.3442)` vs `amcl_pose=(4.300,3.350)` 差 8cm | ✅ **根因确定**：定位/地图坐标系没问题（真值与 amcl 一致），失败在于**目标点被地图上不存在的"幽灵墙"隔开**——`RMUL2026.pgm` 在 x≈5.2 有一条 1 像素宽虚线（y≈1.8→6.0），而世界网格在该处**零顶点**；经 `robot_radius=0.2m` 膨胀后走廊被封死（r=0.15m 时同一点即可达），地图被切成 3 块、目标落在另一块。已新增 `tools/check_map_reachable.py` 用于选点前验证 |
+| 2026-09-16 | 文档/架构（非实跑） | 新增 `docs/algorithm_matrix.md`（算法现状唯一真值来源）与 `docs/issues_and_findings.md`（问题汇总）；决策**不按 2D/3D 物理重组目录**（维度只做文档标注） | ✅ 已登记到 architecture 索引 |
+| 2026-09-16 | cartographer 话题修正 | 栅格输出由 `/cartographer_map` 改回标准 `/map`（原 remap 导致 `static_layer` 与 `map_saver_cli` 静默失效） | ✅ 可用 `occupancy_grid_topic` 覆盖；场景五判据已加 `topic info /map` |
+| 2026-09-16 | 纯建图 RViz | 形态拆分后 `mode:=mapping` 丢失 RViz | ✅ bringup 单独补 RViz（`nav2.rviz`） |
 | 2026-09 | 三 nav+ICP @ RMUL（第一次） | `spawn_entity: Spawn service failed` + `odom` 帧 13 秒不存在 | ⚠️ **未进入 ICP**：机器人插件晚 4 s 加载，LIO 尚未吐 `/odom`，Nav2 无法激活（现场 20 s 就 Ctrl-C 了）。ICP 本身正常：`pcd point size: 97642, 4866`、`pointcloud_topic: /livox/lidar/pointcloud`、`icp_registration initialized`。结论：RMUL 世界重（44 万面），需给 30~60 s |
 
