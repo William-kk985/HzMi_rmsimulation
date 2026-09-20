@@ -36,8 +36,13 @@ def _cartographer_nodes(context, *args, **kwargs):
         parameters=[{'use_sim_time': True}],
         arguments=arguments,
         remappings=[
-            ('points2', '/livox/lidar'),   # Livox MID360 点云话题
-            ('imu', '/livox/imu'),          # IMU 话题
+            # 2D 激光路线（当前默认，见 configuration_files/cartographer.lua）：
+            #   /scan 由感知域 linefit(去地面) + pointcloud_to_laserscan(高度带) 产出
+            ('scan', '/scan'),
+            # 备选点云路线：cartographer_ros **只支持 sensor_msgs/PointCloud2**，
+            # 绝不能 remap 到 /livox/lidar（那是 livox_ros_driver2/CustomMsg，类型不匹配 -> 收不到数据）
+            # ('points2', '/livox/lidar/pointcloud'),
+            ('imu', '/livox/imu'),
         ]
     )
 

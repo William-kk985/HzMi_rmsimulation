@@ -6,19 +6,33 @@ include "trajectory_builder.lua"
 options = {
   map_builder = MAP_BUILDER,
   trajectory_builder = TRAJECTORY_BUILDER,
+  -- ===== 帧契约（2026-09 修正，须与 docs/tf_interface_contract.md 一致）=====
+  -- 本工程分工：odom→base_link 由 LIO(lio_tf_adapter) 发；map→odom 由"全局对齐提供者"发。
+  -- Cartographer 扮演后者，故**只应发 map→odom**：
+  --   published_frame="odom" + provide_odom_frame=false  -> 只发 map→odom（与 amcl/icp 一致）
+  -- 旧配置 published_frame="body" + provide_odom_frame=true 会额外发 odom→body，
+  -- 而 body 已被 FAST-LIO 占用（laserMapping.cpp 的 child_frame_id="body"）-> TF 多父边。
   map_frame = "map",
-  tracking_frame = "livox_frame",          -- Livox MID360 内置 IMU，数据在此坐标系
-  published_frame = "body",                -- 发布的机器人位姿
+  tracking_frame = "livox_frame",          -- 雷达/IMU 所在坐标系（到 base_link 的变换由 URDF 提供）
+  published_frame = "odom",                -- 只发布到 odom，即 map→odom 由本节点提供
   odom_frame = "odom",
-  provide_odom_frame = true,               -- Cartographer 提供 odom frame
+  provide_odom_frame = false,              -- 不再自造 odom→xxx，避免与 LIO 争 body 的子帧
   publish_frame_projected_to_2d = true,    -- 投影到2D平面
-  use_odometry = false,                    -- 不使用外部里程计
+  -- 可选 A/B：置 true 让 Cartographer 以 LIO 的 /odom(nav_msgs/Odometry) 作为运动先验（更稳）
+  use_odometry = false,
   use_nav_sat = false,
   use_landmarks = false,
-  num_laser_scans = 0,                     -- 不使用2D激光
+  -- ===== 输入源（2026-09 修正）=====
+  -- 默认走 2D 激光：吃感知域 p2l 产出的 /scan（**已去地面、已按高度带切好**），
+  -- "什么算障碍"由感知域单点决策，且与 slam_toolbox 公平可比、更省 CPU。
+  num_laser_scans = 1,                     -- 使用 2D 激光（/scan）
   num_multi_echo_laser_scans = 0,
   num_subdivisions_per_laser_scan = 1,
-  num_point_clouds = 1,                    -- 使用3D点云输入
+  -- 备选路线（点云直喂，由 Cartographer 自己做高度带）：
+  --   num_laser_scans = 0; num_point_clouds = 1; points2 remap 到
+  --   /livox/lidar/pointcloud（**不是 /livox/lidar —— 那是 CustomMsg，cartographer_ros 不支持**），
+  --   且 min_z/max_z 必须设成"排除地面"的值（它们是**相对传感器**的，不是相对地面！）
+  num_point_clouds = 0,
   lookup_transform_timeout_sec = 0.5,      -- 增加超时
   submap_publish_period_sec = 0.3,
   pose_publish_period_sec = 5e-3,          -- 200Hz 位姿发布
@@ -46,8 +60,10 @@ TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 1.0  -- 减小，更快响应
 TRAJECTORY_BUILDER_2D.min_range = 0.45          -- 最小距离 0.45m，避开 38cm 的地面最近点
 TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高稳定性
 -- 高度过滤 (基于机器人高度和 PVC 地面特性)
-TRAJECTORY_BUILDER_2D.min_z = 0.05              -- 地面上 5cm，过滤 PVC 噪声
-TRAJECTORY_BUILDER_2D.max_z = 0.8               -- 地面上 80cm，匹配机器人高度上限
+-- ⚠️ min_z/max_z 是**相对 tracking_frame（雷达）**的高度带，不是相对地面！
+-- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
+TRAJECTORY_BUILDER_2D.min_z = -0.8
+TRAJECTORY_BUILDER_2D.max_z = 2.0
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 
