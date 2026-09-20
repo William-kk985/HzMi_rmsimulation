@@ -77,3 +77,39 @@
 
 > 相关章节：`docs/architecture.md` §3.2.2（降维发生在哪一层）、§3.2.5（2D 为何能承载 3D）、
 > `docs/algorithm_matrix.md` §一.1（维度归类，含三处"跨维度桥"）。
+
+---
+
+## 六、本工程里 3D→2D **分布在哪几个域**（为什么"看着很依赖 nav"）
+
+**答案：降维发生两次，一次在感知域（我们自己的代码），一次在导航域（第三方 costmap 图层，我们只给参数）。**
+
+| # | 位置 | 域 | 谁写的 | 输入 → 输出 | 配置在哪 |
+|---|---|---|---|---|---|
+| ① | `linefit_ground_segmentation_ros` | **感知** `src/rm_perception/` | 本仓 | 3D 点云 → 3D 障碍点云（**去地面，不算降维**） | 包内 `config/segmentation_sim.yaml` |
+| ② | `pointcloud_to_laserscan` | **感知** `src/rm_perception/` | 本仓 | 3D 障碍点云 → **2D `/scan`**（高度带 + 每角度取最小） | 包内 `config/laserscan_params.yaml` |
+| ③ | `global_costmap.stvl_layer` | **导航** `src/rm_navigation/` | **apt 第三方插件**（STVL），我们只配参 | 3D 障碍点云 → **2D 代价**（体素 + 高度带 + max 投影） | `params/nav2_params_sim_*.yaml` |
+| ④ | `local_costmap.obstacle_layer` | **导航** `src/rm_navigation/` | nav2 官方插件，我们只配参 | `/scan`（已是 2D）→ 2D 代价（mark/clear） | 同上 |
+| ⑤ | `tools/pcd_to_grid_map.py` | **工具**（离线） | 本仓 | 3D `.pcd` → `.pgm/.yaml` | CLI 参数 |
+
+**所以"用到挺多 nav 的东西"是正常的**：nav2 的代价地图本身就是**图层化**架构，"
+把传感器数据变成代价"这一层天然属于它 —— 只要用 nav2，nav 域里就必然有降维配置。
+
+**是否需要依赖 nav？分两种情况**：
+- **② `/scan` 这一路不依赖 nav**：把 nav2 整个去掉，`linefit` + `p2l` 照样发 `/scan`（只是没消费者）。
+  它的消费者（AMCL、slam_toolbox、cartographer-2D、`local_costmap`）在 nav 域，所以"看起来依赖"；
+- **③ STVL 这一路完全在 nav 域内完成**（它直接收 3D 点云）→ 这一路是真·依赖 nav2 的图层机制 + 第三方插件。
+
+**为什么要有两路（不是重复）**：两类消费者的需求不同 ——
+- `/scan` 要的是**标准 2D 传感器消息**（ROS 生态通用接口，能接一堆现成的 2D 定位/SLAM 算法）；
+- STVL 要的是**保留高度与时间**（高度带可调、有时间衰减）。
+
+**代价（本工程已经踩到）**：两处降维 → **阈值不一致**：
+`local` 用 `/scan`（相对车顶 `z∈[-1.0, +0.1]`），`global` 用 STVL（`z∈[0.2, 2.0]`）→
+同一个 0.1 m 矮台，local 会绕、global 视而不见（见 architecture §3.2.4 的一致性风险）。
+
+**改进方向（低成本 → 彻底）**：
+1. **阈值成对校准**并把"成对"写进注释（最小改动，先做这个）；
+2. **统一来源**：要么让 `local_costmap` 也吃 STVL/点云，要么让 `global_costmap` 退回 `/scan` —— 二选一，消除不一致；
+3. **彻底分层**：把"环境表示"（栅格 + 2.5D 高程/净空 + 体素）全部放在感知域产出，nav 侧只留一个薄图层插件消费它 ——
+   这正是 `src/rm_perception/rm_elevation_map/` + `src/rm_navigation/rm_costmap_layers/` 的规划（architecture §3.2.7）。
