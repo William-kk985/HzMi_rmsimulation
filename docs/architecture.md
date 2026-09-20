@@ -303,6 +303,7 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
    多个 3D 信息源因此统一表达在一张 2D 图上。
 
 > 一句话：**"能不能走"这个 3D 判断被提前做掉了，2D 图只留结论 + 代价。** 所以 2D 规划器能在 3D 环境里避障，
+> **各家实现对照见 `docs/3d_to_2d_survey.md`**：`pointcloud_to_laserscan`（高度带+每角度取最小）、nav2 `ObstacleLayer`（高度带+raytrace）/`VoxelLayer`（体素列计数阈值）、STVL（体素+衰减+max 投影）、**cartographer 2D 自带 `min_z/max_z` 高度带**（所以 3D 雷达能直接喂它）、octomap `projected_map`。
 > 但它对"低矮可跨越 / 悬垂可穿过"这类几何的判断完全依赖上面那组高度阈值。
 
 #### ③ global_costmap 与 local_costmap：**同一套代码，两个独立实例，目的不同**
@@ -580,6 +581,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping l
 | 文档 | 内容 |
 |---|---|
 | `docs/architecture.md` | **本文件**：当前目录架构总览 |
+| `docs/3d_to_2d_survey.md` | **3D→2D 各家实现对照**：pointcloud_to_laserscan / nav2 obstacle+voxel / STVL / cartographer 2D / octomap 的降维机制与参数（带源码位置） |
 | `docs/algorithm_matrix.md` | **算法组合总表**：角色槽位 × 实现 × 资产可用性 × 实测状态 × 扩展位 |
 | `docs/issues_and_findings.md` | **问题与发现汇总**：实际踩到的故障（根因/修复/证据）、静默失效坑、地图坐标系与幽灵墙结论、待办清单 |
 | `docs/smoke_test_runbook.md` | **实跑验证手册**：各组合的原生 `ros2 launch` 指令、判据与错误对照 |
