@@ -121,6 +121,36 @@
 > 即"降维把 3D 判断固化成了结论，结论里不再有高度"（`docs/architecture.md` §3.2.5）。
 > 对比 `stvl`：它收 3D 点云，每个点的 z 就是**障碍自己的高度**，所以能做高度筛选与分层。
 
+**把"都用 `/scan`"后的依赖关系画清楚**（`global_obstacle:=scan` + local 也用 `/scan`）：
+
+```
+3D 雷达 → /livox/lidar/pointcloud
+   ├─ linefit（感知域；只需点云，不需要 LIO/nav）      → /segmentation/obstacle（3D）
+   │     └─ pointcloud_to_laserscan（感知域；只需点云 + URDF TF）→ /scan（2D）★降维终点
+   ├─ LIO（定位域）→ odom→base_link（供 TF，不参与降维）
+   └─ （可选）STVL（**nav 域插件**）→ 2D 代价   ← 只有 global_obstacle:=stvl 时才用
+
+/scan → local_costmap.obstacle_layer   （nav 域：消费 2D）
+/scan → global_costmap.obstacle_layer  （nav 域：消费 2D，即 scan 模式）
+/scan → amcl / slam_toolbox / cartographer-2D（导航相关：消费 2D）
+                    ↓
+        planner / controller / behaviors（nav 域：纯 2D 决策）
+```
+
+结论：
+1. **降维动作 100% 落在感知域**（`linefit` + `p2l`）；nav 域里**不再出现任何 3D 数据**，也就"不依赖 nav 做降维"；
+2. **感知链本身也不依赖 LIO**：`linefit` 只要点云，`p2l` 只要点云 + URDF 的 `base_link→livox_frame` TF
+   （所以 `mode:=mapping` 里它们照样在跑）；
+3. nav 域剩下的只有"**2D 代价化（inflation）→ 规划 → 控制 → 行为**"，那是它的本职，不是降维；
+4. 顺带收益：可以**完全不用 STVL**（少一个 apt 第三方插件 + 省掉最重的 CPU 层）。
+
+**自己验证**（关掉 STVL 后，nav 域是否还碰 3D）：
+```bash
+ros2 param get /global_costmap/global_costmap.stvl_layer.enabled     # False
+ros2 topic info /segmentation/obstacle --verbose | grep -c "SUBSCRIPTION"   # 只剩 p2l(+RViz)
+ros2 topic info /scan --verbose | grep "Node name"                          # local/global costmap + amcl + rviz
+```
+
 **改进方向（低成本 → 彻底）**：
 1. **阈值成对校准**并把"成对"写进注释；
 2. **统一来源 —— 已实现为可切换槽位**（2026-09）：`global_obstacle:=stvl|scan|none`，
