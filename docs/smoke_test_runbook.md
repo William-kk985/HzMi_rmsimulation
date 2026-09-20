@@ -217,6 +217,26 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 **判据**：`/cmd_vel` 出现**正向** `linear.x`、Gazebo 里车在动、RViz 里 scan 与地图墙体重合。
 **不通时**：先按 §10.1「现象 → 归属」分类，再查 §10 具体行。
 
+### 0.11 启动参数总表（`bringup_sim.launch.py`，全部原样可用）
+
+| 参数 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `world` | `RMUC` / `RMUL` / `RMUL2026` | `RMUL2026` | 场地；同时决定 `map/<world>.*` 与 `PCD/<world>.pcd` 前缀 |
+| `mode` | `mapping` / `slam_nav` / `nav` | 空（**必填**） | 场景形态，决定启动哪套节点集（§0.7） |
+| `lio` | `fastlio` / `pointlio` / `none` | `fastlio` | 里程计实现；`none` 需外部提供 odom/TF |
+| `localization` | `amcl` / `slam_toolbox` / `icp` / 空 | 空 | **仅 `mode:=nav` 生效**；空 = 回退用法（LIO 当绝对定位 + 静态桥） |
+| `mapper` | `slam_toolbox` / `cartographer` | `slam_toolbox` | 在线 2D 建图后端；`mapping`/`slam_nav` 生效 |
+| `nav` | `rpp` / `dwb` / `teb` | `rpp` | 局部规划器变体；`nav`/`slam_nav` 生效 |
+| **`global_obstacle`** | `stvl` / `scan` / `none` | `stvl` | 全局代价地图的实时障碍来源（A/B 槽位，见 `docs/3d_to_2d_survey.md` §六） |
+| `spin_speed` | 任意（rad/s） | `5.0` | `fake_vel_transform` 小陀螺固定角速度；排查导航先用 `0.0`（§0.4.1） |
+| `lio_rviz` | `True` / `False` | `False` | 开 LIO 点云 RViz |
+| `nav_rviz` | `True` / `False` | `True` | 开 nav2 RViz（`mode:=mapping` 也会给一块） |
+| `use_sim_time` | `True` / `False` | `True` | 仿真是 `True` |
+
+> 另有两个**只对 cartographer 生效**的参数（`cartographer_sim.launch.py`）：
+> `load_state_filename`（pbstream 路径，留空=纯建图）与 `load_frozen_state`，以及
+> `occupancy_grid_topic`（栅格输出话题，默认 `map`；纯定位另有 map_server 时传 `/cartographer_map`）。
+
 ### 0.10 场景 × 资产前提 × 命令（总览）
 
 | 场景 | **必需资产** | 命令要点 | 关键判据 |
@@ -473,6 +493,31 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 > 变体文件位置：`src/rm_navigation/rm_navigation/params/nav2_params_sim_{rpp,dwb,teb}.yaml`。
 > **比较控制器时要固定其他维度**（同一场地/同一 LIO/同一重定位/同一 `spin_speed`/同一目标点），
 > 否则比出来的差异不归控制器。
+
+---
+
+### 7.1 全局障碍来源 A/B（`global_obstacle`，2026-09 新增槽位）
+
+```bash
+# A：3D 体素层（默认）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
+  localization:=amcl nav:=rpp spin_speed:=0.0 global_obstacle:=stvl
+# B：2D /scan（与 local 同源）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
+  localization:=amcl nav:=rpp spin_speed:=0.0 global_obstacle:=scan
+# C：只用 static + inflation（全局不看实时障碍）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
+  localization:=amcl nav:=rpp spin_speed:=0.0 global_obstacle:=none
+```
+**运行期也能切**（不用重启整场仿真，两个图层都支持 `enabled` 动态参数）：
+```bash
+ros2 param set /global_costmap/global_costmap.stvl_layer.enabled false
+ros2 param set /global_costmap/global_costmap.obstacle_layer.enabled true
+```
+**要比较的三件事**（结果记入 `docs/algorithm_matrix.md` §四）：
+1. **一致性**：造一个 0.1 m 矮台用例，看 local 与 global 判断是否一致（`scan` 模式应一致）；
+2. **行为**：global 路径是否绕开临时障碍、是否出现"幽灵障碍"（`scan` 模式量程已修为 10 m）；
+3. **资源**：`top` 看 `component_container_mt` 的 CPU（`stvl` 明显更重）。
 
 ---
 

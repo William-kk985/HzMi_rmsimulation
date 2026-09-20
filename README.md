@@ -215,11 +215,21 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
    - `teb` - TEB（时间弹性带）
    - 对应参数文件：`rm_navigation/params/nav2_params_sim_{rpp,dwb,teb}.yaml`
 
-7. `lio_rviz`:
+7. `global_obstacle`（默认 `stvl`）—— **全局代价地图的实时障碍来源**（可切换槽位，便于 A/B）:
+   - `stvl` - 3D 体素层（`spatio_temporal_voxel_layer`，吃 `/segmentation/obstacle`，带高度带与时间衰减）
+   - `scan` - 2D 障碍层（吃 `/scan`，与 `local_costmap` 同源 → "什么算障碍"只在感知域 `p2l` 决策一处）
+   - `none` - 只用 `static_layer` + `inflation_layer`（全局规划看不到实时障碍）
+
+8. `lio_rviz`:
    - `True` - 可视化 FAST_LIO 或 Point_LIO 的点云图
 
-8. `nav_rviz`:
+9. `nav_rviz`:
    - `True` - 可视化 navigation2
+   - `mode:=mapping`（不起 nav2）下也会给一块 RViz（bringup 单独补的），能看 `/map` 边建边长
+
+10. `spin_speed`（默认 `5.0`）—— `fake_vel_transform` 的小陀螺固定角速度：
+   - `5.0` - 复现上游哨兵小陀螺行为（仿真里雷达会跟着底盘转，排查导航问题时建议先设 `0.0`）
+   - `0.0` - 角速度直通（等价普通 nav2）
 
 ### 3.2 仿真模式示例
 

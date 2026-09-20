@@ -35,6 +35,9 @@
 | `/map_save` 无处可写 | `fastlio_mid360_sim.yaml` 里 `map_file_path` 被注释 → ICP 在 RMUL2026 上没有底图 | bringup 按 `world` 自动注入 `PCD/<world>.pcd`（与 ICP 的 `pcd_path` 同路径） |
 | `nav_rviz`/`lio_rviz` 都给 `False` | 屏幕上一个可视化都没有（曾误判"没有机器人"） | runbook §0.4：mapping 用 `lio_rviz`，nav 用 `nav_rviz`（默认 True），**只开一个** |
 | `velocity_smoother.odom_topic: "Odometry"` | T2 已把里程计统一为 `/odom`，旧键名是遗留 | 改为 `odom` |
+| **cartographer 的栅格被硬 remap 到 `/cartographer_map`** | nav2 `static_layer`、`map_saver_cli`、RViz 的 Map 显示项都订阅 `/map` → 边建边导 `mapper:=cartographer` 时 costmap 无静态图、建图落盘存不到东西 | **2026-09 修复**：`cartographer_sim.launch.py` 默认发 `/map`；纯定位另有 `map_server` 时用 `occupancy_grid_topic:=/cartographer_map` 覆盖 |
+| **纯建图 `mode:=mapping` 下 `nav_rviz:=True` 却没有任何 RViz** | 三形态拆分后 `mapping` 不再启动 nav2，而 RViz 原先由 nav2 的 `rviz_launch` 带起 | **2026-09 修复**：bringup 为 `mode=='mapping' and nav_rviz=='True'` 单独补一块 RViz（`nav2.rviz`） |
+| **`global_obstacle:=scan` 时 global 图累积幽灵障碍** | 新增该槽位时把 local 的 `obstacle/raytrace_max_range: 6.0` 照搬到 global；而 global 是**全图**（13×10 m），raytrace 只能清 6 m 内的旧标记 | **2026-09 修复**：改为 **10.0 m**（与 `p2l` 的 `range_max` 对齐）——「扫描能看到多远，就要能清多远」 |
 | **T6 撤销**：`base_link_fake` 不是脏帧 | `fake_vel_transform` 20 Hz 发 `base_link→base_link_fake`（含云台转角），并做 `/cmd_vel → /cmd_vel_chassis` 旋转；角速度非零时按 `spin_speed` 原地转底盘 = **哨兵小陀螺**。改成 `base_link` 会丢功能 | `docs/tf_interface_contract.md` 已撤销 T6 并写明理由 |
 
 ---
@@ -126,6 +129,7 @@ nav 模式的地图来自 `map_server` 加载的**磁盘既有 pgm**（`src/rm_n
 | ★★★ | **场景三 nav+ICP @ RMUL 重跑** | 等 30~60 s；按 `/livox/lidar→/livox/imu→/imu/data→/odom` 逐段定位；必要时 `lio:=pointlio` 做 A/B |
 | ★★ | 场景 4/5/6/7 未测 | slam_toolbox 纯定位、cartographer 建图/纯定位、`nav:=dwb|teb` |
 | ★★ | 在新图上验证"发目标能走" | 之前被幽灵墙挡住，未真正验证循迹与小陀螺 |
+| ★★ | **`global_obstacle` A/B** | 同一场地/目标点分别跑 `stvl` 与 `scan`，比较：全局路径是否绕开临时障碍、CPU 占用、0.1 m 矮台在 local/global 的判断是否一致（结果记入 `algorithm_matrix.md` §四） |
 | ★ | 工具增强 | `pcd_to_grid_map.py` 加 SOR + 小团块过滤 + 形态学细化 + 用 `/path` 做射线清除（把"洪泛 free"升级为"射线 free"） |
 | ★ | 退化测试槽位 | 写 `cmd_vel` 延迟/丢包注入节点；摩擦/打滑与点云离群点注入 |
 | ★ | 未来 2.5D / 3D 槽位 | 高程/坡度/净空图生产（`src/rm_perception/rm_elevation_map/`）+ costmap 图层插件（`src/rm_navigation/rm_costmap_layers/`）；云台瞄准（2–3 DOF）规划 |
