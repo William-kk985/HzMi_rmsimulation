@@ -3,6 +3,15 @@
     odom_topic: /odom      # 统一后的里程计话题（bringup 已对 fast_lio/point_lio 做 remap）
     odom_frame: odom       # 输出 TF 的父帧
     base_frame: base_link  # 输出 TF 的子帧
-    # 可选补偿：LIO 内部 body 帧 相对 底盘 base_link 的小外参（默认按重合处理）
-    xyz: [0.0, 0.0, 0.0]
-    rpy: [0.0, 0.0, 0.0]
+    # ★ 2026-09-21 修正：**绝不能按"重合"处理**（原值 [0,0,0] 是 bug）
+    #   LIO 的 /odom 里 child_frame_id = "body"，而 body 就是**雷达/IMU 的位置**：
+    #     URDF：livox_frame = base_link+(0.12, 0, 0.175)；imu_link = base_link+(0.12, 0, 0.125)
+    #     FAST-LIO / Point-LIO 的 extrinsic_T = [0, 0, 0.05]（雷达→IMU）→ body == imu_link
+    #   本节点把 body 的位姿直接改名成 base_link 发布 → **丢掉 (0.12, 0, 0.125) 杆臂**
+    #   → 车**原地转**时，被当作 base_link 的那个点会绕真实底盘中心画半径 ≈0.17 m 的圆，
+    #     而地图是静止的 → 相对运动看起来就是"**整张地图绕着车转**"。
+    #   同根因的公开案例：nav2 issue #4135（雷达装偏 → 转圈时 map 跟着画圈）
+    #   https://github.com/ros-navigation/navigation2/issues/4135
+    #   补偿量 = T_body←base_link 的平移（在 body 系里看 base_link 的位置）→ 取负号。
+    xyz: [-0.12, 0.0, -0.125]
+    rpy: [0.0, 0.0, 0.0]   # base_link 与 body 之间无旋转（URDF imu_joint rpy=0）
