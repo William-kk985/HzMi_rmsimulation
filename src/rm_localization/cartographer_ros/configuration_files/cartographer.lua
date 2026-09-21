@@ -25,16 +25,26 @@ options = {
   odom_frame = "odom",
   provide_odom_frame = false,              -- 不再自造 odom→xxx，避免与 LIO 争 body 的子帧
   publish_frame_projected_to_2d = true,    -- 投影到2D平面
-  -- ★ 2026-09-21：打开里程计先验（之前是 false，是"墙跟着车走"的主因之一）
-  --   现象（与 cartographer issue #1943 一致）：车一转，位姿跟不上 → 新扫描被当成"新墙"铺下去
-  --   → 地图跟着车长、糊成多层。
-  --   为什么必须开：我们 /scan 只有 1~2 Hz（0.5~1s 一帧），中间全靠 IMU 二次积分，
-  --   而实测该外推静止都漂 ≈13°/min。开 use_odometry 后 cartographer 用 10Hz 的 /odom
-  --   做运动先验（速度估计 + 位姿图约束）。
-  --   输入：标准形态下 cartographer 订阅相对话题 `odom` → `/odom`，即 **FAST-LIO/Point-LIO 的输出**，
-  --   它本来就是"从起点算起"的里程计，正是 cartographer 期望的语义（无需零化）。
-  --   ⚠️ 全包形态（lio:=cartographer）没有这路 /odom，那两个 lua 里单独关掉了。
-  use_odometry = true,
+  -- ★★ 2026-09-22（二次修正）：把 LIO 的 /odom 先验**关掉**，改回"纯 2D 扫描匹配"。
+  --   上一版（2026-09-21）打开 use_odometry=true 是为了修"墙跟着车走"，方向是错的：
+  --   1) 硬证据：cartographer_node 建图中会 exit -6(SIGABRT)。在 libcartographer.a 里挖出
+  --      pose_extrapolator.cc 只有两条时间序 CHECK：
+  --        a. timed_pose_queue_.empty() || odometry_data.time >= timed_pose_queue_.back().time
+  --        b. time >= imu_tracker->time()
+  --      两条都是"跨时间源乱序"。我们现在只剩 scan+odom 两路，仍会撞上 a。
+  --   2) 为什么会乱序：仿真雷达插件用**仿真时钟**做 header 戳（now()），却用**墙钟**
+  --      (boost::chrono::high_resolution_clock) 逐点算 offset_time（livox_points_plugin.cpp:149/198），
+  --      而 FAST-LIO 取 lidar_end_time = 戳 + 最后一点的 offset（laserMapping.cpp:396-410）
+  --      → /odom 的戳 = 仿真戳 + 一帧墙钟耗时（RTF<1 时是 1.3~3 倍，且随负载抖动）。
+  --      LIO 处理完一帧才发 odom，于是"第 k 帧的 odom"常常在"第 k+1 帧的 scan 已处理"之后才到
+  --      → 撞 CHECK a → 直接 abort；没 abort 的时段，先验按错时刻套用 → 每帧被拖一下 → 地图跟着车转。
+  --   3) 上游官方"只有 2D 激光"的参考配置就是这么干的：use_odometry=false + use_imu_data=false
+  --      + use_online_correlative_scan_matching=true（revo_lds.lua）。
+  --   4) 同源冗余：/odom 本来就由同一份雷达点云融合出来，喂回去等于把 LIO 自身漂移反馈给 cartographer。
+  --   ⚠️ 残留 TODO（不在这份配置里）：/scan 实测只有 0.55~3.03 Hz，转起来时一帧内转过几十度，
+  --      任何 2D SLAM 都跟不住；这才是"旋转跟不上"的真前置条件，要去查 linefit/p2l 丢帧。
+  --   odom→base_link 仍由 lio_tf_adapter 提供，TF 契约不变（cartographer 只发 map→odom）。
+  use_odometry = false,
   use_nav_sat = false,
   use_landmarks = false,
   -- ===== 输入源（2026-09 修正）=====
@@ -148,14 +158,16 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_in
 -- ============================================================================
 POSE_GRAPH.optimize_every_n_nodes = 30      -- 减少优化频率
 POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
--- ★ 2026-09-21 收紧回环（修"整张图跟着车转 + 残影"）
--- 证据：实测 map→odom 被拧到 (0.281, 0.149, **30.88°**)。它正常应该≈0，
---       只在位姿图修正时变；30° 这种量级 = **误回环**（RM 场地小且四角/边线高度对称，
---       原来的松参数允许"跨场地假匹配"，命中一次就把整条轨迹拧一下 → 地图整体转、留残影）。
--- 三处收紧：搜索距离（跨场地不可能）、命中门槛、全局定位门槛。
+-- ★ 2026-09-22（二次修正）：回环门槛调回"能找到"的水平。
+--   上一版把 min_score 提到 0.72（global 0.8）后，cartographer 收尾时打印的是
+--     Score histogram: Count: 0   （0 computations resulted in 0 additional constraints）
+--   即**一条回环都没有**→ 位姿图完全没有全局锚定，地图只剩 local SLAM 的结果，
+--   于是"地图跟着车转/糊"再怎么调 min_score/搜索窗都治不了本（调的是已经不工作的东西）。
+--   回到上游 revo_lds.lua 的 min_score=0.65；global 用 0.70（比上游略严，防跨场地假匹配）。
+--   搜索距离/搜索窗仍保持收紧（4m / 2m / 10°）——这才是真正挡住"跨场地误回环"的那两个参数。
 POSE_GRAPH.constraint_builder.max_constraint_distance = 4.0            -- 10.0 -> 4.0
-POSE_GRAPH.constraint_builder.min_score = 0.72                         -- 0.55 -> 0.72
-POSE_GRAPH.constraint_builder.global_localization_min_score = 0.80     -- 0.60 -> 0.80
+POSE_GRAPH.constraint_builder.min_score = 0.65                         -- 0.72 -> 0.65（上游 2D 参考值）
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.70     -- 0.80 -> 0.70
 POSE_GRAPH.constraint_builder.loop_closure_translation_weight = 1.1e4
 POSE_GRAPH.constraint_builder.loop_closure_rotation_weight = 1e5
 
