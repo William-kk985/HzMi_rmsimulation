@@ -11,8 +11,8 @@ include "cartographer_localization.lua"
 options.published_frame = "base_link"
 options.provide_odom_frame = true
 
--- 同 cartographer_lio.lua：接一路底盘里程计当运动先验（否则静止也在漂）。
--- 纯定位模式下它同样重要：pose extrapolator 决定 odom→base_link 的连续性。
-options.use_odometry = true
+-- 同 cartographer_lio.lua：全包形态没有"从起点算起"的 odom → 先关掉 use_odometry，
+-- 否则会用世界系绝对位姿把 map→odom 拧坏（实测 -130°）。等补上零化适配器再开。
+options.use_odometry = false
 
 return options

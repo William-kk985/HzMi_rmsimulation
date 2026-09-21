@@ -34,9 +34,11 @@ options.provide_odom_frame = true
 --   速度估计用相邻两帧 odom 的 delta（pose_extrapolator.cc:AddOdometryData），
 --   位姿图约束也用 CalculateOdometryBetweenNodes 的 delta（optimization_problem_2d.cc），
 --   所以常量偏移会被自动消掉。
--- 调参提醒：odometry_translation/rotation_weight 目前是 1e5（在 cartographer.lua 里），
---   仿真这条是真值所以合适；**实车轮速有滑移时要调小**（例如 1e3），否则回环拉不动轨迹。
--- ============================================================================
-options.use_odometry = true
+-- ⚠️ 全包形态**关掉** use_odometry（2026-09-21 实测教训）：
+--   本形态没有 LIO 的 /odom；之前用 Gazebo 真值 /odom_ground_truth 顶上，但它是**世界系绝对位姿**
+--   （起点 (4.3,3.35)、世界系朝向），实测把 map→odom 拧到 -18°/-130°（地图整体被转坏）。
+--   要用必须先做"零化"：把底盘 odom 减去第一帧，变成从起点算起的相对量再喂进来（待补）。
+--   在此之前，全包形态的 odom→base_link 只能靠 IMU 外推（已知会漂）。
+options.use_odometry = false
 
 return options

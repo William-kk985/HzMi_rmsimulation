@@ -25,8 +25,16 @@ options = {
   odom_frame = "odom",
   provide_odom_frame = false,              -- 不再自造 odom→xxx，避免与 LIO 争 body 的子帧
   publish_frame_projected_to_2d = true,    -- 投影到2D平面
-  -- 可选 A/B：置 true 让 Cartographer 以 LIO 的 /odom(nav_msgs/Odometry) 作为运动先验（更稳）
-  use_odometry = false,
+  -- ★ 2026-09-21：打开里程计先验（之前是 false，是"墙跟着车走"的主因之一）
+  --   现象（与 cartographer issue #1943 一致）：车一转，位姿跟不上 → 新扫描被当成"新墙"铺下去
+  --   → 地图跟着车长、糊成多层。
+  --   为什么必须开：我们 /scan 只有 1~2 Hz（0.5~1s 一帧），中间全靠 IMU 二次积分，
+  --   而实测该外推静止都漂 ≈13°/min。开 use_odometry 后 cartographer 用 10Hz 的 /odom
+  --   做运动先验（速度估计 + 位姿图约束）。
+  --   输入：标准形态下 cartographer 订阅相对话题 `odom` → `/odom`，即 **FAST-LIO/Point-LIO 的输出**，
+  --   它本来就是"从起点算起"的里程计，正是 cartographer 期望的语义（无需零化）。
+  --   ⚠️ 全包形态（lio:=cartographer）没有这路 /odom，那两个 lua 里单独关掉了。
+  use_odometry = true,
   use_nav_sat = false,
   use_landmarks = false,
   -- ===== 输入源（2026-09 修正）=====
