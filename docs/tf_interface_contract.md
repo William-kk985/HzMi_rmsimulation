@@ -114,3 +114,31 @@ ros2 lifecycle get /controller_server      # nav2 生命周期 active
 | 新增适配节点 | 引入一个新的失败点（但逻辑极小） | 停用该节点，恢复静态桥 |
 
 > 注：`camera_init`/`body`/`aft_mapped` 是两套 LIO 的**内部帧名**，改造后它们只应存在于 LIO 进程内部，不再泄漏到导航层。
+
+---
+
+## 八、全包形态：`lio:=cartographer`（2026-09 新增）
+
+| 形态 | `odom → base_link` | `map → odom` | 被跳过的槽/节点 |
+|---|---|---|---|
+| 标准（默认） | FAST-LIO / Point-LIO | 重定位模块（amcl / slam_toolbox-local / icp / cartographer 纯定位） | — |
+| `lio:=none` | 外部（轮速等） | 同上 | LIO 节点；（T1 静态桥**仍启用**，那是"LIO 当绝对定位"的回退用法） |
+| **全包 `lio:=cartographer`** | **cartographer**（`provide_odom_frame=true`、`published_frame="base_link"`） | **同一个 cartographer** | **`mapper` 槽、`localization` 槽、`lio_tf_adapter`、T1 静态桥** |
+
+- **契约不变量（每条边恰好一个发布者）仍成立**：`lio:=cartographer` 时没有第二个 `odom` 发布者。
+- lua：`cartographer_lio.lua`（`mapping`/`slam_nav`）、`cartographer_lio_localization.lua`（`nav`，需 `map/<world>.pbstream`）。
+  实测：两条 include 链都能被 `cartographer_node` 正常加载（`Found 'cartographer_lio*.lua'` → `Added trajectory with ID '0'`）。
+- **三个代价/限制**：
+  1. `odom→base_link` 的连续性与精度改由 cartographer 的 pose extrapolator 承担
+     （`use_pose_extrapolator` 默认 `true`，本质是"IMU 外推 + 上次匹配结果"），弱于 FAST-LIO 的紧耦合 IEKF；
+  2. **不发布 `nav_msgs/Odometry`** → `nav:=teb` 不适用（TEB 需要 `/odom` 做速度反馈）；
+     `rpp`/`dwb` 正常；`velocity_smoother` 是 `OPEN_LOOP`（已核对源码），不需要 `/odom`；
+  3. 失去独立故障域：cartographer 挂了，`odom→base_link` 与 `map→odom` 一起消失
+     （local costmap 在 `odom` 系，会连观测都转不过去）。
+- **验收命令**：
+  ```bash
+  ros2 run tf2_ros tf2_echo odom base_link      # 由 cartographer 发（不是 lio_tf_adapter）
+  ros2 run tf2_ros tf2_echo map odom
+  ros2 node list | grep -c fastlio              # 期望 0
+  ros2 node list | grep lio_tf_adapter          # 期望空
+  ```

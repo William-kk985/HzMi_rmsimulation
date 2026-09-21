@@ -9,11 +9,20 @@ include "cartographer.lua"
 options = options or {}
 
 -- ============================================================================
--- 纯定位模式核心开关 (必须开启！)
+-- 纯定位模式核心开关
+-- ⚠️ 这两个键挂在 **TRAJECTORY_BUILDER**（顶层），不是 TRAJECTORY_BUILDER_2D！
+--    层级写错的后果不是"参数无效"，而是 cartographer 的 LuaParameterDictionary
+--    在析构时 CHECK「每个键必须被读恰好一次」→ **启动即 FATAL**：
+--      Check failed: 1 == reference_counts_.count(key)
+--      Key 'pure_localization' was used the wrong number of times.
+--    （2026-09-21 实测。官方 backpack_2d_localization.lua 同样写在 TRAJECTORY_BUILDER 上；
+--      读取点见 cartographer/mapping/trajectory_builder_interface.cc 的 kDictionaryKey 与
+--      map_builder.cc 的 has_pure_localization_trimmer()。）
+--    另：`pure_localization` 这个 bool 在 2.0 里已 deprecated（设了只会打警告，
+--    map_builder.cc 明说改用 pure_localization_trimmer）→ 现在只写 trimmer。
 -- ============================================================================
-TRAJECTORY_BUILDER_2D.pure_localization = true  -- 关闭建图，仅定位
-TRAJECTORY_BUILDER_2D.pure_localization_trimmer = {
-  max_submaps_to_keep = 3,  -- 减少保留子图，降低内存和计算量
+TRAJECTORY_BUILDER.pure_localization_trimmer = {
+  max_submaps_to_keep = 3,  -- 只保留最近 3 个子图，降低内存与计算量
 }
 
 -- ============================================================================

@@ -87,9 +87,17 @@ map ──[localization（已知地图）或 在线 mapper（边建边用）]─
 
 | 层 | 参数 | 发布哪条边 | 输入 | 输出 | 特性 | 取值 |
 |---|---|---|---|---|---|---|
-| **里程计** | `lio` | `odom → base_link` | `/livox/lidar`(CustomMsg 10Hz) + `/imu/data`(100Hz) | `/odom`（≈10Hz）→ 由 `lio_tf_adapter` 转成 TF | **高频连续**；无全局参考、**有累积漂移**；只回答"相对起点" | `fastlio` / `pointlio` / `none` |
+| **里程计** | `lio` | `odom → base_link` | `/livox/lidar`(CustomMsg 10Hz) + `/imu/data`(100Hz) | `/odom`（≈10Hz）→ 由 `lio_tf_adapter` 转成 TF | **高频连续**；无全局参考、**有累积漂移**；只回答"相对起点" | `fastlio` / `pointlio` / `none` / `cartographer`（**全包形态**） |
 | **重定位** | `localization` | `map → odom` | **磁盘地图资产** + `/scan`(或点云) + `odom→base_link` | `map→odom` TF（amcl 另有 `/amcl_pose`） | **低频修正、全局不漂**；amcl/icp 需要初值 | `amcl` / `slam_toolbox`(localization 模式) / `icp`；留空 = 回退（LIO 当绝对定位 + 静态桥补帧） |
 | **建图** | `mapper` | `/map`（在线建图时**同时**发 `map→odom`） | `odom→base_link` + `/scan`（或点云） | `/map`(OccupancyGrid)；离线落盘 `.pgm/.yaml` | **造地图**；含回环优化（`map→odom` 会跳变） | `slam_toolbox`(online_async) / `cartographer` |
+
+> **全包形态（`lio:=cartographer`，2026-09 新增）**：cartographer 同时发 `odom→base_link` 与 `map→odom`
+> （lua `cartographer_lio.lua` / `cartographer_lio_localization.lua`：`provide_odom_frame=true`、
+> `published_frame="base_link"`）→ 因此 **`mapper` 槽与 `localization` 槽都会被跳过**，
+> `lio_tf_adapter` 与 T1 静态桥也不启动（否则 `odom` 多父边）。
+> 三个代价：① 失去独立故障域；② `odom` 的连续性改由 cartographer 的 pose extrapolator（IMU 外推）提供，
+> 弱于 FAST-LIO 的紧耦合 IEKF；③ **不发 `/odom` 话题** → `nav:=teb` 不适用（`rpp`/`dwb` 正常）。
+> 详见 `docs/tf_interface_contract.md` §八。
 
 最容易混的三点：
 
@@ -615,7 +623,7 @@ tools/scripts/control/start_sentinel.sh
 |---|---|---|
 | `world` | `RMUC` / `RMUL` / `RMUL2026`（默认） | 场地（同时决定 map/PCD 前缀） |
 | `mode` | **`mapping`（纯建图）/ `slam_nav`（边建图边导航）/ `nav`（先建图后导航）** | 三种**场景形态**，启动的节点集明显不同，见下表；`localization` 仅 `nav` 生效 |
-| `lio` | `fastlio`（默认） / `pointlio` / **`none`** | 里程计实现选择；**`none` = 不启动任何 LIO**（须由外部提供 odom/TF，如轮式里程计或 cartographer；此时 LIO 相关的静态 TF 桥不会启动） |
+| `lio` | `fastlio`（默认） / `pointlio` / **`none`** / **`cartographer`** | 里程计实现选择；**`none` = 不启动任何 LIO**（须由外部提供 odom/TF，如轮式里程计；此时 LIO 相关的静态 TF 桥不会启动）；**`cartographer` = 全包形态**（cartographer 兼任里程计源，`mapper`/`localization` 槽被跳过，见上表注） |
 | `nav` | `rpp`（默认） / `dwb` / `teb` | **局部规划器变体**：对应 `rm_navigation/params/nav2_params_sim_<nav>.yaml`（全局规划统一为 Navfn）；`nav`/`slam_nav` 形态生效 |
 | `mapper` | `slam_toolbox`（默认） / `cartographer` | **在线 2D 建图后端**：`mapping`/`slam_nav` 生效 |
 | `localization` | `amcl` / `slam_toolbox` / `icp` / **`cartographer`**（**仅 `nav` 生效**） | 重定位方式；留空 = 回退用法（LIO 当绝对定位 + 静态桥补帧） |

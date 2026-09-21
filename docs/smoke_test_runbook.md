@@ -78,7 +78,7 @@ sleep 2
 |---|---|---|
 | `world` | `RMUC` / `RMUL` / `RMUL2026` | `RMUL2026` |
 | `mode` | **`mapping`（纯建图）/ `slam_nav`（边建边导）/ `nav`（先建后导）** | 空（**必填**） |
-| `lio` | `fastlio` / `pointlio` / `none` | `fastlio` |
+| `lio` | `fastlio` / `pointlio` / `none` / `cartographer`（全包，见 §6.1） | `fastlio` |
 | `localization` | `amcl` / `slam_toolbox` / `icp` / `cartographer`（**仅 `mode:=nav`** 生效） | 空 |
 | `nav` | `rpp` / `dwb` / `teb`（`nav` / `slam_nav` 生效） | `rpp` |
 | `mapper` | `slam_toolbox` / `cartographer`（`mapping` / `slam_nav` 生效） | `slam_toolbox` |
@@ -226,7 +226,7 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 |---|---|---|---|
 | `world` | `RMUC` / `RMUL` / `RMUL2026` | `RMUL2026` | 场地；同时决定 `map/<world>.*` 与 `PCD/<world>.pcd` 前缀 |
 | `mode` | `mapping` / `slam_nav` / `nav` | 空（**必填**） | 场景形态，决定启动哪套节点集（§0.7） |
-| `lio` | `fastlio` / `pointlio` / `none` | `fastlio` | 里程计实现；`none` 需外部提供 odom/TF |
+| `lio` | `fastlio` / `pointlio` / `none` / `cartographer` | `fastlio` | 里程计实现；`none` 需外部提供 odom/TF；`cartographer` = 全包形态（兼任里程计源，见 §6.1） |
 | `localization` | `amcl` / `slam_toolbox` / `icp` / `cartographer` / 空 | 空 | **仅 `mode:=nav` 生效**；空 = 回退用法（LIO 当绝对定位 + 静态桥） |
 | `mapper` | `slam_toolbox` / `cartographer` | `slam_toolbox` | 在线 2D 建图后端；`mapping`/`slam_nav` 生效 |
 | `nav` | `rpp` / `dwb` / `teb` | `rpp` | 局部规划器变体；`nav`/`slam_nav` 生效 |
@@ -536,6 +536,39 @@ ros2 lifecycle get /controller_server                 # active
 
 ---
 
+### 6.1 全包形态：`lio:=cartographer`（cartographer 兼任里程计源，2026-09 新增）
+
+**它是什么**：`lio` 槽取 `cartographer` 时，同一个 `cartographer_node` 既发 `odom→base_link`
+（`provide_odom_frame=true` + `published_frame="base_link"`），又发 `map→odom`。
+于是 `mapper` 槽、`localization` 槽、`lio_tf_adapter`、T1 静态桥**全部跳过**（launch 已按 `lio` 门控）。
+
+```bash
+# 建图（不写 mapper，写了也会被跳过）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping \
+  lio:=cartographer spin_speed:=0.0 nav_rviz:=True
+# 边建边导
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=slam_nav \
+  lio:=cartographer nav:=rpp spin_speed:=0.0 nav_rviz:=True
+# 纯定位（需 map/RMUL2026.pbstream；localization 必须留空）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=cartographer nav:=rpp spin_speed:=0.0 nav_rviz:=True
+```
+
+**验收**：
+```bash
+ros2 run tf2_ros tf2_echo odom base_link       # 由 cartographer 发（不是 lio_tf_adapter）
+ros2 run tf2_ros tf2_echo map odom
+ros2 node list | grep -c fastlio               # 期望 0
+ros2 node list | grep lio_tf_adapter           # 期望空
+```
+
+**三个限制**（详见 `docs/tf_interface_contract.md` §八）：
+① `odom` 的连续性改由 cartographer 的 pose extrapolator（IMU 外推）提供，弱于 FAST-LIO 的紧耦合 IEKF；
+② **没有 `/odom` 话题** → `nav:=teb` 不适用（用 `rpp`/`dwb`）；
+③ 失去独立故障域：cartographer 挂了 `odom` 与 `map` 一起没。
+
+---
+
 ## 7. 局部规划器变体（RPP / DWB / TEB）
 
 ```bash
@@ -758,6 +791,7 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | Nav2 在 `odom`/`map` 出现前就激活，刷 `Timed out waiting for transform ...` | Gazebo 生成机器人 + LIO 初始化需要数秒，而 Nav2 立即启动 | **已于 2026-09 缓解**：`bringup_sim` 中定位链延后 **4s**、mapping 后端延后 **4s**、Nav2 延后 **10s** 启动 |
 | `spawn_entity: Spawn status: ... timed out waiting for entity to appear` | RMUL2026 世界加载慢，spawn 默认超时过短（实体其实已生成） | **已于 2026-09 修复**：spawn 参数加 `-timeout 60.0` |
 | `cartographer_node` 启动几秒后 `exit code -6`，日志 `Check failed: ... The IMU frame must be colocated with the tracking frame` | `tracking_frame="livox_frame"`，而 `/livox/imu` 的 frame 是 `imu_link`，URDF 里两者差 5cm → cartographer 的 **IMU 共位硬 CHECK** 失败（`sensor_bridge.cpp:136`） | **2026-09-21 已修**：`tracking_frame = "imu_link"`（官方 `mir-100-mapping.lua` 同做法）。沙箱 A/B 验证：隔离 domain + 合成 TF/IMU 消息下，旧配置必 abort、新配置通过 |
+| `cartographer_node` 加载纯定位 lua 即 FATAL：`Key 'pure_localization' was used the wrong number of times` | `cartographer_localization.lua` 把 `pure_localization`/`pure_localization_trimmer` 写在 `TRAJECTORY_BUILDER_2D`，而 cartographer 从**顶层 `TRAJECTORY_BUILDER`** 读（`trajectory_builder_interface.cc` 的 `kDictionaryKey`）；写错层级的键永不被读，而它要求"每键读恰好一次" | **2026-09-21 已修**：改成 `TRAJECTORY_BUILDER.pure_localization_trimmer = {...}`（官方写法）；deprecated 的 bool 不再设 |
 | `spawn_entity: Spawn service failed. Exiting.` + 随后 `local_costmap: ... "odom" ... frame does not exist` 一直刷、Nav2 永不激活 | `spawn_entity` 放弃后**机器人其实晚了 3~5 秒才被插入**（gzserver 仍会打印 `mecanum_controller: Subscribed to [/cmd_vel_chassis]`、`LivoxPointsPlugin: ros topic name: /livox/lidar`）。而 Nav2 在 `odom` 帧出现前激活不了；若在此期间 LIO 还没吐 `/odom`，就一直是这个循环。**RMUL 场地网格 44 万三角面（RMUL2026 仅 3187），加载明显更慢** | 不要 20 秒就下结论：**给 30~60 秒**再判断。用 `ros2 topic hz /livox/lidar`（CustomMsg 10Hz）→ `/livox/imu`（100Hz）→ `/imu/data`（互补滤波输出 100Hz，FAST-LIO 的 `imu_topic`）→ `/odom`（≈10Hz）**逐段定位**；`/odom` 一出，`odom` 帧即有、local_costmap 立即恢复、Nav2 自行激活。若 `/livox/lidar` 有数据而 `/odom` 始终没有 → 换 `lio:=pointlio` 做 A/B（它用原始 `/livox/imu`）以区分是雷达侧还是 FAST-LIO+互补滤波支路 |
 | `Timed out waiting for transform from base_link to map` | `map→odom` 缺失 | nav 模式必须指定 `localization:=amcl\|slam_toolbox\|icp\|cartographer` |
 | `Invalid frame ID "base_link"` / fake_vel 报 `Could not transform odom to base_link` | `/odom` 无数据 → LIO 或 `lio_tf_adapter` 未启动 | 查终端 A 是否打印 `lio_tf_adapter 启动` |

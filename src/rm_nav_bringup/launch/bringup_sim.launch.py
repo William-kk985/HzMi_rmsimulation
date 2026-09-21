@@ -136,8 +136,11 @@ def generate_launch_description():
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
         default_value='fastlio',
-        description='Choose lio algorithm: fastlio | pointlio | none '
-                    '(none = 不启动任何 LIO，需外部提供 odom/TF，如轮式里程计或 cartographer)')
+        description='里程计源（谁发 odom→base_link）: fastlio | pointlio | '
+                    'none（不启动 LIO，需外部提供 odom/TF，如轮式里程计）| '
+                    'cartographer（**全包形态**：cartographer 兼任里程计源 → 同时跳过 mapper 槽与 '
+                    'localization 槽；mode:=nav 时用 map/<world>.pbstream 做纯定位。'
+                    '它不发 /odom 话题 → nav:=teb 不适用，用 rpp/dwb。见 docs/tf_interface_contract.md）')
 
     declare_nav_cmd = DeclareLaunchArgument(
         'nav',
@@ -259,11 +262,23 @@ def generate_launch_description():
         ])
     ])
 
+    # ===== lio:=cartographer（全包形态）=====
+    # cartographer 同时发 odom→base_link 与 map→odom（见 configuration_files/cartographer_lio*.lua），
+    # 因此：① mapper 槽、localization 槽都要跳过（否则地图/TF 出现第二个发布者）；
+    #       ② lio_tf_adapter 与 T1 回退静态桥（body→odom）也必须关，否则 odom 多父边。
+    carto_as_lio = ["'", LaunchConfiguration('lio'), "' == 'cartographer'"]
+    carto_as_lio_mapping_condition = IfCondition(PythonExpression(
+        carto_as_lio + [" and '", LaunchConfiguration('mode'), "' != 'nav'"]))
+    carto_as_lio_nav_condition = IfCondition(PythonExpression(
+        carto_as_lio + [" and '", LaunchConfiguration('mode'), "' == 'nav'"]))
+
     start_localization_group = GroupAction(
         condition = LaunchConfigurationEquals('mode', 'nav'),
         actions=[
             Node(
-                condition = LaunchConfigurationEquals('localization', 'slam_toolbox'),
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('localization'), "' == 'slam_toolbox' and '",
+                    LaunchConfiguration('lio'), "' != 'cartographer'"])),
                 package='slam_toolbox',
                 executable='localization_slam_toolbox_node',
                 name='slam_toolbox',
@@ -277,7 +292,9 @@ def generate_launch_description():
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir,'localization_amcl_launch.py')),
-                condition = LaunchConfigurationEquals('localization', 'amcl'),
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('localization'), "' == 'amcl' and '",
+                    LaunchConfiguration('lio'), "' != 'cartographer'"])),
                 # amcl_launch 现在同时启动 map_server + amcl（同一个 lifecycle_manager），故需传入地图
                 launch_arguments = {
                     'use_sim_time': use_sim_time,
@@ -295,9 +312,26 @@ def generate_launch_description():
             # 避免 /map 双发布者（map_server 的启动条件见下面那段 Include）。
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
-                condition = LaunchConfigurationEquals('localization', 'cartographer'),
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('localization'), "' == 'cartographer' and '",
+                    LaunchConfiguration('lio'), "' != 'cartographer'"])),
                 launch_arguments = {
                     'configuration_basename': 'cartographer_localization.lua',
+                    'load_state_filename': carto_pbstream_dir,
+                    'load_frozen_state': 'true',
+                    'occupancy_grid_topic': '/cartographer_map'}.items()
+            ),
+
+            # lio:=cartographer（全包形态）+ mode:=nav —— cartographer 自己做纯定位**并且**兼任里程计源。
+            # 与上面那条的区别只有两点：lua 用 cartographer_lio_localization.lua（provide_odom_frame=true），
+            # 且由它自己发 odom→base_link（所以 lio 不能再是 fastlio/pointlio）。
+            # /map 仍由 map_server 发先验图（map_server 的条件只看 localization != amcl/slam_toolbox，
+            # 而本形态要求 localization 留空 → 条件成立，符合预期）。
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
+                condition = carto_as_lio_nav_condition,
+                launch_arguments = {
+                    'configuration_basename': 'cartographer_lio_localization.lua',
                     'load_state_filename': carto_pbstream_dir,
                     'load_frozen_state': 'true',
                     'occupancy_grid_topic': '/cartographer_map'}.items()
@@ -307,7 +341,9 @@ def generate_launch_description():
                 period=7.0,
                 actions=[
                     Node(
-                        condition=LaunchConfigurationEquals('localization', 'icp'),
+                        condition=IfCondition(PythonExpression([
+                            "'", LaunchConfiguration('localization'), "' == 'icp' and '",
+                            LaunchConfiguration('lio'), "' != 'cartographer'"])),
                         package='icp_registration',
                         executable='icp_registration_node',
                         output='screen',
@@ -356,7 +392,9 @@ def generate_launch_description():
     # T3：LIO 位姿 → 标准帧树适配（odom→base_link），启用 LIO 时启动
     # （配合 T4 关闭 Gazebo 的 odom→base_link，使其成为唯一位姿来源；T2 已把里程计话题统一为 /odom）
     lio_tf_adapter_node = Node(
-        condition = LaunchConfigurationNotEquals('lio', 'none'),
+        condition = IfCondition(PythonExpression([
+            "'", LaunchConfiguration('lio'), "' != 'none' and '",
+            LaunchConfiguration('lio'), "' != 'cartographer'"])),
         package='lio_tf_adapter',
         executable='lio_tf_adapter_node',
         name='lio_tf_adapter',
@@ -371,7 +409,8 @@ def generate_launch_description():
     icp_frame_bridge_condition = IfCondition(PythonExpression([
         "'", LaunchConfiguration('mode'), "' == 'nav' and '",
         LaunchConfiguration('localization'), "' == '' and '",
-        LaunchConfiguration('lio'), "' != 'none'"]))
+        LaunchConfiguration('lio'), "' != 'none' and '",
+        LaunchConfiguration('lio'), "' != 'cartographer'"]))
 
     tf_bridge_node = Node(
         condition=icp_frame_bridge_condition,
@@ -414,12 +453,15 @@ def generate_launch_description():
         ['('] + mode_mapping + [' or '] + mode_slam_nav + [')']))
 
     # 2D 建图后端二选一（mapper:=slam_toolbox|cartographer，mode:=mapping 或 slam_nav 生效）
+    # 注：lio:=cartographer（全包形态）时 mapper 槽整体跳过 —— 那一个 cartographer 已经在建图并发 /map。
     slam_mapping_condition = IfCondition(PythonExpression(
         ['('] + mode_mapping + [' or '] + mode_slam_nav + [") and '",
-         LaunchConfiguration('mapper'), "' == 'slam_toolbox'"]))
+         LaunchConfiguration('mapper'), "' == 'slam_toolbox' and '",
+         LaunchConfiguration('lio'), "' != 'cartographer'"]))
     carto_mapping_condition = IfCondition(PythonExpression(
         ['('] + mode_mapping + [' or '] + mode_slam_nav + [") and '",
-         LaunchConfiguration('mapper'), "' == 'cartographer'"]))
+         LaunchConfiguration('mapper'), "' == 'cartographer' and '",
+         LaunchConfiguration('lio'), "' != 'cartographer'"]))
 
     start_mapping = Node(
         condition = slam_mapping_condition,
@@ -436,6 +478,14 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
         condition = carto_mapping_condition,
         launch_arguments={'configuration_basename': 'cartographer.lua'}.items()
+    )
+
+    # lio:=cartographer（全包形态）+ mapping/slam_nav —— 同一个 cartographer 既建图又当里程计源。
+    # mapper 槽此时被跳过（上面两个 condition 都要求 lio != cartographer）→ 不会出现两个 /map 发布者。
+    start_cartographer_as_lio_mapping = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
+        condition = carto_as_lio_mapping_condition,
+        launch_arguments={'configuration_basename': 'cartographer_lio.lua'}.items()
     )
 
     # 纯建图（mode:=mapping）不再启动 nav2，因此 nav2 自带的 rviz_launch 也不会起。
@@ -498,7 +548,8 @@ def generate_launch_description():
     ld.add_action(TimerAction(period=4.0, actions=[start_localization_group]))
     ld.add_action(bringup_fake_vel_transform_node)
     ld.add_action(lio_tf_adapter_node)
-    ld.add_action(TimerAction(period=4.0, actions=[start_mapping, start_cartographer_mapping]))
+    ld.add_action(TimerAction(period=4.0, actions=[start_mapping, start_cartographer_mapping,
+                                                   start_cartographer_as_lio_mapping]))
     ld.add_action(TimerAction(period=10.0, actions=[start_navigation2]))
     # 纯建图模式的 RViz（nav2 未启动时 nav_rviz 仍要能出图）
     ld.add_action(mapping_rviz_node)

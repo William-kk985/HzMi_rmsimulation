@@ -254,7 +254,7 @@ flowchart LR
 | 包 | 建图 | 里程计/定位 | 重定位 | 说明 |
 |---|---|---|---|---|
 | **slam_toolbox** | ✅ mapping | ✅ 在线 | ✅ localization(.posegraph) | 一包三用 + lifelong 续图 |
-| **Cartographer** | ✅ | ✅ | ✅ 纯定位(.pbstream) | 可导出栅格图喂 AMCL |
+| **Cartographer** | ✅ | ✅（**全包形态** `lio:=cartographer`：兼任里程计源）+ 在线定位 | ✅ 纯定位(.pbstream) | 可导出栅格图喂 AMCL；三用（建图/里程计/重定位） |
 | **FAST-LIO** | ✅ 建图 | ✅ 里程计 | ✅ 扩展 FAST-LIO-LOCALIZATION | 建图+里程计一体，重定位靠扩展 |
 | **hdl_graph_slam / hdl_localization** | ✅ 建图 | ✅ | ✅ hdl_localization(NDT/ICP) | 作者配套拆出独立定位节点 |
 | **LIO-SAM** | ✅ | ✅ | 外接 hdl_localization / Scan Context | 回环+GPS 内置 |

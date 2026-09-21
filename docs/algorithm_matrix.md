@@ -22,7 +22,7 @@
 | 槽位 | 参数 | 现有实现 | 对应包 / 节点 | 生效条件 |
 |---|---|---|---|---|
 | **场景形态** | `mode` | `mapping` 纯建图 / `slam_nav` 边建边导 / `nav` 先建后导 | — | 必填 |
-| **里程计** | `lio` | `fastlio` / `pointlio` / `none` | `src/rm_localization/FAST_LIO`、`point_lio`；`none` 需外部提供 odom/TF | 全形态 |
+| **里程计** | `lio` | `fastlio` / `pointlio` / `none` / **`cartographer`（全包）** | `src/rm_localization/FAST_LIO`、`point_lio`；`none` 需外部提供 odom/TF；`cartographer` = 同一个 cartographer 兼任里程计源（`mapper`/`localization` 槽被跳过，lua `cartographer_lio*.lua`） | 全形态 |
 | **在线建图** | `mapper` | `slam_toolbox` / `cartographer` | `src/rm_localization/slam_toolbox`（async）、`cartographer_ros`（+ `cartographer_occupancy_grid_node`） | `mapping` / `slam_nav` |
 | **重定位** | `localization` | `amcl` / `slam_toolbox`(纯定位) / `icp` | `nav2_amcl`(+`map_server`)、`slam_toolbox`(localization)、`src/rm_localization/icp_registration` | 仅 `nav` |
 | **局部规划器** | `nav` | `rpp` / `dwb` / `teb` | `nav2_regulated_pure_pursuit_controller` / `nav2_dwb_controller` / `teb_local_planner`（+ `costmap_converter`） | `nav` / `slam_nav` |
@@ -132,7 +132,7 @@
 | `nav` | **72** | 3 × 2 × **4 重定位**(amcl/slamTB/icp/cartographer) × 3 局部规划器 |
 | **合计** | **120** | 不含 `spin_speed`/`global_obstacle`/`local_obstacle`/`*_rviz` 等开关 |
 
-另有特殊用法：`lio:=none`（需外部 odom/TF，例如轮式里程计或纯 2D 组合）、`mode:=nav localization:=''`（LIO 当绝对定位的静态桥回退用法）。
+另有特殊用法：`lio:=none`（需外部 odom/TF，例如轮式里程计或纯 2D 组合）、**`lio:=cartographer`（全包形态：cartographer 兼任里程计源，`mapper`/`localization` 槽被跳过）**、`mode:=nav localization:=''`（LIO 当绝对定位的静态桥回退用法）。
 
 **加上"回退用法"（`mode:=nav` 且 `localization` 留空）**：nav 变为 3×2×**5**×3 = 90 → 合计 **138**。
 
@@ -211,5 +211,6 @@
 | 2026-09-16 | 修 `global_obstacle:=scan` 的量程隐患：global 的 scan 源 `obstacle/raytrace_max_range` 由照抄 local 的 6.0 改为 **10.0**（与 p2l `range_max` 对齐），否则全图 6 m 外的旧标记永不清除 → 幽灵障碍 |
 | 2026-09-16 | **决策：不按 2D/3D 物理重组目录**（维度与技术域正交：目录按域分、维度用文档标注）；后续算法情况一律在本文件更新 |
 | 2026-09-21 | 新增装配级槽位 **`local_obstacle`**（`scan`/`cloud`/`both`，默认 `scan` 行为不变）：局部代价地图可加第二路（点云直投，不经 `p2l`）→ 破 `p2l` 单点、消 45cm 盲区；组合数 672 → **1968**（含回退 2292） |
-| 2026-09-21 | 修 **`cartographer` 启动即 abort**（`exit -6`）：`tracking_frame` 由 `livox_frame` 改 **`imu_link`**（`sensor_bridge.cpp:136` 要求 IMU 帧与 tracking_frame 重合；URDF 两者差 5cm 且该 5cm 是 FAST-LIO extrinsic 依赖的）；`min_range` 0.45→0.2。已用隔离 ROS domain + 合成 TF/IMU 做 A/B 验证 |
+| 2026-09-21 | 新增里程计槽位取值 **`lio:=cartographer`（全包形态）**：同一个 cartographer 兼任里程计源（`provide_odom_frame=true`，发 `odom→base_link` + `map→odom`）→ `mapper`/`localization` 槽与 `lio_tf_adapter`/T1 桥全部跳过；新增 lua `cartographer_lio.lua` / `cartographer_lio_localization.lua`。代价：无独立故障域、无 `/odom` 话题（`nav:=teb` 不适用） |
+| 2026-09-21 | 修 **`localization:=cartographer` 启动即 FATAL**：`cartographer_localization.lua` 把 `pure_localization`/`pure_localization_trimmer` 写在 `TRAJECTORY_BUILDER_2D` 上，而 cartographer 从顶层 `TRAJECTORY_BUILDER` 读 → 键永不被读 → `LuaParameterDictionary` CHECK `Key 'pure_localization' was used the wrong number of times`。改为官方写法 `TRAJECTORY_BUILDER.pure_localization_trimmer` |
 | 2026-09-21 | 修**静默失效**：所有障碍源加 `expected_update_rate: 0.5`（原默认 0=不检查）→ 源停即 WARN + 拒绝算速度 + `velocity_timeout` 1s 停车；另修 `p2l` 的 `range_min: 0.45 → 0.2`（45cm 盲区会被反向清成 free）、`scan_time: 0.3333 → 0.1` |
