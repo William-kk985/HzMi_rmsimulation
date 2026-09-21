@@ -405,6 +405,30 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}]
     )
 
+    # T3b（2026-09-21）：给 cartographer 的 use_odometry 补上帧连接
+    # LIO 的 /odom 里 child_frame_id = "body"，而 body 是 LIO 的**内部帧名，不在 TF 树里**
+    # → cartographer 查 TF `imu_link ← body` 失败（tf_bridge.cpp:53 刷
+    #   "Could not find a connection between 'imu_link' and 'body' ..."）
+    # → 该条 odom 被直接丢弃（ToOdometryData 返回 nullptr）→ collator 一直等 odom 传感器
+    #   → **整个建图卡住**（开了 use_odometry 反而不工作，就是这个原因）。
+    # body 就是 IMU 所在帧（URDF imu_link；FAST-LIO 的 extrinsic_T=[0,0,0.05] → IMU 在雷达下 5cm），
+    # 所以补一个恒等静态 imu_link→body 即可（body 之前没有父帧，不会产生多父）。
+    # ⚠️ 启动条件必须排除 T1 回退用法（mode:=nav 且 localization:=''）：
+    #   那种用法下 T1 会发 body→odom，若同时存在 imu_link→body，
+    #   就会形成 odom→base_link→imu_link→body→odom 的 **TF 环**（tf2 会崩）。
+    tf_body_alias_node = Node(
+        condition = IfCondition(PythonExpression([
+            "'", LaunchConfiguration('lio'), "' != 'none' and '",
+            LaunchConfiguration('lio'), "' != 'cartographer' and not ('",
+            LaunchConfiguration('mode'), "' == 'nav' and '",
+            LaunchConfiguration('localization'), "' == '')"])),
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_body_alias_imu_link',
+        arguments=['0', '0', '0', '0', '0', '0', 'imu_link', 'body'],
+        parameters=[{'use_sim_time': use_sim_time}]
+    )
+
     # T1（修正版）：帧桥只在「nav + 未选择任何重定位模块 + 启用 LIO」时启动，
     # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
     # amcl / slam_toolbox / icp_registration 三者都会自行发布 map→odom，绝不能再叠加静态桥（否则 map/odom 多父边）。
@@ -553,6 +577,7 @@ def generate_launch_description():
     ld.add_action(TimerAction(period=4.0, actions=[start_localization_group]))
     ld.add_action(bringup_fake_vel_transform_node)
     ld.add_action(lio_tf_adapter_node)
+    ld.add_action(tf_body_alias_node)
     ld.add_action(TimerAction(period=4.0, actions=[start_mapping, start_cartographer_mapping,
                                                    start_cartographer_as_lio_mapping]))
     ld.add_action(TimerAction(period=10.0, actions=[start_navigation2]))
