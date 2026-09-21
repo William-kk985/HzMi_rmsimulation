@@ -4,7 +4,7 @@
   <xacro:property name="M_PI" value="3.1415926"/> 
   <xacro:property name="laser_min_range" value="0.1"/>
   <xacro:property name="laser_max_range" value="200.0"/>
-  <xacro:property name="samples" value="12000"/>  <!-- 2026-09-22: 30000->12000，减轻 linefit/p2l/FAST-LIO 的每帧负担（/scan 投递率从 1~3Hz 提上来） -->
+  <xacro:property name="samples" value="30000"/>
   <xacro:property name="resolution" value="0.002"/>
   <xacro:property name="noise_mean" value="0.0"/>
   <xacro:property name="noise_stddev" value="0.002"/>
