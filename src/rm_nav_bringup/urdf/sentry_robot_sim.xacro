@@ -182,6 +182,22 @@
     </inertial>
   </link>
 
+  <!-- body：FAST-LIO / Point-LIO 里程计消息里的 child_frame_id（就是 IMU 帧本身）。
+       ★ 2026-09-21：显式把它挂到 imu_link 下（恒等），否则 cartographer 的 use_odometry
+       在 SensorBridge::ToOdometryData 里查 TF `imu_link ← body` 会失败
+       （tf_bridge.cpp:53 "Tf has two or more unconnected trees"）→ 该条 odom 被整个丢弃
+       → 轨迹构建器的 collator 一直等 odom 传感器 → **建图停摆**。
+       恒等是正确的：FAST-LIO 的 extrinsic_T=[0,0,0.05] 表示 IMU 就在雷达下方 5cm，
+       即 URDF 的 imu_link，所以 body ≡ imu_link。 -->
+  <link name="body">
+    <xacro:default_inertial mass="1e-6"/>
+  </link>
+  <joint name="body_alias_joint" type="fixed">
+    <parent link="imu_link"/>
+    <child link="body"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
   <!-- Gazebo插件设置相关 -->
   <gazebo reference="base_link">
     <material>Gazebo/Orange</material>
