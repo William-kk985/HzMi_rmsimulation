@@ -68,8 +68,21 @@ MAP_BUILDER.num_background_threads = 4
 -- ============================================================================
 -- 轨迹构建器配置 - 优化稳定性
 -- ============================================================================
-TRAJECTORY_BUILDER_2D.use_imu_data = true
-TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 1.0  -- 减小，更快响应
+-- ★ 2026-09-22：关掉 IMU，只留 odom 作为运动先验
+-- 原因：同时喂 IMU（Gazebo 插件直发 100Hz）与 odom（FAST-LIO 处理完才吐 10Hz）时，
+-- 两者时间戳会交错出现"odom 比已收到的最后一帧 IMU 早几十微秒"（实测差 39µs），
+-- 触发 cartographer 的硬 CHECK 直接 abort：
+--   F pose_extrapolator.cc:229] Check failed: time >= imu_tracker->time()
+--     @ PoseExtrapolator::ExtrapolateRotation()
+--     @ PoseExtrapolator::AddOdometryData()
+--     @ Node::HandleOdometryMessage()
+-- 这是已知问题（https://answers.ros.org/question/320444/）。
+-- 我们的 /odom 本来就是 FAST-LIO 融合了 IMU+LiDAR 的 10Hz 结果（比原始 IMU 更好用），
+-- cartographer 不必再吃原始 IMU → 单一运动先验，彻底避开时间戳交错。
+-- （平地仿真不需要 IMU 做重力对齐；use_imu_data=false 后 cartographer 也不再订阅 /livox/imu，
+--   collator 只需等 scan+odom 两路，反而更不容易卡。）
+TRAJECTORY_BUILDER_2D.use_imu_data = false
+TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 1.0  -- 该键仍会被读取（不能删）
 
 -- 点云范围过滤 (适配 RMUL 赛场 PVC 地胶)
 -- ⚠️ min_range 由 0.45 改 0.2：原值理由是"避开 38cm 的地面最近点"，但我们吃的是感知域 p2l 的 /scan
