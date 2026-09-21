@@ -1,4 +1,3 @@
-#include <boost/chrono.hpp>
 #include <gazebo/physics/Model.hh>
 #include <gazebo/physics/MultiRayShape.hh>  // Store the latest laser scans into laserMsg
 #include <gazebo/physics/PhysicsEngine.hh>
@@ -106,6 +105,9 @@ namespace gazebo
         }
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "sample: %ld", samplesStep);
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "downsample: %ld", downSample);
+        // 这行日志用于确认加载的是修好时间基的插件（旧库打的是墙钟偏移）
+        RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
+                    "timebase: SIM clock, per-point offset_time = 0 (intra-frame motionless)");
         rayShape->RayShapes().reserve(samplesStep / downSample);
         rayShape->Load(sdfPtr);
         rayShape->Init();
@@ -141,16 +143,21 @@ namespace gazebo
         msgs::LaserScan *scan = laserMsg.mutable_scan();
         InitializeScan(scan);
 
+        // ★ 2026-09-22 修正（关键）：本帧所有点的采样时刻 = 当前仿真时刻。
+        //   Gazebo 的射线传感器是"一次回调把所有射线全部打完"（上面那句 rayShape->Update()），
+        //   一帧之内机器人位姿不变 → 帧内没有任何运动，所有点属于同一个仿真时刻。
+        //   两条消息必须共用同一个戳：原来各调用一次 now()，差一个仿真步都会让 /scan 与 /odom 对不齐。
+        const rclcpp::Time stamp = node_->get_clock()->now();
+
         // 创建自定义消息 pp_livox，用于发布 Livox CustomMsg 类型消息
         livox_ros_driver2::msg::CustomMsg pp_livox;
-        pp_livox.header.stamp = node_->get_clock()->now();
+        pp_livox.header.stamp = stamp;
         pp_livox.header.frame_id = raySensor->Name();
         int count = 0;
-        boost::chrono::high_resolution_clock::time_point start_time = boost::chrono::high_resolution_clock::now();
 
         // 用于 PointCloud2 类型消息发布
         sensor_msgs::msg::PointCloud2 cloud2;
-        cloud2.header.stamp = node_->get_clock()->now();
+        cloud2.header.stamp = stamp;
         cloud2.header.frame_id = raySensor->Name();
 
         sensor_msgs::PointCloud2Modifier modifier(cloud2);
@@ -194,10 +201,19 @@ namespace gazebo
             ++out_y;
             ++out_z;
 
-            // 计算时间戳偏移
-            boost::chrono::high_resolution_clock::time_point end_time = boost::chrono::high_resolution_clock::now();
-            boost::chrono::nanoseconds elapsed_time = boost::chrono::duration_cast<boost::chrono::nanoseconds>(end_time - start_time);
-            p.offset_time = elapsed_time.count();
+            // ★ 2026-09-22 修正（关键）：逐点时间偏移必须与 header 戳同一条时间轴（**仿真钟**）。
+            //   原来这里用 boost::chrono::high_resolution_clock（**墙钟**）累计"生成一帧花了多久"，
+            //   而 header 戳是仿真钟 → 两个时间基准混用。下游 FAST-LIO 的用法（laserMapping.cpp:396-410）：
+            //       lidar_end_time = header 戳 + 末点 offset      // 再用于 odom.header.stamp (:632)
+            //   => /odom 的时间戳 = 仿真戳 + 一帧墙钟耗时：RTF<1 时是 1.3~3 倍（本机 RTF≈0.76），
+            //      且逐帧随 CPU 负载抖动；同时 FAST-LIO 拿这个假跨度做去畸变，
+            //      把"其实根本没发生"的帧内运动补偿掉 → 转起来时整帧被拧、odom 位姿带负载相关偏差。
+            //   cartographer 侧的表现：偶发 Check failed: timed_pose_queue_... → exit -6(SIGABRT)，
+            //      以及开 use_odometry 时先验按错时刻套用 → 地图跟着车转（详见 docs/issues_and_findings.md）。
+            //   仿真里帧内无运动，正确值就是 0（FAST-LIO 于是得到 lidar_end_time == header 戳，自洽）。
+            //   若将来真要建帧内运动模型，应使用 scan_mode/mid360.csv 的 Time 列（单位需先确认），
+            //   而不是墙钟。
+            p.offset_time = 0;
 
             // 将点云数据添加到 CustomMsg 消息中
             pp_livox.points.push_back(p);
