@@ -127,15 +127,20 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_in
 -- ============================================================================
 POSE_GRAPH.optimize_every_n_nodes = 30      -- 减少优化频率
 POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
-POSE_GRAPH.constraint_builder.max_constraint_distance = 10.
-POSE_GRAPH.constraint_builder.min_score = 0.55
-POSE_GRAPH.constraint_builder.global_localization_min_score = 0.6
+-- ★ 2026-09-21 收紧回环（修"整张图跟着车转 + 残影"）
+-- 证据：实测 map→odom 被拧到 (0.281, 0.149, **30.88°**)。它正常应该≈0，
+--       只在位姿图修正时变；30° 这种量级 = **误回环**（RM 场地小且四角/边线高度对称，
+--       原来的松参数允许"跨场地假匹配"，命中一次就把整条轨迹拧一下 → 地图整体转、留残影）。
+-- 三处收紧：搜索距离（跨场地不可能）、命中门槛、全局定位门槛。
+POSE_GRAPH.constraint_builder.max_constraint_distance = 4.0            -- 10.0 -> 4.0
+POSE_GRAPH.constraint_builder.min_score = 0.72                         -- 0.55 -> 0.72
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.80     -- 0.60 -> 0.80
 POSE_GRAPH.constraint_builder.loop_closure_translation_weight = 1.1e4
 POSE_GRAPH.constraint_builder.loop_closure_rotation_weight = 1e5
 
--- 快速相关扫描匹配器
-POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 5.
-POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.angular_search_window = math.rad(20.)
+-- 快速相关扫描匹配器：搜索窗也收紧（现在有 odom 先验，不需要 5m / 20° 那么宽）
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 2.0          -- 5. -> 2.0
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.angular_search_window = math.rad(10.)  -- 20° -> 10°
 POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.branch_and_bound_depth = 7
 
 -- Ceres 扫描匹配器
@@ -164,6 +169,6 @@ POSE_GRAPH.optimization_problem.ceres_solver_options.num_threads = 4
 POSE_GRAPH.max_num_final_iterations = 200
 POSE_GRAPH.global_sampling_ratio = 0.003
 POSE_GRAPH.log_residual_histograms = true
-POSE_GRAPH.global_constraint_search_after_n_seconds = 10.
+POSE_GRAPH.global_constraint_search_after_n_seconds = 30.   -- 10s -> 30s（小场地里全局瞎找很容易假匹配）
 
 return options

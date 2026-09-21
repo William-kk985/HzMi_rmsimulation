@@ -212,6 +212,7 @@
 | 2026-09-16 | **决策：不按 2D/3D 物理重组目录**（维度与技术域正交：目录按域分、维度用文档标注）；后续算法情况一律在本文件更新 |
 | 2026-09-21 | 新增装配级槽位 **`local_obstacle`**（`scan`/`cloud`/`both`，默认 `scan` 行为不变）：局部代价地图可加第二路（点云直投，不经 `p2l`）→ 破 `p2l` 单点、消 45cm 盲区；组合数 672 → **1968**（含回退 2292） |
 | 2026-09-21 | 新增里程计槽位取值 **`lio:=cartographer`（全包形态）**：同一个 cartographer 兼任里程计源（`provide_odom_frame=true`，发 `odom→base_link` + `map→odom`）→ `mapper`/`localization` 槽与 `lio_tf_adapter`/T1 桥全部跳过；新增 lua `cartographer_lio.lua` / `cartographer_lio_localization.lua`。代价：无独立故障域、无 `/odom` 话题（`nav:=teb` 不适用） |
+| 2026-09-21 | 收紧 **cartographer 回环参数**（修"整张地图跟着车转 + 残影"）：实测 `map→odom` 被拧到 30.88° = 误回环。`max_constraint_distance 10→4`、`min_score 0.55→0.72`、`global_localization_min_score 0.6→0.8`、`fast_correlative_scan_matcher` 搜索窗 `5m/20°→2m/10°`、`global_constraint_search_after_n_seconds 10→30` |
 | 2026-09-21 | 修 **全包形态静止漂移**：给 `lio:=cartographer` 接一路底盘里程计（lua `use_odometry=true` + `cartographer_sim.launch.py` 新增 `odom_topic` 参数，bringup 传 `/odom_ground_truth`）。实测不加时 `odom→base_link` 漂 ≈4 cm/s、13°/min（`map→odom` 恒定 → 非回环问题）；cartographer 只用 odom 增量，故世界系绝对位姿可直接喂 |
 | 2026-09-21 | `tools/scripts/control/improved_teleop.sh` 键位改为**方向键**（↑↓ 前进后退 / ←→ 左右转 / `<` `>` 线速度 / `,` `.` 角速度 / 空格停 / q 退出，支持 `TELEOP_TOPIC` 覆盖话题）；键位表写进 runbook §1 |
 | 2026-09-21 | 修**静默失效**：所有障碍源加 `expected_update_rate: 0.5`（原默认 0=不检查）→ 源停即 WARN + 拒绝算速度 + `velocity_timeout` 1s 停车；另修 `p2l` 的 `range_min: 0.45 → 0.2`（45cm 盲区会被反向清成 free）、`scan_time: 0.3333 → 0.1` |
