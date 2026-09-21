@@ -27,6 +27,22 @@ def _cartographer_nodes(context, *args, **kwargs):
             arguments += ['-load_frozen_state', 'true']
 
     occupancy_grid_topic = LaunchConfiguration('occupancy_grid_topic')
+    odom_topic = LaunchConfiguration('odom_topic').perform(context).strip()
+
+    remappings = [
+        # 2D 激光路线（当前默认，见 configuration_files/cartographer.lua）：
+        #   /scan 由感知域 linefit(去地面) + pointcloud_to_laserscan(高度带) 产出
+        ('scan', '/scan'),
+        # 备选点云路线：cartographer_ros **只支持 sensor_msgs/PointCloud2**，
+        # 绝不能 remap 到 /livox/lidar（那是 livox_ros_driver2/CustomMsg，类型不匹配 -> 收不到数据）
+        # ('points2', '/livox/lidar/pointcloud'),
+        ('imu', '/livox/imu'),
+    ]
+    if odom_topic:
+        # use_odometry=true 时 cartographer 订阅的是相对话题 `odom`。
+        # 全包形态（lio:=cartographer）下没有 LIO 的 /odom，bringup 会传底盘里程计
+        # （仿真 = /odom_ground_truth；实车 = 下位机轮速 odom）。
+        remappings.append(('odom', odom_topic))
 
     cartographer_node = Node(
         package='cartographer_ros',
@@ -35,15 +51,7 @@ def _cartographer_nodes(context, *args, **kwargs):
         output='screen',
         parameters=[{'use_sim_time': True}],
         arguments=arguments,
-        remappings=[
-            # 2D 激光路线（当前默认，见 configuration_files/cartographer.lua）：
-            #   /scan 由感知域 linefit(去地面) + pointcloud_to_laserscan(高度带) 产出
-            ('scan', '/scan'),
-            # 备选点云路线：cartographer_ros **只支持 sensor_msgs/PointCloud2**，
-            # 绝不能 remap 到 /livox/lidar（那是 livox_ros_driver2/CustomMsg，类型不匹配 -> 收不到数据）
-            # ('points2', '/livox/lidar/pointcloud'),
-            ('imu', '/livox/imu'),
-        ]
+        remappings=remappings
     )
 
     occupancy_grid_node = Node(
@@ -94,6 +102,12 @@ def generate_launch_description():
             'load_frozen_state',
             default_value='true',
             description='纯定位用：是否冻结已加载的状态（配合 load_state_filename）'
+        ),
+        DeclareLaunchArgument(
+            'odom_topic',
+            default_value='',
+            description='use_odometry=true 时的里程计输入话题（留空 = 不 remap，保持默认 odom）。'
+                        '全包形态（lio:=cartographer）下 bringup 会传 /odom_ground_truth'
         ),
         OpaqueFunction(function=_cartographer_nodes),
     ])

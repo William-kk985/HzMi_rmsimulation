@@ -128,9 +128,18 @@ ros2 lifecycle get /controller_server      # nav2 生命周期 active
 - **契约不变量（每条边恰好一个发布者）仍成立**：`lio:=cartographer` 时没有第二个 `odom` 发布者。
 - lua：`cartographer_lio.lua`（`mapping`/`slam_nav`）、`cartographer_lio_localization.lua`（`nav`，需 `map/<world>.pbstream`）。
   实测：两条 include 链都能被 `cartographer_node` 正常加载（`Found 'cartographer_lio*.lua'` → `Added trajectory with ID '0'`）。
-- **三个代价/限制**：
-  1. `odom→base_link` 的连续性与精度改由 cartographer 的 pose extrapolator 承担
-     （`use_pose_extrapolator` 默认 `true`，本质是"IMU 外推 + 上次匹配结果"），弱于 FAST-LIO 的紧耦合 IEKF；
+- **odom 必须由外部提供（2026-09-21 实测修复）**：lua 里 `use_odometry = true`，并用 `odom_topic`
+  参数 remap 到一路底盘里程计（仿真 = `/odom_ground_truth`，实车 = 下位机轮速 odom）。
+  不加这路 odom 时，`odom→base_link` 只能靠 pose extrapolator（`use_pose_extrapolator` 默认 `true`，
+  本质是"IMU 二次积分 + 上次匹配结果"）→ **车静止也在漂**：
+  实测平移 **≈4 cm/s**（x +3.1 / y −2.5）、yaw **≈13°/min**；而同一时刻 `map→odom` **恒定**
+  → 证明**不是回环问题**。漂移还会被当作扫描匹配的初始猜测 → 地图被拖着走
+  （RViz 现象："车自己在动 + 地图跟着小车走"）。
+  另注：cartographer 只使用 odom 的**增量**（速度估计 `pose_extrapolator.cc:AddOdometryData`、
+  位姿图约束 `optimization_problem_2d.cc:CalculateOdometryBetweenNodes` 都是 delta）→
+  **世界系绝对位姿可以直接喂**，常量偏移会被自动消掉。
+  实车用轮速 odom 时记得把 `odometry_translation/rotation_weight` 从 `1e5` 调小（滑移会让它拉死轨迹）。
+- **其余代价/限制**：
   2. **不发布 `nav_msgs/Odometry`** → `nav:=teb` 不适用（TEB 需要 `/odom` 做速度反馈）；
      `rpp`/`dwb` 正常；`velocity_smoother` 是 `OPEN_LOOP`（已核对源码），不需要 `/odom`；
   3. 失去独立故障域：cartographer 挂了，`odom→base_link` 与 `map→odom` 一起消失

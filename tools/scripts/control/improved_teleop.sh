@@ -2,6 +2,23 @@
 
 # 改进版机器人键盘控制脚本
 # 添加系统状态检查和更好的错误处理
+#
+# ===== 键位（2026-09-21 改为方向键操作）=====
+#   ↑ / ↓         前进 / 后退（线速度 LINEAR_SPEED，默认 0.5 m/s）
+#   ← / →         左转 / 右转（角速度 ANGULAR_SPEED，默认 1.0 rad/s）
+#   空格          紧急停止
+#   > / <         线速度 +0.1 / -0.1（0.1 ~ 2.0 m/s）
+#   . / ,         角速度 +0.1 / -0.1（0.2 ~ 3.0 rad/s）
+#   0             速度重置为默认
+#   s / h         系统状态 / 帮助
+#   q             退出（退出前自动发一次零速）
+#   兼容旧键位：i/k/j/l = 前进/后退/左转/右转
+#
+# 说明：按一下发一次 Twist（ros2 topic pub -1）；底盘会【保持】该速度，
+#       所以"停车"必须发零速 —— 按空格（或 q 退出时会自动停）。
+# 话题：默认 /cmd_vel_chassis（直连底盘，绕过 fake_vel_transform）；
+#       需要走 nav2 那条链（经 fake_vel_transform）时用：
+#         TELEOP_TOPIC=/cmd_vel tools/scripts/control/improved_teleop.sh
 
 # ===== 自动定位项目根目录（脚本可在任意位置被调用）=====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,10 +33,10 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 NC='\033[0m'
 
-# 默认参数
+# 默认参数；话题可用环境变量覆盖：TELEOP_TOPIC=/cmd_vel ...（默认直连底盘）
 LINEAR_SPEED=0.5
 ANGULAR_SPEED=1.0
-CMD_TOPIC="/cmd_vel_chassis"
+CMD_TOPIC="${TELEOP_TOPIC:-/cmd_vel_chassis}"
 MAX_RETRIES=3
 
 echo -e "${BLUE}===============================================${NC}"
@@ -146,14 +163,47 @@ show_system_status() {
     echo ""
 }
 
-echo -e "${GREEN}🎮 开始键盘控制...${NC}"
+echo -e "${GREEN}🎮 键盘控制已启动（方向键）${NC}"
+echo -e "  ↑/↓ 前进/后退    ←/→ 左转/右转    空格 停车"
+echo -e "  >/< 线速度±0.1   ./, 角速度±0.1    0 重置   s 状态   h 帮助   q 退出"
 echo ""
+
+# 读一个按键：方向键是 ESC 序列（ESC [ A/B/C/D），需要单独解析；
+# 用全局变量 KEY 返回，避免 $(...) 子壳层读 stdin 的坑。
+read_key() {
+    local c1 c2
+    KEY=""
+    IFS= read -rsn1 KEY || return 1
+    if [[ "$KEY" == $'\x1b' ]]; then
+        IFS= read -rsn1 -t 0.1 c1 && KEY+="$c1"
+        IFS= read -rsn1 -t 0.1 c2 && KEY+="$c2"
+    fi
+    return 0
+}
 
 # 主循环
 while true; do
-    read -n 1 -s key
-    
-    case "$key" in
+    read_key || continue
+
+    case "$KEY" in
+        # ===== 方向键（ESC 序列）=====
+        $'\x1b[A')
+            echo -e "${BLUE}↑ 前进 (线速度: ${LINEAR_SPEED})${NC}"
+            send_cmd "$LINEAR_SPEED" 0.0
+            ;;
+        $'\x1b[B')
+            echo -e "${BLUE}↓ 后退 (线速度: ${LINEAR_SPEED})${NC}"
+            send_cmd "-$LINEAR_SPEED" 0.0
+            ;;
+        $'\x1b[D')
+            echo -e "${BLUE}← 左转 (角速度: ${ANGULAR_SPEED})${NC}"
+            send_cmd 0.0 "$ANGULAR_SPEED"
+            ;;
+        $'\x1b[C')
+            echo -e "${BLUE}→ 右转 (角速度: ${ANGULAR_SPEED})${NC}"
+            send_cmd 0.0 "-$ANGULAR_SPEED"
+            ;;
+        # ===== 兼容旧键位 =====
         'i'|'I')
             echo -e "${BLUE}→ 前进 (线速度: ${LINEAR_SPEED})${NC}"
             send_cmd "$LINEAR_SPEED" 0.0
@@ -174,15 +224,30 @@ while true; do
             echo -e "${YELLOW}⏹ 紧急停止${NC}"
             send_cmd 0.0 0.0
             ;;
-        'q'|'Q')
+        '>')
             LINEAR_SPEED=$(echo "$LINEAR_SPEED + 0.1" | bc -l)
             if (( $(echo "$LINEAR_SPEED > 2.0" | bc -l) )); then LINEAR_SPEED=2.0; fi
-            echo -e "${GREEN}⚡ 线速度调整为: ${LINEAR_SPEED} m/s${NC}"
+            echo -e "${GREEN}⚡ 线速度 +0.1 → ${LINEAR_SPEED} m/s${NC}"
             ;;
-        'z'|'Z')
+        '<')
             LINEAR_SPEED=$(echo "$LINEAR_SPEED - 0.1" | bc -l)
             if (( $(echo "$LINEAR_SPEED < 0.1" | bc -l) )); then LINEAR_SPEED=0.1; fi
-            echo -e "${GREEN}⚡ 线速度调整为: ${LINEAR_SPEED} m/s${NC}"
+            echo -e "${GREEN}⚡ 线速度 -0.1 → ${LINEAR_SPEED} m/s${NC}"
+            ;;
+        '.')
+            ANGULAR_SPEED=$(echo "$ANGULAR_SPEED + 0.1" | bc -l)
+            if (( $(echo "$ANGULAR_SPEED > 3.0" | bc -l) )); then ANGULAR_SPEED=3.0; fi
+            echo -e "${GREEN}⚡ 角速度 +0.1 → ${ANGULAR_SPEED} rad/s${NC}"
+            ;;
+        ',')
+            ANGULAR_SPEED=$(echo "$ANGULAR_SPEED - 0.1" | bc -l)
+            if (( $(echo "$ANGULAR_SPEED < 0.2" | bc -l) )); then ANGULAR_SPEED=0.2; fi
+            echo -e "${GREEN}⚡ 角速度 -0.1 → ${ANGULAR_SPEED} rad/s${NC}"
+            ;;
+        'q'|'Q')
+            echo -e "${YELLOW}👋 退出（先发零速停车）${NC}"
+            send_cmd 0.0 0.0 || true
+            exit 0
             ;;
         '[')
             ANGULAR_SPEED=$(echo "$ANGULAR_SPEED + 0.1" | bc -l)
@@ -205,14 +270,16 @@ while true; do
         'h'|'H')
             echo ""
             echo -e "${BLUE}📖 帮助信息:${NC}"
-            echo "  i/k : 前进/后退"
-            echo "  j/l : 左转/右转"
-            echo "  空格 : 紧急停止"
-            echo "  q/z : 线速度 +/-"
-            echo "  [/] : 角速度 +/-"
-            echo "  0   : 重置速度"
-            echo "  s   : 系统状态"
-            echo "  h   : 显示帮助"
+            echo "  ↑ / ↓       : 前进 / 后退"
+            echo "  ← / →       : 左转 / 右转"
+            echo "  空格        : 紧急停止"
+            echo "  > / <       : 线速度 +0.1 / -0.1  (0.1 ~ 2.0 m/s)"
+            echo "  . / ,       : 角速度 +0.1 / -0.1  (0.2 ~ 3.0 rad/s)"
+            echo "  0           : 重置速度"
+            echo "  s           : 系统状态"
+            echo "  h           : 显示帮助"
+            echo "  q           : 退出（自动停）"
+            echo "  兼容旧键: i/k/j/l = 前进/后退/左转/右转；[/] = 角速度 +/-"
             echo ""
             echo "  当前设置:"
             echo "    线速度: ${LINEAR_SPEED} m/s"

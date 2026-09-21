@@ -9,7 +9,7 @@ tools/
 ├── *.py            # Python 工具（按需新增）
 └── scripts/        # sh 脚本
     ├── build.sh
-    ├── control/        # 启动/控制（start_sentinel.sh、improved_teleop.sh）
+    ├── control/        # 启动/控制（start_sentinel.sh、improved_teleop.sh 方向键遥控）
     ├── mapping/        # 建图工具（存图、存 pcd）
     ├── create_config_package.sh
     └── setup_from_package.sh

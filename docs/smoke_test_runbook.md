@@ -284,6 +284,26 @@ ros2 topic echo /map --once --field info     # 期望：宽高随建图增长（
 tools/scripts/control/improved_teleop.sh      # 键盘遥控（建议速度慢一点、覆盖整场、回到起点附近收尾）
 ```
 
+**键位（2026-09-21 改成方向键）**：
+
+| 键 | 作用 |
+|---|---|
+| `↑` / `↓` | 前进 / 后退（默认 **0.5 m/s**） |
+| `←` / `→` | 左转 / 右转（默认 **1.0 rad/s**） |
+| `空格` | **紧急停止** |
+| `>` / `<` | 线速度 +0.1 / −0.1（0.1 ~ 2.0 m/s） |
+| `.` / `,` | 角速度 +0.1 / −0.1（0.2 ~ 3.0 rad/s） |
+| `0` | 速度重置为默认值 |
+| `s` / `h` | 系统状态 / 帮助 |
+| `q` | 退出（退出前自动发一次零速） |
+| 兼容旧键 | `i/k/j/l` = 前进/后退/左转/右转；`[` / `]` = 角速度 ± |
+
+> ⚠️ **按一下只发一次 Twist，底盘会保持该速度** → 停车必须按 `空格`（`q` 退出时也会自动停）。
+> 默认发到 **`/cmd_vel_chassis`**（直连底盘，绕过 `fake_vel_transform`）；
+> 想让指令走 nav2 那条链（经 `fake_vel_transform`、受 `spin_speed` 影响）时用：
+> `TELEOP_TOPIC=/cmd_vel tools/scripts/control/improved_teleop.sh`
+> 建图建议：线速 0.3–0.5 m/s、转向 0.5–0.8 rad/s，绕场一圈、回到起点附近收尾。
+
 ### 1.1 落盘三件套（.pgm/.yaml + .posegraph + .pcd）
 
 > ⚠️ **先备份**：`save_grid_map.sh` 会**覆盖** `map/RMUL2026.{pgm,yaml}`。
@@ -563,9 +583,36 @@ ros2 node list | grep lio_tf_adapter           # 期望空
 ```
 
 **三个限制**（详见 `docs/tf_interface_contract.md` §八）：
-① `odom` 的连续性改由 cartographer 的 pose extrapolator（IMU 外推）提供，弱于 FAST-LIO 的紧耦合 IEKF；
+① `odom` 由 cartographer 的 pose extrapolator 提供，弱于 FAST-LIO 的紧耦合 IEKF
+   → **2026-09-21 已缓解**：全包形态现在接一路底盘里程计（`use_odometry=true`，仿真用
+   `/odom_ground_truth`、实车用下位机轮速 odom），见下面那段；
 ② **没有 `/odom` 话题** → `nav:=teb` 不适用（用 `rpp`/`dwb`）；
 ③ 失去独立故障域：cartographer 挂了 `odom` 与 `map` 一起没。
+
+**⚠️ 全包形态必须有 odom（2026-09-21 实测修复）**
+
+不接 odom 时，`odom→base_link` 只能靠 pose extrapolator（IMU 二次积分），**静止也会漂**：
+
+| 实测（RMUL2026，车静止） | 值 |
+|---|---|
+| `odom→base_link` 平移漂移 | x +3.1 cm/s、y −2.5 cm/s → 合 **≈4 cm/s** |
+| `odom→base_link` yaw 漂移 | 2.21° → 1.72° / 2.3 s ≈ **13°/min** |
+| `map→odom` | 恒定 `(0.088, 0.075, −0.37°)`（说明**不是回环问题**，位姿图没动） |
+| `/odom_ground_truth` twist | 全 0（车确实没动） |
+
+后果：漂移被当作扫描匹配的初始猜测 → 地图被拖着走（RViz 里"车自己在动、地图跟着小车走"）。
+
+**修法**：给 cartographer 接一路底盘里程计。配置已在仓库里（`cartographer_lio*.lua` 里
+`use_odometry = true`，bringup 用 `odom_topic:=/odom_ground_truth` remap）——**直接重跑上面的命令即可**。
+验证：
+
+```bash
+ros2 topic list | grep odom_ground_truth      # 确认有这路 odom
+ros2 run tf2_ros tf2_echo odom base_link      # 静止 30 s：应几乎不动（之前是 ~4 cm/s 匀速漂）
+```
+> 仿真这路是 Gazebo 底盘真值（相当于**理想轮速里程计**）。实车换成下位机轮速 odom 时，
+> 因为有滑移/噪声，要把 `POSE_GRAPH.optimization_problem.odometry_translation/rotation_weight`
+> 从 `1e5` 调小（例如 `1e3`），否则回环拉不动轨迹。
 
 ---
 

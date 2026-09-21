@@ -334,7 +334,9 @@ def generate_launch_description():
                     'configuration_basename': 'cartographer_lio_localization.lua',
                     'load_state_filename': carto_pbstream_dir,
                     'load_frozen_state': 'true',
-                    'occupancy_grid_topic': '/cartographer_map'}.items()
+                    'occupancy_grid_topic': '/cartographer_map',
+                    # 全包形态没有 LIO 的 /odom → 用仿真底盘里程计喂 use_odometry（实车换成下位机轮速）
+                    'odom_topic': '/odom_ground_truth'}.items()
             ),
 
             TimerAction(
@@ -485,7 +487,10 @@ def generate_launch_description():
     start_cartographer_as_lio_mapping = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
         condition = carto_as_lio_mapping_condition,
-        launch_arguments={'configuration_basename': 'cartographer_lio.lua'}.items()
+        launch_arguments={
+            'configuration_basename': 'cartographer_lio.lua',
+            # 全包形态没有 LIO 的 /odom → 用仿真底盘里程计喂 use_odometry（实车换成下位机轮速）
+            'odom_topic': '/odom_ground_truth'}.items()
     )
 
     # 纯建图（mode:=mapping）不再启动 nav2，因此 nav2 自带的 rviz_launch 也不会起。

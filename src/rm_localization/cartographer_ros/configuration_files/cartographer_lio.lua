@@ -22,4 +22,21 @@ include "cartographer.lua"
 options.published_frame = "base_link"
 options.provide_odom_frame = true
 
+-- ============================================================================
+-- 接一路"底盘里程计"当运动先验（2026-09-21 新增，解决实测的静止漂移）
+-- 为什么必须补：没有 odom 时，cartographer 的 odom→base_link 只能靠 pose extrapolator
+--   （= 上次匹配位姿 + IMU 二次积分）。IMU 的重力对齐残差/零偏被二次积分放大后，
+--   **机器人静止也在漂**，而这个漂移又被当作扫描匹配的初始猜测 → 地图被拖着走。
+--   实测（RMUL2026，静止）：odom→base_link 以 ~4 cm/s 平移、~13°/min 转动漂移。
+-- 数据来源：由 bringup 用 odom_topic 参数 remap（仿真 = Gazebo 底盘里程计
+--   /odom_ground_truth；实车 = 下位机轮速里程计），见 cartographer_sim.launch.py。
+-- 为什么可以给"世界系绝对位姿"：cartographer 只用 odom 的**增量**——
+--   速度估计用相邻两帧 odom 的 delta（pose_extrapolator.cc:AddOdometryData），
+--   位姿图约束也用 CalculateOdometryBetweenNodes 的 delta（optimization_problem_2d.cc），
+--   所以常量偏移会被自动消掉。
+-- 调参提醒：odometry_translation/rotation_weight 目前是 1e5（在 cartographer.lua 里），
+--   仿真这条是真值所以合适；**实车轮速有滑移时要调小**（例如 1e3），否则回环拉不动轨迹。
+-- ============================================================================
+options.use_odometry = true
+
 return options
