@@ -53,3 +53,26 @@ min_probability_to_clear 0.80`（最后一项需要 `src/rm_localization/cartogr
 **已修**（2026-09-23）：`start_sentinel.sh` / `improved_teleop.sh` / `save_pcd.sh` / `save_grid_map.sh`
 的 `PROJECT_ROOT` 改成 `${SCRIPT_DIR}/../../..`（`tools/scripts/build.sh` 等深度 2 的脚本本来是对的）。
 同样的原因还在 `tools/` 下留下了空的 `build/ install/ log/`（可删）。
+
+## 📌 本次落盘记录（2026-09-23，RMUL2026，patched 核心）
+
+| 资产 | 路径 | 大小/体检 |
+|---|---|---|
+| 2D 栅格 | `src/rm_nav_bringup/map/RMUL2026.pgm` + `.yaml` | 249×173 @0.05 m；**占据 8.6% / 自由 79.4% / 未知 12.0%** ⇒ 可用底图（此前"全灰"时未知占绝大多数）|
+| 旧图备份（世界系） | `map/RMUL2026_world_backup.pgm` + `.yaml` | 覆盖前先备份 |
+| pbstream | `map/RMUL2026.pbstream` | **1.73 MB**（原先是 526 B 空壳）⇒ cartographer 纯定位可用 |
+| 3D 点云 | `src/rm_nav_bringup/PCD/RMUL2026.pcd` | 53164 点 / 1.70 MB |
+
+**建图配置**：`mode:=mapping` + `lio:=fastlio` + `mapper:=cartographer`；
+`hit 0.68 / miss 0.49 / num_range_data 3000 / min_probability_to_clear 0.80`（最后一项依赖
+`src/rm_localization/cartographer/` 这份 fork 核心）。
+
+**⚠️ 坐标系（落盘后必须做的一步）**：新 `.yaml` 的 `origin: [-2.2, -3.15, 0]` 是**出生点相对系**，
+与旧图（世界系 `[2.68, 0.228]`）差 ≈`(4.3, 3.35)`。⇒ 用新图做导航/定位前，把
+`bringup_sim.launch.py` 的 `amcl_init_x/y` 从 `4.3/3.35` 改成 **`0.0/0.0`**（新图原点 = 出生点）；
+否则 AMCL 初值会偏 4 米多。若要继续用旧图，就用 `RMUL2026_world_backup.*` 覆盖回来。
+
+**⚠️ PCD 落盘路径的坑**：`save_pcd.sh`/`/map_save` 由 LIO 节点写盘，实际落在
+`install/rm_nav_bringup/share/rm_nav_bringup/PCD/RMUL2026.pcd`（install 树，`rm -rf build install` 就没了）。
+本次已手动复制到 `src/rm_nav_bringup/PCD/RMUL2026.pcd`；以后存完记得 `cp` 一次（或把
+`fastlio_mid360_sim.yaml` 的 `pcd_save`/`map_file_path` 指到 `src/` 下的绝对路径）。
