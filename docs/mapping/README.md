@@ -42,17 +42,14 @@ tools/scripts/mapping/save_pcd.sh               # = ros2 service call /map_save 
 **建图参数（本次定稿，见 `cartographer.lua`）**：`hit 0.68 / miss 0.49 / num_range_data 3000 /
 min_probability_to_clear 0.80`（最后一项需要 `src/rm_localization/cartographer/` 这份 fork 核心）。
 
-### 落盘踩坑：`Failed to write map ... Magick: Unable to open file`
+### 落盘踩坑：`Failed to write map ... Magick: Unable to open file (.../RMUL2026.pgm)`
 
-`map_saver_cli` 用 ImageMagick 写 pgm；如果目标 `.pgm/.yaml` **已经存在且不可写**（本仓库里
-`src/rm_nav_bringup/map/*` 的权限是 `-rw-------`，某些操作后会变成只读），就会报
-`Unable to open file (.../RMUL2026.pgm)` 而**不覆盖、也不报权限字样**。处理：
+**不是权限问题**（我已实测 `map/RMUL2026.pgm` 是 `-rw-rw-r--` 可写）。真因：`tools/scripts/{mapping,control}/*.sh`
+里的 `PROJECT_ROOT` 少算了一层 —— 这些脚本原来在仓库根目录的 `scripts/` 下（`../..` 正好是根），
+2026-09 合并进 `tools/scripts/` 后**深度多了一层**，`${SCRIPT_DIR}/../..` 算出来是 `.../HzMi_rmsimulation/tools`，
+于是 `map_saver_cli -f src/rm_nav_bringup/map/RMUL2026` 实际指向 `tools/src/rm_nav_bringup/map/...`（不存在）
+⇒ ImageMagick 报 `Unable to open file`，而 `map_saver` 只打 `Failed to save the map`。
 
-```bash
-# 先备份，再保证可写（或直接另存新名）
-cp src/rm_nav_bringup/map/RMUL2026.pgm  src/rm_nav_bringup/map/RMUL2026_world_backup.pgm
-cp src/rm_nav_bringup/map/RMUL2026.yaml src/rm_nav_bringup/map/RMUL2026_world_backup.yaml
-chmod u+w src/rm_nav_bringup/map/RMUL2026.pgm src/rm_nav_bringup/map/RMUL2026.yaml
-# 或者干脆另存一份，避免动旧资产：
-ros2 run nav2_map_server map_saver_cli -f src/rm_nav_bringup/map/RMUL2026_carto
-```
+**已修**（2026-09-23）：`start_sentinel.sh` / `improved_teleop.sh` / `save_pcd.sh` / `save_grid_map.sh`
+的 `PROJECT_ROOT` 改成 `${SCRIPT_DIR}/../../..`（`tools/scripts/build.sh` 等深度 2 的脚本本来是对的）。
+同样的原因还在 `tools/` 下留下了空的 `build/ install/ log/`（可删）。
