@@ -433,7 +433,7 @@ def metrics(snaps, occ=65, free_thr=30):
     kept = occ_mask[-1][ever].sum()
     n_ever = int(ever.sum())
     ret = {}
-    for k in (2, 5, 10, 20):
+    for k in (2, 5, 10, 20, 50, 100, 200):
         if len(snaps) > k:
             pairs = occ_mask[:-k][:, ever] & occ_mask[k:][:, ever]
             base = occ_mask[:-k][:, ever].sum()
@@ -500,7 +500,8 @@ def sweep(args):
               f'曾占据 {m["n_ever"]:5d}  留存 {m["kept_pct"]:5.1f}%  擦除 {m["erased_pct"]:5.1f}%  '
               f'闪烁中位 {m["flicker_med"]:.0f} | 留存曲线 +2 {r.get(2, float("nan")):5.1f}% '
               f'+5 {r.get(5, float("nan")):5.1f}% +10 {r.get(10, float("nan")):5.1f}% '
-              f'+20 {r.get(20, float("nan")):5.1f}% | 曾稳定>=5帧 {m["stable_n"]:5d} 末态仍在 {m["stable_kept_pct"]:5.1f}% '
+              f'+20 {r.get(20, float("nan")):5.1f}% +50 {r.get(50, float("nan")):5.1f}% '
+              f'+100 {r.get(100, float("nan")):5.1f}% | 曾稳定>=5帧 {m["stable_n"]:5d} 末态仍在 {m["stable_kept_pct"]:5.1f}% '
               f'| 末态 自由 {m["final_free"]} 中 {m["final_mid"]} 占据 {m["final_occ"]}')
 
 
