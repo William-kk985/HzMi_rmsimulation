@@ -76,3 +76,21 @@ min_probability_to_clear 0.80`（最后一项需要 `src/rm_localization/cartogr
 `install/rm_nav_bringup/share/rm_nav_bringup/PCD/RMUL2026.pcd`（install 树，`rm -rf build install` 就没了）。
 本次已手动复制到 `src/rm_nav_bringup/PCD/RMUL2026.pcd`；以后存完记得 `cp` 一次（或把
 `fastlio_mid360_sim.yaml` 的 `pcd_save`/`map_file_path` 指到 `src/` 下的绝对路径）。
+
+## ✅ nav 模式（先建图后导航）验收 gate —— 2026-09-23 实测
+
+`world:=RMUL2026 mode:=nav lio:=fastlio localization:=amcl nav:=rpp spin_speed:=0.0`
+
+| 检查 | 命令 | 实测 |
+|---|---|---|
+| 雷达点云 | `ros2 topic hz /livox/lidar/pointcloud` | 启动窗口内会显示 1 Hz 左右（**这是 `ros2 topic hz` 反序列化 30000 点大消息跟不上的假象**，不是真丢；稳定后正常） |
+| 2D 扫描 | `ros2 topic hz /scan` | 启动那窗会显示 0.2 Hz（含 ~14.7 s 启动空洞），**稳定后 7.9 Hz（墙钟）≈ 10 Hz（仿真钟）** ✔ |
+| 地图 | `ros2 lifecycle get /map_server` | `active [3]` ✔ |
+| 定位 | `ros2 lifecycle get /amcl` | `active [3]` ✔ |
+| `map→odom` | `ros2 run tf2_ros tf2_echo map odom` | 存在且 **稳定：平移 ≈ (0.116, 0.002, 0.132)**（x/z 偏移 = `base_link→imu_link/livox_frame` 的安装偏移，**不是误差**）；机器人静止时数值不漂 ✔ |
+| AMCL 位姿 | `ros2 topic echo /amcl_pose --once` | `(0,0,0)` @ `frame_id: map` ✔ = 新图（出生点系）下出生点坐标；**注意**：机器人不动时 AMCL 不满足 `update_min_d/a` ⇒ `/amcl_pose` 会停在启动那一帧（协方差全 0），**不是坏了**，`map→odom` 仍在正常发 |
+
+**踩过的坑（两次启动撞车）**：上一次 launch 的 `gzserver/rviz2/component_container` 没清干净就再启动，
+会出现"第一次能用、第二次 RViz 加载不出来 + `/scan` 停更 14 s + `map` 系不存在"。
+⇒ **每次必须先** `pkill -f gzserver; pkill -f gzclient; pkill -f rviz2; pkill -f component_container; sleep 3`。
+（`map` 系由 **AMCL 收到激光后**才发 `map→odom`；`/scan` 一停 ⇒ 没有 `map` 系 ⇒ costmap 变换超时 ⇒ 目标点必然不执行。）
