@@ -84,20 +84,33 @@ MAP_BUILDER.num_background_threads = 4
 -- ============================================================================
 -- 轨迹构建器配置 - 优化稳定性
 -- ============================================================================
--- ★ 2026-09-22：关掉 IMU，只留 odom 作为运动先验
--- 原因：同时喂 IMU（Gazebo 插件直发 100Hz）与 odom（FAST-LIO 处理完才吐 10Hz）时，
--- 两者时间戳会交错出现"odom 比已收到的最后一帧 IMU 早几十微秒"（实测差 39µs），
--- 触发 cartographer 的硬 CHECK 直接 abort：
---   F pose_extrapolator.cc:229] Check failed: time >= imu_tracker->time()
---     @ PoseExtrapolator::ExtrapolateRotation()
---     @ PoseExtrapolator::AddOdometryData()
---     @ Node::HandleOdometryMessage()
--- 这是已知问题（https://answers.ros.org/question/320444/）。
--- 我们的 /odom 本来就是 FAST-LIO 融合了 IMU+LiDAR 的 10Hz 结果（比原始 IMU 更好用），
--- cartographer 不必再吃原始 IMU → 单一运动先验，彻底避开时间戳交错。
--- （平地仿真不需要 IMU 做重力对齐；use_imu_data=false 后 cartographer 也不再订阅 /livox/imu，
---   collator 只需等 scan+odom 两路，反而更不容易卡。）
-TRAJECTORY_BUILDER_2D.use_imu_data = false
+-- ★★ 2026-09-22（五次修正）：**把 IMU 重新打开**（上一次关它是为了躲崩溃，方向对但归因错）
+-- 当时的现象：`F pose_extrapolator.cc:229] Check failed: time >= imu_tracker->time()`
+--   @ PoseExtrapolator::ExtrapolateRotation() ← AddOdometryData() ← HandleOdometryMessage()
+-- 当时的处置：use_imu_data=false（只留 odom）。
+-- 现在改回 true，因为那个崩溃的**真正根源已经修掉，而且它并不是"IMU 本身有问题"**：
+--   1) 根因是**仿真雷达插件的时间基 bug**（header 用仿真钟、逐点 offset 用墙钟）→ `/odom` 的
+--      时间戳 = 仿真戳 + 一帧墙钟耗时，且逐帧抖动；再叠加 LIO"处理完一整帧才发 odom"的晚到
+--      → 两个时间源**乱序**。该 bug 已在 `cb24ba8` 修掉（offset_time=0）；
+--   2) 运动先验现在也换成了**独立、立即到达**的底盘里程计（`/odom_ground_truth`，#21/路线①），
+--      不再有"晚一整帧"的 odom → collator 的时间序成立，CHECK 的前提消失。
+-- 为什么现在**必须**把 IMU 打开（这是本轮的关键判断）：
+--   · `/scan` 实测只有 ~2.8 Hz，而且每 ~0.5 s 一个空洞（`/segmentation/obstacle` 那条线还没查完）
+--     → 相邻两帧扫描之间机器人可能转过几十度；
+--   · 2D 且**没有 IMU** 时，`PoseExtrapolator` 的旋转外推只能靠 odom + 位姿历史，
+--     cartographer 维护者/贡献者在 issue #534 里明确指出这个组合（odom-only、无 IMU）
+--     在 2D 下的旋转外推不可靠（"using odometry without IMU is broken" 那段讨论）；
+--   · 实测症状与此吻合：`map→odom` 被以 ≈97°/s 连续甩动（50 Hz 采样下 |Δyaw| P95=1.94°）、
+--     并夹着 83° 级别的单样本大跳 —— 这不是"矫正"，是**帧间没有旋转来源**。
+--   · 对照组：**slam_toolbox 没有这个问题** —— 它从 TF（`odom→base_link`，由 lio_tf_adapter 发）
+--     直接取运动模型，不走 cartographer 的 IMU-tracker 路径。所以问题在 cartographer 的
+--     "旋转外推缺输入"，而不是"这套传感器/TF 不行"。
+-- 兼容性：`tracking_frame = imu_link` 当初就是为满足 IMU 共位 CHECK（sensor_bridge.cpp:136）选的，
+--   现在正好用上；`imu_gravity_time_constant` 本来就在。IMU 与扫描同源同钟（Gazebo 插件）、
+--   到达及时 → collator 按时间序派发即可。
+-- 回退条件：若重新出现 `exit code -6` 且是同一条 `time >= imu_tracker->time()`，
+--   说明仍有时间序不一致 → 改回 false 并把当时的 `/scan`、`/odom`、IMU 时间戳抓出来对比。
+TRAJECTORY_BUILDER_2D.use_imu_data = true
 TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 1.0  -- 该键仍会被读取（不能删）
 
 -- 点云范围过滤 (适配 RMUL 赛场 PVC 地胶)

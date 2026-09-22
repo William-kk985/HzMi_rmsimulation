@@ -405,9 +405,12 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}]
     )
 
-    # 注：`body`（LIO 的 odom child_frame_id）已改为**写进 URDF**（sentry_robot_sim.xacro 里
-    # imu_link→body 恒等固定关节），由 robot_state_publisher 以静态 TF 发布 —— 比在 launch 里
-    # 另起 static_transform_publisher 更稳（不依赖启动条件、也不会和 T1 回退桥形成 TF 环）。
+    # 注（2026-09-22 更正，原文写反了）：`body` **并不在 URDF 里**（曾试图用 imu_link→body 固定关节
+    # 兜住 LIO 的 odom child_frame_id，但会造成 body 双父边，已撤销 —— 见 issues_and_findings.md #19/#21）。
+    # 现在的做法：LIO 的 odom `child_frame_id` 直接写 `imu_link`（FAST_LIO laserMapping.cpp:631）→
+    # **不需要任何 body 桥**。FAST-LIO 仍会发一条 `camera_init→body`，那是**孤立岛（无父）**，无害。
+    # 真正要防的是"多父边"：`map`/`odom` 一旦出现两个父，tf2 的查找结果会在两条路径间跳
+    # → 症状是 map→odom 高频甩动 + 几十度大跳（与"SLAM 在矫正"很容易混淆）。
 
     # T1（修正版）：帧桥只在「nav + 未选择任何重定位模块 + 启用 LIO」时启动，
     # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
