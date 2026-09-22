@@ -1,11 +1,38 @@
-# 调试手册：地图跟着车转 / SLAM 丢帧（本轮实战沉淀）
+# 调试手册：建图链路 `mode:=mapping` + `lio:=fastlio` + `mapper:=cartographer`（实战沉淀）
 
 > **本文是一次完整排查的可复用路径**：从"RViz 里地图跟着车转"一路查到根因（时间基 → 先验源 → QoS 丢帧 → 稀疏扫描 → 栅格清除），
 > 含**分层判读法、三个工具、实测基线数字、症状→判据→处置速查表、以及踩过的坑**。
 > 相关：`issues_and_findings.md`（#19–#25 是这条链上的每一环）、`sim_real_contract.md`（改动该落在 sim/real 哪一侧）、
 > `architecture.md` §3.2.4（谁吃什么）、`tf_interface_contract.md`（帧契约）。
 >
-> 适用症状：地图跟着车转 / 地图飞 / 残影 / 建图时好时坏 / `/scan` 频率异常 / cartographer 崩 `exit -6`。
+> 适用症状：地图跟着车转 / 地图飞 / 残影 / 特征先有后没 / 建图时好时坏 / `/scan` 频率异常 / cartographer 崩 `exit -6`。
+
+---
+
+## 0.1 这套链路是什么（本文的适用范围）
+
+**本文所有数字与结论都在这一套上实测得到：**
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 \
+    mode:=mapping lio:=fastlio mapper:=cartographer
+```
+
+| 角色 | 节点 | 输入 → 输出 | 本文涉及的文件 |
+|---|---|---|---|
+| 数据源（仿真替身） | Gazebo `LivoxPointsPlugin` + `imu_plugin` + `mecanum_controller` | `/livox/lidar`(CustomMsg)、`/livox/lidar/pointcloud`(PC2)、`/livox/imu`、`/odom_ground_truth` | `livox_points_plugin.cpp`（时间基、假点）、`sentry_robot_sim.xacro` |
+| **LIO** | `fastlio_mapping` | `/livox/lidar` + `/imu/data` → `/odom`（+ 孤立岛 `camera_init→body`） | `FAST_LIO/src/laserMapping.cpp`（`child_frame_id`） |
+| 里程计 TF | `lio_tf_adapter` | `/odom` → TF `odom→base_link`（含杆臂 `xyz`） | `lio_tf_adapter.yaml` |
+| 感知① | `ground_segmentation`（linefit） | `/livox/lidar/pointcloud` → `/segmentation/obstacle` | `ground_segmentation_node.cc`（**订阅 QoS**）、`segmentation_sim.yaml` |
+| 感知② | `pointcloud_to_laserscan` | `/segmentation/obstacle` → `/scan`（高度带 -1.0~0.1） | `laserscan_params.yaml` |
+| **mapper** | `cartographer_node` + `cartographer_occupancy_grid_node` | `/scan` + **`/odom_ground_truth`**（先验）→ TF `map→odom` + `/map` | **`cartographer.lua`**、`bringup_sim.launch.py`（传 `odom_topic:=/odom_ground_truth`） |
+| 其它 | `robot_state_publisher`（URDF 静态边）、`fake_vel_transform`、`rviz2` | — | `sentry_robot_sim.xacro` |
+
+**哪些结论换配置后仍适用 / 要重测：**
+
+- ✅ 仍适用：时间基（#19）、QoS 大消息丢帧（#25）、TF 单父边、`map→odom` 三态判读、栅格清除（§5.2）。
+- 🔁 要重测：先验源（#21）—— `lio:=cartographer`（全包形态）没有 LIO 的 `/odom`，用的是 `cartographer_lio*.lua`；换 `mapper:=slam_toolbox` 时 `cartographer.lua` 的参数完全不适用（但 QoS/时间基/扫描率三条照样适用）。
+- ⚠️ 与 `localization`（amcl/icp/纯定位）**不能同时开**：`map→odom` 只能有一个发布者。
 
 ---
 
@@ -103,16 +130,64 @@
 
 ⚠️ 别把 `map→odom` 有常数偏置当 bug：map 帧原点=建图起点、朝向每次重启都不同（cartographer_ros #1170，wontfix）。
 
-### 5.2 特征"先有后没" = 无回波方向被清成自由空间
+### 5.2 特征"先有后没" = 无回波方向被清成自由空间（**主要吃掉的是内部小墙**）
 
-- `/scan` 里 **`inf` = 该角度无回波**。我们的 `inf` 占 **37.3%**，来源是：地面被 linefit 去掉 + MID360 上视射线打空。
-- cartographer 对无回波光束的处理是**把 0~`missing_data_ray_length` 段标为自由**（我们设 **3.0 m**）。
-- ⇒ **3 m 内的任何东西，只要在某个方向上不再被命中，就会被主动擦掉**。内部小墙正好满足："转过去看到→有；被挡住/角度扫开→无回波→被清"。
-- 处置（`cartographer.lua`）：
-  - `TRAJECTORY_BUILDER_2D.missing_data_ray_length`：`3.0 → 0.5~1.0`（**首选**，只清机器人贴身范围）
-  - `submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability`：`0.55 → 0.62`、`miss_probability`：`0.49 → 0.45`（命中更粘、清除更弱）
-  - `TRAJECTORY_BUILDER_2D.num_accumulated_range_data`：`1 → 3`（多帧累积再插入，提升稀疏特征的命中数）
-  - 判别实验：临时 `insert_free_space = false` 跑一圈 —— 特征立刻留住 ⇒ 确认是"清除太狠"；确认后按上面调弱（不建议永久关掉，会失去清动态物的能力）
+**先记住一件事**：cartographer 的 2D 栅格不是"画上去就永久"，而是**每一帧对每个格子投票**：
+
+| 票 | 什么时候投 | 效果 |
+|---|---|---|
+| **命中 +** | 这一束真的打在这个格子上 | 概率上升（`hit_probability = 0.55` → odds ×1.22） |
+| **穿过 −** | 射线从原点走到命中点，途经的格子 | 概率下降（正常、且正确） |
+| **无回波 −（关键）** | 这个角度**没有障碍物**（`inf`） | cartographer 把 **0 ~ `missing_data_ray_length`** 这一整段标成**自由**（我们设 **3.0 m**） |
+
+而这条链路里 **`inf` 的 bin 特别多：实测 37.3%**（1462 个 bin 里 546 个）。来源是两个"物理上正常"的原因：
+
+- `linefit` 把**地面**去掉了 → 朝地面的那些角度**没有障碍物** → `inf`；
+- MID360 垂直 FOV 是 −7°~+52°，**上视**的射线打不到东西 → `inf`。
+
+于是**每帧都有 37% 的方向把 3 m 以内"投票成空地"**。这解释了为什么"**主要是内部小墙**"消失：
+
+```
+        外侧大墙（4~7 m，在"3 m 常清区"之外）
+   ┌────────────────────────────────────────┐
+   │                                        │
+   │         ▮ 内部小墙（1.2 m）
+   │         ▲
+   │         │ ← 这一束打中小墙 → 小墙拿到 1 张"命中"票（稀疏！）
+   │      (车)
+   │         │
+   │         └──► 车一转 / 小墙被挡 → 同一束变成 inf
+   │                → cartographer 把 0~3 m 全标 FREE
+   │                → 小墙每帧吃一张"清除"票
+   └────────────────────────────────────────┘
+```
+
+**为什么内墙死、外墙活 —— 数字正好对上**（我们实测有回波点的距离分布）：
+
+| 距离 | 占比 | 是否在 3 m"常清区"内 |
+|---|---|---|
+| 1~2 m | 32% | ✅ 在内 → **每帧被清** |
+| 2~4 m | 47% | ✅ 大部分在内 |
+| **4~10 m** | **16%** | ❌ 在外 → 只被"真正穿过的射线"清，命中票还多 → **留得住** |
+
+P25=1.8 m / P50=2.3 m / P75=3.1 m ⇒ **约 3/4 的命中都落在 3 m 的常清区里**，而外侧大墙只有 16% 的命中、且大多在常清区外。
+
+再叠加两件事，小墙就更站不住：
+1. **命中票稀疏**：`/scan` 每帧只有约 3100 个有效障碍点摊在 1462 个 bin 上（≈2 点/bin），而**机器人一转，同一面小墙每帧落进不同的 bin** ⇒ 同一个格子被命中的频率很低；
+2. **清除票每帧必到**：只要那一束没打中小墙，`inf` 就给它一张"清 3 m"的票。
+
+⇒ 概率在阈值附近来回摆 ⇒ **"扫到就有、扫不到就没"的闪烁**。（这不是"忘了"，是**被主动擦掉**。）
+
+**处置（`cartographer.lua`）**：
+
+| 参数 | 现值 | 建议 | 作用 |
+|---|---|---|---|
+| `TRAJECTORY_BUILDER_2D.missing_data_ray_length` | **3.0** | **0.5~1.0** | **首选**：常清区从 3 m 缩到贴身范围，1.2 m 的小墙不再被无回波束擦掉 |
+| `...probability_grid_range_data_inserter.hit_probability` | 0.55 | **0.62** | 命中更"粘" |
+| `...miss_probability` | 0.49 | **0.45** | 清除更弱（两者拉开差距，墙才立得住） |
+| `TRAJECTORY_BUILDER_2D.num_accumulated_range_data` | 1 | **3** | 3 帧累积再插入 ⇒ 同一格有效命中 ×3 |
+
+判别实验：临时 `insert_free_space = false` 跑一圈 —— 若小墙立刻稳稳留住，即确认"清除太狠"；确认后按上表**调弱**，不建议永久关掉（会失去清动态物的能力）。
 
 ### 5.3 大消息 + BEST_EFFORT = 静默丢帧（本轮最隐蔽的一环）
 
