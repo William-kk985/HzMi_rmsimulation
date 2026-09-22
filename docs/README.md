@@ -17,6 +17,7 @@
 | 改感知/代价图层、换 3D→2D 做法 | `3d_to_2d_survey.md` | §二 两种降维哲学 / §三 共性旋钮 / §七 本工程分布 |
 | 挑算法（选型池） | `rm_algorithm_catalog.md` | §〇.0 前端 vs 系统 / 各章候选 |
 | 改 TF/话题契约 | `tf_interface_contract.md` | T1–T5 已实施、T6 撤销 |
+| 判断"这个改动会不会上实车 / 是不是为仿真妥协" | `sim_real_contract.md` | §一 分界点与替身 / §四 三分类判据 / §五 禁止清单 |
 
 ---
 
@@ -32,6 +33,7 @@
 | `3d_to_2d_survey.md` | 各家 3D→2D 实现对照（p2l / nav2 / STVL / cartographer / octomap） | 降维机制与参数 |
 | `tf_interface_contract.md` | TF / 接口契约（**T1–T5 已实施，T6 撤销**） | 帧树与话题契约 |
 | `params_ownership_checklist.md` | 参数归属清单（R1–R5 逐项状态） | 参数该放哪个包 |
+| `sim_real_contract.md` | **仿真 ↔ 实车契约**：分界点/替身清单、共用接口、参数分家、三分类判据、禁止清单、验收判据 | **"改动会不会上实车 / 该不该为仿真动算法"的唯一真值** |
 
 ## 二、选型与路线（参考）
 

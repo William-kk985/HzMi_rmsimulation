@@ -597,6 +597,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=mapping l
 
 其余：`glossary.md`（术语）、`issues_and_findings.md`（坑与根因）、`3d_to_2d_survey.md`（降维对照）、
 `tf_interface_contract.md`（TF 契约）、`params_ownership_checklist.md`（参数归属）、
+`sim_real_contract.md`（仿真↔实车分界与判据）、
 `rm_algorithm_catalog.md`（选型池）、`mapping/`、`package/`（专题），历史草案见索引"状态"列。
 
 ---
