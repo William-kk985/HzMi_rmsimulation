@@ -68,11 +68,15 @@ def generate_launch_description():
     # 依据（用场地 STL 世界包围盒 vs pgm 已知区域比对得出，见 docs/smoke_test_runbook.md §0.5）：
     #   RMUC / RMUL 的 pgm 是 sim 建图导出 → map 原点 = 机器人出生点 → (0, 0, 0)
     #   RMUL2026 的 pgm 是场地几何生成     → map 系 = world 系     → (4.3, 3.35, 0)
+    # ★ 2026-09-23：RMUL2026 的 pgm 已换成 **cartographer 新建的图**（见 docs/mapping/README.md
+    #   "本次落盘记录"）。cartographer 的 map 系 = **出生点相对系**（新 yaml origin ≈[-2.2,-3.15]，
+    #   与旧世界系图差 ≈(4.3,3.35)）⇒ 新图下出生点在 map 里的坐标就是 (0,0,0)。
+    #   ⚠️ 若把旧图放回（map/RMUL2026_world_backup.*），这两个值要改回 4.3 / 3.35。
     amcl_init_x = PythonExpression([
-        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 4.3}['",
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0}['",
         LaunchConfiguration('world'), "']"])
     amcl_init_y = PythonExpression([
-        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 3.35}['",
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0}['",
         LaunchConfiguration('world'), "']"])
     ################################### navigation2 parameters end ####################################
 
