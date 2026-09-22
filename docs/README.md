@@ -41,7 +41,8 @@
 | `tf_interface_contract.md` | TF / 接口契约（**T1–T5 已实施，T6 撤销**） | 帧树与话题契约 |
 | `params_ownership_checklist.md` | 参数归属清单（R1–R5 逐项状态） | 参数该放哪个包 |
 | `sim_real_contract.md` | **仿真 ↔ 实车契约**：分界点/替身清单、共用接口、参数分家、三分类判据、禁止清单、验收判据 | **"改动会不会上实车 / 该不该为仿真动算法"的唯一真值** |
-| `debug_fastlio_cartographer.md` | **调试手册（针对 `mode:=mapping`+`lio:=fastlio`+`mapper:=cartographer` 这套链路，§0.1 有范围声明）**：分层判读法（L0–L6）、三个诊断工具、实测基线数字、症状→判据→处置速查表、12 条踩坑清单 | **"SLAM/建图异常怎么查"的方法论真值** |
+| `debug_fastlio_cartographer.md` | **调试手册（针对 `mode:=mapping`+`lio:=fastlio`+`mapper:=cartographer` 这套链路，§0.1 有范围声明）**：分层判读法（L0–L6）、诊断工具、实测基线数字、症状→判据→处置速查表、踩坑清单；**§5.2.4 = "留不住"的离线复现结论与参数扫描表** | **"SLAM/建图异常怎么查"的方法论真值** |
+| `cartographer_2d_occupancy_semantics.md` | **cartographer 2D 占据栅格语义逐行考据**（2.0.9004/2.0.9002，与上游 master 逐字节相同）：命中/清除写入顺序与"同周期先写者胜"、`missing_data_ray_length` 只在超距回波分支生效、`kMin/kMaxProbability=0.1/0.9`、LaserScan 两级过滤（`inf` 被丢弃）、**`/map` 取值上限 75 的完整推导**（含 pycairo/C++ 两路复算） | 改 cartographer 参数前的**源码级依据**；§5.2.4 与 `cartographer.lua` 注释都引用它 |
 
 ## 二、选型与路线（参考）
 

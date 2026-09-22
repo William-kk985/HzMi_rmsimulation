@@ -119,8 +119,24 @@ TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高�
 -- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
 TRAJECTORY_BUILDER_2D.min_z = -0.8
 TRAJECTORY_BUILDER_2D.max_z = 2.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.05
+-- ★★★ 2026-09-23（十一次修正）：**本参数在本链路里是空转的**，留 0.05 只为无害。
+--   读源码（cartographer 2.0.9004 / cartographer_ros 2.0.9002，与上游 master 逐字节相同）：
+--     `local_trajectory_builder_2d.cc` 里 `missing_data_ray_length` **只在** "range > max_range" 分支生效：
+--        } else {                       // range > options_.max_range()
+--          hit.position = origin + options_.missing_data_ray_length() / range * delta;
+--          accumulated_range_data_.misses.push_back(hit.position); }
+--     而 /scan 的 range_max = 10.0（p2l 侧），这里 max_range = 12.0 ⇒ **永远进不了这个分支**
+--     ⇒ `range_data.misses` 恒为空 ⇒ 该参数改多少都不影响地图。
+--     · 另外 p2l 的 `use_inf: true` 把"无回波"的 bin 发成 inf，cartographer_ros 的
+--       `msg_conversion.cpp:LaserScanToPointCloudWithIntensities` 用
+--       `msg.range_min <= first_echo && first_echo <= msg.range_max` 过滤 ⇒ inf **直接被丢掉**（既非命中也不清除）。
+--   ⇒ 结论：八/九/十次修正里"改 missing_data_ray_length 来擦墙/留墙"的推理**全部无效**，
+--     那两步测到的变化只来自同时改动的 hit/miss 与 num_range_data。
+--     **清空/擦墙的唯一来源是"打到东西的光束"（起点→命中点）沿途的 miss 写**（同见下方 11 次修正）。
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.05   -- ← 空转（见上），别再拿它当旋钮
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
+-- num_accumulated_range_data 实测（离线复现）：1 最好；2 ⇒ +20帧留存 42.2%→46.3%（略好但会把 0.2s 内的
+--   运动糊成一个位姿，实车/转弯时是隐患）；3 ⇒ 掉到 30.2%（糊得比"命中优先"赚的还多）。保持 1。
 
 -- 体素滤波 - 精细配置，保留 RMUL 场地细节
 TRAJECTORY_BUILDER_2D.voxel_filter_size = 0.05  -- 5cm 体素，保留墙壁和台阶特征
@@ -158,51 +174,60 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.1
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 
 -- ============================================================================
--- 子图配置 (关键修改：减少num_range_data，适配MID360高频)
+-- 子图 / 概率栅格写入（2D SLAM 唯一的"记忆"全在这两个参数上）
 -- ============================================================================
--- ⚠️ 2026-09-22（九次修正回滚）：曾按"上游默认"改到 90，实测**留存从 49% 掉到 30%**、曾占据格子 3779→2291
---   （证据变少，疑似子图栅格范围裁剪），因此**回滚到 30**。教训：不要一次改多项。
--- ★（原八次修正的想法，保留备查）：30 → 90。30 是"扫描率只有 0.3~3Hz"时代的取值；
---   现在 /scan 已稳定 10Hz（QoS 修复后），节点插入率涨了约 10 倍 ⇒ 30 意味着**每 3 秒就换一个子图**，
---   子图重叠缝暴增（这本身就是"留不住/闪烁"的一个来源）。90 ⇒ 约 9 秒一个子图。
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 30
+-- ★★★ 2026-09-23（十一次修正）：**离线复现之后重写本段**。新工具 tools/replay_scan_grid.py：
+--   把 bag 里的 /scan + /tf 位姿离线重放成 cartographer 的概率栅格（逐条照抄
+--   probability_grid_range_data_inserter_2d.cc：**命中先写 → 清除后写 → 同周期内先写者胜**），
+--   再用 tools/analyze_slam_bag.py 第 ⑤ 段同一套指标打分。校验（对 ret4 **同一条轨迹**）：
+--   真 /map 末态仍占据 40.5% ↔ 复现 43.3%；留存 +10 帧 52.9% ↔ 52.8%；闪烁中位 3 ↔ 3
+--   ⇒ 可以信它的**相对**结论（绝对值受位姿来源/子图近似影响）。
+--
+--   ❌ 已证伪（八~十次修正的推理）："37% 无回波光束 × missing_data_ray_length 是擦墙元凶"
+--      —— 本链路 `range_data.misses` 恒空、该参数空转（逐条源码见文件上方 missing_data_ray_length 段）。
+--   ✅ 真正的擦除机理（读源码 + 实测）：
+--      · 一帧内命中优先，但**跨帧没有任何保护** ⇒ 下一帧"打到东西的光束"沿途仍会把上一帧的墙格子写成 free；
+--      · 实测（ret4；tools/diag_wall_passes.py）：真 /map 里的墙格子每帧只有 **~12% 被命中**、
+--        **~17% 被"更远的回波"压过** ⇒ 净票 ≈ 0（+0.017/帧）⇒ 栅格在阈值附近随机游走
+--        = 用户看到的"闪 + 慢慢化掉"；
+--      · 压过它的回波长什么样：**82% 来自距本格子 50cm 以内的回波**（0~5cm 19%、5~10cm 23%、
+--        10~20cm 17%、20~50cm 23%），只有 7% 是"那一帧该方位根本没看见墙"。
+--        ⇒ 元凶是 **5cm 栅格把墙面量化成锯齿，打到"深齿"的射线会压过"浅齿"的格子**（掠射+量化），
+--          既不是无回波光束，也不是"墙看不见了"；
+--      · 命中为什么这么稀：一帧 30000 点 → p2l 压成 1310 条 range → cartographer 5cm 体素滤波后
+--        只剩 **~373 个不同的命中格子**（墙总共几千格）；且世界里挡板只有 ~0.4m 高、雷达在 0.226m，
+--        落进 p2l 高度带的竖直窗口很小 ⇒ 每个墙格子平均 **约 9 帧才轮到一次命中**；
+--      · `/map` 的取值上限是 **75**（不是 100）：P=0.80→65、P=0.90→75（submaps.h + submap_painter.cc
+--        + CreateOccupancyGridMsg 三段串起来算出来的）⇒ tools 里的 `>=65` 即 P>=0.80
+--        ⇒ 墙要 **2 次命中**才"变黑"，但只要 **3 次清除**就掉出去（阈值贴着天花板）。
+--   ⇒ 能撬动的只有：①命中票加重；②子图别换那么勤（每 3 秒清零一次证据）；③关掉清除（自由空间一起没，已否决）。
+--     离线**同轨迹**扫描结果（hit/miss/num_range_data）：
+--      | 参数 | 曾稳定≥5帧 | 末态仍在 | 留存+20帧 | 闪烁中位 | 末态占据 |
+--      | 0.68/0.40/30（旧）              | 2001 | 43.3% | 42.2% | 3 | 1087 |
+--      | **0.85/0.40/30**                | 4421 | 44.3% | 57.0% | 2 | **2073** |
+--      | **0.85/0.40/90（本次采用）**     | 4474 | 44.8% | **58.0%** | 2 | 2098 |
+--      | 0.68/0.40/∞（完全不换子图）      | 2973 | 47.6% | 59.5% | 1 | 1452 |
+--      | 0.68/0.40/30 + insert_free_space=false | — | ~89% | ~78% | — | 自由格=0（已否决）|
+--      | 原始 3D 点云(z∈[−0.15,0.2]) 当输入 | 2727 | 47.0% | 46.9% | 3 | 1544 |
+--   ⇒ 本次取 **hit 0.85 + num_range_data 90**（90 = 上游默认值）。
+--     预期：实心墙格子约翻倍，+20 帧留存 42%→58%，自由空间不变（~8000 格），闪烁中位 3→2。
+--   ⚠️ 仍有约一半"曾经很实的"墙格子最后会掉出去 —— 这是本传感/世界几何的**结构性上限**
+--      （低雷达 0.226m + 约 0.4m 挡板 ⇒ 单格证据天生稀疏），不是再调一个参数能消掉的。要更稳只能：
+--      抬高雷达 / 加高挡板 / 换更密且不重复的输入，或改 cartographer 源码给"已占据格子"加清除豁免
+--      （third_party/ 保持原样，不做）。
+--   ⚠️ 历史教训：ret/ret2/ret3/ret4 是**四条不同路线/时长**的 bag（167s/137s/78s/104s），
+--      跨 bag 比"留存百分比"没有意义（九次修正"实测变差"就栽在这：5 个参数是在不同轨迹上比的）。
+--      以后只认"同一条 bag 离线扫参数"，再让用户跑 1~2 次确认。
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
--- ★★ 2026-09-22（八次修正）：`insert_free_space` 恢复为 **true**，但把**清除调弱**。
---   判别实验结论（`insert_free_space=false` 跑了一次，tools/analyze_slam_bag.py 第 ⑤ 段量化）：
---     | 指标 | true(旧) | false(诊断) |
---     | 结束仍占据 | 49% | **89%** |
---     | 被擦掉     | 51% | **11%** |
---     | 留存 +20帧 | 63.8% | **78.9%** |
---     | 闪烁≥1     | 87% | 54% |
---     | 自由格子(0~30) | 35856 | **0** ← 关掉清除 ⇒ 自由空间也没了，栅格全灰（"一点点出来很艰难"）
---   ⇒ 结论：**"留不住"确实是清除造成的**，但**不能靠关掉清除来解决**（自由空间会一起消失，
---      地图没法用；而且本题场景没有动态物，但实车有，清除能力要保留）。
---      正确做法 = 保留清除 + 把它调弱：下面 `missing_data_ray_length` 调小（只清贴身）、
---      hit/miss 拉开差距（命中更粘）。
---   ★ 2026-09-22（九次修正）再加强一档：`missing_data_ray_length 1.0 → 0.5`、`hit 0.62 → 0.68`、`miss 0.45 → 0.40`。
---   依据一（实测，ret2 的 7 帧）：低矮特征(离地3~15cm)的 2D 格子每帧 **90.4% 会被命中**，只有 **36.3% 会被
---     "命中高度>25cm 的光束从上方穿过"**（命中:清除 ≈ 1:0.4）⇒ **主导的清除不是"穿过"，而是 37% 的
---     无回波光束 × `missing_data_ray_length`**。对真实 2D 雷达"无回波=这段是空的"成立；但我们是
---     **3D FOV(−7°~+52°) 转 2D**，无回波大多来自"朝天上打空" ⇒ 该假设不成立 ⇒ 这个半径必须小。
---   依据二（现场观感）：墙"变淡/变灰、慢慢化掉" = 清除票持续压过命中票 ⇒ 方向就是继续拉开 hit/miss。
---   odds：hit/miss = 1.22/0.96 = 1.27（旧）→ 1.63/0.82 = 2.0（八次）→ **2.13/0.67 = 3.2（本次）**，
---     同时清除半径 3.0 → 1.0 → **0.5 m**（被清面积约降到 1/6）。
---   注：`num_accumulated_range_data` **不解决这个问题** —— 累积多帧只是把"命中与清除同时放大"，
---     **比值不变**，所以它不是这里的旋钮（保持 1）。
---   ★ 2026-09-22（十次修正）：`missing_data_ray_length 0.5 → 0.05`（≈关掉"假想空地"）。
---   为什么不是干脆 `insert_free_space=false`（那样墙最稳）？因为**"擦旧墙"和"标空地"是同一个写**
---   （都是给射线途经的格子写 miss），关掉开关会连自由空间一起没有（实测 自由格子=0、地图全灰）。
---   但两种射线的 miss 价值不同，可以解耦：
---     · **打到东西的射线**：起点→命中点这段是**真观测过的空地** ⇒ 白格的正当来源（保留）；
---     · **没有回波的光束**（我们占 37%，多来自朝天打空）：cartographer 只能**假设**
---       0~missing_data_ray_length 是空的 ⇒ 它并没观测过 ⇒ **乱擦墙的元凶**。
---   把该值压到 ≈0 后：白格照样来自命中射线（车走过、打到墙的地方都会标白），
---   而"没回波的光束"几乎不再擦任何东西 ⇒ **两全**（预期留存 ≥ 不清除时的 89%，且自由格子 >0）。
+-- insert_free_space=true 必须保留：**"擦旧墙"和"标空地"是同一个写**（都是给射线途经的格子写 miss），
+--   关掉它确实能到 89% 留存，但自由格子=0、地图全灰（ret2 判别实验）。
+--   本场景没有动态物，但实车有，清除能力不能丢。推导见 docs/debug_fastlio_cartographer.md §5.2.3。
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.68
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.40
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.85   -- ← 十一次修正：0.68 → 0.85（命中更粘）
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.40   -- 0.40 是甜点：0.49 ⇒ 自由格子几乎长不出来(实测 31 格)；0.30 ⇒ 墙被擦得更快
 
 -- ============================================================================
 -- 位姿图优化配置

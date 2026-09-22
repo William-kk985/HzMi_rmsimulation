@@ -59,6 +59,24 @@
 | **T6 撤销**：`base_link_fake` 不是脏帧 | `fake_vel_transform` 20 Hz 发 `base_link→base_link_fake`（含云台转角），并做 `/cmd_vel → /cmd_vel_chassis` 旋转；角速度非零时按 `spin_speed` 原地转底盘 = **哨兵小陀螺**。改成 `base_link` 会丢功能 | `docs/tf_interface_contract.md` 已撤销 T6 并写明理由 |
 | **感知链断掉 → costmap 冻在最后一帧：无报错、不停车（静默失效）** | ① nav2 障碍源的 `expected_update_rate` 默认 **0 = 不检查**（`observation_buffer.cpp` 的 `isCurrent()` 直接 return true）；② `ObservationBuffer` 在 `observation_keep_time=0` 时**永远保留最后一条**（`purgeStaleObservations()` 只 `erase(++begin, end)`）→ 每轮 costmap 更新把**同一帧旧点云**重新 mark；③ `/scan` 是**串行单点**（插件 → `linefit` → `p2l`），local 没有第二来源 | **2026-09 修复**：① 所有障碍源加 `expected_update_rate: 0.5` → 源停即 `current_=false` → `controller_server.cpp` / `planner_server.cpp` 拒绝算速度 → 已有 `velocity_smoother.velocity_timeout: 1.0` 发零速停车 + 日志 WARN；② 新增 `local_obstacle:=scan\|cloud\|both` 槽位（`cloud` = 点云直投，不经 `p2l`，作第二来源）。验证：`pkill -f pointcloud_to_laserscan` 后应出现 WARN 且 ~1 s 内停车 |
 | **`p2l` 的 `range_min: 0.45` ⇒ 贴身 45cm 既看不见、又被清成 free** | 小于 `range_min` 的点被 **丢弃**（`pointcloud_to_laserscan_node.cpp` 的 `continue`），该角度 bin 保持 `inf`；`inf_is_valid: true` 时 nav2 把 `inf` 换成 `range_max-ε`（=10 m，`obstacle_layer.cpp` 的 `laserScanValidInfCallback`）→ 沿射线**一路 clear**。原值 0.45 的理由是"避开 38cm 地面最近点"，但 `p2l` 的输入已是 `linefit` **去地面后**的 `/segmentation/obstacle`，该理由不成立 | **2026-09 修复**：`range_min: 0.45 → 0.2`（与车体半径 0.20、`linefit` 的 `r_min` 对齐 → 盲区缩到车体内部）；同时 `scan_time: 0.3333 → 0.1`（与 10 Hz 传感器一致） |
+| **`missing_data_ray_length` 在本链路里是空转的（八~十次修正全白改）** | 逐行读源码：它只在 `local_trajectory_builder_2d.cc` 的 `range > max_range` 分支生效（把超距回波截到该距离当 miss）。而 `/scan` 的 `range_max = 10.0`（p2l）< `TRAJECTORY_BUILDER_2D.max_range = 12.0` ⇒ **该分支永不执行** ⇒ `range_data.misses` 恒空。另外 p2l `use_inf:true` 把无回波 bin 发成 `inf`，`msg_conversion.cpp` 的 `LaserScanToPointCloudWithIntensities` 用 `range_min <= r <= range_max` 过滤 ⇒ **`inf` 直接丢弃**（既不命中也不清除） | **2026-09 十一次修正**：`cartographer.lua` 注释已改写并标注"别再拿它当旋钮"；真正的旋钮是 `hit_probability` / `num_range_data` / `insert_free_space`（见 `docs/debug_fastlio_cartographer.md` §5.2.4） |
+| **`/map` 的取值上限是 75，永远不出现 100** | `msg_conversion.cpp::CreateOccupancyGridMsg` 的 `value = round((1 - color/255)*100)`，而 `color` 是 `DrawToSubmapTexture` 的 `delta = 128 - ProbabilityToLogOddsInteger(P)` 在**暗红底上预乘合成**的结果 ⇒ 实测映射：`P=0.5→50、0.68→58、0.80→65、0.90→75`。**任何 `lethal_threshold: 100` 之类"取满值"的消费者永远看不到障碍** | 阈值按 `>=65`（= P>=0.80）判读；§5.2.4 的所有"占据"统计都用这个口径 |
+
+---
+
+## 三、地图资产与坐标系（含"幽灵墙"完整证据链）
+
+### 3.0 两个都叫 `odom` 的坐标系并不一致（**建图图/导航图对齐的坑**）
+
+| 来源 | 出生点处数值 | 性质 |
+|---|---|---|
+| `/odom_ground_truth`（话题，`frame_id: odom`） | `x=4.30, y=3.35` | **世界坐标**（= 出生点在世界里的位置） |
+| `/tf` 的 `odom→base_link` | `x=-0.106, y=0.007` | **出生点相对系** |
+
+而 cartographer 的 `map` 系 = **出生点相对系**（实测 `map→odom ≈ 恒等`，SLAM `/map` 的内容整体比世界坐标偏 `−(4.3, 3.35)`）。
+⇒ ① 离线复现必须换算系（`tools/replay_scan_grid.py --pose tf` 默认用 `/tf` 复合，**别用 `gt`**）；
+② **cartographer 建出来的图与 `map/RMUL2026.pgm`（世界系，`origin: [2.68, 0.228]`）天然差 `(4.3, 3.35)`** ——
+纯建图落盘、替换底图、给 `amcl_init_x/y` 初值时都要意识到这一点。
 
 ---
 
