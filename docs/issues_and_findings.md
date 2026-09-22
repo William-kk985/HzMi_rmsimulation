@@ -67,6 +67,9 @@
 
 ## 三、地图资产与坐标系（含"幽灵墙"完整证据链）
 
+| **★ 墙"运行久了就没了"：上游 2D 概率栅格没有任何"已占据格子免清"机制，`insert_free_space` 又是全有/全无** | 逐行源码：`insert_free_space=true` 时对每条 return 都 `RayToPixelMask(origin→hit)` 并把 miss 表写满沿途每个格子；`false` 时在 miss 循环前直接 `return`。没有中间档、没有"别擦已占据格子"的开关。参数只能拉长时间常数（离线长时程：最好的 weak-clear 配置 +2 帧 94% → **+100 帧 46%**；`insert_free_space=false` 才 100% 但自由格=0） | **2026-09 十三次修正**：工作区内 fork 核心 `src/rm_localization/cartographer/`（`third_party/` 保持原样），插入器新增 `min_probability_to_clear`（P≥阈值免清，0=上游行为）。离线同轨迹预测 `0.68/0.49/3000/0.80`：**留存 +2/+20/+100 帧 100%/99.9%/100%、闪烁 0、自由格 5037、占据 4794**。副作用见 `PATCH_README.md` |
+| **nav2 陷阱：`static_layer` 的 `lethal_cost_threshold` 默认 100 + `trinary_costmap: true`，而 cartographer 的 `/map` 上限只有 75 ⇒ 每一面墙都被判成 FREE_SPACE** | `msg_conversion.cpp::CreateOccupancyGridMsg` 的 `value = round((1-color/255)*100)`，`color` 经暗红底预乘合成后上限对应 P=0.9 ⇒ 出图最大 **75**；nav2 `static_layer` 用 `map >= lethal_cost_threshold` 判致命 | 用 cartographer 的图喂 costmap 时设 **`lethal_cost_threshold: 60`**（社区 issue #628 用的就是 60）。本仓库 `nav2_params*.yaml` 尚未设置，属待办 |
+
 ### 3.0 两个都叫 `odom` 的坐标系并不一致（**建图图/导航图对齐的坑**）
 
 | 来源 | 出生点处数值 | 性质 |

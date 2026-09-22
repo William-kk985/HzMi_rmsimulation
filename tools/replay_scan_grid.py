@@ -369,7 +369,8 @@ def real_map_cells(bag, occ=65):
 
 # ---------------------------------------------------------------- sweep
 
-def simulate(H, P, hit, miss, num_range_data=30, insert_free=True, accumulate=1, snap_every=10):
+def simulate(H, P, hit, miss, num_range_data=30, insert_free=True, accumulate=1, snap_every=10,
+             clear_above=0.0):
     """返回 snapshots: (n_snap, n_cells) 的占据概率（nan = 未观测）。"""
     a = math.log(hit / (1 - hit))
     b = math.log(miss / (1 - miss))
@@ -389,8 +390,12 @@ def simulate(H, P, hit, miss, num_range_data=30, insert_free=True, accumulate=1,
             lo[grp_h] = np.clip(lo[grp_h] + a, -LIM, LIM)
             pub[grp_h] = lo[grp_h]
         if insert_free and len(grp_p):
-            lo[grp_p] = np.clip(lo[grp_p] + b, -LIM, LIM)
-            pub[grp_p] = lo[grp_p]
+            if clear_above > 0.0:      # ★ 清除豁免：已经确信是障碍的格子不被穿过它的射线清除
+                cur = 1.0 / (1.0 + np.exp(-lo))
+                grp_p = grp_p & (cur < clear_above)
+            if len(grp_p):
+                lo[grp_p] = np.clip(lo[grp_p] + b, -LIM, LIM)
+                pub[grp_p] = lo[grp_p]
         if c % snap_every == 0:
             snaps.append(pub.copy())
     return np.array(snaps)
@@ -488,7 +493,8 @@ def sweep(args):
         hit = float(kv.get('hit', 0.68)); miss = float(kv.get('miss', 0.40))
         nrd = int(kv.get('nrd', 30)); acc = int(kv.get('acc', 1))
         free = kv.get('free', 'true') == 'true'
-        snaps = simulate(H, P, hit, miss, nrd, free, acc)
+        nc = float(kv.get('nc', 0.0))
+        snaps = simulate(H, P, hit, miss, nrd, free, acc, clear_above=nc)
         if args.pgm:
             tag = f'{args.pgm}_h{hit}_m{miss}_n{nrd}.pgm'
             render_pgm(tag, snaps, wxy)

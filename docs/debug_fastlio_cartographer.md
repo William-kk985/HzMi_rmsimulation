@@ -438,6 +438,44 @@ P25=1.8 m / P50=2.3 m / P75=3.1 m ⇒ **约 3/4 的命中都落在 3 m 的常清
 （本项目 30，上游默认 90）：位姿图每 3 秒优化一次会让已画好的子图整体挪动，是"闪"的一个独立来源。
 离线复现不建模位姿图，无法预测，只能单独 A/B。
 
+**★★★ 十三次修正（2026-09-23）：参数到顶了 ⇒ 改源码给"已占据格子"加清除豁免**
+
+先把"消失"量化到底：`tools/diag_map_loss.py`（四份 bag）显示 ret4 里消失的墙格子
+**40.6% 被清成自由(0~30)**、16.2% 淡成中间、**只有 3.3% 变成 unknown** ⇒ 确实是清除，
+不是子图覆盖丢失。再给离线复现加上长时程指标（+50/+100 帧 = 5/10 秒）：
+
+| 配置（同一条 ret4 轨迹） | +2 | +20 | +50 | +100 | 末态自由 | 末态占据 |
+|---|---|---|---|---|---|---|
+| `0.68/0.49/nrd=30`（弱清除+短窗） | 78.1% | 45.0% | — | — | 31 | 1414 |
+| `0.85/0.49/nrd=300`（我上一版） | 91.5% | 65.0% | 57.2% | 42.0% | 6086 | 3105 |
+| `0.68/0.49/nrd=∞`（弱清除+长窗，参数最优） | 94.3% | 76.9% | 69.4% | **46.4%** | 5705 | 3455 |
+| `insert_free_space=false`（你认可的 89% 那档） | 100% | 100% | 100% | 100% | **119** | — |
+| **`0.68/0.49/nrd=3000 + min_probability_to_clear=0.80`（本次）** | **100%** | **99.9%** | **99.9%** | **100%** | 5037 | 4794 |
+
+⇒ **参数只能把时间常数拉长，永远到不了 89% 那一档**：清除票会一直累积（长窗下墙的净票虽为正，
+但**新子图一旦接班，格子从 P=0.5 重新累积，被"穿过"一次就掉到 0.48** ⇒ 读出来就是灰/没了）。
+要长期稳定必须**让清除不碰已经确信是障碍的格子**——上游没有任何开关能表达这件事（只有
+`insert_free_space` 这个全有/全无的布尔），所以在工作区里 fork 了核心：
+
+- `src/rm_localization/cartographer/`（= `ros2/cartographer` 2.0.9004 的 fork；`third_party/` 保持原样，
+  见该目录的 `PATCH_README.md`）
+- 改动：概率栅格插入器新增 `min_probability_to_clear`：**P(occupied) ≥ 该值的格子不再被"穿过"的射线清除**；
+  白格照旧生长（空格子的 P 很低，不受影响）。`0` = 完全保持上游行为。
+- 构建：`colcon build --packages-select cartographer cartographer_ros --cmake-args -DCMAKE_BUILD_TYPE=Release`
+- 副作用：动态障碍物一旦被记为占据就不会被"穿过"的射线清掉（本场景无动态物；实车复用时把阈值调到 0.9 或设 0）。
+
+**外部资料印证**（社区同症状 + 同结论）：[cartographer_ros#1818](https://github.com/cartographer-project/cartographer_ros/issues/1818)
+（"桌子转身就没了"）的提问者用 **`hit_probability=0.75` + `miss_probability=0.49`** 修好 —— 与本节
+"回上游 0.49"完全一致；官方 [tuning 文档](https://google-cartographer-ros.readthedocs.io/en/latest/tuning.html)
+把 `submaps.num_range_data` 定义为子图大小且只在"低延迟"里建议*减小*它；
+[cartographer_ros#1538](https://github.com/cartographer-project/cartographer_ros/issues/1538)（"怎么调动态物体消失时间"）
+**0 条回复**、维护者从未给出过"不擦已占据格子"的开关。
+
+**nav2 陷阱（同一份 /map 的另一个坑）**：cartographer 的 `/map` 取值上限是 **75**，而 nav2
+`static_layer` 的 `lethal_cost_threshold` 默认 **100** + `trinary_costmap: true` ⇒ **静态层会把
+每一面墙都判成 FREE_SPACE**。用 cartographer 的图喂 costmap 时必须设 `lethal_cost_threshold: 60`
+（本仓库的 `nav2_params*.yaml` 还没设，已记入 `issues_and_findings.md`）。
+
 **工具用法**
 
 ```bash

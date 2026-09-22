@@ -249,7 +249,7 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 --      预期：留存+2 帧 69%→94%、+20 帧 42%→75%、闪烁中位 3→1、实心墙格子 1087→2585、自由空间不损失。
 --   ⚠️ num_range_data 越大越粘，但子图越少 ⇒ 回环约束越少（长距离建图时全局一致性变差）。
 --      300（30 秒）是"粘性/回环"的折中；只跑一小段/只求这张图最稳，可以直接给 100000（整段一个子图）。
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 300
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 3000   -- ★十三次修正：300 → 3000（≈5 分钟一个子图；离线 +20 帧留存 65%→77%）
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
@@ -258,7 +258,16 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PR
 --   十二次修正后不需要这个取舍了：**弱清除(miss 0.49) + 长窗口(nrd 300) 可以同时得到
 --   94% 的 +2 帧留存和 6556 个自由格子**。推导见 docs/debug_fastlio_cartographer.md §5.2.4。
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.85   -- 上游 0.55；0.85 = 命中更粘（占据格 2585 vs 0.68 的 2585/0.55 的 1600）
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.68   -- 上游 0.55；0.85 = 命中更粘（占据格 2585 vs 0.68 的 2585/0.55 的 1600）
+-- ★★★ 2026-09-23（十三次修正）：**给"已确信是障碍"的格子加清除豁免**（需要本工作区的
+--   patched cartographer 核心：src/rm_localization/cartographer，third_party/ 保持原样）。
+--   为什么必须动源码：上游 2D 概率栅格只有三个选项，`insert_free_space=true` 就会把每条
+--   "打到东西的光束"沿途每个格子都写 miss；而 2D 投影下低矮障碍/掠射会让**同一条墙的射线互相擦**
+--   （实测 82% 的擦除票来自 50cm 以内的同墙邻格）。参数只能拉长时间常数：离线长时程指标显示
+--   最好的 weak-clear 配置也是 +2 帧 96% → +10 秒 53%（`insert_free_space=false` 才是 100%，但没空地）。
+--   本选项：P(occupied) >= 该值的格子**不再被穿过它的射线清除**；白格照旧生长（空格子 P 很低）。
+--   0 = 完全保持上游行为（不设就是 0）。0.80 ≈ 工具里判"占据"的阈值。
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.min_probability_to_clear = 0.80
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49   -- ★十二次修正：0.40 → 0.49（回到上游默认！单张清除票强度曾达上游 10 倍，才是"留不住"的真凶）
 
 -- ============================================================================
