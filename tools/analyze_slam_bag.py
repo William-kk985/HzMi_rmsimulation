@@ -140,23 +140,34 @@ def main():
             (gt_yaw if topic.endswith("odom_ground_truth") else odom_yaw).append((t, y))
 
     # ------------------------------------------------------------ ① 时间戳
-    print("\n== ① 各话题：条数 / 时间范围 / 中位率 / 乱序 / 异常时间戳 ==")
+    print("\n== ① 各话题：平均率 / 中位间隔 / 最大空洞 / 非单调戳 ==")
+    print("    ⚠️ 必须同时看**平均率**和**最大空洞**：只看中位间隔会把'成串+长空洞'误判成'稳定低频'")
+    print("       （实测教训：/scan 中位间隔 300ms 看着像 3.3Hz，实际平均只有 1.67Hz、最大空洞 6.6s）")
     for topic in sorted(stamps):
         ts = sorted(stamps[topic])
         n = len(ts)
         bogus = sum(1 for t in ts if t > BOGUS_T)
         good = [t for t in ts if t <= BOGUS_T]
-        dts = sorted(b - a for a, b in zip(good[:-1], good[1:]) if b > a)
-        back = n - 1 - len(dts)
-        rate = 1.0 / statistics.median(dts) if dts else float("nan")
-        rng = f"[{good[0]:9.3f} .. {good[-1]:9.3f}]" if good else "[  --  ]"
+        if len(good) < 2:
+            print(f"  {topic:30s} n={n:<7d} 只有静态/单条数据（stamp={good[0] if good else '-'}）")
+            continue
+        dts = [b - a for a, b in zip(good[:-1], good[1:])]
+        span = good[-1] - good[0]
+        mean_rate = (n - 1) / span if span > 0 else float("nan")
+        med = statistics.median(dts) if dts else 0.0
+        med_rate = (1.0 / med) if med > 0 else float("inf")
+        max_gap = max(dts) if dts else 0.0
+        big_gaps = sum(1 for x in dts if x > 0.5)
+        nonmono = n - 1 - sum(1 for a, b in zip(ts[:-1], ts[1:]) if b > a)
         flag = ""
         if bogus:
-            flag += f"  ← ⚠️ {bogus} 条时间戳 >1e6（不是仿真钟，例如 6213559xx）"
-        if back:
-            flag += f"  ← ⚠️ 时间回退 {back} 次（乱序）"
-        print(f"  {topic:30s} n={n:<7d} {rng} {rate:7.2f} Hz{flag}")
-    print("  说明：这里的率用**相邻间隔的中位数**算，避免个别异常戳把平均值带偏。")
+            flag += f"  ← ⚠️ {bogus} 条戳 >1e6（不是仿真钟，例如 6213559xx）"
+        if nonmono:
+            flag += f"  ← ⚠️ {nonmono} 条戳非单调（重复/回退，会让 tf2 报 TF_OLD_DATA）"
+        if big_gaps:
+            flag += f"  ← ⚠️ {big_gaps} 个 >0.5s 空洞"
+        print(f"  {topic:30s} n={n:<7d} 平均 {mean_rate:6.2f} Hz / 中位 {med_rate:6.2f} Hz  "
+              f"最大空洞 {max_gap*1000:7.0f} ms{flag}")
 
     # ------------------------------------------------------------ ② IMU
     print("\n== ② IMU 启动质量（cartographer 拿第一帧当重力基准）==")
