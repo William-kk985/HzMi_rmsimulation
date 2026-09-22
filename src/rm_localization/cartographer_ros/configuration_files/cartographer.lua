@@ -160,10 +160,12 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 -- ============================================================================
 -- 子图配置 (关键修改：减少num_range_data，适配MID360高频)
 -- ============================================================================
--- ★ 2026-09-22（八次修正）：30 → **90**（上游默认）。30 是"扫描率只有 0.3~3Hz"时代的取值；
+-- ⚠️ 2026-09-22（九次修正回滚）：曾按"上游默认"改到 90，实测**留存从 49% 掉到 30%**、曾占据格子 3779→2291
+--   （证据变少，疑似子图栅格范围裁剪），因此**回滚到 30**。教训：不要一次改多项。
+-- ★（原八次修正的想法，保留备查）：30 → 90。30 是"扫描率只有 0.3~3Hz"时代的取值；
 --   现在 /scan 已稳定 10Hz（QoS 修复后），节点插入率涨了约 10 倍 ⇒ 30 意味着**每 3 秒就换一个子图**，
 --   子图重叠缝暴增（这本身就是"留不住/闪烁"的一个来源）。90 ⇒ 约 9 秒一个子图。
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 30
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
@@ -196,9 +198,10 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_in
 -- ============================================================================
 -- 位姿图优化配置
 -- ============================================================================
--- ★ 2026-09-22（八次修正）：30 → **90**（上游默认）。理由同 num_range_data：10Hz 插入下
+-- ⚠️ 同上：随 num_range_data 一起回滚到 30（实测负收益）。
+-- ★（原八次修正的想法）：30 → 90。理由同 num_range_data：10Hz 插入下
 --   30 节点 = 每 3 秒优化一次，位姿图修正过频也会让栅格反复重画。
-POSE_GRAPH.optimize_every_n_nodes = 90
+POSE_GRAPH.optimize_every_n_nodes = 30      -- 减少优化频率
 POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
 -- ★ 2026-09-22（二次修正）：回环门槛调回"能找到"的水平。
 --   上一版把 min_score 提到 0.72（global 0.8）后，cartographer 收尾时打印的是
