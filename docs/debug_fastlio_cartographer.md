@@ -410,6 +410,16 @@ P25=1.8 m / P50=2.3 m / P75=3.1 m ⇒ **约 3/4 的命中都落在 3 m 的常清
 "墙留不住 → 去关清除（89% 但没自由空间）→ 回头再调 `missing_data_ray_length`（空转）"这条歧路，
 根子就在这个漂移上。
 
+**离线预测图（同一条 ret4 轨迹，末态快照，黑=占据 / 白=自由 / 灰=未知或中间态）**
+
+![离线预测：旧参数 vs 上游默认 vs 本次参数](img/cartographer_retention_pred_compare.png)
+
+左（旧 `0.68/0.40/30`）：墙只剩零星碎片、大片灰；中（纯上游 `0.55/0.49/90`）：几乎没墙、全是灰；
+右（本次 `0.85/0.49/300`）：**场地外圈连成深色闭合线、内部隔墙成块、中间一大片白自由空间**。
+生成命令：`python3 tools/replay_scan_grid.py --mode sweep --events .tmp_cache/ret4_raw.npz --pgm .tmp_cache/pred --set hit=0.68,miss=0.40,nrd=30 --set hit=0.55,miss=0.49,nrd=90 --set hit=0.85,miss=0.49,nrd=300`
+（同时会写出 nav2 风格 `.pgm/.yaml`，可直接丢进 RViz 的 Map 显示项对比；本次的图在
+`docs/img/cartographer_pred_new_h0.85_m0.49_n300.pgm`）
+
 **两个参数必须一起改，缺一不可**：
 
 1. `miss_probability 0.40 → 0.49`（**回上游**）：让"打到东西的射线"沿途的清除票变弱 → 墙格子的净票转正。

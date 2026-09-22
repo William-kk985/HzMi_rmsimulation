@@ -460,6 +460,25 @@ def metrics(snaps, occ=65, free_thr=30):
     }
 
 
+def render_pgm(fn, snaps, wxy, occ=65, free_thr=30):
+    """把最后一个快照画成 nav2 风格的 pgm/yaml（0=黑=占据，254=白=自由，205=未知）。"""
+    v = np.where(np.isnan(snaps[-1]), -1.0, map_value_arr(np.nan_to_num(snaps[-1])))
+    x0, y0 = wxy[:, 0].min(), wxy[:, 1].min()
+    W = int((wxy[:, 0].max() - x0) / RES) + 2
+    Hh = int((wxy[:, 1].max() - y0) / RES) + 2
+    img = np.full((Hh, W), 205, np.uint8)          # 未知
+    ix = ((wxy[:, 0] - x0) / RES).astype(int)
+    iy = ((wxy[:, 1] - y0) / RES).astype(int)
+    img[iy, ix] = np.where(v >= occ, 0, np.where(v <= free_thr, 254, 205)).astype(np.uint8)
+    with open(fn, 'wb') as f:
+        f.write(b'P5\n%d %d\n255\n' % (W, Hh))
+        f.write(np.flipud(img).tobytes())
+    with open(fn.replace('.pgm', '.yaml'), 'w') as f:
+        f.write(f'image: {os.path.basename(fn)}\nresolution: {RES}\norigin: [{x0:.3f}, {y0:.3f}, 0.0]\n'
+                f'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n')
+    return fn
+
+
 def sweep(args):
     d = np.load(args.events)
     H, P, wxy = d['H'], d['P'], d['wxy']
@@ -470,6 +489,9 @@ def sweep(args):
         nrd = int(kv.get('nrd', 30)); acc = int(kv.get('acc', 1))
         free = kv.get('free', 'true') == 'true'
         snaps = simulate(H, P, hit, miss, nrd, free, acc)
+        if args.pgm:
+            tag = f'{args.pgm}_h{hit}_m{miss}_n{nrd}.pgm'
+            render_pgm(tag, snaps, wxy)
         m = metrics(snaps)
         if m is None:
             print(f'  hit={hit} miss={miss} nrd={nrd} acc={acc} free={free}: 无占据'); continue
@@ -560,6 +582,7 @@ def main():
     ap.add_argument('--hit', type=float, default=0.68)
     ap.add_argument('--miss', type=float, default=0.40)
     ap.add_argument('--min-touch', type=int, default=20)
+    ap.add_argument('--pgm', default='', help='给每个参数组合把**末态快照**渲染成 nav2 风格 pgm/yaml（前缀）')
     ap.add_argument('--cache', default='.tmp_cache')
     args = ap.parse_args()
     if args.mode == 'events':
