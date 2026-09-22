@@ -119,7 +119,7 @@ TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高�
 -- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
 TRAJECTORY_BUILDER_2D.min_z = -0.8
 TRAJECTORY_BUILDER_2D.max_z = 2.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 1.0
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 
 -- 体素滤波 - 精细配置，保留 RMUL 场地细节
@@ -160,28 +160,35 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 -- ============================================================================
 -- 子图配置 (关键修改：减少num_range_data，适配MID360高频)
 -- ============================================================================
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 30   -- 从60→30，子图更小，定位更灵活
+-- ★ 2026-09-22（八次修正）：30 → **90**（上游默认）。30 是"扫描率只有 0.3~3Hz"时代的取值；
+--   现在 /scan 已稳定 10Hz（QoS 修复后），节点插入率涨了约 10 倍 ⇒ 30 意味着**每 3 秒就换一个子图**，
+--   子图重叠缝暴增（这本身就是"留不住/闪烁"的一个来源）。90 ⇒ 约 9 秒一个子图。
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
--- ⚠️⚠️ 2026-09-22 **临时诊断值**：`insert_free_space = false`（跑完请改回 true）
---   目的：判别"特征留不住"到底是不是**清除**造成的。实测（.tmp_bags/ret，222 帧 /map）：
---     曾占据 3779 格 → 结束仍在 1837（49%）；被擦掉 1942（51%）；
---     留存曲线 +2/5/10/20 帧 = 87.5 / 74.4 / 63.9 / 63.8%；
---     闪烁（occupied→free）中位 2、P95 6、max 12，**87% 的曾占据格子都闪过**。
---   ⇒ 判读为"**被主动擦除**"：每帧有 37% 的无回波光束，而 cartographer 会把它们的
---     0~`missing_data_ray_length`(3.0m) 段标成自由；矮墙一旦离开下视 FOV（−7°）就变"无回波"⇒ 被清。
---   预期（用 tools/analyze_slam_bag.py 第 ⑤ 段复测）：被擦掉比例 51% → ~0、闪烁消失、留存曲线走平 ≈100%。
---   ⚠️ 这个值**只是诊断**：关掉清除后，动态物与漏网点会永久留在图上，**不能用于导航**；
---      机制确认后要改成"调弱清除"（missing_data_ray_length 调小 + hit/miss 拉开），而不是永久关闭。
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = false
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.55
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49
+-- ★★ 2026-09-22（八次修正）：`insert_free_space` 恢复为 **true**，但把**清除调弱**。
+--   判别实验结论（`insert_free_space=false` 跑了一次，tools/analyze_slam_bag.py 第 ⑤ 段量化）：
+--     | 指标 | true(旧) | false(诊断) |
+--     | 结束仍占据 | 49% | **89%** |
+--     | 被擦掉     | 51% | **11%** |
+--     | 留存 +20帧 | 63.8% | **78.9%** |
+--     | 闪烁≥1     | 87% | 54% |
+--     | 自由格子(0~30) | 35856 | **0** ← 关掉清除 ⇒ 自由空间也没了，栅格全灰（"一点点出来很艰难"）
+--   ⇒ 结论：**"留不住"确实是清除造成的**，但**不能靠关掉清除来解决**（自由空间会一起消失，
+--      地图没法用；而且本题场景没有动态物，但实车有，清除能力要保留）。
+--      正确做法 = 保留清除 + 把它调弱：下面 `missing_data_ray_length` 调小（只清贴身）、
+--      hit/miss 拉开差距（命中更粘）。
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.62
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.45
 
 -- ============================================================================
 -- 位姿图优化配置
 -- ============================================================================
-POSE_GRAPH.optimize_every_n_nodes = 30      -- 减少优化频率
+-- ★ 2026-09-22（八次修正）：30 → **90**（上游默认）。理由同 num_range_data：10Hz 插入下
+--   30 节点 = 每 3 秒优化一次，位姿图修正过频也会让栅格反复重画。
+POSE_GRAPH.optimize_every_n_nodes = 90
 POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
 -- ★ 2026-09-22（二次修正）：回环门槛调回"能找到"的水平。
 --   上一版把 min_score 提到 0.72（global 0.8）后，cartographer 收尾时打印的是
