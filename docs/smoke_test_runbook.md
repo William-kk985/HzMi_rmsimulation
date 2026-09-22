@@ -485,6 +485,8 @@ ros2 node list | grep cartographer                    # cartographer_node + cart
 ros2 topic info /scan --verbose | grep "Node name"    # ★ 必须看到 cartographer_node（证明输入类型/话题对上了）
 ros2 topic info /map --verbose | grep -c PUBLISHER    # 期望 1（cartographer occupancy_grid）
 ros2 run tf2_ros tf2_echo map odom                    # 有输出（由 cartographer 发）
+python3 tools/monitor_map_odom.py                     # ★ 50Hz 采样 + 判读：平滑漂移 / 锯齿矫正 / 高频抖动
+                                                      #   （tf2_echo 每 ~0.8s 一行，看不出高频抖动；判据见 tools/README.md）
 ros2 topic echo /map --once --field info              # 宽高随建图增长
 ros2 run tf2_tools view_frames                        # ★ 帧树：body 只能有一个父(camera_init)，odom 下只应有 base_link
 ```
