@@ -128,17 +128,32 @@ TRAJECTORY_BUILDER_2D.loop_closure_adaptive_voxel_filter.max_length = 1.2
 TRAJECTORY_BUILDER_2D.loop_closure_adaptive_voxel_filter.min_num_points = 80
 TRAJECTORY_BUILDER_2D.loop_closure_adaptive_voxel_filter.max_range = 12.
 
--- 扫描匹配 - 增大搜索窗口，提高稳定性
+-- ★★ 2026-09-22（四次修正，路线①配套）：**有里程计时，搜索窗要"按最坏漂移"给小，不是越大越好**。
+--   依据两条公开结论：
+--     ① 官方调参文档 "Tuning methodology"：局部 SLAM 打滑/走偏时，要让扫描匹配"偏离先验的代价更高"
+--        （`ceres_scan_matcher.translation_weight` / `rotation_weight`），示例最终落在 1e2 / 4e2；
+--     ② cartographer #534 里 contributor 的经验法则（就是"里程计 + 实时相关匹配器"这个组合）：
+--        「用实时相关匹配器 + 里程计，并配一个**很小的搜索窗**；窗口 ≈ 一帧内
+--          (max_speed / laser_freq) 距离上的最坏里程计漂移 +10~50%」。
+--   我们现在的先验是底盘真值 odom（仿真里无打滑）→ 残差≈0 → 窗口只需要吸收先验的小偏差。
+--   原来 ±30° / 0.2m 是"没有可用先验时代"的遗留：它允许匹配器一步跳到**对称场地**的错误朝向
+--   → 局部位姿相对优化轨迹缓慢走偏（实测 map→odom 的 yaw 从 ~1° 锯齿涨到 17° 再被拉回）
+--   → 位姿图再矫正 → 子图里的旧扫描与被矫正后的轨迹不一致 → **残影**。
+--   （官方文档原话：submap 内部的错误会被"永久保留"，全局 SLAM 只能部分矫正。）
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.2   -- 增大
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(30.)  -- 增大
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 10.  -- 减小
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 10.     -- 减小
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1   -- 0.2 -> 0.1（上游默认）
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(5.)  -- 30° -> 5°
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 10.  -- 偏离先验的代价（>1 = 更信任先验）
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 10.
 
--- Ceres 扫描匹配器 - 平衡权重
+-- Ceres 扫描匹配器 —— 精配准阶段同样要"更信任先验"
+-- 官方 tuning 文档的示例把这两个权重从默认 10 / 40 提到 1e2 / 4e2（1e3 过头、会与点云明显矛盾）。
+-- 我们的先验是**真值**级别的底盘 odom，比该示例里的背包轮速里程计更可信 → 采用文档的最终值。
+-- ⚠️ 实车注意（sim/real 偏差）：真实轮速里程计会打滑，这两个权重不该照抄；实车要用实车数据重调
+--    （见 docs/sim_real_contract.md §四"不许把仿真专属结论当实车结论"）。
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 1.
-TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 10.
-TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.   -- 增加旋转权重，减少旋转漂移
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 1e2   -- 10 -> 1e2（官方示例值）
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 4e2      -- 40 -> 4e2（官方示例值）
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.use_nonmonotonic_steps = false
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.max_num_iterations = 20
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.num_threads = 4
