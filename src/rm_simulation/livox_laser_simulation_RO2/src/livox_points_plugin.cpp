@@ -162,7 +162,23 @@ namespace gazebo
 
         sensor_msgs::PointCloud2Modifier modifier(cloud2);
         modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-        modifier.resize(points_pair.size());
+
+        // ★★ 2026-09-23（nav 模式排查）：**只发有效回波，不再用 (0,0,0) 占位**。
+        //   实测一帧 30000 个射线方向里只有 ~6200 个真有回波（20.8%），其余 78% 被填成 (0,0,0)
+        //   发出去 ⇒ 消息 480 KB/帧 @10Hz = 4.8 MB/s 灌进 DDS。后果：
+        //     · 任何消费端（linefit / nav2 costmap / RViz）一卡，**RELIABLE + KEEP_LAST(10)**
+        //       的写者就会积压 → 阻塞 Gazebo 的 sensor 回调 → **整条感知链冻死且不自恢复**
+        //       （实测现象：/scan 与 /segmentation/obstacle 同时停更 180 s，而 linefit/p2l 进程还活着）。
+        //     · 真实 Livox 驱动**只发有回波的采样点**，(0,0,0) 本来就不是它发的 ⇒ 这也是保真度修复。
+        //   改法：先数一遍有效回波数，按它 resize，再只填有效点（CustomMsg 同步受益）。
+        {
+            size_t valid = 0;
+            for (const auto &pair : points_pair) {
+                const double r = rayShape->GetRange(pair.first);
+                if (r > RangeMin() && r < RangeMax()) ++valid;
+            }
+            modifier.resize(valid);
+        }
 
         sensor_msgs::PointCloud2Iterator<float> out_x(cloud2, "x");
         sensor_msgs::PointCloud2Iterator<float> out_y(cloud2, "y");
@@ -173,9 +189,9 @@ namespace gazebo
             auto range = rayShape->GetRange(pair.first);
             auto intensity = rayShape->GetRetro(pair.first);
 
-            // 处理超出范围的数据
+            // 无回波 / 超范围：**整点丢弃**（不再填 (0,0,0)）—— 见上方 2026-09-23 说明
             if (range <= RangeMin() || range >= RangeMax()) {
-                range = 0;
+                continue;
             }
 
             // 计算点云数据

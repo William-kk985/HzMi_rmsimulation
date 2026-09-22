@@ -565,7 +565,7 @@ ros2 run tf2_tools view_frames
 
 | 项 | 说明 |
 |---|---|
-| 插件不发 `(0,0,0)` 假点 | 无回波射线现在被填成 `(0,0,0)` 发出（每帧 78.4%）。真实驱动只发有效回波；修掉后消息 480 KB→~100 KB。属**仿真保真度**修复，需拍板 + rebuild |
+| ~~插件不发 `(0,0,0)` 假点~~ **已完成 2026-09-23** | 原来无回波射线被填成 `(0,0,0)` 发出（每帧 78.4%，30000 点里只有 ~6200 真有回波）⇒ 480 KB/帧 @10Hz 灌 DDS；**RELIABLE + KEEP_LAST(10)** 的写者一旦积压就会阻塞 Gazebo 的 sensor 回调 ⇒ 整条感知链冻死且不自恢复（实测 `/scan` 与 `/segmentation/obstacle` 同时停更 180 s，而 linefit/p2l 进程仍活着）| **已改**：`ros2_livox_simulation/livox_points_plugin.cpp` 先数有效回波再 resize、无回波整点丢弃（CustomMsg 同步受益）⇒ 消息 ~480 KB → ~100 KB。真实驱动行为一致 |
 | IMU 首帧重力 | 要"先录制 → 全新 launch"才能抓到首帧；确认后加"丢掉开头零加速度帧"的管道滤波（实车同样需要） |
 | `fake_vel_transform` 戳 | `base_link→base_link_fake` 5508 条里 3317 条戳非单调（会让 tf2 报 TF_OLD_DATA） |
 | `/odom`(LIO) 重复戳 | 1905 条里 20 条重复（同样会让显示侧抖） |
