@@ -464,6 +464,14 @@ P25=1.8 m / P50=2.3 m / P75=3.1 m ⇒ **约 3/4 的命中都落在 3 m 的常清
 - 构建：`colcon build --packages-select cartographer cartographer_ros --cmake-args -DCMAKE_BUILD_TYPE=Release`
 - 副作用：动态障碍物一旦被记为占据就不会被"穿过"的射线清掉（本场景无动态物；实车复用时把阈值调到 0.9 或设 0）。
 
+**✅ 现场确认（2026-09-23，用户实测）**：用这套配置（patched 核心 + `0.68/0.49/3000/0.80`）跑
+`mode:=mapping` + `lio:=fastlio` + `mapper:=cartographer`，用户反馈"**这个地图是可以的**"——
+墙不再随时间化掉（此前是"比之前好，但运行久了还是没了"）。
+补丁生效的硬证据：把 `min_probability_to_clear` 故意写成 1.5 会让节点在
+`probability_grid_range_data_inserter_2d.cc:131` 触发 `Check failed: ... < 1.`；
+写 0.80 正常 `Added trajectory with ID '0'`。（本轮没录 ret5 bag，结论为**目视确认** +
+上表的离线同轨迹预测，未做 bag 量化。）
+
 **外部资料印证**（社区同症状 + 同结论）：[cartographer_ros#1818](https://github.com/cartographer-project/cartographer_ros/issues/1818)
 （"桌子转身就没了"）的提问者用 **`hit_probability=0.75` + `miss_probability=0.49`** 修好 —— 与本节
 "回上游 0.49"完全一致；官方 [tuning 文档](https://google-cartographer-ros.readthedocs.io/en/latest/tuning.html)
