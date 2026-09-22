@@ -108,11 +108,13 @@ def main():
         print(f"  {n:28s} {t}")
 
     WANT = ("sensor_msgs/msg/Imu", "nav_msgs/msg/Odometry", "sensor_msgs/msg/LaserScan",
-            "tf2_msgs/msg/TFMessage", "rosgraph_msgs/msg/Clock")
+            "tf2_msgs/msg/TFMessage", "rosgraph_msgs/msg/Clock",
+            "nav_msgs/msg/OccupancyGrid")
     stamps = {}                     # topic -> [t]
     imu_acc, imu_t = [], []
     odom_yaw, gt_yaw = [], []       # [(t, yaw)]
     tf_pairs = {}                   # (parent, child) -> [(t, yaw)]
+    maps = []                       # /map 快照 [(res, x0, y0, int8 2D)]
 
     while reader.has_next():
         topic, data, _wall = reader.read_next()
@@ -122,6 +124,12 @@ def main():
         msg = deserialize_message(data, get_message(mtype))
         if mtype == "rosgraph_msgs/msg/Clock":
             stamps.setdefault(topic, []).append(msg.clock.sec + msg.clock.nanosec * 1e-9)
+            continue
+        if mtype == "nav_msgs/msg/OccupancyGrid":
+            import numpy as _np
+            info = msg.info
+            data = _np.frombuffer(bytes(msg.data), dtype=_np.int8).reshape(info.height, info.width)
+            maps.append((info.resolution, info.origin.position.x, info.origin.position.y, data))
             continue
         if mtype == "tf2_msgs/msg/TFMessage":
             for tr in msg.transforms:
@@ -204,6 +212,61 @@ def main():
         print(fmt("   ", yaw_stats(tf_pairs[key])))
     if ("map", "odom") not in tf_pairs:
         print("  ⚠️ bag 里没有 map->odom（没录 /tf，或 cartographer 没起来）")
+
+    # ------------------------------------------------------------ ⑤ /map 留存分析
+    print("\n== ⑤ /map 留存分析（直接量'特征留得住吗'）==")
+    if len(maps) < 3:
+        print("  bag 里没有 /map（录制时加上 /map；它由 cartographer_occupancy_grid_node 以 ~1Hz 发）")
+    else:
+        import numpy as _np
+        res = maps[0][0]
+        xs = [x0 for _, x0, _, _ in maps] + [x0 + d.shape[1] * res for _, x0, _, d in maps]
+        ys = [y0 for _, _, y0, _ in maps] + [y0 + d.shape[0] * res for _, _, y0, d in maps]
+        gx0, gy0 = min(xs), min(ys)
+        gw = int(round((max(xs) - gx0) / res)); gh = int(round((max(ys) - gy0) / res))
+        G = _np.full((len(maps), gh, gw), -128, dtype=_np.int8)
+        ts = []
+        for i, (r, x0, y0, d) in enumerate(maps):
+            cx = int(round((x0 - gx0) / r)); cy = int(round((y0 - gy0) / r))
+            G[i, cy:cy + d.shape[0], cx:cx + d.shape[1]] = d
+            ts.append(i)
+        occ = G >= 65                      # 占据阈值（nav2/map_saver 常用 65）
+        known = G >= 0
+        ever = occ.any(axis=0)
+        n_ever = int(ever.sum())
+        occ_end = occ[-1]
+        print(f"  快照 {len(maps)} 帧；栅格 {gw}x{gh} @ {res:g} m（已按各自 origin 对齐到同一世界栅格）")
+        if n_ever == 0:
+            print("  ⚠️ 从头到尾没有任何格子被标为占据 —— 地图根本没建起来")
+        else:
+            lost = int((ever & ~occ_end).sum())
+            print(f"  曾占据过的格子 {n_ever}；结束时仍占据 {int(occ_end.sum())}（"
+                  f"{100.0 * int(occ_end.sum()) / n_ever:.0f}%）；被擦掉 {lost}（{100.0*lost/n_ever:.0f}%）")
+            # 留存曲线：首次占据后 +Δ 帧仍占据的比例
+            first = _np.where(ever, occ.argmax(axis=0), -1)
+            for d in (2, 5, 10, 20):
+                if len(maps) <= d: continue
+                idx = _np.clip(first + d, 0, len(maps) - 1)
+                sel = ever & (first >= 0) & (first + d < len(maps))
+                if sel.sum():
+                    still = occ[idx[sel], _np.nonzero(sel)[0], _np.nonzero(sel)[1]]
+                    print(f"    留存曲线 +{d}帧: {100.0*still.mean():5.1f}%  "
+                          f"（样本 {int(sel.sum())} 格）")
+            # 闪烁：同一格 occupied -> free 的次数
+            f = _np.zeros_like(occ, dtype=_np.int8)
+            f[1:] = (occ[:-1] & ~occ[1:]).astype(_np.int8)
+            flips = f.sum(axis=0)
+            fl = flips[ever]
+            if len(fl):
+                print(f"  闪烁（曾占据格子的 occupied→free 次数）：中位 {int(_np.median(fl))} / "
+                      f"P95 {int(_np.percentile(fl, 95))} / max {int(fl.max())}；"
+                      f"闪烁≥1 的占 {100.0*(fl>=1).mean():.0f}%")
+            hist = [int(((G[-1] >= lo) & (G[-1] <= hi)).sum()) for lo, hi in ((0, 30), (31, 64), (65, 100))]
+            print(f"  最终栅格取值：自由(0~30) {hist[0]} / 中间(31~64) {hist[1]} / 占据(65~100) {hist[2]}"
+                  "   ← 占据数远小于中间数 = 命中/清除在阈值附近拉锯")
+            print("  判读：闪烁多 + 留存曲线掉得快 ⇒ **被主动擦除**（去调 cartographer 的清除/命中，"
+                  "先做 insert_free_space=false 判别实验）；曾占据很少且闪烁少 ⇒ **数据里就没进来**"
+                  "（去修感知/几何：linefit 地面容差、sensor_height、MID360 下视 FOV）")
 
     if args.csv and odom_yaw:
         with open(args.csv, "w") as fh:
