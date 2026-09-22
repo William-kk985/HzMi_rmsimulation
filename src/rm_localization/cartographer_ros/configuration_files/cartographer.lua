@@ -164,7 +164,17 @@ TRAJECTORY_BUILDER_2D.submaps.num_range_data = 30   -- 从60→30，子图更小
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
+-- ⚠️⚠️ 2026-09-22 **临时诊断值**：`insert_free_space = false`（跑完请改回 true）
+--   目的：判别"特征留不住"到底是不是**清除**造成的。实测（.tmp_bags/ret，222 帧 /map）：
+--     曾占据 3779 格 → 结束仍在 1837（49%）；被擦掉 1942（51%）；
+--     留存曲线 +2/5/10/20 帧 = 87.5 / 74.4 / 63.9 / 63.8%；
+--     闪烁（occupied→free）中位 2、P95 6、max 12，**87% 的曾占据格子都闪过**。
+--   ⇒ 判读为"**被主动擦除**"：每帧有 37% 的无回波光束，而 cartographer 会把它们的
+--     0~`missing_data_ray_length`(3.0m) 段标成自由；矮墙一旦离开下视 FOV（−7°）就变"无回波"⇒ 被清。
+--   预期（用 tools/analyze_slam_bag.py 第 ⑤ 段复测）：被擦掉比例 51% → ~0、闪烁消失、留存曲线走平 ≈100%。
+--   ⚠️ 这个值**只是诊断**：关掉清除后，动态物与漏网点会永久留在图上，**不能用于导航**；
+--      机制确认后要改成"调弱清除"（missing_data_ray_length 调小 + hit/miss 拉开），而不是永久关闭。
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = false
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.55
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49
 
