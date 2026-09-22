@@ -119,21 +119,7 @@ TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高�
 -- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
 TRAJECTORY_BUILDER_2D.min_z = -0.8
 TRAJECTORY_BUILDER_2D.max_z = 2.0
--- ★★ 2026-09-22（七次修正）：`missing_data_ray_length` 3.0 → **1.0**
---   现象：**内部小墙"扫到就有、被挡住/角度扫开就没了"**（外墙不受影响）。
---   机制（详见 docs/debug_fastlio_cartographer.md §5.2）：
---     · `/scan` 里 **37.3% 的角度 bin 是 `inf`（无回波）** —— 来源是"地面被 linefit 去掉" +
---       "MID360 上视射线（-7°~+52°）打空"，都是物理上正常的原因；
---     · cartographer 对无回波光束的处理是：把 **0 ~ missing_data_ray_length** 这一段
---       **标为自由空间** ⇒ 我们原来 3.0m，等于**每帧有 1/3 的方向在擦 3m 内的地**；
---     · 实测命中距离 P25=1.8 / P50=2.3 / P75=3.1m、4~10m 仅占 16% ⇒ **约 3/4 的命中都在
---       3m 常清区内**，而外侧大墙多在区外 ⇒ 所以"死的是内部小墙"。
---   1.0m 足够清掉机器人贴身范围（车体半径 0.2m、p2l range_min 0.2m），又不会再擦到 1m 外的墙。
---   ⚠️ 副作用：1~3m 处**真的被移走的**动态障碍会留得久一点（可接受；要清动态物靠的是"命中/穿过"的票）。
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 1.0
--- 3 帧累积再插入：`/scan` 每帧只有 ~3100 个有效障碍点摊在 1462 个 bin 上（≈2 点/bin），
--- 稀疏特征（内部小墙）需要多次命中才立得住 ⇒ 累积能显著提高"同一格的有效命中数"。
--- （本轮先只动上面那条与 hit/miss 一组；这条留作下一组变量，若要开就改 1 -> 3）
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 
 -- 体素滤波 - 精细配置，保留 RMUL 场地细节
@@ -179,13 +165,8 @@ TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
--- ★★ 2026-09-22（七次修正）：把"命中/清除"的差距拉开，让墙立得住。
---   上游默认 hit 0.55 / miss 0.49 几乎对称（odds 1.22 vs 0.96）⇒ 一条"偶尔被命中、经常被扫过"
---   的墙，概率就在阈值附近来回摆（表现为"先有后没"）。这里命中更粘、清除更弱：
---     hit 0.55 -> 0.62（odds 1.63）  miss 0.49 -> 0.45（odds 0.82）
---   注意：`insert_free_space` 保持 true —— 我们只是把清除**调弱**，不是取消（取消会失去清动态物的能力）。
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.62
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.45
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.55
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49
 
 -- ============================================================================
 -- 位姿图优化配置
