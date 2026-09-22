@@ -1,4 +1,4 @@
-image: pred_h0.85_m0.49_n300.pgm
+image: cartographer_pred_new_h0.85_m0.49_n300.pgm
 resolution: 0.05
 origin: [-2.275, -3.125, 0.0]
 negate: 0
