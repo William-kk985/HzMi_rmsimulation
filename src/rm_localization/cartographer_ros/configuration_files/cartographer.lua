@@ -119,7 +119,7 @@ TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高�
 -- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
 TRAJECTORY_BUILDER_2D.min_z = -0.8
 TRAJECTORY_BUILDER_2D.max_z = 2.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 1.0
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.5
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 
 -- 体素滤波 - 精细配置，保留 RMUL 场地细节
@@ -179,9 +179,19 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PR
 --      地图没法用；而且本题场景没有动态物，但实车有，清除能力要保留）。
 --      正确做法 = 保留清除 + 把它调弱：下面 `missing_data_ray_length` 调小（只清贴身）、
 --      hit/miss 拉开差距（命中更粘）。
+--   ★ 2026-09-22（九次修正）再加强一档：`missing_data_ray_length 1.0 → 0.5`、`hit 0.62 → 0.68`、`miss 0.45 → 0.40`。
+--   依据一（实测，ret2 的 7 帧）：低矮特征(离地3~15cm)的 2D 格子每帧 **90.4% 会被命中**，只有 **36.3% 会被
+--     "命中高度>25cm 的光束从上方穿过"**（命中:清除 ≈ 1:0.4）⇒ **主导的清除不是"穿过"，而是 37% 的
+--     无回波光束 × `missing_data_ray_length`**。对真实 2D 雷达"无回波=这段是空的"成立；但我们是
+--     **3D FOV(−7°~+52°) 转 2D**，无回波大多来自"朝天上打空" ⇒ 该假设不成立 ⇒ 这个半径必须小。
+--   依据二（现场观感）：墙"变淡/变灰、慢慢化掉" = 清除票持续压过命中票 ⇒ 方向就是继续拉开 hit/miss。
+--   odds：hit/miss = 1.22/0.96 = 1.27（旧）→ 1.63/0.82 = 2.0（八次）→ **2.13/0.67 = 3.2（本次）**，
+--     同时清除半径 3.0 → 1.0 → **0.5 m**（被清面积约降到 1/6）。
+--   注：`num_accumulated_range_data` **不解决这个问题** —— 累积多帧只是把"命中与清除同时放大"，
+--     **比值不变**，所以它不是这里的旋钮（保持 1）。
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.62
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.45
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.68
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.40
 
 -- ============================================================================
 -- 位姿图优化配置
