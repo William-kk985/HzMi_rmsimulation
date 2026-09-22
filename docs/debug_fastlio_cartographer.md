@@ -405,7 +405,7 @@ P25=1.8 m / P50=2.3 m / P75=3.1 m ⇒ **约 3/4 的命中都落在 3 m 的常清
 上游默认（`/opt/ros/humble/share/cartographer/configuration_files/trajectory_builder_2d.lua`）：
 `hit 0.55 / miss 0.49 / num_range_data 90 / insert_free_space true`。
 上游 hit:miss 的 log-odds 比是 `+0.201 : −0.040`（**1 次命中顶 5 次清除**）；本项目调成 `0.68/0.40`
-后变成 `+0.754 : −0.916`（1 次命中只顶 0.8 次清除）⇒ **清除强度被放大了 ~23 倍**。而当初"把清除调猛"
+后变成 `+0.754 : −0.405`（1 次命中只顶 1.9 次清除）⇒ **单张清除票的强度是上游的 ~10 倍**。而当初"把清除调猛"
 的理由正是**已被证伪**的"无回波光束 × `missing_data_ray_length` 乱擦墙"（见 §5.2.4 源码表）。
 "墙留不住 → 去关清除（89% 但没自由空间）→ 回头再调 `missing_data_ray_length`（空转）"这条歧路，
 根子就在这个漂移上。

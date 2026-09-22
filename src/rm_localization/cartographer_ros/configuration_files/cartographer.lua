@@ -225,7 +225,7 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 --   num_range_data 90→30（证据窗口砍到 3 秒）。而"把 miss 调猛"的理由是**已被证伪的**
 --   "无回波光束 × missing_data_ray_length 乱擦墙"（见上方十一次修正）。
 --   量级对比（log-odds 单票）：上游 hit/miss = +0.201/−0.040（**1 次命中等价 5 次清除**）；
---   本项目 0.68/0.40 = +0.754/−0.916（1 次命中只顶 0.8 次清除）⇒ **清除强度被放大了 23 倍**。
+--   本项目 0.68/0.40 = +0.754/−0.405（1 次命中只顶 1.9 次清除）⇒ **单张清除票的强度是上游的 10.1 倍**。
 --   ⇒ 墙当然留不住；而为了把墙救回来，又去调 `missing_data_ray_length`（空转）和 `insert_free_space=false`
 --     （89% 但自由空间全没）——**整条歧路都是这个漂移引起的**。
 --
@@ -259,7 +259,7 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PR
 --   94% 的 +2 帧留存和 6556 个自由格子**。推导见 docs/debug_fastlio_cartographer.md §5.2.4。
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.85   -- 上游 0.55；0.85 = 命中更粘（占据格 2585 vs 0.68 的 2585/0.55 的 1600）
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49   -- ★十二次修正：0.40 → 0.49（回到上游默认！清除票被放大了 23 倍才是"留不住"的真凶）
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49   -- ★十二次修正：0.40 → 0.49（回到上游默认！单张清除票强度曾达上游 10 倍，才是"留不住"的真凶）
 
 -- ============================================================================
 -- 位姿图优化配置
