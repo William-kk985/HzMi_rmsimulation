@@ -18,6 +18,7 @@
 | 挑算法（选型池） | `rm_algorithm_catalog.md` | §〇.0 前端 vs 系统 / 各章候选 |
 | 改 TF/话题契约 | `tf_interface_contract.md` | T1–T5 已实施、T6 撤销 |
 | 判断"这个改动会不会上实车 / 是不是为仿真妥协" | `sim_real_contract.md` | §一 分界点与替身 / §四 三分类判据 / §五 禁止清单 |
+| 地图跟着车转 / 建图丢帧 / SLAM 不稳，想一步步查 | `debug_map_drift_playbook.md` | §1 分层判读法 → §4 症状速查表 → §6 踩过的坑 |
 
 ---
 
@@ -34,6 +35,7 @@
 | `tf_interface_contract.md` | TF / 接口契约（**T1–T5 已实施，T6 撤销**） | 帧树与话题契约 |
 | `params_ownership_checklist.md` | 参数归属清单（R1–R5 逐项状态） | 参数该放哪个包 |
 | `sim_real_contract.md` | **仿真 ↔ 实车契约**：分界点/替身清单、共用接口、参数分家、三分类判据、禁止清单、验收判据 | **"改动会不会上实车 / 该不该为仿真动算法"的唯一真值** |
+| `debug_map_drift_playbook.md` | **调试手册**：分层判读法（L0–L6）、三个诊断工具、实测基线数字、症状→判据→处置速查表、12 条踩坑清单 | **"SLAM/建图异常怎么查"的方法论真值** |
 
 ## 二、选型与路线（参考）
 
