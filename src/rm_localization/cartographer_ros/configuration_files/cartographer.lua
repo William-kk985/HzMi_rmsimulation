@@ -84,33 +84,27 @@ MAP_BUILDER.num_background_threads = 4
 -- ============================================================================
 -- 轨迹构建器配置 - 优化稳定性
 -- ============================================================================
--- ★★ 2026-09-22（五次修正）：**把 IMU 重新打开**（上一次关它是为了躲崩溃，方向对但归因错）
--- 当时的现象：`F pose_extrapolator.cc:229] Check failed: time >= imu_tracker->time()`
---   @ PoseExtrapolator::ExtrapolateRotation() ← AddOdometryData() ← HandleOdometryMessage()
--- 当时的处置：use_imu_data=false（只留 odom）。
--- 现在改回 true，因为那个崩溃的**真正根源已经修掉，而且它并不是"IMU 本身有问题"**：
---   1) 根因是**仿真雷达插件的时间基 bug**（header 用仿真钟、逐点 offset 用墙钟）→ `/odom` 的
---      时间戳 = 仿真戳 + 一帧墙钟耗时，且逐帧抖动；再叠加 LIO"处理完一整帧才发 odom"的晚到
---      → 两个时间源**乱序**。该 bug 已在 `cb24ba8` 修掉（offset_time=0）；
---   2) 运动先验现在也换成了**独立、立即到达**的底盘里程计（`/odom_ground_truth`，#21/路线①），
---      不再有"晚一整帧"的 odom → collator 的时间序成立，CHECK 的前提消失。
--- 为什么现在**必须**把 IMU 打开（这是本轮的关键判断）：
---   · `/scan` 实测只有 ~2.8 Hz，而且每 ~0.5 s 一个空洞（`/segmentation/obstacle` 那条线还没查完）
---     → 相邻两帧扫描之间机器人可能转过几十度；
---   · 2D 且**没有 IMU** 时，`PoseExtrapolator` 的旋转外推只能靠 odom + 位姿历史，
---     cartographer 维护者/贡献者在 issue #534 里明确指出这个组合（odom-only、无 IMU）
---     在 2D 下的旋转外推不可靠（"using odometry without IMU is broken" 那段讨论）；
---   · 实测症状与此吻合：`map→odom` 被以 ≈97°/s 连续甩动（50 Hz 采样下 |Δyaw| P95=1.94°）、
---     并夹着 83° 级别的单样本大跳 —— 这不是"矫正"，是**帧间没有旋转来源**。
---   · 对照组：**slam_toolbox 没有这个问题** —— 它从 TF（`odom→base_link`，由 lio_tf_adapter 发）
---     直接取运动模型，不走 cartographer 的 IMU-tracker 路径。所以问题在 cartographer 的
---     "旋转外推缺输入"，而不是"这套传感器/TF 不行"。
--- 兼容性：`tracking_frame = imu_link` 当初就是为满足 IMU 共位 CHECK（sensor_bridge.cpp:136）选的，
---   现在正好用上；`imu_gravity_time_constant` 本来就在。IMU 与扫描同源同钟（Gazebo 插件）、
---   到达及时 → collator 按时间序派发即可。
--- 回退条件：若重新出现 `exit code -6` 且是同一条 `time >= imu_tracker->time()`，
---   说明仍有时间序不一致 → 改回 false 并把当时的 `/scan`、`/odom`、IMU 时间戳抓出来对比。
-TRAJECTORY_BUILDER_2D.use_imu_data = true
+-- ★★ 2026-09-22（六次修正）：
+-- (A) IMU 又必须关回 false —— 第五次打开后拿到的是**另一条** CHECK（说明时间基修复有效，
+--     上一层乱序不再出现，现在是 IMU 自身的数据/时间戳问题）：
+--       F imu_tracker.cc:67] Check failed: (orientation_ * gravity_vector_).z() > 0. (0 vs. 0)
+--         @ ImuTracker::AddImuLinearAccelerationObservation()
+--         @ PoseExtrapolator::AdvanceImuTracker()
+--         @ PoseExtrapolator::AddPose()   ← Node::PublishLocalTrajectoryData()
+--     含义：重力估计被**清零**。`ImuTracker` 的首个加速度样本 alpha≈1（delta_t = now - Time::min
+--     极大）→ gravity_vector_ 直接被赋成"第一帧 IMU 的 linear_acceleration"；只要那一帧是
+--     (0,0,0)，后面 `(orientation_*gravity).z() > 0` 必然失败。
+--     → 与"FAST-LIO 能用同一路 IMU"并不矛盾：FAST-LIO 是**多帧求均值**做重力初始化，
+--       天然容忍启动阶段的几帧零值；cartographer 是拿**第一帧**当基准。
+-- (B) 同时把"四次修正"改过的两个局部匹配参数**恢复成上游默认**（回到基线，一次只改一个变量）：
+--     21:0x 那次实测（`monitor_map_odom.py`：|Δyaw| P95 1.94°/样本、max 83°、143 次跳变）
+--     说明"更信任先验 + 5° 小搜索窗"并没有让 map→odom 变稳，反而可能剥夺了匹配器的纠正能力
+--     （若先验旋转与扫描不一致，5° 窗口让它够不着）。先回到默认，用 monitor 采一条干净基线。
+-- ----------------------------------------------------------------------------
+-- 保留（已证必要）：use_odometry=true + 先验为独立底盘 odom（/odom_ground_truth，#21 路线①）、
+--   时间基修复（插件 #19）、回环门槛 0.65/0.70 与收紧的约束搜索距离/窗口（#20/#22）。
+-- 打开 IMU 的前置条件（#24）：先确认 `/livox/imu` 的前几帧不是 (0,0,0)、且三路时间戳同轴。
+TRAJECTORY_BUILDER_2D.use_imu_data = false
 TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 1.0  -- 该键仍会被读取（不能删）
 
 -- 点云范围过滤 (适配 RMUL 赛场 PVC 地胶)
@@ -141,32 +135,19 @@ TRAJECTORY_BUILDER_2D.loop_closure_adaptive_voxel_filter.max_length = 1.2
 TRAJECTORY_BUILDER_2D.loop_closure_adaptive_voxel_filter.min_num_points = 80
 TRAJECTORY_BUILDER_2D.loop_closure_adaptive_voxel_filter.max_range = 12.
 
--- ★★ 2026-09-22（四次修正，路线①配套）：**有里程计时，搜索窗要"按最坏漂移"给小，不是越大越好**。
---   依据两条公开结论：
---     ① 官方调参文档 "Tuning methodology"：局部 SLAM 打滑/走偏时，要让扫描匹配"偏离先验的代价更高"
---        （`ceres_scan_matcher.translation_weight` / `rotation_weight`），示例最终落在 1e2 / 4e2；
---     ② cartographer #534 里 contributor 的经验法则（就是"里程计 + 实时相关匹配器"这个组合）：
---        「用实时相关匹配器 + 里程计，并配一个**很小的搜索窗**；窗口 ≈ 一帧内
---          (max_speed / laser_freq) 距离上的最坏里程计漂移 +10~50%」。
---   我们现在的先验是底盘真值 odom（仿真里无打滑）→ 残差≈0 → 窗口只需要吸收先验的小偏差。
---   原来 ±30° / 0.2m 是"没有可用先验时代"的遗留：它允许匹配器一步跳到**对称场地**的错误朝向
---   → 局部位姿相对优化轨迹缓慢走偏（实测 map→odom 的 yaw 从 ~1° 锯齿涨到 17° 再被拉回）
---   → 位姿图再矫正 → 子图里的旧扫描与被矫正后的轨迹不一致 → **残影**。
---   （官方文档原话：submap 内部的错误会被"永久保留"，全局 SLAM 只能部分矫正。）
+-- ★ 2026-09-22（六次修正）：局部匹配恢复**上游默认**（见文件上方 (B) 说明）。
+--   历史：30°/0.2m（"没有可用先验时代"的遗留）→ 5°/0.1m（四次修正，"更信任先验"）→ 实测变差 → 回默认。
+--   教训：先验可信 ≠ 匹配器可以没有纠正能力；一次只改一个变量并用 monitor_map_odom.py 采数据。
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1   -- 0.2 -> 0.1（上游默认）
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(5.)  -- 30° -> 5°
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1   -- 上游默认
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(20.)  -- 上游默认
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 10.  -- 偏离先验的代价（>1 = 更信任先验）
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 10.
 
--- Ceres 扫描匹配器 —— 精配准阶段同样要"更信任先验"
--- 官方 tuning 文档的示例把这两个权重从默认 10 / 40 提到 1e2 / 4e2（1e3 过头、会与点云明显矛盾）。
--- 我们的先验是**真值**级别的底盘 odom，比该示例里的背包轮速里程计更可信 → 采用文档的最终值。
--- ⚠️ 实车注意（sim/real 偏差）：真实轮速里程计会打滑，这两个权重不该照抄；实车要用实车数据重调
---    （见 docs/sim_real_contract.md §四"不许把仿真专属结论当实车结论"）。
+-- Ceres 扫描匹配器 —— 同样回到上游默认 10 / 40（四次修正曾提到 1e2 / 4e2，实测没帮上忙）
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 1.
-TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 1e2   -- 10 -> 1e2（官方示例值）
-TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 4e2      -- 40 -> 4e2（官方示例值）
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 10.
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.use_nonmonotonic_steps = false
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.max_num_iterations = 20
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.num_threads = 4
