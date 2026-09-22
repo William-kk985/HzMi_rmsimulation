@@ -119,7 +119,7 @@ TRAJECTORY_BUILDER_2D.max_range = 12.0          -- 减小最大距离，提高�
 -- 走 /scan 时点是激光平面上的 z=0，只要带包含 0 即可；高度决策已由感知域 p2l 完成。
 TRAJECTORY_BUILDER_2D.min_z = -0.8
 TRAJECTORY_BUILDER_2D.max_z = 2.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.5
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.05
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 
 -- 体素滤波 - 精细配置，保留 RMUL 场地细节
@@ -191,6 +191,15 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PR
 --     同时清除半径 3.0 → 1.0 → **0.5 m**（被清面积约降到 1/6）。
 --   注：`num_accumulated_range_data` **不解决这个问题** —— 累积多帧只是把"命中与清除同时放大"，
 --     **比值不变**，所以它不是这里的旋钮（保持 1）。
+--   ★ 2026-09-22（十次修正）：`missing_data_ray_length 0.5 → 0.05`（≈关掉"假想空地"）。
+--   为什么不是干脆 `insert_free_space=false`（那样墙最稳）？因为**"擦旧墙"和"标空地"是同一个写**
+--   （都是给射线途经的格子写 miss），关掉开关会连自由空间一起没有（实测 自由格子=0、地图全灰）。
+--   但两种射线的 miss 价值不同，可以解耦：
+--     · **打到东西的射线**：起点→命中点这段是**真观测过的空地** ⇒ 白格的正当来源（保留）；
+--     · **没有回波的光束**（我们占 37%，多来自朝天打空）：cartographer 只能**假设**
+--       0~missing_data_ray_length 是空的 ⇒ 它并没观测过 ⇒ **乱擦墙的元凶**。
+--   把该值压到 ≈0 后：白格照样来自命中射线（车走过、打到墙的地方都会标白），
+--   而"没回波的光束"几乎不再擦任何东西 ⇒ **两全**（预期留存 ≥ 不清除时的 89%，且自由格子 >0）。
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.68
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.40
