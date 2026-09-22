@@ -77,10 +77,12 @@ GridType ProbabilityGrid::GetGridType() const {
 // Returns the probability of the cell with 'cell_index'.
 float ProbabilityGrid::GetProbabilityWithoutMarker(
     const Eigen::Array2i& cell_index) const {
-  if (!limits().Contains(cell_index)) return kUnknownProbability;
+  // 未知格子在 cartographer 里就是 P=0.5（上游 ProbabilityGrid 里没有 kUnknownProbability 这个
+  // float 常量，只有 uint16 的 kUnknownProbabilityValue=0），这里直接写 0.5f。
+  if (!limits().Contains(cell_index)) return 0.5f;
   uint16 value = correspondence_cost_cells()[ToFlatIndex(cell_index)];
   if (value >= kUpdateMarker) value -= kUpdateMarker;
-  if (value == kUnknownCorrespondenceValue) return kUnknownProbability;
+  if (value == kUnknownCorrespondenceValue) return 0.5f;
   return CorrespondenceCostToProbability(ValueToCorrespondenceCost(value));
 }
 

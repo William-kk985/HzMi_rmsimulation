@@ -298,6 +298,8 @@ set(TARGET_COMPILE_FLAGS "${TARGET_COMPILE_FLAGS} ${GOOG_CXX_FLAGS}")
 set_target_properties(${PROJECT_NAME} PROPERTIES
   COMPILE_FLAGS ${TARGET_COMPILE_FLAGS})
 
+# ★ 本 fork：本机没装 libgmock-dev（只有 /usr/src/googletest 源码），测试库对库本身无用 ⇒ 没有 gmock 就跳过测试目标。
+if(GMOCK_LIBRARY AND GMOCK_INCLUDE_DIRS)
 set(TEST_LIB
   cartographer_test_library
 )
@@ -313,6 +315,8 @@ target_link_libraries(${TEST_LIB} PUBLIC ${PROJECT_NAME})
 set_target_properties(${TEST_LIB} PROPERTIES
   COMPILE_FLAGS ${TARGET_COMPILE_FLAGS})
 
+set(ALL_TESTS "")
+# ★ 本 fork：本机无 libgmock-dev ⇒ 不构建任何测试目标（对库/节点无影响）
 foreach(ABS_FIL ${ALL_TESTS})
   file(RELATIVE_PATH REL_FIL ${PROJECT_SOURCE_DIR} ${ABS_FIL})
   get_filename_component(DIR ${REL_FIL} DIRECTORY)
@@ -331,6 +335,7 @@ foreach(ABS_FIL ${ALL_TESTS})
   endif()
   target_link_libraries("${TEST_TARGET_NAME}" PUBLIC ${TEST_LIB})
 endforeach()
+endif()  # ★ fork: GMOCK_LIBRARY
 
 # Add the binary directory first, so that port.h is included after it has
 # been generated.
