@@ -106,8 +106,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'odom_topic',
             default_value='',
-            description='use_odometry=true 时的里程计输入话题（留空 = 不 remap，保持默认 odom）。'
-                        '全包形态（lio:=cartographer）下 bringup 会传 /odom_ground_truth'
+            description='use_odometry=true 时的里程计输入话题（留空 = 不 remap，保持默认 odom → /odom）。'
+                        '★ 必须是**独立于 LIO 的**底盘/轮速里程计（仿真 = /odom_ground_truth；'
+                        '实车 = 下位机轮速 odom）：LIO 自己的 /odom 与 /scan 同源且晚到，'
+                        '会撞 cartographer 的时间序 CHECK（exit -6）。'
+                        'bringup 的标准形态与全包形态都会传 /odom_ground_truth'
         ),
         OpaqueFunction(function=_cartographer_nodes),
     ])

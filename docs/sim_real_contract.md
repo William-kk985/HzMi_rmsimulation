@@ -75,6 +75,7 @@
 | p2l `range_min` | `0.2` | `0.45` | sim 侧修正值（0.45 会造成贴身盲区 + `inf` 被清成 free）；**实车快照未同步** ⚠️ |
 | nav2 / costmap 参数 | `nav2_params_sim_*.yaml` | `nav2_params_real.yaml` | 场地尺寸/传感器噪声/速度上限不同 |
 | LIO 外参 | sim URDF 的 `livox_frame`/`imu_link` | `MID360_config.json` + `measurement_params_real.yaml` | 安装尺寸不同 |
+| **运动先验来源**（cartographer `use_odometry`） | `/odom_ground_truth`（`gazebo_ros_planar_move`，**无打滑的理想值**，10 Hz） | 下位机轮速 odom（会打滑、有延迟、有噪声） | 对应关系成立，但**仿真的先验"太好"** → 台架在这项上比实车容易；要复现实车退化需注入打滑/延迟（见 `issues_and_findings.md` §六 退化测试槽位） |
 
 > ⚠️ **实现方式不一致 = 漂移风险**：linefit 用 `segmentation_sim.yaml` / `segmentation_real.yaml` 两份文件；
 > 而 p2l 的参数在实车栈里是**内联写在 launch 里**的（`bringup_real.launch.py:174-187`），

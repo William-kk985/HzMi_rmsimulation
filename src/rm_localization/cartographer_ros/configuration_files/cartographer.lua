@@ -25,26 +25,32 @@ options = {
   odom_frame = "odom",
   provide_odom_frame = false,              -- 不再自造 odom→xxx，避免与 LIO 争 body 的子帧
   publish_frame_projected_to_2d = true,    -- 投影到2D平面
-  -- ★★ 2026-09-22（二次修正）：把 LIO 的 /odom 先验**关掉**，改回"纯 2D 扫描匹配"。
-  --   上一版（2026-09-21）打开 use_odometry=true 是为了修"墙跟着车走"，方向是错的：
-  --   1) 硬证据：cartographer_node 建图中会 exit -6(SIGABRT)。在 libcartographer.a 里挖出
-  --      pose_extrapolator.cc 只有两条时间序 CHECK：
-  --        a. timed_pose_queue_.empty() || odometry_data.time >= timed_pose_queue_.back().time
-  --        b. time >= imu_tracker->time()
-  --      两条都是"跨时间源乱序"。我们现在只剩 scan+odom 两路，仍会撞上 a。
-  --   2) 为什么会乱序：仿真雷达插件用**仿真时钟**做 header 戳（now()），却用**墙钟**
-  --      (boost::chrono::high_resolution_clock) 逐点算 offset_time（livox_points_plugin.cpp:149/198），
-  --      而 FAST-LIO 取 lidar_end_time = 戳 + 最后一点的 offset（laserMapping.cpp:396-410）
-  --      → /odom 的戳 = 仿真戳 + 一帧墙钟耗时（RTF<1 时是 1.3~3 倍，且随负载抖动）。
-  --      LIO 处理完一帧才发 odom，于是"第 k 帧的 odom"常常在"第 k+1 帧的 scan 已处理"之后才到
-  --      → 撞 CHECK a → 直接 abort；没 abort 的时段，先验按错时刻套用 → 每帧被拖一下 → 地图跟着车转。
-  --   3) 上游官方"只有 2D 激光"的参考配置就是这么干的：use_odometry=false + use_imu_data=false
-  --      + use_online_correlative_scan_matching=true（revo_lds.lua）。
-  --   4) 同源冗余：/odom 本来就由同一份雷达点云融合出来，喂回去等于把 LIO 自身漂移反馈给 cartographer。
-  --   ⚠️ 残留 TODO（不在这份配置里）：/scan 实测只有 0.55~3.03 Hz，转起来时一帧内转过几十度，
-  --      任何 2D SLAM 都跟不住；这才是"旋转跟不上"的真前置条件，要去查 linefit/p2l 丢帧。
-  --   odom→base_link 仍由 lio_tf_adapter 提供，TF 契约不变（cartographer 只发 map→odom）。
-  use_odometry = false,
+  -- ★★ 2026-09-22（三次修正，路线①）：先验**要开**，但必须换成"独立的底盘/轮速里程计"。
+  --   历史三步，别再来回翻：
+  --     ① 一开始 use_odometry=false → 转起来"墙跟着车走"；
+  --     ② 2026-09-21 打开 use_odometry=true 但喂的是 **LIO 自己的 /odom**
+  --        → cartographer_node 建图中 exit -6(SIGABRT)，地图照样跟着车转（方向错在这）；
+  --     ③ 2026-09-22 一度关掉（纯扫描匹配）→ 空洞期间没有东西推位姿，仍会跟转；
+  --        现在改回 true，但把 odom 换成**独立来源**。
+  --   为什么 LIO 的 /odom 不能当先验（已证）：
+  --     a. 同源：/odom 与 /scan 来自同一份雷达点云 → 反馈回路（LIO 漂移直接拖地图）；
+  --     b. 晚到：LIO 要处理完一整帧才发 odom → "第 k 帧的 odom"常在"第 k+1 帧的 scan 已处理"
+  --        之后才到 → 撞 pose_extrapolator 的时间序 CHECK（libcartographer.a 里只有两条，这是其一）：
+  --          Check failed: timed_pose_queue_.empty() || odometry_data.time >= timed_pose_queue_.back().time
+  --        → abort(exit -6)；没 abort 的时段先验按错时刻套用 → 每帧被拖一下。
+  --   为什么独立底盘 odom 能同时解决"崩"和"糊"：
+  --     · 它由**物理插件/下位机**按自己的时刻产出、立即到达 → collator 永远有一个
+  --       ≥ 上一帧位姿的 odom 头 → 上面那条 CHECK 不可能被踩；
+  --     · /scan 出现空洞时（实测 2.8Hz、每 ~0.5s 一个洞）靠它把位姿推过去
+  --       → 下一帧扫描的初值仍落在搜索窗内（空洞 × 角速度 ≤ 搜索窗，见 runbook §7）。
+  --   ⚠️ 本行的 use_odometry=true 与"bringup 把 odom 重映射到独立话题"是**一对**：
+  --      只开这个而不 remap，就会退回订阅 LIO 的 /odom → 复现 exit -6。
+  --      仿真 = /odom_ground_truth（gazebo_ros_planar_move）；实车 = 下位机轮速 odom。
+  --   ⚠️ 台架偏差：planar_move 的 odom 是**无打滑的理想值**，实车轮速会打滑 →
+  --      这一项台架比实车"容易"，见 docs/sim_real_contract.md §三。
+  --   另：上游 revo_lds.lua（只有 2D 激光、无任何 odom/IMU）是 use_odometry=false + 
+  --      use_online_correlative_scan_matching=true —— 我们是"有独立先验"的另一种合法形态。
+  use_odometry = true,
   use_nav_sat = false,
   use_landmarks = false,
   -- ===== 输入源（2026-09 修正）=====

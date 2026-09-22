@@ -483,7 +483,14 @@ def generate_launch_description():
     start_cartographer_mapping = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(rm_nav_bringup_dir, 'launch', 'cartographer_sim.launch.py')),
         condition = carto_mapping_condition,
-        launch_arguments={'configuration_basename': 'cartographer.lua'}.items()
+        launch_arguments={
+            'configuration_basename': 'cartographer.lua',
+            # ★ 先验来源必须是**独立的**底盘/轮速里程计，不能用 LIO 自己的 /odom：
+            #   同源（同一份点云）+ 晚到（LIO 处理完整帧才发）→ 撞 cartographer 的时间序 CHECK
+            #   → exit -6(SIGABRT)，并形成反馈回路。详见 cartographer.lua 顶部注释、
+            #   docs/issues_and_findings.md #21、docs/sim_real_contract.md §七.5。
+            #   仿真 = /odom_ground_truth（planar_move）；实车 = 下位机轮速 odom。
+            'odom_topic': '/odom_ground_truth'}.items()
     )
 
     # lio:=cartographer（全包形态）+ mapping/slam_nav —— 同一个 cartographer 既建图又当里程计源。
