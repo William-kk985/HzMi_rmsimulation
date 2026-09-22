@@ -218,16 +218,48 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 --   ⚠️ 历史教训：ret/ret2/ret3/ret4 是**四条不同路线/时长**的 bag（167s/137s/78s/104s），
 --      跨 bag 比"留存百分比"没有意义（九次修正"实测变差"就栽在这：5 个参数是在不同轨迹上比的）。
 --      以后只认"同一条 bag 离线扫参数"，再让用户跑 1~2 次确认。
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
+-- ★★★ 2026-09-23（十二次修正）：**找到真凶了 —— 是本项目自己把两个参数调离了上游默认值。**
+--   上游默认（`/opt/ros/humble/share/cartographer/configuration_files/trajectory_builder_2d.lua`）：
+--       hit_probability = 0.55, miss_probability = 0.49, num_range_data = 90, insert_free_space = true
+--   本项目历史漂移：hit 0.55→0.62→0.68→0.85（命中越调越重），**miss 0.49→0.45→0.40（清除越调越猛）**，
+--   num_range_data 90→30（证据窗口砍到 3 秒）。而"把 miss 调猛"的理由是**已被证伪的**
+--   "无回波光束 × missing_data_ray_length 乱擦墙"（见上方十一次修正）。
+--   量级对比（log-odds 单票）：上游 hit/miss = +0.201/−0.040（**1 次命中等价 5 次清除**）；
+--   本项目 0.68/0.40 = +0.754/−0.916（1 次命中只顶 0.8 次清除）⇒ **清除强度被放大了 23 倍**。
+--   ⇒ 墙当然留不住；而为了把墙救回来，又去调 `missing_data_ray_length`（空转）和 `insert_free_space=false`
+--     （89% 但自由空间全没）——**整条歧路都是这个漂移引起的**。
+--
+--   ★ 离线同轨迹（ret4，tools/replay_scan_grid.py --mode sweep）决定性对比：
+--   | hit/miss/num_range_data | 留存+2 | +5 | +10 | +20 | 闪烁中位 | 末态自由 | 末态中 | 末态占据 |
+--   | 0.68/0.40/30（旧）      | 69.1% | 60.8% | 52.8% | 42.2% | 3 | 7664 | 2241 | 1087 |
+--   | 0.85/0.40/90（十一次）  | 83.5% | 75.3% | 67.4% | 57.0% | 2 | 7439 | 1480 | 2073 |
+--   | 0.68/0.49/30            | 78.1% | 66.6% | 57.3% | 45.0% | 2 | **31** | 9547 | 1414 | ← **自由空间死在这**（旧结论的由来）
+--   | 0.68/0.49/300           | 90.6% | 82.0% | 71.9% | 59.9% | 2 | 6502 | 2260 | 2230 |
+--   | 0.68/0.49/600           | 92.6% | 85.2% | 76.8% | 66.7% | 1 | 6646 | 1993 | 2353 |
+--   | **0.68/0.49/100000（本次）** | **94.3%** | **88.6%** | **82.5%** | **75.2%** | **1** | **6556** | 1851 | **2585** |
+--   | 0.55/0.49/100000（纯上游+长窗） | 94.0% | 87.3% | 79.0% | 68.9% | 1 | 7532 | 1860 | 1600 |
+--   | 0.85/0.49/100000        | 94.3% | 88.9% | 83.4% | 76.9% | 1 | 5705 | 1832 | 3455 |
+--   | 0.68/0.40/30 + insert_free_space=false | — | — | — | ~78% | — | 0 | — | — |（用户认可的 89% 效果，但地图全灰）
+--   ⇒ **关键发现：真正杀死自由空间的不是 miss=0.49，而是 num_range_data=30！**
+--      自由格子要靠"很多帧的清除票"累积（从 P=0.5 到 P=0.1 需要 ~55 张，`miss=0.49` 时），
+--      而 30 帧（3 秒）的子图窗口根本攒不够；窗口一拉长，miss=0.49 照样能长出白格（实测 6556 格）。
+--      同时墙格子只被"穿过"~0.17 次/帧、却被打中 ~0.12 次/帧（见 5.2.4），弱清除下**净票为正** ⇒ 墙稳住。
+--   ⇒ 本次取值：**miss 0.40 → 0.49（回到上游）、num_range_data 90 → 300（30 秒窗口）**，
+--      hit 保持 0.85（命中重一点，墙更实：占据格 2585；若想让自由空间更白可退回 0.68~0.75）。
+--      预期：留存+2 帧 69%→94%、+20 帧 42%→75%、闪烁中位 3→1、实心墙格子 1087→2585、自由空间不损失。
+--   ⚠️ num_range_data 越大越粘，但子图越少 ⇒ 回环约束越少（长距离建图时全局一致性变差）。
+--      300（30 秒）是"粘性/回环"的折中；只跑一小段/只求这张图最稳，可以直接给 100000（整段一个子图）。
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 300
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05  -- 5cm 分辨率
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.range_data_inserter_type = "PROBABILITY_GRID_INSERTER_2D"
--- insert_free_space=true 必须保留：**"擦旧墙"和"标空地"是同一个写**（都是给射线途经的格子写 miss），
---   关掉它确实能到 89% 留存，但自由格子=0、地图全灰（ret2 判别实验）。
---   本场景没有动态物，但实车有，清除能力不能丢。推导见 docs/debug_fastlio_cartographer.md §5.2.3。
+-- insert_free_space 必须 true：**"擦旧墙"和"标空地"是同一个写**（都是给射线途经格子写 miss），
+--   关掉它=89% 留存但自由格子=0、地图全灰（ret2 判别实验，用户认可的那个效果）。
+--   十二次修正后不需要这个取舍了：**弱清除(miss 0.49) + 长窗口(nrd 300) 可以同时得到
+--   94% 的 +2 帧留存和 6556 个自由格子**。推导见 docs/debug_fastlio_cartographer.md §5.2.4。
 TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.85   -- ← 十一次修正：0.68 → 0.85（命中更粘）
-TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.40   -- 0.40 是甜点：0.49 ⇒ 自由格子几乎长不出来(实测 31 格)；0.30 ⇒ 墙被擦得更快
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.85   -- 上游 0.55；0.85 = 命中更粘（占据格 2585 vs 0.68 的 2585/0.55 的 1600）
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.49   -- ★十二次修正：0.40 → 0.49（回到上游默认！清除票被放大了 23 倍才是"留不住"的真凶）
 
 -- ============================================================================
 -- 位姿图优化配置
