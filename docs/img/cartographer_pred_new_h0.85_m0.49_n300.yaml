@@ -1,0 +1,6 @@
+image: pred_h0.85_m0.49_n300.pgm
+resolution: 0.05
+origin: [-2.275, -3.125, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
