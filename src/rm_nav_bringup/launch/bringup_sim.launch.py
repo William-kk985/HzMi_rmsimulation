@@ -180,6 +180,15 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'world': world,
             'robot_description': robot_description,
+            # ★ 2026-09-24：**nav2 不共用组合容器（use_composition=False）**。
+            #   实测：两张 costmap 在同一个 component_container_mt 里跑几十秒后，/tf 与 /scan 的**摄入静默冻死**
+            #   （published_footprint 只有 1 个戳、costmap 内容 md5 恒定，而外部新开的 tf2 监听看到的是新鲜变换），
+            #   但发布循环照跑 ⇒ 表面完全正常、`expected_update_rate: 0.0` 也不再报警。
+            #   后果：costmap 内最新的 map→odom 永远是旧的 ⇒ planner/controller 拿过期 TF ⇒ 触发上游 nav2
+            #   `isGoalReached()` 丢弃 transformPose 返回值那个 bug ⇒ 目标被当成 (0,0,0) ⇒ 假"到达"、零速、车不动。
+            #   拆成独立进程后，单个回调卡死不会连带两张 costmap。
+            #   （想恢复组合容器省进程：删掉下面这一行即可。）
+            'use_composition': 'False',
             'rviz': 'False'}.items()
     )
 
