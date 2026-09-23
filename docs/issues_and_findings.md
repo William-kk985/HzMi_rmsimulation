@@ -163,6 +163,50 @@ nav 模式的地图来自 `map_server` 加载的**磁盘既有 pgm**（`src/rm_n
 
 ---
 
+## 七、2026-09-24 复盘：`mode:=nav` 下「车不动 + 秒报 SUCCEEDED」的链路定位
+
+### 7.1 症状
+RViz 给目标 `(-1.00, 2.00)`（AMCL 重定位）→ BT 立刻 `Goal succeeded`，`distance_remaining` 停在 **2.3042919635772705**，`/cmd_vel` 全程**零样本**，车体一步不动。
+
+### 7.2 决定性证据（全部在活图上实测）
+
+| 观测 | 命令 | 实测 | 结论 |
+|---|---|---|---|
+| sim 时钟 | `ros2 topic echo /clock --field clock.sec --once` | 1069 | 时钟在跑 |
+| **costmap 自己发的栅格** | `ros2 topic echo /local_costmap/costmap_raw --qos-durability transient_local --field header.stamp --once` | **1067.58**（global 1068.88） | costmap 节点时钟、发布线程、更新循环**全部正常** |
+| **costmap 的 footprint** | `ros2 topic echo /local_costmap/published_footprint --field header.stamp --once` | **644.682，相隔 181 秒两次采样一字不变** | 它的 `getRobotPose()` 永远返回**启动那一瞬**的僵住位姿 |
+| TF 线上是否新鲜 | `ros2 run tf2_ros tf2_echo <A> <B>`（base_link→base_link_fake、odom→base_link、map→odom、map→base_link_fake） | 949~958 **全部新鲜**，`/tf` 42.9 Hz | **TF 本身没有断** |
+| 控制器自己的日志 | `~/.ros/log/controller_server_*.log` | `Exception in transformPose: Lookup would require extrapolation into the past. Requested time 644.682000 but the earliest data is at time 644.882000, when looking up transform from frame [odom] to frame [map]` → `Unable to transform robot pose into global plan's frame` → **`Reached the goal!`**（相隔 20 µs） | 见 7.3 |
+
+### 7.3 因果链（已闭环，可稳定复现）
+1. 两个 costmap 子节点（`local_costmap` 在 `controller_server` 进程内、`global_costmap` 在 `planner_server` 进程内）的 **tf2 缓冲区在启动约 0.2 秒后就不再进新数据**，永远停在 `644.682` / `646.282`。
+2. ⇒ `Costmap2DROS::getRobotPose()`（内部 `nav2_util::getCurrentPose()`）用「最新可用」查询，于是**一直成功**返回**同一个 644.682 的旧位姿**（`published_footprint` 以 20 Hz 重复发这同一戳，所以后来才加入的订阅者也能收到，看起来"话题还活着"）。
+3. ⇒ `ControllerServer::isGoalReached()` 里 `nav_2d_utils::transformPose(costmap_ros_->getTfBuffer(), ...)` 要把目标姿态从 map 转到 odom：它拿的正是这个**旧缓存**（最早数据 644.882）去查 **644.682** ⇒ `ExtrapolationException`。
+4. ⇒ **上游 `controller_server.cpp` 打印了 ERROR，却把 `transformPose()` 的 bool 返回值丢掉**，`transformed_end_pose` 保持默认 `(0,0,0)`。
+5. ⇒ `SimpleGoalChecker`（xy 容差 0.25 m / yaw 0.25 rad）比较车实际位姿 `(0.013, -0.007)` 与 `(0,0,0)`：相差 **1.4 cm < 容差** ⇒ **“Reached the goal!”** ⇒ 零速 ⇒ BT 报 `Goal succeeded` ⇒ **车一步没动**。
+   （两次目标相隔 203 秒、结果完全一致；这条链解释了每一个观测到的现象。）
+
+### 7.4 已排除的假设（都有活图证据，不必重复试）
+
+| 假设 | 证据 | 结论 |
+|---|---|---|
+| `/tf` QoS 不匹配 | `ros2 topic info -v /tf`：6 个发布者 + 9 个订阅者**全部** RELIABLE / KEEP_LAST(100) / VOLATILE | 排除 |
+| RMW 是 Fast DDS（需换 CycloneDDS） | 本栈**已经在跑** `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`（`ros2-humble-rmw-cyclonedds-cpp 1.3.5` 已装） | 排除（这一招已在用） |
+| 有僵尸/重复进程在抢 | `/cmd_vel` 的 5 个发布者 = `velocity_smoother` + `behavior_server` 的 4 个行为插件（Humble 正常）；`/tf` 6 个发布者全是本尊；`/clock` **只有 1 个发布者** | 排除 |
+| 某些节点 `use_sim_time` 没设 | 逐节点 `ros2 param get`：controller / planner / bt_navigator / amcl / map_server / velocity_smoother / behavior_server / **两个 costmap** 全 True | 排除 |
+| 组合容器共享 executor 导致互锁 | `use_composition:=False`（进程已分离，节点列表里无 component_container）后**同样复现** | 排除 |
+| `transform_tolerance` 太小 | 曾放大到 1000.0：在 tf2 里这个值经 `getCurrentPose()` 传成了**等待超时**，遇到「过去的时间点」这种永远等不来的查询，会让 costmap 线程一次阻塞到超时（1000 秒）—— **已撤销回 0.3** | 不是解，且危险 |
+
+### 7.5 仍未知 + 下一步（按优先级）
+1. **未解的问题**：为什么这两个 costmap 的 `tf2_ros::Buffer` 只在启动一瞬进数据、之后永久不进。节点时钟（`costmap_raw` 新鲜）、executor（动作与发布都在转）、线上 TF（新鲜）、QoS、RMW 都已排除 ⇒ 卡点在这条订阅的**摄入回调**上，而不是上游数据。
+   - 待查线索 A：buffer 时钟类型的差异 —— 实测 **`tf2_echo`（墙钟缓存）能正常读到 sim 戳的 TF**，而 costmap（`use_sim_time=True` 的 sim 钟缓存）读不到；需确认 tf2 的 `TF_OLD_DATA` 剪枝是否按 buffer 时钟判定，以及 `/clock` 只有 **7.76 Hz**（不是常见的 100 Hz）是否让剪枝窗口抖动。
+2. **该修的两处（互相独立）**：
+   - ① **上游 `nav2_controller/src/controller_server.cpp::isGoalReached()` 必须尊重 `transformPose()` 的返回值**（失败就 `return false` 并明确报错），让"假到达"至少变成"诚实失败"。做法与 cartographer 一样：把 nav2 拷进 `src/` 做 overlay 构建，`third_party/nav2` 保持只读。
+   - ② **让 costmap 的 tf 摄入不冻**：候选是把 `costmap_2d_ros.cpp:187` 的 `TransformListener(*tf_buffer_)` 改成带节点/回调组（`tf2_ros::TransformListener(*tf_buffer_, node, true)`），或给它独立 spin 线程。
+3. **5 分钟判据实验**：只重启 nav2（sim/LIO 不动），每 2 秒采一次 `ros2 topic echo /local_costmap/published_footprint --field header.stamp`，看戳是否**先跟 `/clock` 走几秒、然后固定不动**；若是，即确认「启动窗口内 TF 尚未就绪 ⇒ 摄入线程死掉」这一形态，再做 ②。
+
+---
+
 ## 六、待办（未完成）
 
 | 优先级 | 事项 | 说明 |
