@@ -1,7 +1,16 @@
 /**:
   ros__parameters:
-    target_frame: livox_frame
+    # ★ 2026-09-23（据 docs/research_p2l_scan_stall.md 的源码级考证）：
+#   target_frame 置空 ⇒ node.cpp L82 的 `if (!target_frame_.empty())` 不成立 ⇒ **根本不创建
+#   tf2 Buffer / TransformListener / MessageFilter**（L94-96 直接 registerCallback），
+#   输出帧仍是点云自带帧（L149 抄 header.frame_id = livox_frame）⇒ **输出逐字节不变**，
+#   但整类"tf2 过滤器丢消息/静默排队"的故障被移除。
+#   （本配置原来 target_frame == 点云 frame，过滤器本来短路放行，所以这是加固不是解药。）
+target_frame: ""
     transform_tolerance: 0.01
+    # 显式给队列深度：原来没配 ⇒ 默认 std::thread::hardware_concurrency() = 本机 28
+    # （同时作为 MessageFilter 队列与订阅 QoS 深度）⇒ 最多少排 28 帧 0.2MB 的旧数据。
+    queue_size: 5
     min_height: -1.0
     max_height: 0.1
     angle_min: -3.14159   # -M_PI/2
