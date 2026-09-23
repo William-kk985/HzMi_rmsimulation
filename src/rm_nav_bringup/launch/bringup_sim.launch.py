@@ -199,7 +199,10 @@ def generate_launch_description():
         package='linefit_ground_segmentation_ros',
         executable='ground_segmentation_node',
         output='screen',
-        parameters=[segmentation_params]
+        # ★ 2026-09-23 修复：原来漏了 use_sim_time ⇒ 这个节点跑在**墙钟**上，而全链路（plugin/scan/
+        #   costmap/AMCL/tf）都是仿真钟。它的输出戳虽然抄自输入（所以看起来还好），但任何依赖
+        #   "本节点时钟"的逻辑（tf2 Buffer 的缓存窗口、超时判定）都会用错时间轴。
+        parameters=[segmentation_params, {'use_sim_time': use_sim_time}]
     )
 
     bringup_pointcloud_to_laserscan_node = Node(
@@ -207,7 +210,12 @@ def generate_launch_description():
         remappings=[('cloud_in',  ['/segmentation/obstacle']),
                     ('scan',  ['/scan'])],
         # 参数已回归 pointcloud_to_laserscan 包 config/（R1）
-        parameters=[os.path.join(get_package_share_directory('pointcloud_to_laserscan'), 'config', 'laserscan_params.yaml')],
+        # ★ 2026-09-23 修复：同上，原来漏了 use_sim_time。p2l 内部用
+        #   `tf2_ros::Buffer(this->get_clock())` 建 TF 缓存，节点时钟是墙钟时缓存窗口走的是墙钟，
+        #   与消息里的仿真戳不在一条时间轴上（本配置 target_frame==点云 frame，过滤器短路才没炸；
+        #   一旦改 target_frame 就会立刻表现为"整条 Talker 被丢光"）。
+        parameters=[os.path.join(get_package_share_directory('pointcloud_to_laserscan'), 'config', 'laserscan_params.yaml'),
+                    {'use_sim_time': use_sim_time}],
         name='pointcloud_to_laserscan'
     )
 
