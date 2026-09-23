@@ -177,7 +177,9 @@ local_costmap:
           # ★ 失效检测：超过该间隔没更新 → isCurrent()=false → layer current_=false →
           #   nav2 控制器/规划器拒绝算速度，velocity_smoother 的 velocity_timeout(1.0s) 发零速停车，
           #   同时日志出 WARN。0（默认）= 不检查 → costmap 会冻在最后一帧且毫无提示（静默失效）。
-          expected_update_rate: 0.5
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。
           raytrace_max_range: 6.0
           obstacle_max_range: 6.0
           obstacle_min_range: 0.1
@@ -204,7 +206,9 @@ local_costmap:
           raytrace_max_range: 4.0
           clearing: true
           marking: true
-          expected_update_rate: 0.5
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
@@ -245,7 +249,9 @@ global_costmap:
           raytrace_max_range: 10.0
           obstacle_min_range: 0.1
           max_obstacle_height: 2.0
-          expected_update_rate: 0.5           # ★ 失效检测（0=不检查 → 静默失效）
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。           # ★ 失效检测（0=不检查 → 静默失效）
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
         enabled: true                       # 默认开（launch 按 global_obstacle 覆盖）
@@ -271,7 +277,9 @@ global_costmap:
           obstacle_range: 3.0                                       # meters
           min_obstacle_height: 0.2                                  # default 0, meters
           max_obstacle_height: 2.0                                  # default 3, meters
-          expected_update_rate: 0.5                                 # ★ 0=不检查(默认)→静默失效；0.5=源超时即告警
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。                                 # ★ 0=不检查(默认)→静默失效；0.5=源超时即告警
           observation_persistence: 0.0                              # default 0, use all measurements taken during now-value, 0=latest
           inf_is_valid: false                                       # default false, for laser scans
           filter: "voxel"                                           # default passthrough, apply "voxel", "passthrough", or no filter to sensor data, recommend on
