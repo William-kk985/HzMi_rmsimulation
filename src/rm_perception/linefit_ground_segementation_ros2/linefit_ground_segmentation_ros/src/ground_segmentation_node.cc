@@ -69,20 +69,17 @@ SegmentationNode::SegmentationNode(const rclcpp::NodeOptions &node_options)
   obstacle_topic =
       this->declare_parameter("obstacle_output_topic", "obstacle_cloud");
   input_topic = this->declare_parameter("input_topic", "input_cloud");
-  // ★ 2026-09-22：订阅 QoS 由 BEST_EFFORT 改为 **RELIABLE + keep_last(10)**。
-  //   原因（实测，见 docs/issues_and_findings.md #25）：
-  //     · 发布端（仿真插件）是 RELIABLE 发 480KB 的 PointCloud2；本节点原来是
-  //       rclcpp::SensorDataQoS() = BEST_EFFORT + 只攒 5 条；
-  //     · DDS 允许"RELIABLE 发 → BEST_EFFORT 收"连上，但**不会为这个读者重传**：
-  //       480KB 必须分片，丢任意一个分片整帧作废 → 实测 2182 帧只收到 68 帧（3%），
-  //       表现是 /segmentation/obstacle 只有 0.31Hz、单次空洞最长 20.8s，
-  //       而 CPU 92% 空闲（离线段测 segment() 只要 1.01ms/帧 ⇒ 不是算力）。
-  //     · 同一发布端、同一台机器：RELIABLE 订阅者（rosbag2）拿到 2182/2182 = 100%；
-  //       FAST-LIO 订更大的 CustomMsg 用默认 RELIABLE(depth 20) 也是 10Hz 一帧不丢。
-  //   这只是"投递合同"对齐，**不改任何分割参数/输出内容**，也不影响 FAST-LIO
-  //   （不同话题、不同进程、无共享状态）。实车同样受益（真实驱动也是大点云 + reliable）。
-  cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      input_topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
+  // ★ 2026-09-23（十四次修正）：订阅 QoS 定稿为 **rclcpp::SensorDataQoS()（BEST_EFFORT + keep_last 5）**。
+  //   演进：2026-09-22 曾因"480KB 大消息丢分片 ⇒ 实测只收到 3%（68/2182 帧）"把它改成 RELIABLE，
+  //   投递确实恢复到 100%，但引入了更严重的副作用：**RELIABLE 写者会被跟不上速率的消费者堵住队列**
+  //   （实测 slam_toolbox 2.5 s/帧 → 一直打 "queue is full"；nav 模式下 RViz 渲大点云 / STVL 体素层同理），
+  //   阻塞点落在 Gazebo 的 sensor 回调里 ⇒ `/livox/lidar/pointcloud`→`/segmentation/obstacle`→`/scan`
+  //   **一起停更 180s 且不自恢复**（跑几分钟后突发），local/global costmap 随后全线失效。
+  //   现在两头一起改：**发布端也 BEST_EFFORT（ros2_livox_simulation 插件）+ 消息体已从 0.48MB 降到 0.20MB**
+  //   （只发有效回波）⇒ 写者永不阻塞；丢帧风险靠实测把关（见 docs/debug_fastlio_cartographer.md）。
+  //   判活/验收：`ros2 topic hz /segmentation/obstacle` 期望 ~8Hz(墙钟)≈10Hz(仿真钟)、`/scan` 同步。
+cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+      input_topic, rclcpp::SensorDataQoS(),
       std::bind(&SegmentationNode::scanCallback, this, std::placeholders::_1));
   ground_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
       ground_topic, rclcpp::SensorDataQoS());

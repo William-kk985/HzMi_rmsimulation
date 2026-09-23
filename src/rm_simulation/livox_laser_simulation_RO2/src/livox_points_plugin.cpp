@@ -74,7 +74,14 @@ namespace gazebo
         node = transport::NodePtr(new transport::Node());
         node->Init(raySensor->WorldName());
         // PointCloud2 publisher
-        cloud2_pub = node_->create_publisher<sensor_msgs::msg::PointCloud2>(curr_scan_topic + "/pointcloud", 10);
+        // ★★ 2026-09-23：**BEST_EFFORT(KEEP_LAST 5)** —— 传感器数据的惯例 QoS(REP-2009)，
+        //   关键是"写者永不阻塞"：RELIABLE+KEEP_LAST(10) 时，只要有一个消费者跟不上
+        //   （实测 slam_toolbox 2.5 s/帧、RViz 渲染大点云、STVL 体素层），队列满就会
+        //   阻塞 Gazebo 的 sensor 回调 ⇒ /livox/lidar/pointcloud、/segmentation/obstacle、
+        //   /scan 一起停更且不自恢复（跑几分钟后突发）。
+        //   代价：慢消费者会丢帧（但它本来就来不及），快消费者（linefit 1ms/帧）不丢。
+        cloud2_pub = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+            curr_scan_topic + "/pointcloud", rclcpp::SensorDataQoS());
         // CustomMsg publisher
         custom_pub = node_->create_publisher<livox_ros_driver2::msg::CustomMsg>(curr_scan_topic, 10);
 
