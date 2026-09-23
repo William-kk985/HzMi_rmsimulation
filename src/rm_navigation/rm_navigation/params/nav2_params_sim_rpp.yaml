@@ -151,6 +151,11 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
+      # ★ 2026-09-24（临时去雷）：上游 nav2 的 ControllerServer::isGoalReached() 会把
+      #   map→odom 转换的失败**丢掉**，于是 goal 变成默认 (0,0,0)、机器人在原点 ⇒ 第一拍假'到达'。
+      #   把本 costmap 的变换宽容度放到很大 ⇒ 那个转换即使 TF 旧也返回成功 ⇒ 用**真实目标**去判 ⇒ 不再假到达。
+      #   代价：本 costmap 的 TF 校验形同关闭（它现在本来就冻着）。定稿前应改回 0.3~0.5。
+      transform_tolerance: 1000.0
       update_frequency: 20.0
       publish_frequency: 10.0
       global_frame: odom
