@@ -205,6 +205,30 @@ RViz 给目标 `(-1.00, 2.00)`（AMCL 重定位）→ BT 立刻 `Goal succeeded`
    - ② **让 costmap 的 tf 摄入不冻**：候选是把 `costmap_2d_ros.cpp:187` 的 `TransformListener(*tf_buffer_)` 改成带节点/回调组（`tf2_ros::TransformListener(*tf_buffer_, node, true)`），或给它独立 spin 线程。
 3. **5 分钟判据实验**：只重启 nav2（sim/LIO 不动），每 2 秒采一次 `ros2 topic echo /local_costmap/published_footprint --field header.stamp`，看戳是否**先跟 `/clock` 走几秒、然后固定不动**；若是，即确认「启动窗口内 TF 尚未就绪 ⇒ 摄入线程死掉」这一形态，再做 ②。
 
+### 7.6 上游查证结论（2026-09-24 联网调研）
+
+**① 「丢弃 `transformPose` 返回值」是上游已知缺陷：main 已修，Humble 永不回移**
+- 引入：[PR #2780](https://github.com/ros-navigation/navigation2/pull/2780)（2022-01-21）把目标 TF 查询挪进 `isGoalReached()`，同时**丢掉了返回值**。
+- 修复：[PR #6436](https://github.com/ros-navigation/navigation2/pull/6436)「Reusing a staleness-proofed tf lookup…」（2026-09-20 合入 main，关 [#6320](https://github.com/ros-navigation/navigation2/issues/6320)/[#6316](https://github.com/ros-navigation/navigation2/issues/6316)）：把 `nav_2d_utils::transformPose` 换成 `nav2_util::transformPoseInTargetFrame`（**false 就抛 `nav2_core::ControllerTFError`**），并新增 `transform_staleness_threshold` 新鲜度阈值。
+- **#6436 没有 `backport-*` 标签，Humble 无回移**（Humble 分支最近的 controller_server 改动是 #6191）⇒ 想让"假到达"变成"诚实失败"，只能自己把这套纪律补回本地（overlay）。
+
+**② 日志里那两行的分工（纠正 7.2 的表述 —— 这一点很关键）**
+- `[tf_help] Transform data too old when converting from map to odom` + `Data time: … / Transform time: …` = **`isGoalReached()` 那条路**。`nav_2d_utils::transformPose` 会**吞掉** ExtrapolationException，退而取"最新缓存变换"并按 `transform_tolerance` 判年龄 ⇒ 超龄就 `return false`；上游又不看这个返回值 ⇒ 目标姿态保持默认 `(0,0,0)` ⇒ 假到达。**这才是主证据。**
+- `[controller_server] Exception in transformPose: … from frame [odom] to frame [map]` = **同一控制周期里「全局路径转局部系」那条路**（只有 `transformPoseInTargetFrame` 会打印 `ex.what()`），是同一个旧缓存造成的**第二个症状**，不是假到达的直接原因。
+- 顺带核实：本地 costmap 是 `global_frame: odom`（**不是** map）✓，所以常规查询不走 `map↔odom` 那条慢链。
+
+**③ `transform_tolerance` 在这个 bug 上根本不是杠杆（撤销是对的）**
+- tf2 里 `lookupTransform(…, timeout)` 的 `timeout` **只是"等数据到达"的等待时长，绝不是外插容差**，对"过去的时间点"永远无效（后到的数据戳只会更晚）。
+- Humble 的 `nav_2d_utils::transformPose` 甚至**不用**它当超时，只在 Extrapolation 回退分支里拿它判"旧变换能否凑合" ⇒ 调大要么无效，要么变成「拿 400 秒前的旧变换凑合并用它判距离」，同样是错的。与上游 [#5234](https://github.com/ros-navigation/navigation2/issues/5234)（"transform_tolerance 对 controller_server 无影响"，closed **未修**）完全吻合。
+
+**④ 「costmap 的 tf 摄入停掉」没有对应的上游报告**（我们这一例是残余病例）
+- 最接近的是 [#3352](https://github.com/ros-navigation/navigation2/issues/3352)：Gazebo 下 footprint 冻结、导航失效；维护者判定为 **RMW 缺陷**（让去报 Fast-DDS，关联 [eProsima/Fast-DDS #3195](https://github.com/eProsima/Fast-DDS/pull/3195)），报告者换 CycloneDDS 后消失。**我们已经在 CycloneDDS 上，所以不是它。**
+- [geometry2 #727](https://github.com/ros2/geometry2/issues/727) 给出唯一"节点看着健康但 /tf 回调饿死"的可复现原因：`~/.bashrc` 里残留的 `FASTRTPS_DEFAULT_PROFILES_FILE` 自定义 DDS profile。**本机已查：只有 `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` 与 `ROS_LOCALHOST_ONLY=0`，无任何 DDS profile 变量 ⇒ 排除。**（附带发现：`~/.bashrc` 192~198 行把同一行 RMW 导出**重复写了 7 次**，无害但建议清理。）
+- tf2 会在**时间跳变**时清空整个缓冲区（`Detected jump back in time / Detected time source change. Clearing TF buffer.`，连静态帧一起清）⇒ **已 grep 全部日志：无任何清空事件 ⇒ 排除。**
+- tf2 缓冲区 cache 固定 10 s、nav2 不暴露该参数；nav2 用的正是"隐藏节点 + 独立线程 + `setUsingDedicatedThread(true)`"，**上游 main 也没改这个策略** ⇒ 不要照搬「给 `TransformListener` 传 node + `spin_thread=true`」这类改法（会破坏该契约，除非同时把回调组挂进自己的 executor 并手动置 `setUsingDedicatedThread(true)`）。
+
+**⑤ 所以本地该做的是「补回 #6436 的纪律 + 单独解决摄入冻结」，不是继续找配置开关。**
+
 ---
 
 ## 六、待办（未完成）
