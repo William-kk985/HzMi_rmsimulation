@@ -26,7 +26,11 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$OUT"; }
 
 stamp_of() {  # 取一条消息的 header.stamp（超时 2s ⇒ 打印 DEAD）
   local t="$1" out
-  out=$(timeout 2 ros2 topic echo "$t" --field header.stamp --once 2>/dev/null | tr '\n' ' ')
+  # ★ 2026-09-24 修正：**必须显式指定 best_effort** —— Humble 的 `ros2 topic echo/hz` 默认用
+  #   RELIABLE 预设，而本链路的 /scan、/segmentation/obstacle、点云都是 BEST_EFFORT ⇒ 默认订阅
+  #   根本收不到（QoS 不兼容，静默 0 条），于是把"健康的话题"误判成 DEAD（这就是前几天反复
+  #   出现"/scan 挂了"的假警报来源）。判活一律带 --qos-reliability best_effort。
+  out=$(timeout 2 ros2 topic echo "$t" --qos-reliability best_effort --field header.stamp --once 2>/dev/null | tr '\n' ' ')
   if [ -z "$out" ]; then echo "DEAD"; else echo "$out" | sed 's/  */ /g'; fi
 }
 
