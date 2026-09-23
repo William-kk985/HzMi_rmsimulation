@@ -123,15 +123,22 @@ void PointCloudToLaserScanNode::subscriptionListenerThreadLoop()
         sub_.subscribe(this, "cloud_in", qos.get_rmw_qos_profile());
       }
     } else if (sub_.getSubscriber()) {
-      RCLCPP_INFO(
+      // ★★ 2026-09-23 本仓库改动：**不再因为"/scan 暂时没有订阅者"就退订输入点云**。
+      //   原逻辑（上游）会在 subscription_count==0 时 sub_.unsubscribe()，用意是省 CPU；
+      //   但仿真/导航里 `/scan` 的订阅者会频繁进出（nav2 lifecycle 上下电、RViz 启停、
+      //   AMCL 重置），一旦退订，恢复只能靠监听线程下一次图变化事件；实测出现过
+      //   `/segmentation/obstacle` 正常在发（与 /clock 同步 ±1s）而 `/scan` 永久停更、
+      //   进程还活着的情况 —— 表现为 costmap/AMCL 报 "not updated"、导航不动。
+      //   这里保持订阅永远在线（代价：空跑一份 0.2MB@10Hz 的点云，可忽略），
+      //   彻底消除"退订后没恢复"这一类故障。仅一行行为变化，不改任何数据内容。
+      RCLCPP_INFO_ONCE(
         this->get_logger(),
-        "No subscribers to laserscan, shutting down pointcloud subscriber");
-      sub_.unsubscribe();
+        "No subscribers to laserscan, but keeping pointcloud subscription (rm_simulation patch)");
     }
     rclcpp::Event::SharedPtr event = this->get_graph_event();
     this->wait_for_graph_change(event, timeout);
   }
-  sub_.unsubscribe();
+  // ★ 同上：退出循环时也不主动退订，交由析构处理。
 }
 
 void PointCloudToLaserScanNode::cloudCallback(
