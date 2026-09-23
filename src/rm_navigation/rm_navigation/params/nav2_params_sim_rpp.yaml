@@ -177,6 +177,9 @@ local_costmap:
         scan:
           topic: /scan
           # /scan 由 pointcloud_to_laserscan 以 SensorDataQoS(best-effort) 发布，这里必须匹配，否则收不到数据
+          # ⚠️ 2026-09-24 核实：下面两个键在 nav2 1.1.20 里**是惰性的**——
+          #   nav2_costmap_2d/plugins/obstacle_layer.cpp:221 硬编码 rmw_qos_profile_sensor_data（best effort），
+          #   全包内 grep 不到 reliability_policy/qos_policy 的读取。保留只为留痕，改它们没有任何效果。
           reliability_policy: "best_effort"
           qos_policy: "best_effort"
           # ★ 失效检测：超过该间隔没更新 → isCurrent()=false → layer current_=false →
@@ -241,7 +244,10 @@ global_costmap:
         observation_sources: scan
         scan:
           topic: /scan
-          reliability_policy: "best_effort" # 与 p2l 的 best-effort 发布匹配
+          # ⚠️ 2026-09-24 核实：下面两个键在 nav2 1.1.20 里**是惰性的**——
+          #   nav2_costmap_2d/plugins/obstacle_layer.cpp:221 硬编码 rmw_qos_profile_sensor_data（best effort），
+          #   全包内 grep 不到 reliability_policy/qos_policy 的读取。保留只为留痕，改它们没有任何效果。
+          reliability_policy: "best_effort"  # 惰性键（见上）；真正生效的是 obstacle_layer 硬编码的 sensor QoS
           qos_policy: "best_effort"
           data_type: "LaserScan"
           clearing: true
