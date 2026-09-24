@@ -683,6 +683,50 @@ tf2 会按 `TF_OLD_DATA ignoring data from the past` 丢弃 ⇒ 该帧「最新�
 - ⚠️ **尚未验证**：需重启仿真跑上面第 4 条验收（尤其是"连续 5 分钟不中断"）——本轮只做到"编译通过"。
 - 重启后先自查一条：`ros2 param get /laser_mapping use_sim_time` 应为 **True**（③ 生效的判据）。
 
+### 9.2b ★★ 根因确认（2026-09-24 晚）：`<always_on>` 缺失 ⇒ 雷达**间歇性完全不扫描**
+
+**症状（看门狗 180 秒连续实测）**：`/clock` 每秒 +1.0（RTF 1.0）、`/livox/imu` 100 Hz 正常，而
+`/livox/lidar/pointcloud` **0 Hz**；`/scan`、`/odom`、`odom→base_link`、`map→odom`、`footprint` 全部 `--`。
+⇒ 整条链的卡点在最上游的 Gazebo 传感器。
+
+**判据（把"传感器没扫"和"插件没发"分开）**：
+1. `fastlio_mapping_*.log` 里的 `No point`（FAST-LIO **只有收到 CustomMsg 才打印**）：20:13/20:15 两次运行有、
+   **20:21/20:25 两次一条都没有** ⇒ 那两次 `OnNewLaserScans` **从未被调用**；
+2. 插件在**每次**运行里都成功加载（`LivoxPointsPlugin` 的 6 行配置日志次次齐全）⇒ 不是加载失败；
+3. `spawn_entity: Spawn service failed`（`Entity pushed to spawn queue, but spawn service timed out`）
+   **与雷达好坏不相关**（20:15 雷达好、spawn 失败；20:25 雷达死、spawn 成功）⇒ 这是 `gazebo_ros_pkgs`
+   的老问题（[#864](https://github.com/ros-simulation/gazebo_ros_pkgs/issues/864)），**不是**本次病根；
+4. 加探针后在 gzserver 终端直接看 `[probe] OnNewLaserScans 被调用 第N次` 的有无（二值判据）。
+
+**根因与修法**：`ros2_livox_simulation/urdf/mid360.xacro` 的 `<sensor type="ray">` **没有 `<always_on>`**
+（Gazebo Classic 默认 false ⇒ 是否产生扫描取决于传感器有没有被"激活"，与订阅/渲染状态相关，故时好时坏），
+且 `<visualize>true</visualize>` 让行为依赖 gzclient 渲染。修：
+
+```xml
+<always_on>true</always_on>
+<visualize>false</visualize>
+```
+
+**修后实测（同一看门狗）**：t=1s 起全绿 —— `pcloud≈7Hz`、`imu≈70Hz`、`scan≈7Hz`、`odom≈7Hz`、
+`odom→base_link`/`map→odom`/`base_link→base_link_fake` 全在、**`footprint` 20 Hz 且戳持续前进**；
+gzserver 终端 `[probe] ... active=1 update_rate=10.0` 每 2 秒一条。
+（7 Hz 而非 10 Hz 是 RTF≈0.7 所致，属正常。`map→odom` 比 clock 领先约 1 s = AMCL 的 `transform_tolerance: 1.0`。）
+
+**连带结论（§9.1 的假到达链被切断）**：不再出现"秒报 SUCCEEDED"；改为真实控制循环
+（`Received a goal` → 反复 `Passing new path to controller` → ~15 s 后 `Failed to make progress`
+→ `clear costmap` 重试）。⇒ **TF/位姿这条链已通，剩下的是"运动链"**（`/cmd_vel_nav → velocity_smoother →
+/cmd_vel → fake_vel_transform → /cmd_vel_chassis → mecanum`）或 `progress_checker` 阈值。
+
+**测量事故清单（我的，记下来别再犯）**：
+- `ros2 topic hz` **不接受 `--qos-reliability`**（那是 `echo`/`pub` 的参数）⇒ 命令直接报错，被我误读成"无数据"；
+- `ros2 topic hz /livox/lidar` 对 **CustomMsg 类型 CLI 加载不了** ⇒ 同样出不了数，也被我误读；
+- `~/.ros/log/<run>/launch.log` **只含 launch 级输出**（非 ROS 进程如 gzserver 的 stdout），
+  各 ROS 节点的输出在 `~/.ros/log/<node>_<pid>_*.log` ⇒ 早期"livox帧=0"的指纹列因此是无意义的。
+- 结论：**每个"某环节无数据"的判断，都必须先确认那条命令本身能出数**（本仓库一律用
+  `tools/scripts/diag/watch_startup_chain.py`，它把每个话题的正确 QoS 写死在代码里）。
+
+---
+
 ### 9.3 上游查证（2026-09-24）
 
 | 事实 | 出处 |
