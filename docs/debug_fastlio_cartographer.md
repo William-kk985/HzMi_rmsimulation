@@ -567,5 +567,94 @@ ros2 run tf2_tools view_frames
 |---|---|
 | ~~插件不发 `(0,0,0)` 假点~~ **已完成 2026-09-23** | 原来无回波射线被填成 `(0,0,0)` 发出（每帧 78.4%，30000 点里只有 ~6200 真有回波）⇒ 480 KB/帧 @10Hz 灌 DDS；**RELIABLE + KEEP_LAST(10)** 的写者一旦积压就会阻塞 Gazebo 的 sensor 回调 ⇒ 整条感知链冻死且不自恢复（实测 `/scan` 与 `/segmentation/obstacle` 同时停更 180 s，而 linefit/p2l 进程仍活着）| **已改**：`ros2_livox_simulation/livox_points_plugin.cpp` 先数有效回波再 resize、无回波整点丢弃（CustomMsg 同步受益）⇒ 消息 ~480 KB → ~100 KB。真实驱动行为一致 |
 | IMU 首帧重力 | 要"先录制 → 全新 launch"才能抓到首帧；确认后加"丢掉开头零加速度帧"的管道滤波（实车同样需要） |
-| `fake_vel_transform` 戳 | `base_link→base_link_fake` 5508 条里 3317 条戳非单调（会让 tf2 报 TF_OLD_DATA） |
+| **`fake_vel_transform` 戳 ★★** | `base_link→base_link_fake` 5508 条里 **3317 条戳非单调**（会让 tf2 按 `TF_OLD_DATA` 丢弃）。**2026-09-24 升级为 §9.2 候选①：costmap 位姿「冻在启动那一刻」的最可能原因** |
 | `/odom`(LIO) 重复戳 | 1905 条里 20 条重复（同样会让显示侧抖） |
+
+---
+
+## 9. 2026-09-23 ~ 09-24 两天总账：问题 → 判据 → 解法
+
+> 只记「真疼过 / 真改过」的。每条都带判据命令或 commit，便于回查。上一轮 5.2.4 的十一次修正仍有效，本节是它的续集。
+
+### 9.0 总表
+
+| # | 症状 | 根因与判据 | 解法 | 状态 |
+|---|---|---|---|---|
+| 1 | cartographer 建图：特征「先有后没 / 慢慢化掉 / 跑久了就没了」 | `replay_scan_grid.py` 把 bag 重放成事件矩阵：墙格**命中票数不低，是被 miss 票清掉**；离线复现出真参数漂移（`miss_probability 0.49→0.40`、`num_range_data 90→30`） | 核心补丁 `min_probability_to_clear: 0.80`（`probability_grid_range_data_inserter_2d.cc` 的 `SkipClearing()`）+ 参数回到 `hit 0.68 / miss 0.49 / num_range_data 3000`，保持 `insert_free_space: true` | ✅ 已解（你确认「这个地图是可以的」；预测留存 100%/99.9%/100%） |
+| 2 | `save_grid_map.sh` 报 `Magick: Unable to open file` | `PROJECT_ROOT=${SCRIPT_DIR}/../..` 在 `scripts/`→`tools/scripts/` 合并后少了一级，指到了 `tools/` | 4 个脚本统一改 `../../..` | ✅ |
+| 3 | 配置改完直接崩（`yaml.parser.ParserError` line 10） | **我自己**把 `target_frame: ""` 写在第 0 列，破坏 `laserscan_params.yaml` 缩进 | 修好并立规矩：**任何配置改完先 `yaml.safe_load` / `ast.parse` 校验再提交** | ✅ |
+| 4 | nav2 规划器卡死（`/plan` 不出、goal 无响应） | gdb 栈：`PlannerServer::waitForCostmap()` ← `computePlan()` **无超时自旋**；起因是本 fork 的 `expected_update_rate: 0.5` 让 costmap `isCurrent()` 永远 false | 12 处 `expected_update_rate: 0.5 → 0.0`；并修正 `planner_server`/`map_server` 的 `use_sim_time: True`（墙钟戳 vs sim 时钟 TF 缓冲） | ✅ 卡死消失 |
+| 5 | **RViz 给目标，BT 秒报 `Goal succeeded`、`distance_remaining` 不动、`/cmd_vel` 零样本、车一步不走** | **假到达链**（§9.1）：costmap 位姿冻在启动那一刻 ⇒ 目标姿态转换失败 ⇒ 上游丢弃失败 ⇒ 目标变 `(0,0,0)` ⇒ 与车实际位姿只差 1.4 cm < 容差 0.25 m ⇒ 「到达」 | 机制已闭环；**根因（costmap 的 tf 摄入冻结，§9.2）未解** | ⚠️ 机制已确认 / 根因未解 |
+| 6 | costmap「看着活着但内容僵死」 | `published_footprint` 戳**恒为 644.682**（181 秒两次采样一字不变），而同一节点的 `costmap_raw` 戳**新鲜（1067.58）**、`/tf` 线上 42.9 Hz 全新鲜 ⇒ 节点时钟/发布线程/更新循环都好，**只有 tf 摄入死了** | 见 §9.2 三个候选 | ⚠️ 未解 |
+| 7 | 我的一次错误尝试：把 `local_costmap.transform_tolerance` 放大到 1000 想「别让转换失败」 | 在 tf2 里这个值经 `getCurrentPose()` 传成了**等待超时**，遇到「过去的时间点」这种永远等不来的查询会让 costmap 线程一次阻塞到超时（1000 秒） ⇒ **小病治成大病** | 已撤销回 `0.3`，注释里写明原因 | ⚠️ 教训（已撤销） |
+| 8 | 反复假警报：`/scan`「DEAD」、`/clock`「收不到」、p2l 报 RELIABLE 订阅者 QoS 不兼容 | `ros2 topic echo/hz` **默认 RELIABLE**，而 `/scan`(p2l)、`/clock`(gzserver) 都是 **BEST_EFFORT** 发的 ⇒ 根本收不到；那条被拒的 RELIABLE `/scan` 订阅者就是这种探测（costmap 硬编码 sensor QoS、amcl/rviz 都匹配，均排除） | **一切活性探测一律加 `--qos-reliability best_effort`**；`watch_stack.sh` 已修 | ✅ 方法论 |
+| 9 | 插件每帧发 78.4% 的 `(0,0,0)` 假点，~480 KB/帧 @10Hz | 无回波射线被填成 `(0,0,0)`；RELIABLE+KEEP_LAST 写者一旦积压就**阻塞 Gazebo 的 sensor 回调** ⇒ 整条感知链冻死且不自恢复 | 先数有效回波再 resize、无回波整点丢弃（消息 ~480 KB → ~100 KB） | ✅（上一轮已改） |
+| 10 | RViz「崩溃」 | 实际是**退出时** librclcpp `SIGSEGV`（teardown）且与 fastlio 同帧，不是点云洪泛/GL 问题 | 记录待查（不影响运行） | 记录 |
+
+### 9.1 假到达链（因果闭环，可 100% 复现）
+
+```
+costmap 子节点的 tf2 缓冲区在启动 ~0.2 s 后不再进数据（最新样本恒为 644.682）
+  ↓ getRobotPose() 用「最新可用」查询 ⇒ 一直「成功」地返回同一个旧位姿
+     （published_footprint 以 20 Hz 重复发这同一戳 ⇒ 话题看起来还活着）
+  ↓ isGoalReached() 里 nav_2d_utils::transformPose(costmap 的旧缓存) 要把目标 map→odom
+     [tf_help] Transform data too old when converting from map to odom
+     [tf_help] Data time: 682.982 / Transform time: 645.482     ← 主证据（相隔 37.5 s）
+     ⇒ 该函数 return false
+  ↓ 上游 controller_server.cpp:602 **丢弃这个返回值** ⇒ transformed_end_pose 保持默认 (0,0,0)
+  ↓ SimpleGoalChecker（xy 0.25 m / yaw 0.25 rad）比较车实际 (0.013, -0.007) 与 (0,0,0)
+     相距 1.4 cm < 容差 ⇒ 「Reached the goal!」（与报错相隔 20 微秒）
+  ↓ 零速 + BT 报 Goal succeeded ⇒ 车一步没动
+```
+
+- 两次目标相隔 203 秒，`distance_remaining` 都是 **2.3042919635772705**、都以 SUCCEEDED 结束。
+- **日志分工要分清**：`[tf_help] Transform data too old …` 才是 `isGoalReached()` 那条路；另一条
+  `[controller_server] Exception in transformPose: … from frame [odom] to frame [map]` 是**同一周期里「全局路径转局部系」**
+  那条路（只有 `transformPoseInTargetFrame` 会打印 `ex.what()`），是同一旧缓存的**第二个症状**，不是假到达的直接原因。
+  本地 costmap 是 `global_frame: odom`（不是 map）✓。
+
+### 9.2 仍未知：costmap 的 tf 摄入为何在启动后 ~0.2 s 永久停止
+
+**已排除（都有活图证据，别再重复试）**：`/tf` QoS（6 发 9 订全部 RELIABLE/KEEP_LAST(100)/VOLATILE 一致）·
+RMW（**已在 CycloneDDS**）· DDS profile 残留（geometry2 #727 那个坑；本机只有 `RMW_IMPLEMENTATION` 与
+`ROS_LOCALHOST_ONLY=0`）· `use_sim_time`（含两个 costmap 全 True）· 僵尸进程（`/cmd_vel` 5 个发布者 =
+velocity_smoother + behavior_server 4 个行为插件，正常）· 组合容器（`use_composition:=False` 后同样复现）·
+第二时钟源（`/clock` 只 1 个发布者）· tf2 时间跳变清空缓冲区（**全日志无 `Clearing TF buffer`**）·
+`transform_tolerance` 大小（见 9.0 #7 与 §9.3）。
+
+**候选①（最值得先试，来自本文 §8 的老线索）**：`fake_vel_transform` 发的 `base_link→base_link_fake`
+**3317/5508 条戳非单调**，而 costmap 的 `robot_base_frame` 正是 `base_link_fake`。若它持续发出「比已接受样本更旧」的戳，
+tf2 会按 `TF_OLD_DATA ignoring data from the past` 丢弃 ⇒ 该帧「最新样本」永远停在启动那一刻 ⇒ **与 644.682 恒定的观测完全吻合**。
+→ 判据：录 30 s `/tf`，单独统计 `base_link_fake` 的戳是否单调；同时 grep `tf2_buffer` 的 `TF_OLD_DATA` 行。
+→ 解法：让 `fake_vel_transform` 每次回调只取一次 `now()` 并保证单调（不与输入消息的戳混用）。
+
+**候选②（零代码可试）**：启动竞态 —— 日志里 costmap 激活时 TF 尚未就绪
+（`Timed out waiting for transform from base_link_fake to odom … frame does not exist`），冻结戳正好是那一刻。
+→ 判据：`autostart:=False` 起栈 → 等 `tf2_echo odom base_link_fake` 出数 →
+`ros2 service call /lifecycle_manager_navigation/manage_nodes nav2_msgs/srv/ManageLifecycleNodes "{command: 0}"` →
+看 footprint 戳是否一直跟着 `/clock` 走。
+
+**候选③**：RMW/reader 层饿死（geometry2 #727 类）。本机 DDS profile 已排除，但「进程内所有读者一起停」这一形态仍属此类。
+
+### 9.3 上游查证（2026-09-24）
+
+| 事实 | 出处 |
+|---|---|
+| 「丢弃 `transformPose` 返回值」是上游缺陷：**PR #2780**（2022-01-21）引入 | https://github.com/ros-navigation/navigation2/pull/2780 |
+| main 已修：**PR #6436**（2026-09-20，关 #6320/#6316）—— 换 `nav2_util::transformPoseInTargetFrame`（false 抛 `nav2_core::ControllerTFError`）+ 新增 `transform_staleness_threshold` | https://github.com/ros-navigation/navigation2/pull/6436 |
+| **#6436 无 `backport-*`，Humble 永不回移** ⇒ 只能自己补回这套纪律 | — |
+| 最接近的「footprint 冻结」报告 **#3352** 被判为 **RMW 缺陷**（换 CycloneDDS 即消失），我们已在 CycloneDDS ⇒ 残余病例 | https://github.com/ros-navigation/navigation2/issues/3352 |
+| `transform_tolerance` 在 Humble 对 controller **实为惰性**（`nav_2d_utils::transformPose` 不用它当超时，只在 Extrapolation 回退里判「旧变换能否凑合」）；上游 #5234 closed **未修** | https://github.com/ros-navigation/navigation2/issues/5234 |
+| tf2 的 `lookupTransform(…, timeout)` 里 timeout **只是等待时长，不是外插容差**，对「过去的时间点」永远无效 | https://github.com/ros2/geometry2/blob/humble/tf2_ros/src/buffer.cpp |
+| 「节点健康但 /tf 回调饿死」唯一可复现原因：`~/.bashrc` 残留 `FASTRTPS_DEFAULT_PROFILES_FILE` | https://github.com/ros2/geometry2/issues/727 |
+
+**结论**：不要继续找配置开关；本地要做的是 ① 把 #6436 的纪律补回 `controller_server.cpp`（假到达 → 诚实失败），
+② 单独解决 costmap 摄入冻结（候选①）。
+
+### 9.4 下一步（按性价比）
+
+| 选项 | 内容 | 预期 | 代价 |
+|---|---|---|---|
+| **A** | 先验候选①：统计 `base_link_fake` 戳单调性（录 30 s `/tf` 即可，不重启整栈） | 若证实非单调 ⇒ 根因锁定，改 `fake_vel_transform` 一个函数 | 极低 |
+| **B** | 候选项②的 `autostart:=False` 实验（等 TF 就绪再激活 nav2） | 若成立 ⇒ **不改代码就能让车动** | 低（launch 可能要先加一个开关） |
+| **C** | overlay 补丁：`controller_server.cpp` 补回 #6436 纪律（+ `transform_staleness_threshold`） | 让「假到达」变「诚实失败」，防再被误导；**不解决车不动** | 中（要把 nav2 拷进 `src/` 构建） |
