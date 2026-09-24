@@ -45,7 +45,15 @@
     <gazebo reference="${name}">
       <sensor type="ray" name="${name}">
         <pose>0 0 0 0 0 0</pose>
-        <visualize>true</visualize>
+        <!-- ★ 2026-09-24：原来这里 <visualize>true</visualize> 且**整个 sensor 没有 <always_on>**。
+             Gazebo Classic 里 <always_on> 默认 false ⇒ 这个 ray sensor 是否真的产生扫描取决于它有没有
+             被「激活」（与 gzclient 是否在渲染、传感器是否被订阅有关）⇒ 实测出现「同一份代码、有的运行
+             点云 10Hz、有的运行 180 秒一条都没有」的间歇故障（判据：/livox/imu 100Hz、/clock RTF≈1.0、
+             而 /livox/lidar/pointcloud 0Hz，且 FAST-LIO 日志里连 'No point' 都没有 ⇒ 回调从未被调用）。
+             修：显式 always_on=true（传感器无条件扫描），并把 visualize 关掉（30000 采样的射线可视化
+             在 gzclient 里是出了名的负担，且会让传感器行为依赖渲染端）。 -->
+        <always_on>true</always_on>
+        <visualize>false</visualize>
         <update_rate>10</update_rate>
         <plugin name="${name}_plugin" filename="libros2_livox.so">
           <ray>
