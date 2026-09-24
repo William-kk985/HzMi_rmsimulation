@@ -45,6 +45,13 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
 // Get the local pose from planner
 void FakeVelTransform::localPoseCallback(const nav_msgs::msg::Path::SharedPtr msg)
 {
+  // ★ 2026-09-24：spin_speed_ == 0 的直通模式下不做云台解耦，current_angle_ 恒为 0
+  //   （base_link→base_link_fake 的单位旋转），nav 看到的就是底盘真实朝向。
+  if (spin_speed_ == 0.0) {
+    current_angle_ = 0.0;
+    return;
+  }
+
   if (!msg || msg->poses.empty()) {
     RCLCPP_WARN(get_logger(), "Received empty or invalid PoseArray message");
     return;
@@ -62,6 +69,20 @@ void FakeVelTransform::localPoseCallback(const nav_msgs::msg::Path::SharedPtr ms
 // Transform the velocity from base_link to base_link_fake
 void FakeVelTransform::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
+  // ★ 2026-09-24 修复：原来无论 spin_speed 取什么值，都把 nav 的角速度**替换**成 spin_speed_：
+  //     aft_tf_vel.angular.z = (msg->angular.z != 0) ? spin_speed_ : 0;
+  //   于是当 spin_speed:=0.0（用来关掉小陀螺）时，**任何转弯指令都被写成 0** ⇒ 底盘永不转
+  //   ⇒ nav 永远对不准朝向 ⇒ progress_checker 报 'Failed to make progress'、车一步不动。
+  //   实测证据：/cmd_vel angular.z=0.75 → /cmd_vel_chassis angular.z=0.0，/odom_ground_truth 全 0。
+  //   修法：spin_speed_ == 0 时进入「无云台解耦」直通模式（此时 base_link_fake ≡ base_link）：
+  //         角速度与线速度原样下发，且不做 TF 查询（顺带避免了 TF 缺失时整条指令丢失）。
+  //         spin_speed_ != 0 时保持原有小陀螺/云台解耦语义完全不变。
+  if (spin_speed_ == 0.0) {
+    current_angle_ = 0.0;
+    cmd_vel_chassis_pub_->publish(*msg);
+    return;
+  }
+
   try {
     geometry_msgs::msg::TransformStamped transform_stamped;
     transform_stamped = tf2_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
