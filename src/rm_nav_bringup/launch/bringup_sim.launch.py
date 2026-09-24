@@ -133,6 +133,7 @@ def generate_launch_description():
     declare_localization_cmd = DeclareLaunchArgument(
         'localization',
         default_value='',
+        choices=['', 'amcl', 'slam_toolbox', 'icp', 'cartographer'],
         description='仅 mode:=nav 生效。重定位模块: amcl | slam_toolbox（需 .posegraph）| '
                     'icp（需 PCD/<world>.pcd）| cartographer（纯定位，需 map/<world>.pbstream）；'
                     '留空 = 回退用法，直接用 LIO 当绝对定位并由静态桥补帧')
@@ -140,6 +141,7 @@ def generate_launch_description():
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
         default_value='fastlio',
+        choices=['fastlio', 'pointlio', 'none', 'cartographer'],
         description='里程计源（谁发 odom→base_link）: fastlio | pointlio | '
                     'none（不启动 LIO，需外部提供 odom/TF，如轮式里程计）| '
                     'cartographer（**全包形态**：cartographer 兼任里程计源 → 同时跳过 mapper 槽与 '
@@ -149,6 +151,7 @@ def generate_launch_description():
     declare_nav_cmd = DeclareLaunchArgument(
         'nav',
         default_value='rpp',
+        choices=['rpp', 'dwb', 'teb'],
         description='Choose local planner variant: rpp | dwb | teb '
                     '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml)')
 
@@ -171,6 +174,7 @@ def generate_launch_description():
     declare_mapper_cmd = DeclareLaunchArgument(
         'mapper',
         default_value='slam_toolbox',
+        choices=['cartographer', 'slam_toolbox'],
         description='Choose 2D mapping backend (only mode:=mapping): slam_toolbox | cartographer')
 
     # Specify the actions
@@ -180,14 +184,15 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'world': world,
             'robot_description': robot_description,
-            # ★ 2026-09-24：**nav2 不共用组合容器（use_composition=False）**。
-            #   实测：两张 costmap 在同一个 component_container_mt 里跑几十秒后，/tf 与 /scan 的**摄入静默冻死**
-            #   （published_footprint 只有 1 个戳、costmap 内容 md5 恒定，而外部新开的 tf2 监听看到的是新鲜变换），
-            #   但发布循环照跑 ⇒ 表面完全正常、`expected_update_rate: 0.0` 也不再报警。
-            #   后果：costmap 内最新的 map→odom 永远是旧的 ⇒ planner/controller 拿过期 TF ⇒ 触发上游 nav2
-            #   `isGoalReached()` 丢弃 transformPose 返回值那个 bug ⇒ 目标被当成 (0,0,0) ⇒ 假"到达"、零速、车不动。
-            #   拆成独立进程后，单个回调卡死不会连带两张 costmap。
-            #   （想恢复组合容器省进程：删掉下面这一行即可。）
+            # ★ 2026-09-24：nav2 不共用组合容器（use_composition=False）。
+            #   当时的假设：两张 costmap 同处一个 component_container_mt 会互相拖死（摄入静默冻死）。
+            #   ⚠️ **该假设已被后续实测否定**：拆成独立进程后同样复现；真因是 livox 插件的 sensor 回调被
+            #   CustomMsg 的 RELIABLE 背压锁死 ⇒ /livox/lidar 与 /livox/lidar/pointcloud 同时停发 ⇒ 没有 /odom
+            #   ⇒ TF 里不存在 odom 帧 ⇒ costmap 的 getRobotPose() 取到的「最新公共时刻」被钉死在启动那一刻
+            #   （published_footprint 恒为 644.682，而它自己的 costmap_raw 戳是新鲜的）⇒ planner/controller 拿过期 TF
+            #   ⇒ 撞上上游 nav2 `isGoalReached()` 丢弃 transformPose 返回值那个 bug ⇒ 目标被当成 (0,0,0) ⇒ 假"到达"、车不动。
+            #   真因与修法见 docs/debug_fastlio_cartographer.md §9.2 候选④（CustomMsg/订阅 QoS 已于 2026-09-24 修复）。
+            #   本行保留 False 属「故障隔离」的保守选择，代价是多几个进程；想省进程可删掉本行，但需重跑验收。
             'use_composition': 'False',
             'rviz': 'False'}.items()
     )
