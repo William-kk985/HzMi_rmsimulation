@@ -163,7 +163,21 @@
 | ★★★ | 高程/净空图 | `src/rm_perception/rm_elevation_map/` |
 | ★★★ | 3D 规划器插件 | 新包（nav2 插件接口 2D，最贵） |
 
-## 6. 记录方式
+## 6. P0 回归怎么用（一条命令出结论）
+
+栈起来后（本脚本会等它就绪）：
+
+```bash
+python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0   # 链路体检 + 发目标 + 结果断言
+python3 tools/scripts/regress/nav_smoke_regression.py --skip-goal      # 只体检链路（换感知/建图轴时用）
+```
+
+判据（集中在脚本顶部 `TH` 字典，可按 world/起始点调）：链路四环节频率、TF 新鲜度、
+`footprint` 戳是否持续更新、**四跳命令链是否一致**、真值是否真动、
+以及**拒绝"假到达"**（<2 s 就 SUCCEEDED 而残余 >0.5 m ⇒ FAIL）。
+输出 `PASS/FAIL` + **首个断点** + `.tmp_bags/regress_<ts>.json` 快照 ⇒ 抄一行进 `algorithm_matrix.md §四`。
+
+## 7. 记录方式
 
 - **每玩一条路线** → 在 `algorithm_matrix.md §四 实测状态` 加一行（组合 / 日期 / 结论 / 判据数据）；
 - **轴有增减或语义变化** → 改本文；
