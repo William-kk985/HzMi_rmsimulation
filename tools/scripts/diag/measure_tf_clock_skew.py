@@ -11,6 +11,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
+from sensor_msgs.msg import PointCloud2
+from nav_msgs.msg import Odometry
 
 # /tf 上真正被直接发布的边（map->base_link_fake 是 tf2 现场合成的，不会出现在 /tf 里）
 WATCH = {("odom", "base_link"), ("base_link", "base_link_fake"), ("map", "odom")}
@@ -21,6 +23,7 @@ class Skew(Node):
         super().__init__("measure_tf_clock_skew")
         self.clock = None
         self.stamps = {}
+        self.msgs = {}   # 话题 -> 最新 header.stamp（对照 TF 数据区间用）
         # 注意：gzserver 的 /clock 是 BEST_EFFORT 发的，用默认 RELIABLE 会收不到（QoS 不兼容）
         clock_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.BEST_EFFORT,
                                durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
@@ -28,9 +31,17 @@ class Skew(Node):
         qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
         self.create_subscription(TFMessage, "/tf", self.on_tf, qos)
+        # 点云是 SensorDataQoS(best effort)；/odom 用默认 RELIABLE（与 ros2 topic echo 默认一致）
+        self.create_subscription(PointCloud2, "/livox/lidar/pointcloud", lambda m: self.on_msg("pointcloud", m),
+                                 QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                            durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST))
+        self.create_subscription(Odometry, "/odom", lambda m: self.on_msg("odom", m), 20)
 
     def on_clock(self, msg):
         self.clock = msg.clock.sec + msg.clock.nanosec * 1e-9
+
+    def on_msg(self, name, msg):
+        self.msgs[name] = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
     def on_tf(self, msg):
         for t in msg.transforms:
@@ -47,6 +58,11 @@ class Skew(Node):
             v = self.stamps.get(key)
             parts.append(f"{key[0]}->{key[1]}: {'--' if v is None else f'{v:.3f} (Δ{v - self.clock:+.3f})'}")
         print(f"clock={self.clock:.3f} | " + " | ".join(parts))
+        m = []
+        for k in ("pointcloud", "odom"):
+            v = self.msgs.get(k)
+            m.append(f"{k}: {'--' if v is None else f'{v:.3f} (Δ{v - self.clock:+.3f})'}")
+        print("        消息戳  " + " | ".join(m))
 
 
 def main():
