@@ -655,6 +655,9 @@ tf2 会按 `TF_OLD_DATA ignoring data from the past` 丢弃 ⇒ 该帧「最新�
 `tf2_echo odom base_link`、`tf2_echo map odom` **都取不到** ⇒ **`odom` 帧压根不存在** ⇒ tf2 查 `odom→base_link_fake` 时「最新公共时刻」被钉死在 `odom→base_link` 最后一次出现的那一刻（= 644.682）
 ⇒ 位姿恒定、而查询「还成功」 ⇒ 触发 §9.1 的假到达链。
 **为什么雷达死而 IMU 活**：IMU 与雷达是**两个独立 Gazebo 插件**（`/imu_plugin`、`/livox_frame_plugin`）。
+**卡死范围的实测（2026-09-24，sim 846，12 秒窗口）**：`/livox/lidar`(CustomMsg) **无消息**、`/livox/lidar/pointcloud` **无消息**、
+而 `/livox/imu` **99.94 Hz** ⇒ **不是「只缺点云」，而是 `livox_frame_plugin` 的 sensor 回调整体阻塞**。
+这条与下面的源码顺序一起，把机理钉死：回调先卡在 252 行的 CustomMsg 发布上，255 行的点云便永远发不出来。
 
 **机理（源码级，已定位到行）**：
 1. `/livox/lidar`(CustomMsg)：发布者 `livox_frame_plugin` **RELIABLE** ↔ 订阅者 `laser_mapping`(FAST-LIO) **RELIABLE** ⇒ QoS 匹配、不丢帧，**但会产生背压**；
