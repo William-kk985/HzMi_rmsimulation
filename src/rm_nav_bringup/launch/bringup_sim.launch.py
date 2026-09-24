@@ -237,7 +237,9 @@ def generate_launch_description():
                 executable='fastlio_mapping',
                 parameters=[
                     fastlio_mid360_params,
-                    {use_sim_time: use_sim_time},
+                    # ★ 2026-09-24 修复：原来键名漏了引号（{use_sim_time: use_sim_time}）⇒ 这个参数
+                    #   根本没传到节点（实测 /laser_mapping use_sim_time=False，而全栈其它节点都是 True）。
+                    {'use_sim_time': use_sim_time},
                     {'runtime_pos_log_enable': False},
                     # 装配级：pcd 落盘路径按 world 自动指向 PCD/<world>.pcd
                     # （= icp_registration 的底图路径，建图产物直接可被重定位复用）。

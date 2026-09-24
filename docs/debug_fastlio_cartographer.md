@@ -673,6 +673,15 @@ tf2 会按 `TF_OLD_DATA ignoring data from the past` 丢弃 ⇒ 该帧「最新�
 3. 顺便把 `laser_mapping` 的 `use_sim_time` 设为 `True`（与全栈一致）；
 4. **验收**：`ros2 topic hz /livox/lidar/pointcloud --qos-reliability best_effort` ≈ 10 Hz 且**连续转 5 分钟不中断**；`tf2_echo odom base_link` 持续出数；`published_footprint` 戳跟着 `/clock` 走。
 
+**已实施（2026-09-24）** —— 三处改动 + 构建结果：
+- ① `src/rm_simulation/livox_laser_simulation_RO2/src/livox_points_plugin.cpp`：`custom_pub` 的 QoS `10` → `rclcpp::SensorDataQoS()`（带注释说明，见文件内）；
+- ② `src/rm_localization/FAST_LIO/src/laserMapping.cpp`：AVIA 分支的 CustomMsg 订阅 `20` → `rclcpp::SensorDataQoS()`（与 ① 同一次提交，必须成对）；
+- ③ `src/rm_nav_bringup/launch/bringup_sim.launch.py`：`{use_sim_time: use_sim_time}` → `{'use_sim_time': use_sim_time}`（**键名漏引号**导致该参数从未传给 `fastlio_mapping`）。
+- 构建：`ros2_livox_simulation`（**注意真实包名不是目录名** `livox_laser_simulation_RO2`）12.9 s ✓ ／ `fast_lio` 48.4 s ✓（仅 boost 弃用告警）／ `rm_nav_bringup` 走 `--symlink-install`，launch 立即生效 ✓。
+- ⚠️ **FAST_LIO 是 git 子模块**：本次改动与既有的 `child_frame_id: "body"→"imu_link"` 一样，**保持在工作区未提交**（父仓库只记录 gitlink），所以文档在此留全文，便于复现。
+- ⚠️ **尚未验证**：需重启仿真跑上面第 4 条验收（尤其是"连续 5 分钟不中断"）——本轮只做到"编译通过"。
+- 重启后先自查一条：`ros2 param get /laser_mapping use_sim_time` 应为 **True**（③ 生效的判据）。
+
 ### 9.3 上游查证（2026-09-24）
 
 | 事实 | 出处 |

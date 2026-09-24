@@ -83,7 +83,17 @@ namespace gazebo
         cloud2_pub = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
             curr_scan_topic + "/pointcloud", rclcpp::SensorDataQoS());
         // CustomMsg publisher
-        custom_pub = node_->create_publisher<livox_ros_driver2::msg::CustomMsg>(curr_scan_topic, 10);
+        // ★ 2026-09-24 修复（与上面 cloud2_pub 同一个坑，上一轮只修了那条、漏了这条）：
+        //   原来这里是默认的 RELIABLE + KEEP_LAST(10)。FAST-LIO(mid360/AVIA) 订的正是 CustomMsg，
+        //   两端都 RELIABLE ⇒ 一旦它的回调跟不上，**这一行会在 Gazebo 的 sensor 回调里阻塞**；
+        //   而它在本函数里排在 cloud2_pub->publish() 之前 ⇒ 同一帧的 PointCloud2 永远发不出去，
+        //   且不自恢复。实测：/livox/lidar 与 /livox/lidar/pointcloud 同时无消息，而 /livox/imu
+        //   （另一个插件）99.94 Hz ⇒ 没有 odom 帧 ⇒ costmap 位姿冻在启动那一刻(644.682)
+        //   ⇒ nav2「假到达」、车一步不动。详见 docs/debug_fastlio_cartographer.md §9.2 候选④。
+        //   改 best effort 后写者永不阻塞；FAST-LIO 侧订阅必须同步改 SensorDataQoS()，否则
+        //   BEST_EFFORT 写者 + RELIABLE 读者 = QoS 不兼容，laser_mapping 一条都收不到。
+        custom_pub = node_->create_publisher<livox_ros_driver2::msg::CustomMsg>(
+            curr_scan_topic, rclcpp::SensorDataQoS());
 
         scanPub = node->Advertise<msgs::LaserScanStamped>(curr_scan_topic+"laserscan", 50);
 
