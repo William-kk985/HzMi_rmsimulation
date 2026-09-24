@@ -622,7 +622,7 @@ velocity_smoother + behavior_server 4 个行为插件，正常）· 组合容器
 第二时钟源（`/clock` 只 1 个发布者）· tf2 时间跳变清空缓冲区（**全日志无 `Clearing TF buffer`**）·
 `transform_tolerance` 大小（见 9.0 #7 与 §9.3）。
 
-**候选①（最值得先试，来自本文 §8 的老线索）**：`fake_vel_transform` 发的 `base_link→base_link_fake`
+**候选①（2026-09-24 实测：❌ 已否掉，见本节末）**：`fake_vel_transform` 发的 `base_link→base_link_fake`
 **3317/5508 条戳非单调**，而 costmap 的 `robot_base_frame` 正是 `base_link_fake`。若它持续发出「比已接受样本更旧」的戳，
 tf2 会按 `TF_OLD_DATA ignoring data from the past` 丢弃 ⇒ 该帧「最新样本」永远停在启动那一刻 ⇒ **与 644.682 恒定的观测完全吻合**。
 → 判据：录 30 s `/tf`，单独统计 `base_link_fake` 的戳是否单调；同时 grep `tf2_buffer` 的 `TF_OLD_DATA` 行。
@@ -635,6 +635,40 @@ tf2 会按 `TF_OLD_DATA ignoring data from the past` 丢弃 ⇒ 该帧「最新�
 看 footprint 戳是否一直跟着 `/clock` 走。
 
 **候选③**：RMW/reader 层饿死（geometry2 #727 类）。本机 DDS profile 已排除，但「进程内所有读者一起停」这一形态仍属此类。
+
+#### 候选① 的实测结论（2026-09-24，`tools/scripts/diag/record_tf_monotonic.py`）
+
+两次各 30 s（原始数据 `.tmp_bags/tf_monotonic_1790250386.jsonl` / `_1790250988.jsonl`），按**到达顺序**模拟 tf2 的行为：
+
+| 边 | 条数 | Hz | 「drops」 | 其中=重复戳 | 最大回退 | `running_max − clock` |
+|---|---|---|---|---|---|---|
+| `base_link→base_link_fake` | 626 / 600 | 20.0 | 366 / 300 | **366 / 300** | **0.000 s** | **0.000** |
+| `base_link→wheel_1..4` | 259×4 / 300×4 | 8.3 / 10.0 | 0 | 0 | 0.000 s | 0.000 |
+
+⇒ 那 366 次根本不是「戳倒退」，**全部是同一戳重复发**（20 Hz 发、戳只按轮子数据的 8.3~10 Hz 更新）；`running_max` 与 `/clock` 完全同步 ⇒ **这条边在 tf2 眼里是新鲜的** ⇒ **候选① 不成立**。
+（推论：§8 里那条「5508 条里 3317 条戳非单调」很可能也是把「重复戳」计成了非单调 —— 统计口径要写成「严格小于前值」而不是「小于等于」。）
+
+#### ★ 候选④（2026-09-24 现场确认：**本次运行的直接根因**）
+
+**现象**：`/livox/lidar/pointcloud` **根本不发**。
+**判据（活图）**：`/livox/imu` 新鲜（755.79）；而 `/livox/lidar/pointcloud`、`/segmentation/obstacle`、`/scan`、`/odom`、`/amcl_pose` **全部无数据**；`/tf` 里**只有** `base_link→base_link_fake` + 四个轮子，
+`tf2_echo odom base_link`、`tf2_echo map odom` **都取不到** ⇒ **`odom` 帧压根不存在** ⇒ tf2 查 `odom→base_link_fake` 时「最新公共时刻」被钉死在 `odom→base_link` 最后一次出现的那一刻（= 644.682）
+⇒ 位姿恒定、而查询「还成功」 ⇒ 触发 §9.1 的假到达链。
+**为什么雷达死而 IMU 活**：IMU 与雷达是**两个独立 Gazebo 插件**（`/imu_plugin`、`/livox_frame_plugin`）。
+
+**机理（源码级，已定位到行）**：
+1. `/livox/lidar`(CustomMsg)：发布者 `livox_frame_plugin` **RELIABLE** ↔ 订阅者 `laser_mapping`(FAST-LIO) **RELIABLE** ⇒ QoS 匹配、不丢帧，**但会产生背压**；
+2. `livox_points_plugin.cpp` 里 **第 252 行 `custom_pub->publish(pp_livox)` 在第 255 行 `cloud2_pub->publish(cloud2)` 之前** ⇒ 一旦 CustomMsg 的 `KEEP_LAST(10)` 被慢下游写满，
+   **这一行就在 Gazebo 的 sensor 回调里阻塞** ⇒ 同一帧的 PointCloud2 **永远发不出去**，且**不再自恢复**；
+3. ⇒ 与 §8 第一条「480 KB/帧 灌 DDS ⇒ 整链冻死且不自恢复」是**同一个坑的残余**：上一轮只把 `cloud2_pub` 改成 `SensorDataQoS()`(best effort)，**CustomMsg 这条写者没改**。
+
+**附带发现（真 bug，§9.0 未列）**：`/laser_mapping use_sim_time = False`（活图实测）—— FAST-LIO 跑墙钟而消息是 sim 戳，会放大它回调的耗时/异常（其日志里出现过 `No point`）。
+
+**修法（⚠️ 两端必须一起改，只改一端会变成「一条都收不到」）**：
+1. `src/rm_simulation/livox_laser_simulation_RO2/src/livox_points_plugin.cpp:86`：`custom_pub` 改 `rclcpp::SensorDataQoS()`；
+2. **同一提交**把 FAST-LIO 的雷达订阅也改 `rclcpp::SensorDataQoS()`（否则 BEST_EFFORT 写者 + RELIABLE 读者 = QoS 不兼容 ⇒ `laser_mapping` 收不到，建图直接废）；
+3. 顺便把 `laser_mapping` 的 `use_sim_time` 设为 `True`（与全栈一致）；
+4. **验收**：`ros2 topic hz /livox/lidar/pointcloud --qos-reliability best_effort` ≈ 10 Hz 且**连续转 5 分钟不中断**；`tf2_echo odom base_link` 持续出数；`published_footprint` 戳跟着 `/clock` 走。
 
 ### 9.3 上游查证（2026-09-24）
 
