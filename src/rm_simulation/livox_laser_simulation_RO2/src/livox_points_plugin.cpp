@@ -160,7 +160,7 @@ namespace gazebo
             if ((now_probe - last_probe).seconds() > 2.0) {
                 last_probe = now_probe;
                 static long probe_count = 0;
-                RCLCPP_WARN(rclcpp::get_logger("LivoxPointsPlugin"),
+                RCLCPP_DEBUG(rclcpp::get_logger("LivoxPointsPlugin"),
                     "[probe] OnNewLaserScans 被调用 第%ld次: sensor=%s active=%d update_rate=%.1f",
                     ++probe_count, raySensor->Name().c_str(),
                     static_cast<int>(raySensor->IsActive()), raySensor->UpdateRate());

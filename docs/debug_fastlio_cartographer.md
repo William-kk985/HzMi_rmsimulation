@@ -567,7 +567,7 @@ ros2 run tf2_tools view_frames
 |---|---|
 | ~~插件不发 `(0,0,0)` 假点~~ **已完成 2026-09-23** | 原来无回波射线被填成 `(0,0,0)` 发出（每帧 78.4%，30000 点里只有 ~6200 真有回波）⇒ 480 KB/帧 @10Hz 灌 DDS；**RELIABLE + KEEP_LAST(10)** 的写者一旦积压就会阻塞 Gazebo 的 sensor 回调 ⇒ 整条感知链冻死且不自恢复（实测 `/scan` 与 `/segmentation/obstacle` 同时停更 180 s，而 linefit/p2l 进程仍活着）| **已改**：`ros2_livox_simulation/livox_points_plugin.cpp` 先数有效回波再 resize、无回波整点丢弃（CustomMsg 同步受益）⇒ 消息 ~480 KB → ~100 KB。真实驱动行为一致 |
 | IMU 首帧重力 | 要"先录制 → 全新 launch"才能抓到首帧；确认后加"丢掉开头零加速度帧"的管道滤波（实车同样需要） |
-| **`fake_vel_transform` 戳 ★★** | `base_link→base_link_fake` 5508 条里 **3317 条戳非单调**（会让 tf2 按 `TF_OLD_DATA` 丢弃）。**2026-09-24 升级为 §9.2 候选①：costmap 位姿「冻在启动那一刻」的最可能原因** |
+| ~~`fake_vel_transform` 戳~~ **已查清 2026-09-24** | 5508 条里 3317 条「非单调」经 §9.2 实测证实**全部是同一戳重复发**（20 Hz 发、戳按轮子 8.3~10 Hz 更新），**没有回退**、`running_max` 与 `/clock` 完全同步 ⇒ 对 tf2 无害，**不再是嫌疑** |
 | `/odom`(LIO) 重复戳 | 1905 条里 20 条重复（同样会让显示侧抖） |
 
 ---
@@ -724,6 +724,47 @@ gzserver 终端 `[probe] ... active=1 update_rate=10.0` 每 2 秒一条。
   各 ROS 节点的输出在 `~/.ros/log/<node>_<pid>_*.log` ⇒ 早期"livox帧=0"的指纹列因此是无意义的。
 - 结论：**每个"某环节无数据"的判断，都必须先确认那条命令本身能出数**（本仓库一律用
   `tools/scripts/diag/watch_startup_chain.py`，它把每个话题的正确 QoS 写死在代码里）。
+
+---
+
+### 9.2c ★★ 收官（2026-09-24 晚）：`fake_vel_transform` 丢弃角速度 ⇒ 车永不转弯（已修，**端到端走通**）
+
+**症状**：目标被受理、控制器正常下发 `/cmd_vel`，但约 15 s 后 `controller_server: Failed to make progress`
+→ `Aborting handle` → `clear costmap` 重试；`/odom_ground_truth` 的 twist 全 0、orientation ≈ 单位四元数 ⇒ 车真的没动。
+
+**三段实测定位**：
+
+| 话题 | 实测 | 结论 |
+|---|---|---|
+| `/cmd_vel_nav` | (0, 0, **0.75**) | 控制器正常（原地转向，RPP 在朝向误差大时的正常输出） |
+| `/cmd_vel` | (0, 0, **0.75**) | velocity_smoother 原样透传 ✓ |
+| **`/cmd_vel_chassis`** | (0, 0, **0.0**) | **角速度在此被吃掉** |
+| `/odom_ground_truth` | twist=0、orientation≈(0,0,0,1) | 车确实静止（真值） |
+
+**根因**（`src/rm_navigation/fake_vel_transform/src/fake_vel_transform.cpp:73`）：
+
+```cpp
+aft_tf_vel.angular.z = (msg->angular.z != 0) ? spin_speed_ : 0;   // 把 nav 角速度「替换」为小陀螺转速
+```
+
+该节点是**小陀螺/云台解耦**：`base_link_fake` 是云台系，底盘转速被设计成恒定的 `spin_speed_`（默认 −6.0），
+再靠 `base_link→base_link_fake` 的反向旋转让 nav「以为」朝向是对的。
+**所以 `spin_speed:=0.0`（关小陀螺）时，任何转向指令都被写成 0** ⇒ 底盘永不转 ⇒ nav 永远对不准朝向
+⇒ `progress_checker` 判 `Failed to make progress`。
+
+**修法**：`spin_speed_ == 0` 时进入**无解耦直通模式** —— `current_angle_` 恒 0（`base_link_fake ≡ base_link`）、
+指令（含角速度）原样下发、且不再依赖 TF 查询；`spin_speed_ != 0` 时**原小陀螺语义一字未改**。
+（将来若要「小陀螺 + nav 也能转向」，正确语义是 `chassis_angular = spin_speed_ + msg->angular.z`，
+但会改变哨兵行为，未采用。）
+
+**验收（用户实测）**：**「走通了，给目标点车可以过去」** ✅
+
+**遗留（不挡走，择日收尾）**：
+1. 全局 costmap 的 `stvl_layer` 仍 100% 丢弃 `/segmentation/obstacle`
+   （`the timestamp on the message is earlier than all the data in the transform cache`，与 AMCL
+   `transform_tolerance: 1.0` 的未来戳 + 点云戳区间不重叠有关）⇒ 全局看不到实时 3D 障碍；static + `/scan` 已够规划；
+2. launch 的 `mode` 槽默认空串而文档写「必填」，暂未加 `choices`；
+3. `~/.bashrc` 里 `export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` 重复 7 次（无害，建议清理）。
 
 ---
 
