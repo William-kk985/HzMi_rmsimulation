@@ -148,6 +148,24 @@ namespace gazebo
 
 
     void LivoxPointsPlugin::OnNewLaserScans() {
+        // ★ 2026-09-24 现场探针（每 2 秒最多一条）：用于区分
+        //   「Gazebo 根本没调用扫描回调」与「回调调用了但点云发不出去」。
+        //   症状对照：/livox/imu 100Hz、/clock RTF≈1.0，而 /livox/lidar/pointcloud 0Hz 时，
+        //   若本行**完全不出现** ⇒ 卡在 Gazebo 传感器侧（mid360.xacro 没有 <always_on>、
+        //   传感器/模型是否真的生成扫描），与插件发布逻辑无关。
+        {
+            static rclcpp::Clock probe_clock(RCL_STEADY_TIME);
+            static rclcpp::Time last_probe(0, 0, RCL_STEADY_TIME);
+            const rclcpp::Time now_probe = probe_clock.now();
+            if ((now_probe - last_probe).seconds() > 2.0) {
+                last_probe = now_probe;
+                static long probe_count = 0;
+                RCLCPP_WARN(rclcpp::get_logger("LivoxPointsPlugin"),
+                    "[probe] OnNewLaserScans 被调用 第%ld次: sensor=%s active=%d update_rate=%.1f",
+                    ++probe_count, raySensor->Name().c_str(),
+                    static_cast<int>(raySensor->IsActive()), raySensor->UpdateRate());
+            }
+        }
         if (!rayShape) {
             return; // 检查是否已经初始化了 rayShape
         }
