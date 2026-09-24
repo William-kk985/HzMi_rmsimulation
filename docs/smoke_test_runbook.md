@@ -80,6 +80,11 @@ sleep 2
 | `mode` | **`mapping`（纯建图）/ `slam_nav`（边建边导）/ `nav`（先建后导）** | 空（**必填**） |
 | `lio` | `fastlio` / `pointlio` / `none` / `cartographer`（全包，见 §6.1） | `fastlio` |
 | `localization` | `amcl` / `slam_toolbox` / `icp` / `cartographer`（**仅 `mode:=nav`** 生效） | 空 |
+
+> ⚠️ **常见误用（2026-09-24 实录）**：把 `amcl` 传给 **`lio`** 槽（例：`lio:=amcl`）⇒ 没有任何分支匹配它 ⇒ **FAST-LIO 与 AMCL 都不会启动**，`/odom` 与 `odom→base_link` 全部缺失，costmap 报 `Tf has two or more unconnected trees` 并每 0.5 s 超时一次（进程列表里查不到 `fastlio_mapping` 即为铁证）。
+> **`amcl` 只能给 `localization`**；`lio` 只接受 `fastlio` / `pointlio` / `none` / `cartographer`。
+> 正确写法：`world:=RMUL2026 mode:=nav lio:=fastlio localization:=amcl nav:=rpp spin_speed:=0.0`
+
 | `nav` | `rpp` / `dwb` / `teb`（`nav` / `slam_nav` 生效） | `rpp` |
 | `mapper` | `slam_toolbox` / `cartographer`（`mapping` / `slam_nav` 生效） | `slam_toolbox` |
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |

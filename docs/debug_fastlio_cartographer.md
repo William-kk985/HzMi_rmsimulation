@@ -589,6 +589,7 @@ ros2 run tf2_tools view_frames
 | 7 | 我的一次错误尝试：把 `local_costmap.transform_tolerance` 放大到 1000 想「别让转换失败」 | 在 tf2 里这个值经 `getCurrentPose()` 传成了**等待超时**，遇到「过去的时间点」这种永远等不来的查询会让 costmap 线程一次阻塞到超时（1000 秒） ⇒ **小病治成大病** | 已撤销回 `0.3`，注释里写明原因 | ⚠️ 教训（已撤销） |
 | 8 | 反复假警报：`/scan`「DEAD」、`/clock`「收不到」、p2l 报 RELIABLE 订阅者 QoS 不兼容 | `ros2 topic echo/hz` **默认 RELIABLE**，而 `/scan`(p2l)、`/clock`(gzserver) 都是 **BEST_EFFORT** 发的 ⇒ 根本收不到；那条被拒的 RELIABLE `/scan` 订阅者就是这种探测（costmap 硬编码 sensor QoS、amcl/rviz 都匹配，均排除） | **一切活性探测一律加 `--qos-reliability best_effort`**；`watch_stack.sh` 已修 | ✅ 方法论 |
 | 9 | 插件每帧发 78.4% 的 `(0,0,0)` 假点，~480 KB/帧 @10Hz | 无回波射线被填成 `(0,0,0)`；RELIABLE+KEEP_LAST 写者一旦积压就**阻塞 Gazebo 的 sensor 回调** ⇒ 整条感知链冻死且不自恢复 | 先数有效回波再 resize、无回波整点丢弃（消息 ~480 KB → ~100 KB） | ✅（上一轮已改） |
+| 11 | 启动后 TF 报 `Tf has two or more unconnected trees`、costmap 一直 `Timed out waiting for transform … odom` | 命令里写了 **`lio:=amcl`**。`lio` 槽的定义是「谁发 `odom→base_link`」，合法值只有 `fastlio` / `pointlio` / `none` / `cartographer`；`amcl` 不在其中、也没有分支匹配它 ⇒ **FAST-LIO 没起、AMCL 也没起**（AMCL 在 `localization` 槽）⇒ 无 `/odom` ⇒ `lio_tf_adapter` 无源可转 ⇒ 只剩静态桥的碎片（`{map,camera_init}`、`{odom,body}`、`{base_link,…}`）⇒ TF 断裂。判据：进程列表里**没有 `fastlio_mapping`**，`lifecycle_manager_localization` 只起了 `map_server` | 正确命令：`mode:=nav lio:=fastlio localization:=amcl`（见 `docs/smoke_test_runbook.md`） | ⚠️ 命令坑（2026-09-24 实录） |
 | 10 | RViz「崩溃」 | 实际是**退出时** librclcpp `SIGSEGV`（teardown）且与 fastlio 同帧，不是点云洪泛/GL 问题 | 记录待查（不影响运行） | 记录 |
 
 ### 9.1 假到达链（因果闭环，可 100% 复现）
