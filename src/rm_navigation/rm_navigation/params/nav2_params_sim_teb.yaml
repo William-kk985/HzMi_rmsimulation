@@ -291,7 +291,11 @@ global_costmap:
           marking: true
           clearing: false
           obstacle_range: 3.0                                       # meters
-          min_obstacle_height: 0.2                                  # default 0, meters
+          # ★ 2026-09-24：min_obstacle_height 0.2 → 0.0。
+          #   原来把 20cm 以下全丢 ⇒ 矮内墙在 stvl 里天然不存在；而全局 costmap 才是规划用的那一张
+          #   ⇒「stvl 有的才规避」的现象由此而来。代价：贴地噪声更易成为障碍（幽灵障碍）⇒ 出现就回退 0.05。
+          #   ⚠️ 前提：stvl 必须真收到点云；若终端仍刷 'Message Filter dropping … livox_frame'，改这里无效（先修 TF，见 docs/debug_fastlio_cartographer.md §9.2）。
+          min_obstacle_height: 0.0                                  # default 0, meters（2026-09-24 由 0.2 调低）
           max_obstacle_height: 2.0                                  # default 3, meters
           expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
                               #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
