@@ -247,7 +247,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link_fake
       use_sim_time: True
-      robot_radius: 0.2
+      # ★ 2026-09-24：0.2 → 0.35（同上，**全局这张才是规划用的**，漏改会导致 planner 仍允许贴脸）
+      robot_radius: 0.35
       resolution: 0.04
       track_unknown_space: true
       # 实时障碍来源二选一（由 launch 的 global_obstacle 参数切 enabled，默认 stvl 保持原行为）：
