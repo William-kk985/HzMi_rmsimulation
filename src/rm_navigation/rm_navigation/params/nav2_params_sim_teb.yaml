@@ -176,7 +176,12 @@ local_costmap:
       width: 5
       height: 5
       resolution: 0.02
-      robot_radius: 0.2
+      # ★ 2026-09-24：0.2 → 0.35（= 车体半径 0.2 + 近距盲区余量 0.15）。
+      #   本仓库没有 footprint 多边形 ⇒ nav2 的"实心圈"(代价 253, INSCRIBED) 半径就等于 robot_radius。
+      #   实测现象：车贴到内墙很近时墙会"碎掉"（进 p2l 的 range_min=0.2 盲区后被丢/被清）。
+      #   把它加大到"车体+盲区"⇒ 规划器不会再把车带进盲区，墙自然不会被贴脸。
+      #   代价：<0.7m 的窄缝会判为不可通行 ⇒ 若太保守，回退 0.25~0.30。
+      robot_radius: 0.35
       # 局部障碍来源 = 两个可切换图层（bench 槽位，launch 用 local_obstacle 参数切 enabled）：
       #   obstacle_layer       = /scan（几何 2D；链路单点，且 p2l 有 45cm 盲区）
       #   obstacle_cloud_layer = /segmentation/obstacle 点云直投（不经 p2l；默认关，A/B 用）
@@ -228,7 +233,9 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
-        inflation_radius: 0.6
+        # ★ 2026-09-24：0.6 → 0.5（"虚"的外扩收小一点，按用户体感）
+        #   注意：必须 ≥ robot_radius(0.35)，否则 nav2 会告警并夹紧。
+        inflation_radius: 0.5
       always_send_full_costmap: true
 
 global_costmap:
@@ -325,7 +332,8 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 8.0
-        inflation_radius: 0.7
+        # ★ 2026-09-24：0.7 → 0.55（同上，全局的"虚"也收小）
+        inflation_radius: 0.55
       always_send_full_costmap: True
 
 map_saver:
