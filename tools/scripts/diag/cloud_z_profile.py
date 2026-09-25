@@ -102,14 +102,14 @@ class Prof(Node):
         first_break = None
         for b in BUCKETS:
             c = self.cloud[b]
+            label = "%g-%s" % (b[0], "inf" if b[1] > 1e8 else "%g" % b[1])
             if c["n"] == 0:
-                print(f"  {f'{b[0]}-{b[1] if b[1]<1e8 else \"inf\"}':>12} {'0':>8} {'--':>10} {'--':>10} {'--':>10} {'--':>11} "
-                      f"{self._scan_pct(b):>16}")
+                print(f"  {label:>12} {'0':>8} {'--':>10} {'--':>10} {'--':>10} {'--':>11} {self._scan_pct(b):>16}")
                 continue
             zs = sorted(c["zs"])
             med = zs[len(zs) // 2]
             pct = 100.0 * c["hi"] / max(1, c["n"])
-            print(f"  {f'{b[0]}-{b[1] if b[1]<1e8 else \"inf\"}':>12} {c['n']:>8} {c['zmin']:>10.3f} {med:>10.3f} "
+            print(f"  {label:>12} {c['n']:>8} {c['zmin']:>10.3f} {med:>10.3f} "
                   f"{c['zmax']:>10.3f} {pct:>10.1f}% {self._scan_pct(b):>16}")
             if first_break is None and pct < 5.0 and c["n"] > 50:
                 first_break = b
