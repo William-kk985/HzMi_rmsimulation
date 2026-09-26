@@ -62,21 +62,23 @@ class SegNav(Node):
 
     def compute_path(self, goal, start=None):
         if not self.planner.wait_for_server(timeout_sec=10.0):
-            print("[seg] /compute_path_to_pose 不可用（nav2 没起？）", flush=True); return None
+            print("[seg] /compute_path_to_pose 不可用（nav2 没起？）", flush=True); return None, None, None
         g = ComputePathToPose.Goal()
         g.goal, g.planner_id = goal, "GridBased"
         g.use_start = start is not None
         g.start = start if start is not None else goal     # use_start=False 时被忽略
         fut = self.planner.send_goal_async(g)
         if not self.wait(fut, 20.0):
-            print("[seg] 规划请求超时", flush=True); return None
+            print("[seg] 规划请求超时", flush=True); return None, None, None
         gh = fut.result()
         if gh is None or not gh.accepted:
-            print("[seg] 规划被拒绝", flush=True); return None
+            print("[seg] 规划被拒绝", flush=True); return None, None, None
         rf = gh.get_result_async()
         if not self.wait(rf, self.a.seg_timeout):
-            print("[seg] 规划无结果（目标不可达，或必须穿过未知/障碍区）", flush=True); return None
-        return rf.result().result.path
+            print("[seg] 规划无结果（目标不可达，或必须穿过未知/障碍区）", flush=True)
+            return None, None, None
+        res = rf.result()
+        return res.result.path, res.status, getattr(res.result, "error_code", None)
 
     def pick_segment(self, path):
         poses = path.poses
@@ -159,9 +161,20 @@ def main():
     virtual = None            # dry-run 用：虚拟的"当前位置"（= 上一段终点）
     seg_i, ok = 0, False
     while seg_i < a.max_segs:
-        path = n.compute_path(goal, start=virtual)
+        path, st, ec = n.compute_path(goal, start=virtual)
         if path is None:
-            print("[seg] ✗ 规划失败：目标不可达（或必须穿过未知区）", flush=True); break
+            print("[seg] ✗ 规划请求失败（见上一行）", flush=True); break
+        if not path.poses:
+            m = n.map
+            res_, ox, oy = m.info.resolution, m.info.origin.position.x, m.info.origin.position.y
+            print("[seg] ✗ planner 返回**空路径**：status=%s error_code=%s" % (st, ec), flush=True)
+            print("     地图范围 x[%.2f, %.2f] y[%.2f, %.2f]；目标(%.2f,%.2f) 落格=%s"
+                  % (ox, ox + m.info.width * res_, oy, oy + m.info.height * res_,
+                     a.goal[0], a.goal[1], n.cell(a.goal[0], a.goal[1])), flush=True)
+            print("     判读：若目标是 out/unk/occ ⇒ 目标在地图外/未知/障碍里；"
+                  "若目标 free 却仍空路径 ⇒ 多半是**车当前位姿不在 costmap 覆盖范围内**（地图没覆盖到车）",
+                  flush=True)
+            break
         cur = path.poses[0].pose            # planner 给的"当前位姿"，不自己查 TF
         d_goal = math.hypot(goal.pose.position.x - cur.position.x,
                             goal.pose.position.y - cur.position.y)
