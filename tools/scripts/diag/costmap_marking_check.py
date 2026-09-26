@@ -72,8 +72,21 @@ class Chk(Node):
         self.stat = {b: {"n": 0, "mk": 0, "lethal": 0, "cost": 0} for b in BUCKETS}
         self.frames, self.clouds, self.no_tf = set(), 0, 0
         self.create_subscription(PointCloud2, "/segmentation/obstacle", self.on_cloud, BEST)
-        self.create_subscription(OccupancyGrid, topic, self.on_grid, RELI)
-        self.create_subscription(OccupancyGrid, topic, self.on_grid, LATCH)
+        # ★ 2026-09-26 修正：原来请求 RELIABLE，而话题可能是 BEST_EFFORT 发布的 ⇒ 一点都收不到
+        #   （本项目第 N 次踩同一个坑：/scan、/clock 也是）。DDS 的 RxO 规则下：
+        #   「请求 BEST_EFFORT」对 RELIABLE / BEST_EFFORT 两种写者**都兼容** ⇒ 统一用它，
+        #   同时把写者的真实 QoS 打印出来，避免以后再猜。
+        try:
+            infos = self.get_publishers_info_by_topic(topic)
+            if infos:
+                q = infos[0].qos_profile
+                print("[check] %s 写者 QoS: reliability=%s durability=%s depth=%s"
+                      % (topic, q.reliability, q.durability, q.depth), flush=True)
+            else:
+                print("[check] %s 暂无写者（图发现可能滞后，仍继续订阅）" % topic, flush=True)
+        except Exception as e:               # noqa: BLE001
+            print("[check] 查询写者 QoS 失败:", e, flush=True)
+        self.create_subscription(OccupancyGrid, topic, self.on_grid, BEST)
 
     def on_grid(self, m):
         self.grid = m
