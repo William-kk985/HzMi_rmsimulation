@@ -28,10 +28,17 @@ from rclpy.time import Time
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav_msgs.msg import OccupancyGrid
-from tf2_ros import Buffer, TransformListener
+from tf2_msgs.msg import TFMessage
+from tf2_ros import Buffer
 
 MAP_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
+# /tf：动态，RELIABLE+VOLATILE；/tf_static：**latched**，必须请求 TRANSIENT_LOCAL 才能拿到启动时已发的静态变换
+# （rclpy 的 TransformListener 默认是 volatile ⇒ 晚加入的节点会"看不见 map 帧"，本工具因此踩过坑）
+TF_QOS = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
+TF_STATIC_QOS = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
 
 
 class SegNav(Node):
@@ -40,13 +47,51 @@ class SegNav(Node):
         self.a = a
         self.map = None
         self.buf = Buffer()
-        self.tf = TransformListener(self.buf, self)
+        # 自己喂 buffer：/tf 与 /tf_static（后者必须 transient_local，否则收不到 latched 的 map 帧）
+        self.create_subscription(TFMessage, "/tf", self.on_tf, TF_QOS)
+        self.create_subscription(TFMessage, "/tf_static", self.on_tf_static, TF_STATIC_QOS)
         self.create_subscription(OccupancyGrid, a.map_topic, self.on_map, MAP_QOS)
         self.planner = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
         self.nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
+    def on_tf(self, m):
+        for t in m.transforms:
+            try: self.buf.set_transform(t, "default_authority", False)
+            except Exception: pass
+
+    def on_tf_static(self, m):
+        for t in m.transforms:
+            try: self.buf.set_transform(t, "default_authority", True)
+            except Exception: pass
+
     def on_map(self, m):
         self.map = m
+
+    def wait_frame(self, frame, timeout=20.0):
+        """等某帧进入 buffer；失败时打印 buffer 里已知的帧，便于一眼看出问题"""
+        end = time.time() + timeout
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            try:
+                self.buf.lookup_transform(frame, frame, Time())
+                return True
+            except Exception:
+                pass
+        known = []
+        try:
+            known = sorted({f for f, _ in self.buf.all_frames_as_yaml().split(":")[:0]} |
+                           set())
+        except Exception:
+            pass
+        try:
+            import re as _re
+            y = self.buf.all_frames_as_yaml()
+            known = sorted(set(_re.findall(r"^- (\S+):", y, _re.M)) |
+                           set(_re.findall(r"^\s+parent: '([^']+)'", y, _re.M)))
+        except Exception:
+            pass
+        print("[seg] ✗ 等不到帧 '%s'（%.0fs）。buffer 已知帧：%s" % (frame, timeout, known or "（空）"), flush=True)
+        return False
 
     def drain(self, sec):
         end = time.time() + sec
@@ -177,6 +222,13 @@ def main():
 
     rclpy.init()
     n = SegNav(a)
+    if not n.wait_frame("map"):
+        print("     提示：map 帧可能来自 /tf_static(latched) 或 map→odom；先跑 "
+              "ros2 run tf2_ros tf2_echo map odom 确认", flush=True)
+        n.destroy_node()
+        try: rclpy.shutdown()
+        except Exception: pass
+        return 3
     print("[seg] 等 /map …", flush=True)
     end = time.time() + 30
     while n.map is None and time.time() < end:
