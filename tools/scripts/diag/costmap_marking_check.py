@@ -33,6 +33,10 @@ BEST = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
                   durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
 RELI = QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE,
                   durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
+# nav2 的 costmap/costmap_raw 是 **transient_local(latched)** 发布的；再挂一份 transient_local 订阅，
+# 两种 durability 各匹配一次，谁收到用谁（同话题两个订阅是允许的）。
+LATCH = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                   durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
 BUCKETS = [(0.0, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 3.0), (3.0, 5.0), (5.0, 10.0)]
 
 
@@ -69,6 +73,7 @@ class Chk(Node):
         self.frames, self.clouds, self.no_tf = set(), 0, 0
         self.create_subscription(PointCloud2, "/segmentation/obstacle", self.on_cloud, BEST)
         self.create_subscription(OccupancyGrid, topic, self.on_grid, RELI)
+        self.create_subscription(OccupancyGrid, topic, self.on_grid, LATCH)
 
     def on_grid(self, m):
         self.grid = m
