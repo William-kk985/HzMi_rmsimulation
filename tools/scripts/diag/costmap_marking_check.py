@@ -60,7 +60,7 @@ def quat_rotate(q, v):
 
 
 class Chk(Node):
-    def __init__(self):
+    def __init__(self, topic="/global_costmap/costmap_raw"):
         super().__init__("costmap_marking_check")
         self.buf = Buffer()
         self.listener = TransformListener(self.buf, self)
@@ -68,7 +68,7 @@ class Chk(Node):
         self.stat = {b: {"n": 0, "mk": 0, "lethal": 0, "cost": 0} for b in BUCKETS}
         self.frames, self.clouds, self.no_tf = set(), 0, 0
         self.create_subscription(PointCloud2, "/segmentation/obstacle", self.on_cloud, BEST)
-        self.create_subscription(OccupancyGrid, "/global_costmap/costmap_raw", self.on_grid, RELI)
+        self.create_subscription(OccupancyGrid, topic, self.on_grid, RELI)
 
     def on_grid(self, m):
         self.grid = m
@@ -145,10 +145,12 @@ class Chk(Node):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--duration", type=float, default=20.0)
+    ap.add_argument("--topic", default="/global_costmap/costmap_raw",
+                    help="代价地图话题；也可指向 /global_costmap/costmap、/local_costmap/costmap_raw 等")
     a = ap.parse_args()
     rclpy.init()
-    n = Chk()
-    print(f"[check] 采样 {a.duration:.0f}s —— 请保持机器人与被测墙的相对位置不变")
+    n = Chk(a.topic)
+    print(f"[check] 采样 {a.duration:.0f}s，代价地图话题={a.topic} —— 请保持机器人与被测墙的相对位置不变")
     t0 = time.time()
     try:
         while time.time() - t0 < a.duration:
