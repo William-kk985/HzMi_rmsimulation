@@ -16,7 +16,7 @@
 
 | 轴 | 我们现状 | COD_NAV 2026 | 我们的落地方式 | 优先级 |
 |---|---|---|---|---|
-| LIO | `lio:=fastlio|pointlio|none|cartographer` | **small_point_lio** | 先不动；将来新增 `lio:=smallpointlio`（需引入上游包） | P3 |
+| LIO | `lio:=fastlio|pointlio|none|cartographer` | **`small_point_lio`（仓库内自带目录，2026 分支**没有 FAST-LIO**） | 先用我们已有的 **`lio:=pointlio`**（同族、零引入成本）顶替验证；收益确认后再决定是否 vendor `small_point_lio` | P3 |
 | 在线建图 | `mapper:=cartographer|slam_toolbox` | **slam_toolbox async `mode: lifelong`** | `mapper` 增加取值 `slam_toolbox_lifelong`（只改参数文件，不新增包） | P3 |
 | 重定位 | AMCL / ICP / slam_toolbox / cartographer | **无（静态 `map→odom`）** | **不采用**（我们四种更强）；只在"纯在线建图"模式下允许静态桥 | — |
 | 3D 点云预处理 | 无（直接用 `/segmentation/obstacle`） | **`cpp_lidar_filter` 车体裁剪盒**（x±0.3, y−0.3~0.5, z−0.1~0.2, `negative:true`, leaf 0.05） | 新增 **`rm_cloud_crop`**（或先用 `pcl_ros` 的 `PassThrough`×3 组合）→ `/livox/lidar_filtered`，**只接 stvl 与 local cloud 层**；`/scan` 链不动 | **P0** |
@@ -119,3 +119,26 @@ crop_box: {min_x: -0.30, max_x: 0.30, min_y: -0.30, max_y: 0.50, min_z: -0.10, m
 - 每阶段结束：`nav_smoke_regression.py`（PASS/FAIL + JSON 快照）→ `algorithm_matrix.md §四` 加一行 → 本文件对应阶段打勾；
 - 链路体检：`tools/scripts/diag/watch_startup_chain.py`；
 - 若出现新坑：写进 `debug_fastlio_cartographer.md §9.0 总表`（症状 → 判据 → 处置 → 状态）。
+
+---
+
+## 7. 关于"2026 用的是不是 FAST-LIO"——已核实（2026-09-26）
+
+抓 `https://api.github.com/repos/qza36/COD_NAV/git/trees/rmul2026` 得到该分支**根目录**：
+
+```
+.github/  .gitignore  .idea/  CLAUDE.md  LICENSE  README.md
+cpp_lidar_filter/          ← 车体裁剪盒（自带包）
+fake_vel_transform/        ← 小陀螺/云台解耦（自带包）
+nav_bringup/               ← launch/params/map/BT
+pointcloud_to_laserscan/   ← 自带 fork
+resource/
+small_point_lio/           ← ★ LIO 就是它：**仓库内自带目录，不是 submodule**
+```
+
+**结论**：
+1. **`rmul2026` 的 LIO = `small_point_lio`，分支里没有 `FAST_LIO/` 目录** ⇒ **2026 路线不用 FAST-LIO**（FAST-LIO 只留在 `master`/2025 那套）；
+2. 该分支**没有 `.gitmodules`**（我抓 `.../rmul2026/.gitmodules` 得 404），而 `master` 有 4 个 submodule（patchwork-plusplus、pcd2pgm、pb_omni_pid_pursuit_controller、pb_nav2_plugins）⇒ **2026 是一次"做减法"的重构**：去掉地面分割（改高度带）、去掉先验图与全部重定位（纯在线 lifelong）、去掉 pb_omni（改 MPPI）、去掉 patchwork++/pcd2pgm/pb_nav2_plugins。**整个工作区只剩 5 个包**（上面 5 个目录）；
+3. 他们 2026 的文档主要在 **`CLAUDE.md`（5.3 KB）**，`README.md` 只有 1.1 KB ⇒ 想看他们的设计意图，读 `CLAUDE.md`；
+4. **我们的最短对齐路径**：我们工作区**已经有 Point-LIO**（`src/rm_localization/point_lio`，槽位 `lio:=pointlio`）——`small_point_lio` 属同一族（名字即 "Small Point-LIO"），所以**先用 `lio:=pointlio` 做等效验证，零引入成本**；确有效益再考虑 vendor 他们的 `small_point_lio`（那是 P3，且要先看它的 license 与依赖）。
+5. 顺带修正一条认知：**"2026 架构"不能整体照搬** —— 它同时**砍掉了重定位**（`map→odom` 静态）和**地面分割**，这两条在我们这里是资产（四种重定位可选、linefit 可测），**只借它做加法的部分（裁剪盒/STVL 双图/MPPI/Smac/SG 平滑）**。
