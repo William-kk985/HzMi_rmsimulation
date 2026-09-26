@@ -830,3 +830,66 @@ aft_tf_vel.angular.z = (msg->angular.z != 0) ? spin_speed_ : 0;   // 把 nav 角
 | **A** | 先验候选①：统计 `base_link_fake` 戳单调性（录 30 s `/tf` 即可，不重启整栈） | 若证实非单调 ⇒ 根因锁定，改 `fake_vel_transform` 一个函数 | 极低 |
 | **B** | 候选项②的 `autostart:=False` 实验（等 TF 就绪再激活 nav2） | 若成立 ⇒ **不改代码就能让车动** | 低（launch 可能要先加一个开关） |
 | **C** | overlay 补丁：`controller_server.cpp` 补回 #6436 纪律（+ `transform_staleness_threshold`） | 让「假到达」变「诚实失败」，防再被误导；**不解决车不动** | 中（要把 nav2 拷进 `src/` 构建） |
+
+---
+
+## 10. 三个 `mode` 的调试回顾（当前参数集，2026-09-26）
+
+> 本节是"结算"：把 `mapping` / `slam_nav` / `nav` 三条路径各自的症状、根因、已修项、遗留项摊开，
+> 便于以后按模式查。**"缝"的那条排查本轮到此为止**（结论见 10.4 遗留①）。
+
+### 10.0 三模式共享的同一条链（当前参数集）
+
+| 环节 | 关键参数 / 现值 |
+|---|---|
+| 雷达传感器 | `mid360.xacro`：**`<always_on>true</always_on>`**、`<visualize>false</visualize>`、`laser_min_range 0.1`、`laser_max_range 200`、`samples 30000` |
+| 雷达话题 | `/livox/lidar`(CustomMsg, **best effort**)、`/livox/lidar/pointcloud`(SensorDataQoS)、`/livox/imu`(100 Hz) |
+| 地面分割 | `linefit`：`sensor_height 0.226`、`max_dist_to_line 0.05` → `/segmentation/obstacle`(给 stvl) + `/segmentation/ground` |
+| 2D 投影 | `p2l`：`target_frame ""`、`min_height -1.0`、`max_height 0.1`(livox 系 ⇒ map ≤0.326 m)、**`range_min 0.05`**、`range_max 10.0` → `/scan` |
+| 里程计 | FAST-LIO（**`use_sim_time: True`**，launch 键名已修）→ `/odom` → `lio_tf_adapter`(`odom→base_link`) → `fake_vel_transform`(`base_link→base_link_fake`，**`spin_speed==0` 走直通模式**) → `/cmd_vel_chassis` |
+| 代价地图 | global `[static, obstacle, stvl, inflation]`、local `[obstacle, obstacle_cloud, inflation]`；**`robot_radius 0.40`**；inflation local **0.5** / global **0.55**；stvl **`min_obstacle_height 0.0`**、`voxel_decay 0.5`、`mark_threshold 0`；planner **`allow_unknown: true`** |
+| 重定位 | 仅 `mode:=nav`：AMCL（`transform_tolerance 1.0`）/ icp / slam_toolbox / cartographer |
+
+### 10.1 `mode:=mapping`（纯建图）—— ✅ 已验收
+
+| 项 | 内容 |
+|---|---|
+| 症状 | 特征"先有后没 / 慢慢化掉 / 跑几分钟就没了" |
+| 真机理 | 墙格**命中票数不低，是被 miss 票清掉**；另有参数漂移（`miss_probability 0.49→0.40`、`num_range_data 90→30`） |
+| 修法 | cartographer **核心补丁 `min_probability_to_clear: 0.80`**（`probability_grid_range_data_inserter_2d.cc` 的 `SkipClearing()`）+ 参数回 `hit 0.68 / miss 0.49 / num_range_data 3000`，保留 `insert_free_space: true` |
+| 状态 | 图已落盘（`RMUL2026.pgm/.yaml/.pbstream/.pcd`），用户确认"这个地图是可以的" |
+| 本模式特有坑 | `save_grid_map.sh` 路径少一级；**雷达 `<always_on>` 缺失**在纯建图里表现为"跑几分钟后突发停更"（已修） |
+
+### 10.2 `mode:=slam_nav`（边建边导）—— ⚠️ 部分可用
+
+| 项 | 内容 |
+|---|---|
+| 症状链 | nav2 激活期 `base_link_fake→odom` 超时 → cartographer `Ignored subdivision`（零戳，`621355978.97 s ≈ 时间零点`）→ 拒收扫描、无 `map→odom` → 全局路径只在已知区边界就停（RViz"只剩最后一段"）→ 贴墙时 `/scan` 丢墙 → **缝被当走廊 ⇒ 穿墙撞墙** |
+| 已修 | `<always_on>true</always_on>`（雷达间歇不扫描）、CustomMsg 两端 QoS 成对改 best effort、FAST-LIO `use_sim_time` 键名、`fake_vel_transform` 角速度直通、`stvl.min_obstacle_height 0.2→0.0`、**`p2l.range_min 0.2→0.05`**、**`robot_radius 0.35→0.40`** |
+| 实测数据 | 近场（<1.5 m）障碍点 `z_map ≤ 0.196`、远场 `z_map ≈ 0.40`（墙高≈0.40 m）；`/scan` `inf` 占 22~30%（主因 `range_max 10 m` < 场地 15×28 m） |
+| 遗留（本轮不再展开） | ① 缝：`range_min` 改小**没解决** ⇒ 疑更上游（原始点云 0–0.5 m 桶只有 2~3 点，近距几乎为空，疑似仿真保真度）；② cartographer 零戳/`num_subdivisions_per_laser_scan` 未查完；③ `range_max 10 → 20` 未改；④ 缝宽 >0.8 m 时安全几何挡不住 |
+
+### 10.3 `mode:=nav`（先建图后导航 + AMCL）—— ✅ 端到端验收通过
+
+| 项 | 内容 |
+|---|---|
+| 已解决 | ① `expected_update_rate: 0.5` ⇒ costmap `isCurrent()` 永假 ⇒ **planner 卡死**（改 0.0）；② `planner_server`/`map_server` 的 `use_sim_time: False`（墙钟 vs 仿真钟混用）；③ **假到达链**（costmap 位姿冻结 ⇒ `transformPose` 失败被上游丢弃 ⇒ 目标变 `(0,0,0)` ⇒ 1.4 cm < 0.25 m 判"到达"）；④ **`fake_vel_transform` 把角速度替换成 `spin_speed`** ⇒ `spin_speed:=0` 时永不转弯 ⇒ `Failed to make progress`；⑤ `lio:=amcl` 非法值（已加 `choices` 校验） |
+| 状态 | **"给目标点车可以过去"**（用户验收）；`robot_radius 0.40` / `range_min 0.05` 为最新叠加，待复验 |
+| 本模式特有坑 | **先验图会掩盖感知盲区**（缝在先验 `RMUL2026.pgm` 里可能本来就有/被补上）⇒ **不能在 nav 模式下诊断 slam_nav 的问题**（本轮就因此跑偏过一次） |
+
+### 10.4 三条通用规律（本轮的真正资产）
+
+1. **判定"能不能走"要用 planner 真正用的那张图（global costmap），不是 `/map`** —— 在线建图的产物与 costmap 可能不一致（旧快照/阈值/分辨率）；实测就出现过"我判 occ、planner 却能规划穿过它"。
+2. **QoS / 类型必须匹配**：latched 话题（`/tf_static`、`/map`、`costmap_raw`）读端要 **`TRANSIENT_LOCAL`**；传感器话题（`/scan`、`/clock`、`/livox/*`）要 **`BEST_EFFORT`**；`costmap_raw` 的类型是 **`nav2_msgs/msg/Costmap`**（不是 `OccupancyGrid`）。这三条坑了本轮 4 次。
+3. **工具不许"静默退化"**：`pose or goal`、`path.poses[0]` 不判空、用 `/map` 冒充 costmap —— 三次都制造了假象（其中一次直接导致"直冲远目标撞墙"）。一律 **fail-fast + 打印诊断**。
+
+### 10.5 遗留清单（明确挂着，择日再动）
+
+| # | 事项 | 判据/入口 |
+|---|---|---|
+| ① | **近距点云几乎为空**（0–0.5 m 桶只有 2~3 点）——疑仿真/插件保真度，`range_min` 已排除 | `cloud_z_profile.py`；必要时看 `/livox/lidar/pointcloud` 车身附近有无薄片 |
+| ② | cartographer 零戳 / `Ignored subdivision` | `num_subdivisions_per_laser_scan`、`/scan.time_increment` |
+| ③ | `range_max: 10 → 20`（场地 15×28 m，10 m 外的墙全层不可见） | 改后 `inf` 占比应大幅下降 |
+| ④ | `static_layer.track_unknown_space` 在 global 根层级（疑似**惰性键**） | 确认它是否在 `static_layer:` 块内 |
+| ⑤ | `allow_unknown: true` 与"缝"的最终关系（本轮未定论） | A/B：`allow_unknown: false` |
+| ⑥ | 长目标的"前沿式"分段（路线 B 工具已就绪，等缝隙问题解决后再用） | `tools/scripts/nav/segment_goal_navigator.py --dry-run` |
