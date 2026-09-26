@@ -170,7 +170,12 @@ local_costmap:
       #   实测现象：车贴到内墙很近时墙会"碎掉"（进 p2l 的 range_min=0.2 盲区后被丢/被清）。
       #   把它加大到"车体+盲区"⇒ 规划器不会再把车带进盲区，墙自然不会被贴脸。
       #   代价：<0.7m 的窄缝会判为不可通行 ⇒ 若太保守，回退 0.25~0.30。
-      robot_radius: 0.35
+      # ★ 2026-09-26：robot_radius 0.35 → 0.40（= 车体 0.2 + 近距盲区 0.2）——安全几何：
+      #   「看不见的地方，不许车去」。叠加在 p2l range_min 0.05 之上一起试（用户反馈未出现幽灵障碍）。
+      #   作用：规划/避障都按 0.40 m 半径判碰撞 ⇒ **窄于约 0.8 m 的缝过不去**（缝不再被当成可通行）。
+      #   局限：它不能让墙"出现"；若缝宽 >0.8 m 仍可能穿 ⇒ 那要回到 unknown 不可通行/建图侧解决。
+      #   回退：太保守（窄缝进不去/贴边绕大弯）就退到 0.35~0.45 之间。
+      robot_radius: 0.40
       # 局部障碍来源 = 两个可切换图层（bench 槽位，launch 用 local_obstacle 参数切 enabled）：
       #   obstacle_layer       = /scan（几何 2D；链路单点，且 p2l 有 45cm 盲区）
       #   obstacle_cloud_layer = /segmentation/obstacle 点云直投（不经 p2l；默认关，A/B 用）
@@ -239,7 +244,12 @@ global_costmap:
       robot_base_frame: base_link_fake
       use_sim_time: True
       # ★ 2026-09-24：0.2 → 0.35（同上，**全局这张才是规划用的**，漏改会导致 planner 仍允许贴脸）
-      robot_radius: 0.35
+      # ★ 2026-09-26：robot_radius 0.35 → 0.40（= 车体 0.2 + 近距盲区 0.2）——安全几何：
+      #   「看不见的地方，不许车去」。叠加在 p2l range_min 0.05 之上一起试（用户反馈未出现幽灵障碍）。
+      #   作用：规划/避障都按 0.40 m 半径判碰撞 ⇒ **窄于约 0.8 m 的缝过不去**（缝不再被当成可通行）。
+      #   局限：它不能让墙"出现"；若缝宽 >0.8 m 仍可能穿 ⇒ 那要回到 unknown 不可通行/建图侧解决。
+      #   回退：太保守（窄缝进不去/贴边绕大弯）就退到 0.35~0.45 之间。
+      robot_radius: 0.40
       resolution: 0.04
       track_unknown_space: true
       # 实时障碍来源二选一（由 launch 的 global_obstacle 参数切 enabled，默认 stvl 保持原行为）：
