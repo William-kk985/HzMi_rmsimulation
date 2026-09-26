@@ -23,6 +23,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from nav2_msgs.msg import Costmap
 from nav_msgs.msg import OccupancyGrid
 
 MAP_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -34,12 +35,19 @@ class SegNav(Node):
         super().__init__("segment_goal_navigator")
         self.a = a
         self.map = None
+        self.costmap = None
         self.create_subscription(OccupancyGrid, a.map_topic, self.on_map, MAP_QOS)
+        # ★ 判定"能不能走"应当用**planner 真正使用的那张图**（global costmap），而不是 /map：
+        #   /map 是在线建图的产物，可能与 costmap 的 static 层不一致（旧快照/不同阈值）
+        self.create_subscription(Costmap, a.costmap_topic, self.on_costmap, MAP_QOS)
         self.planner = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
         self.nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
     def on_map(self, m):
         self.map = m
+
+    def on_costmap(self, m):
+        self.costmap = m
 
     def wait(self, fut, timeout):
         end = time.time() + timeout
@@ -48,6 +56,19 @@ class SegNav(Node):
         return fut.done()
 
     def cell(self, x, y):
+        """优先用 global costmap 判定：0=free、1..252=膨胀(可走)、>=253=致命/内切、255=未知；
+        没有 costmap 时退回 /map（0=free、>0=occ、-1=unk）。"""
+        cm = self.costmap
+        if cm is not None:
+            md = cm.metadata
+            cx = int((x - md.origin.position.x) / md.resolution)
+            cy = int((y - md.origin.position.y) / md.resolution)
+            if not (0 <= cx < md.size_x and 0 <= cy < md.size_y):
+                return "out"
+            v = int(cm.data[cy * md.size_x + cx])
+            if v == 255:
+                return "unk"
+            return "occ" if v >= 253 else "free"
         m = self.map
         if m is None:
             return "unk"
@@ -134,6 +155,8 @@ def main():
     ap.add_argument("--seg-timeout", type=float, default=90.0)
     ap.add_argument("--max-segs", type=int, default=12)
     ap.add_argument("--map-topic", default="/map")
+    ap.add_argument("--costmap-topic", default="/global_costmap/costmap_raw",
+                    help="用来判定可通行性的图（默认 global costmap；它就是 planner 用的那张）")
     ap.add_argument("--dry-run", action="store_true", help="只算并打印分段，不发目标、不动车")
     a = ap.parse_args()
 
@@ -154,6 +177,8 @@ def main():
     goal.header.frame_id = "map"
     goal.pose.position.x, goal.pose.position.y = a.goal
     goal.pose.orientation.w = 1.0
+    src = "global costmap" if n.costmap is not None else "/map（警告：未收到 costmap，判定可能不准）"
+    print("[seg] 可通行性判定来源：%s" % src, flush=True)
     print("[seg] 地图 %.3f m/格 %dx%d  目标 (%.2f, %.2f)  max-seg=%.1f %s"
           % (n.map.info.resolution, n.map.info.width, n.map.info.height,
              a.goal[0], a.goal[1], a.max_seg, "(dry-run)" if a.dry_run else ""), flush=True)
@@ -189,6 +214,10 @@ def main():
             print("[seg] 参考路径全在已知自由空间 ⇒ 一段直达终点", flush=True)
         if a.dry_run:
             if all_free or d_goal <= a.arrive_tol:
+                break
+            if length < a.min_seg:
+                print("[seg] ✗ dry-run 也推进不了（单段仅 %.2f m < min-seg）；"
+                      "多半是车前方立刻被占/未知——看上面的 [cut@…] 原因" % length, flush=True)
                 break
             virtual = seg                    # 虚拟前进，继续算下一段
             continue
