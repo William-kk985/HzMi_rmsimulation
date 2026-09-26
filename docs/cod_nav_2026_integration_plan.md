@@ -4,6 +4,16 @@
 > 对比依据：`docs/cod_nav_comparison.md`
 > 本文件性质：**设计/排期文档**。在明确说"改"之前，不动任何配置与代码。
 
+> ⚠️ **2026-09-26 修正声明**：`docs/cod_nav_2026_deep_dive.md` 对该分支做了逐文件深挖，**发现本文若干行有误**（共 25 条，见那份文档 §E）。以下是最影响决策的 8 条，**以深挖文档为准**：
+> 1. **裁剪盒的 `leaf_size: 0.05` 是死参**：`pcl::VoxelGrid` 整段被注释，节点只做 crop、不做降采样；
+> 2. **裁剪盒在输入点云坐标系（`livox_frame`）里裁，但 marker 硬编码发在 `base_link`** ⇒ 两者错开；**不要照抄他们的 box 数值**，要按我们的 livox_frame 重新算；
+> 3. 他们的两条 launch 用**两套不同的 box**：`slam.launch.py` x±0.2/y−0.2~0.4；`nav.launch.py` x±0.3/y−0.3~0.5（z 都是 −0.1~0.2）；
+> 4. **p2l 真值**（写在 launch 内联，不在包内）：`target_frame: base_link`、`min_height **0.15**(slam)/**0.10**(nav)`、`max_height 1.00`、`angle ±3.1416`（**整圈**，包内注释写 −π/2 是错的）、`increment 0.0087`（723 线）、`range_min 0.5`、`range_max 20.0`、`use_inf true`、输入是 **`/livox/lidar`(PointCloud2)** ⇒ 本文第 1 节里的「0.01~1.00」应改为「0.10/0.15~1.00」；
+> 5. **`smoother_server` 在他们的实时链里是死代码**（自定义 BT 里没有 `<SmoothPath>`）⇒ 真正的平滑是 **SmacPlanner2D 的 `smooth_path: true` + 内建 smoother**；本文"借 savgol"要改成"先把 Smac 的 smooth_path 打开"，savgol 只是我们自己可选的加分项；
+> 6. **BT 事实修正**：两个 XML 里**都没有 `IsStuck` 节点**；`BackUp` 是 **1.0 m @ 1.0 m/s**（不是 1.5）且只在 through-poses BT 里；`navigate_to_pose` 的恢复只有 `ClearEntireCostmap`；`RateController 3 Hz` 与重试 10 次是对的；
+> 7. **他们其实从不自转**：`spin_speed` 全分支只出现 5 次（源码/头文件/README），**没有任何文件把它设成非零** ⇒ `angular.z ≡ 0`（MPPI 的 wz ±2.5 被丢弃）+ `robot_base_frame: base_link_fake` + `yaw_goal_tolerance 6.28` = 纯位置控制。**所以"只控位置"是他们的事实行为，而"`spin_speed` 直通修复 + sentry_spin 模式"是我们的设计，不是抄来的**；
+> 8. **换 LIO 有硬门槛**：`small_point_lio` 的 PointCloud2 适配**要求 `tag`(uint8) 与 `timestamp`(float64, 秒) 字段**（`src/lidar_adapter/livox_pointcloud2.h`），我们的仿真点云没有 ⇒ **不能直接替换**；它的 `frame_id/child_frame_id` 硬编码 `odom/base_link`，且 **twist 全零**（源码 TODO）。本文 §7 第 4 条"先用 `lio:=pointlio` 顶替"仍然成立，但"vendor small_point_lio"要重新评估成本。
+
 ## 0. 总原则（五条）
 
 1. **只"增槽"，不"换默认"**：COD_NAV 的做法一律作为**新槽位值/新候选**加入；默认路径（rpp + cartographer + amcl）保持不变，随时可回退。
@@ -16,13 +26,13 @@
 
 | 轴 | 我们现状 | COD_NAV 2026 | 我们的落地方式 | 优先级 |
 |---|---|---|---|---|
-| LIO | `lio:=fastlio|pointlio|none|cartographer` | **`small_point_lio`（仓库内自带目录，2026 分支**没有 FAST-LIO**） | 先用我们已有的 **`lio:=pointlio`**（同族、零引入成本）顶替验证；收益确认后再决定是否 vendor `small_point_lio` | P3 |
+| LIO | `lio:=fastlio|pointlio|none|cartographer` | **`small_point_lio`（仓库内自带；2026 分支没有 FAST-LIO）** | 先用已有的 `lio:=pointlio`（同族、零成本）；**直接 vendor 有门槛**：它要求点云带 `tag`+`timestamp` 字段（见深挖 §E/§F） | P3 |
 | 在线建图 | `mapper:=cartographer|slam_toolbox` | **slam_toolbox async `mode: lifelong`** | `mapper` 增加取值 `slam_toolbox_lifelong`（只改参数文件，不新增包） | P3 |
 | 重定位 | AMCL / ICP / slam_toolbox / cartographer | **无（静态 `map→odom`）** | **不采用**（我们四种更强）；只在"纯在线建图"模式下允许静态桥 | — |
 | 3D 点云预处理 | 无（直接用 `/segmentation/obstacle`） | **`cpp_lidar_filter` 车体裁剪盒**（x±0.3, y−0.3~0.5, z−0.1~0.2, `negative:true`, leaf 0.05） | 新增 **`rm_cloud_crop`**（或先用 `pcl_ros` 的 `PassThrough`×3 组合）→ `/livox/lidar_filtered`，**只接 stvl 与 local cloud 层**；`/scan` 链不动 | **P0** |
 | `/scan` 射程与高度带 | `range_min 0.05`、`range_max **10.0**`、带在雷达面**之下**(−1.0~0.1) | `range_min 0.5`、`range_max **20.0**`、带在雷达面**之上**(0.01~1.00) | `range_max → 20.0`（P0）；高度带**必须按我们传感器重算**（我们的墙仅 0.40 m、近场回波 0.10~0.196 m ⇒ 照抄会丢矮墙） | **P0** |
 | 全局规划 | NavFn（`allow_unknown: true`） | Smac2D + `cost_travel_multiplier 4.0` + `tolerance 0.5`（2025 是 SmacHybrid DUBIN） | `planner` 槽：`navfn`(默认) / `smac2d` / `smac_hybrid`；Smac2D 参数抄上游、`allow_unknown` 保持 true | P1 |
-| 路径平滑 | `SimpleSmoother` | **Savitzky-Golay**（win 7 / poly 3 / refinement 2 / enforce_path_inversion） | `smoother` 槽：`simple`(默认) / `savgol`；只配 rpp/dwb/mppi（TEB 自带优化） | P1 |
+| 路径平滑 | `SimpleSmoother` | **SmacPlanner2D 的 `smooth_path: true` + 内建 smoother**（他们的 `smoother_server` 在实时链里是**死代码**，BT 无 SmoothPath） | 先只打开 Smac 的 `smooth_path`；`smoother:=savgol` 降为可选 | P1 |
 | 局部障碍表示 | local: `scan|cloud|both`（无时间维） | **local 也用 STVL**（`voxel_decay 0.5`、`voxel_size 0.05`、`obstacle/raytrace 8/9 m`、`min_h 0.1 / max_h 1.0`） | `local_obstacle` 增加取值 `stvl`；先只加"衰减"这一条，不动其它层 | **P0** |
 | 局部控制 | `nav:=rpp|dwb|teb` | **MPPI Omni 50 Hz**（vx/vy 7.5 m/s，critics：GoalCritic 15/2.5、CostCritic `critical_cost 253`+`consider_footprint`、PathFollow/PathAlign `threshold 1.5`、`temperature 0.25`、`gamma 0.008`、60 步/2000 采样） | `nav:=mppi`（包已装）→ 独立 params 文件，**速度从 2.0 m/s 起调**，`controller_frequency 30` 起 | P2 |
 | 任务层 | stock BT + 自研分段工具 | BT：**3 Hz 重规划** + `IsStuck→BackUp(1 m@1.5 m/s)` + 10 次重试；目标由 bash 轮询裁判串口 | 先**只借 BT 结构**（若确认有利再改 XML）；目标选择仍用我们的方式 | P4 |
