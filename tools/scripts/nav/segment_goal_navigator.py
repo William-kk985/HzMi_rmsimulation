@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """segment_goal_navigator.py —— 路线 B：**给一个远目标，自动拆成若干短段**逐段导航。
 
-思路（分层调度，不改 nav2 源码）：
-  1) 任务层用 planner_server 的 /compute_path_to_pose 算一条**参考路径**（允许 unknown，只作参考）；
-  2) 沿参考路径从起点往前走，找**最后一个"已知自由"栅格**（在 /map 上查：0=free；>0=占据；-1=未知），
-     并把本段长度**限制在 --max-seg 之内** ⇒ 得到本段目标（保证：每段都落在已知自由空间里）；
-  3) 用 /navigate_to_pose 走这一段；到了再从 ① 重新算（所以地图长大了、段也会跟着变长）；
-  4) 若整条参考路径都落在已知自由空间 ⇒ 直接一步到位（正常导航，不折腾）；
-  5) 若"前进不了 min-seg" ⇒ 明确报**不可达/被堵**（而不是把未知当自由硬穿）。
+设计要点（v2，**完全不依赖 TF**，避免 /tf_static latched、时钟、QoS 那一整类坑）：
+  · 当前位姿不自己查 TF，而是**让 planner 给**：/compute_path_to_pose 用 use_start=False（它自己取起点），
+    返回路径的第一个点就是"车当前位姿"（map 系）。
+  · 沿路径找**最后一个"已知自由"栅格**（/map：0=free，>0=占据，-1=未知），且本段长度 ≤ --max-seg
+    ⇒ 得到本段目标（保证每段都落在已知自由空间里）。
+  · 用 /navigate_to_pose 走这一段；到了再算下一段（地图长大了段会自然变长）。
+  · 整条参考路径都 free ⇒ 一步直达；前进不足 --min-seg ⇒ 明确报"不可达/被堵"，不把未知当自由硬穿。
 
-用法（⚠️ 先 --dry-run 看它怎么切，确认合理再实跑）：
+用法（先 --dry-run 只看分段、不动车）：
   python3 tools/scripts/nav/segment_goal_navigator.py --goal 3.0 -4.0 --dry-run
   python3 tools/scripts/nav/segment_goal_navigator.py --goal 3.0 -4.0 --max-seg 4.0 --min-seg 1.0
-
-参数：--max-seg 单段最长(m) | --min-seg 能前进的最小步长(m) | --arrive-tol 终点容差(m)
-      --seg-timeout 单段超时(s) | --max-segs 最多几段 | --map-topic | --dry-run
 """
 import argparse
 import math
@@ -24,21 +21,12 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from rclpy.time import Time
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav_msgs.msg import OccupancyGrid
-from tf2_msgs.msg import TFMessage
-from tf2_ros import Buffer
 
 MAP_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
-# /tf：动态，RELIABLE+VOLATILE；/tf_static：**latched**，必须请求 TRANSIENT_LOCAL 才能拿到启动时已发的静态变换
-# （rclpy 的 TransformListener 默认是 volatile ⇒ 晚加入的节点会"看不见 map 帧"，本工具因此踩过坑）
-TF_QOS = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
-                    durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
-TF_STATIC_QOS = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
-                           durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
 
 
 class SegNav(Node):
@@ -46,57 +34,12 @@ class SegNav(Node):
         super().__init__("segment_goal_navigator")
         self.a = a
         self.map = None
-        self.buf = Buffer()
-        # 自己喂 buffer：/tf 与 /tf_static（后者必须 transient_local，否则收不到 latched 的 map 帧）
-        self.create_subscription(TFMessage, "/tf", self.on_tf, TF_QOS)
-        self.create_subscription(TFMessage, "/tf_static", self.on_tf_static, TF_STATIC_QOS)
         self.create_subscription(OccupancyGrid, a.map_topic, self.on_map, MAP_QOS)
         self.planner = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
         self.nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
-    def on_tf(self, m):
-        for t in m.transforms:
-            try: self.buf.set_transform(t, "default_authority", False)
-            except Exception: pass
-
-    def on_tf_static(self, m):
-        for t in m.transforms:
-            try: self.buf.set_transform(t, "default_authority", True)
-            except Exception: pass
-
     def on_map(self, m):
         self.map = m
-
-    def wait_frame(self, frame, timeout=20.0):
-        """等某帧进入 buffer；失败时打印 buffer 里已知的帧，便于一眼看出问题"""
-        end = time.time() + timeout
-        while time.time() < end:
-            rclpy.spin_once(self, timeout_sec=0.1)
-            try:
-                self.buf.lookup_transform(frame, frame, Time())
-                return True
-            except Exception:
-                pass
-        known = []
-        try:
-            known = sorted({f for f, _ in self.buf.all_frames_as_yaml().split(":")[:0]} |
-                           set())
-        except Exception:
-            pass
-        try:
-            import re as _re
-            y = self.buf.all_frames_as_yaml()
-            known = sorted(set(_re.findall(r"^- (\S+):", y, _re.M)) |
-                           set(_re.findall(r"^\s+parent: '([^']+)'", y, _re.M)))
-        except Exception:
-            pass
-        print("[seg] ✗ 等不到帧 '%s'（%.0fs）。buffer 已知帧：%s" % (frame, timeout, known or "（空）"), flush=True)
-        return False
-
-    def drain(self, sec):
-        end = time.time() + sec
-        while time.time() < end:
-            rclpy.spin_once(self, timeout_sec=0.02)
 
     def wait(self, fut, timeout):
         end = time.time() + timeout
@@ -104,28 +47,7 @@ class SegNav(Node):
             rclpy.spin_once(self, timeout_sec=0.05)
         return fut.done()
 
-    # --- 位姿 / 地图 ---
-    def robot_pose(self):
-        """取 map→base 的位姿；base_frame 不可用时退用 base_link（并告警）。失败时记录原因。"""
-        self.tf_err = None
-        for f in (self.a.base_frame, "base_link"):
-            try:
-                t = self.buf.lookup_transform("map", f, Time())
-            except Exception as e:                    # noqa: BLE001
-                self.tf_err = "%s: %s" % (f, e)
-                continue
-            if f != self.a.base_frame:
-                print("[seg] ⚠️ %s 查不到，退用 %s" % (self.a.base_frame, f), flush=True)
-            p = PoseStamped()
-            p.header.frame_id = "map"
-            p.pose.position.x = t.transform.translation.x
-            p.pose.position.y = t.transform.translation.y
-            p.pose.orientation = t.transform.rotation
-            return p
-        return None
-
     def cell(self, x, y):
-        """返回 'free' / 'occ' / 'unk' / 'out'（-1=未知，0=自由，1..100=占据）"""
         m = self.map
         if m is None:
             return "unk"
@@ -138,12 +60,13 @@ class SegNav(Node):
             return "unk"
         return "free" if v == 0 else "occ"
 
-    # --- 规划 ---
-    def compute_path(self, start, goal):
+    def compute_path(self, goal, start=None):
         if not self.planner.wait_for_server(timeout_sec=10.0):
-            print("[seg] /compute_path_to_pose 不可用", flush=True); return None
+            print("[seg] /compute_path_to_pose 不可用（nav2 没起？）", flush=True); return None
         g = ComputePathToPose.Goal()
-        g.start, g.goal, g.use_start, g.planner_id = start, goal, True, "GridBased"
+        g.goal, g.planner_id = goal, "GridBased"
+        g.use_start = start is not None
+        g.start = start if start is not None else goal     # use_start=False 时被忽略
         fut = self.planner.send_goal_async(g)
         if not self.wait(fut, 20.0):
             print("[seg] 规划请求超时", flush=True); return None
@@ -152,19 +75,15 @@ class SegNav(Node):
             print("[seg] 规划被拒绝", flush=True); return None
         rf = gh.get_result_async()
         if not self.wait(rf, self.a.seg_timeout):
-            print("[seg] 规划无结果（可能必须穿过未知区/不可达）", flush=True); return None
+            print("[seg] 规划无结果（目标不可达，或必须穿过未知/障碍区）", flush=True); return None
         return rf.result().result.path
 
     def pick_segment(self, path):
-        """沿路径找本段终点：走到第一个非 free 之前为止，且长度不超过 max-seg。
-        返回 (pose, 段长, 是否已可直达终点, 截断原因)"""
         poses = path.poses
         if not poses:
             return None, 0.0, False, "empty"
-        total = 0.0
+        total, cut, blocked = 0.0, None, None
         prev = poses[0].pose.position
-        cut = None
-        blocked_at = None
         for i, ps in enumerate(poses):
             p = ps.pose.position
             if i > 0:
@@ -172,24 +91,22 @@ class SegNav(Node):
                 prev = p
             st = self.cell(p.x, p.y)
             if st != "free":
-                blocked_at = (i, st); break
+                blocked = (i, st); break
             if total >= self.a.max_seg:
                 cut = i; break
             cut = i
-        if blocked_at is None:
+        if blocked is None:
             return poses[-1], total, True, "all-free"
-        i, st = blocked_at
         if cut is None:
-            return None, 0.0, False, "start-%s" % st
-        return poses[cut], total, False, "cut@%s" % st
+            return None, 0.0, False, "start-%s" % blocked[1]
+        return poses[cut], total, False, "cut@%s" % blocked[1]
 
-    # --- 执行 ---
     def go(self, pose, timeout):
         if not self.nav.wait_for_server(timeout_sec=10.0):
             print("[seg] /navigate_to_pose 不可用", flush=True); return False
         g = NavigateToPose.Goal()
         g.pose = pose
-        g.pose.header.stamp.sec = 0          # 0 = 取最新，避免墙钟/仿真钟差异
+        g.pose.header.stamp.sec = 0            # 0 = 取最新
         g.pose.header.stamp.nanosec = 0
         fut = self.nav.send_goal_async(g)
         if not self.wait(fut, 15.0):
@@ -203,8 +120,7 @@ class SegNav(Node):
             try: gh.cancel_goal_async()
             except Exception: pass
             return False
-        st = rf.result().status
-        return st == 4
+        return rf.result().status == 4
 
 
 def main():
@@ -216,57 +132,42 @@ def main():
     ap.add_argument("--seg-timeout", type=float, default=90.0)
     ap.add_argument("--max-segs", type=int, default=12)
     ap.add_argument("--map-topic", default="/map")
-    ap.add_argument("--base-frame", default="base_link_fake")
     ap.add_argument("--dry-run", action="store_true", help="只算并打印分段，不发目标、不动车")
     a = ap.parse_args()
 
     rclpy.init()
     n = SegNav(a)
-    if not n.wait_frame("map"):
-        print("     提示：map 帧可能来自 /tf_static(latched) 或 map→odom；先跑 "
-              "ros2 run tf2_ros tf2_echo map odom 确认", flush=True)
-        n.destroy_node()
-        try: rclpy.shutdown()
-        except Exception: pass
-        return 3
-    print("[seg] 等 /map …", flush=True)
+    print("[seg] 等 %s …" % a.map_topic, flush=True)
     end = time.time() + 30
     while n.map is None and time.time() < end:
         rclpy.spin_once(n, timeout_sec=0.1)
     if n.map is None:
-        print("[seg] 没收到 %s（地图未起？）" % a.map_topic, flush=True)
-        n.destroy_node(); rclpy.shutdown(); return 2
+        print("[seg] ✗ 没收到 %s（地图未起，或话题名不同：--map-topic）" % a.map_topic, flush=True)
+        n.destroy_node()
+        try: rclpy.shutdown()
+        except Exception: pass
+        return 2
 
     goal = PoseStamped()
     goal.header.frame_id = "map"
     goal.pose.position.x, goal.pose.position.y = a.goal
     goal.pose.orientation.w = 1.0
-    print("[seg] 地图 %.3f m/格  %dx%d  目标 (%.2f, %.2f)  max-seg=%.1f  %s"
-          % (n.map.info.resolution, n.map.info.width, n.map.info.height, a.goal[0], a.goal[1],
-             a.max_seg, "(dry-run)" if a.dry_run else ""), flush=True)
+    print("[seg] 地图 %.3f m/格 %dx%d  目标 (%.2f, %.2f)  max-seg=%.1f %s"
+          % (n.map.info.resolution, n.map.info.width, n.map.info.height,
+             a.goal[0], a.goal[1], a.max_seg, "(dry-run)" if a.dry_run else ""), flush=True)
 
-    cur = n.robot_pose()
-    if cur is None:
-        print("[seg] ✗ 取不到机器人位姿：TF map → %s 查不到。" % a.base_frame, flush=True)
-        print("     底层原因：%s" % getattr(n, "tf_err", "?"), flush=True)
-        print("     先自查： ros2 run tf2_ros tf2_echo map %s" % a.base_frame, flush=True)
-        print("             ros2 run tf2_ros tf2_echo map odom ; ros2 run tf2_ros tf2_echo odom base_link", flush=True)
-        print("     常见原因：map→odom 没发布（slam_nav 下 cartographer 零戳/未发布）或 TF 分成两棵树。", flush=True)
-        n.destroy_node()
-        try: rclpy.shutdown()
-        except Exception: pass
-        return 3
+    virtual = None            # dry-run 用：虚拟的"当前位置"（= 上一段终点）
     seg_i, ok = 0, False
     while seg_i < a.max_segs:
-        cur = n.robot_pose() or cur
-        path = n.compute_path(cur, goal)
+        path = n.compute_path(goal, start=virtual)
         if path is None:
             print("[seg] ✗ 规划失败：目标不可达（或必须穿过未知区）", flush=True); break
+        cur = path.poses[0].pose            # planner 给的"当前位姿"，不自己查 TF
+        d_goal = math.hypot(goal.pose.position.x - cur.position.x,
+                            goal.pose.position.y - cur.position.y)
         seg, length, all_free, why = n.pick_segment(path)
-        d_goal = math.hypot(goal.pose.position.x - cur.pose.position.x,
-                            goal.pose.position.y - cur.pose.position.y)
         if seg is None:
-            print("[seg] ✗ 无法前进（原因 %s；车距目标 %.2f m）—— 明确报不可达，不硬穿未知区" % (why, d_goal), flush=True)
+            print("[seg] ✗ 无法前进（%s；车距目标 %.2f m）—— 明确报不可达，不硬穿未知区" % (why, d_goal), flush=True)
             break
         seg_i += 1
         print("[seg] 第 %d 段 → (%.2f, %.2f)  段长 %.2f m  离最终目标 %.2f m  [%s]"
@@ -274,17 +175,18 @@ def main():
         if all_free or d_goal <= a.arrive_tol:
             print("[seg] 参考路径全在已知自由空间 ⇒ 一段直达终点", flush=True)
         if a.dry_run:
-            cur = seg                       # 虚拟前进，继续算下一段
             if all_free or d_goal <= a.arrive_tol:
-                print("[seg] dry-run 结束（预计 %d 段）" % seg_i); break
+                break
+            virtual = seg                    # 虚拟前进，继续算下一段
             continue
         if not n.go(seg, a.seg_timeout):
             print("[seg] ✗ 第 %d 段失败" % seg_i, flush=True); break
         if all_free or d_goal <= a.arrive_tol:
             ok = True; break
         if length < a.min_seg:
-            print("[seg] ✗ 单段进展不足 %.2f m < min-seg，停止（避免死循环）" % length, flush=True); break
-    print("[seg] %s：共 %d 段" % ("✅ 完成" if ok else ("(dry-run)" if a.dry_run else "❌ 未完成"), seg_i), flush=True)
+            print("[seg] ✗ 单段进展 %.2f m < min-seg，停止（避免死循环）" % length, flush=True); break
+    print("[seg] %s：共 %d 段"
+          % ("✅ 完成" if ok else ("(dry-run)" if a.dry_run else "❌ 未完成"), seg_i), flush=True)
     n.destroy_node()
     try: rclpy.shutdown()
     except Exception: pass
