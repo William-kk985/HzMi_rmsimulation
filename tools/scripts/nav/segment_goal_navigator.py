@@ -177,7 +177,11 @@ def main():
     goal.header.frame_id = "map"
     goal.pose.position.x, goal.pose.position.y = a.goal
     goal.pose.orientation.w = 1.0
-    src = "global costmap" if n.costmap is not None else "/map（警告：未收到 costmap，判定可能不准）"
+    # 再等一会儿 costmap（它是 2Hz 发布 + DDS 发现延迟；/map 是 latched 会立刻到，别因此判"没有 costmap"）
+    t_cm = time.time() + 5.0
+    while n.costmap is None and time.time() < t_cm:
+        rclpy.spin_once(n, timeout_sec=0.1)
+    src = "global costmap" if n.costmap is not None else "/map（警告：等待 5s 仍未收到 costmap，判定可能不准）"
     print("[seg] 可通行性判定来源：%s" % src, flush=True)
     print("[seg] 地图 %.3f m/格 %dx%d  目标 (%.2f, %.2f)  max-seg=%.1f %s"
           % (n.map.info.resolution, n.map.info.width, n.map.info.height,
