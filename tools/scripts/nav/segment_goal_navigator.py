@@ -61,16 +61,23 @@ class SegNav(Node):
 
     # --- 位姿 / 地图 ---
     def robot_pose(self):
-        try:
-            t = self.buf.lookup_transform("map", self.a.base_frame, Time())
-        except Exception:
-            return None
-        p = PoseStamped()
-        p.header.frame_id = "map"
-        p.pose.position.x = t.transform.translation.x
-        p.pose.position.y = t.transform.translation.y
-        p.pose.orientation = t.transform.rotation
-        return p
+        """取 map→base 的位姿；base_frame 不可用时退用 base_link（并告警）。失败时记录原因。"""
+        self.tf_err = None
+        for f in (self.a.base_frame, "base_link"):
+            try:
+                t = self.buf.lookup_transform("map", f, Time())
+            except Exception as e:                    # noqa: BLE001
+                self.tf_err = "%s: %s" % (f, e)
+                continue
+            if f != self.a.base_frame:
+                print("[seg] ⚠️ %s 查不到，退用 %s" % (self.a.base_frame, f), flush=True)
+            p = PoseStamped()
+            p.header.frame_id = "map"
+            p.pose.position.x = t.transform.translation.x
+            p.pose.position.y = t.transform.translation.y
+            p.pose.orientation = t.transform.rotation
+            return p
+        return None
 
     def cell(self, x, y):
         """返回 'free' / 'occ' / 'unk' / 'out'（-1=未知，0=自由，1..100=占据）"""
@@ -186,7 +193,17 @@ def main():
           % (n.map.info.resolution, n.map.info.width, n.map.info.height, a.goal[0], a.goal[1],
              a.max_seg, "(dry-run)" if a.dry_run else ""), flush=True)
 
-    cur = n.robot_pose() or goal
+    cur = n.robot_pose()
+    if cur is None:
+        print("[seg] ✗ 取不到机器人位姿：TF map → %s 查不到。" % a.base_frame, flush=True)
+        print("     底层原因：%s" % getattr(n, "tf_err", "?"), flush=True)
+        print("     先自查： ros2 run tf2_ros tf2_echo map %s" % a.base_frame, flush=True)
+        print("             ros2 run tf2_ros tf2_echo map odom ; ros2 run tf2_ros tf2_echo odom base_link", flush=True)
+        print("     常见原因：map→odom 没发布（slam_nav 下 cartographer 零戳/未发布）或 TF 分成两棵树。", flush=True)
+        n.destroy_node()
+        try: rclpy.shutdown()
+        except Exception: pass
+        return 3
     seg_i, ok = 0, False
     while seg_i < a.max_segs:
         cur = n.robot_pose() or cur
