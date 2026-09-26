@@ -25,7 +25,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from rclpy.time import Time
-from nav_msgs.msg import OccupancyGrid
+from nav2_msgs.msg import Costmap
 from sensor_msgs.msg import PointCloud2
 from tf2_ros import Buffer, TransformListener
 
@@ -86,7 +86,7 @@ class Chk(Node):
                 print("[check] %s 暂无写者（图发现可能滞后，仍继续订阅）" % topic, flush=True)
         except Exception as e:               # noqa: BLE001
             print("[check] 查询写者 QoS 失败:", e, flush=True)
-        self.create_subscription(OccupancyGrid, topic, self.on_grid, BEST)
+        self.create_subscription(Costmap, topic, self.on_grid, BEST)
 
     def on_grid(self, m):
         self.grid = m
@@ -104,9 +104,11 @@ class Chk(Node):
         t = tf.transform.translation
         q = (tf.transform.rotation.x, tf.transform.rotation.y,
              tf.transform.rotation.z, tf.transform.rotation.w)
-        info = self.grid.info
-        res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
-        w, h, data = info.width, info.height, self.grid.data
+        # nav2_msgs/msg/Costmap：元数据在 metadata（size_x/size_y/origin），代价是 uint8 0..255
+        # （0=free, 1..252=inflated, 253=inscribed, 254=lethal, 255=NO_INFORMATION）
+        md = self.grid.metadata
+        res, ox, oy = md.resolution, md.origin.position.x, md.origin.position.y
+        w, h, data = md.size_x, md.size_y, self.grid.data
         for x, y, z in iter_xyz(m):
             if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
                 continue
@@ -121,19 +123,24 @@ class Chk(Node):
             self.stat[b]["n"] += 1
             cx, cy = int((mx - ox) / res), int((my - oy) / res)
             if 0 <= cx < w and 0 <= cy < h:
-                c = data[cy * w + cx]
-                if c >= 100:
-                    self.stat[b]["mk"] += 1
-                if c >= 253:
-                    self.stat[b]["lethal"] += 1
-                self.stat[b]["cost"] += max(0, c)
+                c = int(data[cy * w + cx])
+                if c == 255:                      # NO_INFORMATION：既非障碍也非自由
+                    self.stat[b]["unk"] = self.stat[b].get("unk", 0) + 1
+                else:
+                    if c >= 100:
+                        self.stat[b]["mk"] += 1
+                    if c >= 253:
+                        self.stat[b]["lethal"] += 1
+                    self.stat[b]["cost"] += c
 
     def table(self):
         g = self.grid
         print(f"\n  点云帧={self.clouds} frame={sorted(self.frames)}  未取到TF={self.no_tf}")
         if g is None:
             print("  ⚠️ 没收到 /global_costmap/costmap_raw —— 全局 costmap 可能没启动（或话题不同）"); return
-        print(f"  costmap: {g.info.width}x{g.info.height} @ {g.info.resolution} m  frame={g.header.frame_id}")
+        md = g.metadata
+        print(f"  costmap: {md.size_x}x{md.size_y} @ {md.resolution:.3f} m  frame={g.header.frame_id}  "
+              f"type=nav2_msgs/Costmap")
         print(f"  {'距离桶(m)':>12} {'点数':>8} {'已标记(cost>=100)':>18} {'致命/内切(>=253)':>17} {'平均cost':>10}")
         for b in BUCKETS:
             e = self.stat[b]
