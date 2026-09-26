@@ -105,7 +105,7 @@ class SegNav(Node):
         poses = path.poses
         if not poses:
             return None, 0.0, False, "empty"
-        total, cut, blocked = 0.0, None, None
+        total, cut, blocked, reached_end = 0.0, None, None, True
         prev = poses[0].pose.position
         for i, ps in enumerate(poses):
             p = ps.pose.position
@@ -114,15 +114,19 @@ class SegNav(Node):
                 prev = p
             st = self.cell(p.x, p.y)
             if st != "free":
-                blocked = (i, st); break
+                blocked, reached_end = (i, st), False; break
             if total >= self.a.max_seg:
-                cut = i; break
+                cut, reached_end = i, False; break        # ★ 被 max-seg 截断 ≠ 走到路径尽头
             cut = i
-        if blocked is None:
+        if blocked is not None:
+            if cut is None:
+                return None, 0.0, False, "start-%s" % blocked[1]
+            return poses[cut], total, False, "cut@%s" % blocked[1]
+        if reached_end:
             return poses[-1], total, True, "all-free"
-        if cut is None:
-            return None, 0.0, False, "start-%s" % blocked[1]
-        return poses[cut], total, False, "cut@%s" % blocked[1]
+        # ★ 关键修复：原来这里错误地返回 poses[-1] 且标记 all-free ⇒ 把"该在这里切"变成
+        #   "一段直达最终目标" ⇒ 机器人会一头奔向很远的未探索区域（实测就是这样撞墙的）
+        return poses[cut], total, False, "cut@max-seg"
 
     def go(self, pose, timeout):
         if not self.nav.wait_for_server(timeout_sec=10.0):
