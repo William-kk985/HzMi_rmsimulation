@@ -59,16 +59,36 @@ def generate_launch_description():
     ################################### navigation2 parameters start ##################################
     nav2_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world]), ".yaml"
     empty_map_dir = os.path.join(rm_nav_bringup_dir, 'map', 'empty_map.yaml')
-    # nav2 参数已回归自研 rm_navigation 包 params/（R1）；按 nav 选择局部规划器变体
-    # ★ 2026-09-26：再叠一层 planner 槽（全局规划器 A/B 用，与 nav 正交）——
-    #   planner:=navfn  → nav2_params_sim_<nav>.yaml        （默认；与今天**逐字节等价**）
-    #   planner:=smac2d → nav2_params_sim_<nav>_smac2d.yaml （只多一个后缀；文件不存在时 nav2 会直接报错，不会静默回退）
-    nav2_params_file_dir = PathJoinSubstitution([
-        get_package_share_directory('rm_navigation'), 'params',
-        PythonExpression([
-            "'nav2_params_sim_' + '", LaunchConfiguration('nav'), "' + ",
-            "('_smac2d' if '", LaunchConfiguration('planner'), "' == 'smac2d' else '') + '.yaml'"])
-    ])
+    # nav2 参数已回归自研 rm_navigation 包 params/（R1）。
+    # ★ 2026-10-05 params 分层重构（动机/等价性证明见 docs/cod_nav_2026_migration_worksheet.md §J）：
+    #   以前 = 「一个组合一份 full copy」（4 nav × 2 planner = 8 份，每份 ~400 行），
+    #   代价是改一个公共参数要改 N 份、少一个组合文件就起不来。
+    #   现在 = 公共段 + 两个正交槽位，**三份文件按顺序**（base → planner 槽 → controller 槽）传给同一个 nav2 节点：
+    #     nav2_params_sim_base.yaml                公共段（除 planner_server / controller_server 外的全部段）
+    #     nav2_params_sim_planner_<planner>.yaml   planner_server 段（planner:=navfn | smac2d，默认 navfn）
+    #     nav2_params_sim_controller_<nav>.yaml    controller_server 段（nav:=rpp | dwb | teb | mppi，默认 rpp）
+    #   ROS 2 的 parameters= 支持多份 YAML **按参数逐键**叠加（同名参数后写覆盖，同一段里没写的键仍来自前一份文件），
+    #   每个节点只读自己名字那一段 ⇒ 三段互不冲突。加新规划器/控制器 = 只加一个槽位文件 + 这里一个 choices。
+    nav2_params_dir = os.path.join(get_package_share_directory('rm_navigation'), 'params')
+    # ⚠️ 这个 list 不能直接塞进 launch_arguments：launch 会把 list 里的 substitution 逐个 perform 后
+    #   **拼接成一个字符串**（normalize_to_list_of_substitutions + perform_substitutions）
+    #   ⇒ 传下去会变成 "…base.yaml…planner…yaml…controller…yaml" 三串相连的假路径。
+    #   所以按槽位拆成三个入参（params_file / params_file_planner / params_file_controller）。
+    nav2_params_file_dir = [
+        PathJoinSubstitution([nav2_params_dir, 'nav2_params_sim_base.yaml']),
+        PathJoinSubstitution([nav2_params_dir, PythonExpression([
+            "'nav2_params_sim_planner_' + '", LaunchConfiguration('planner'), "' + '.yaml'"])]),
+        PathJoinSubstitution([nav2_params_dir, PythonExpression([
+            "'nav2_params_sim_controller_' + '", LaunchConfiguration('nav'), "' + '.yaml'"])]),
+    ]
+    # 逐槽位传参（老的入参名 params_file 保留 = 公共段 ⇒ 单文件用法仍然可用）
+    nav2_params_launch_args = {
+        'params_file': nav2_params_file_dir[0],             # 公共段（base）
+        'params_file_planner': nav2_params_file_dir[1],     # planner_server 槽
+        'params_file_controller': nav2_params_file_dir[2],  # controller_server 槽
+    }
+    # ⚠️ 旧的 nav2_params_sim_<nav>[_smac2d].yaml（8 份 full copy）**已废弃**：本 launch 不再引用它们，
+    #   文件保留只为「参考 / 回滚」（等价性已逐键核实：8/8 组合 0 处差异，见 docs §J）。
     # AMCL 初值（map 系，米/弧度）：sim 出生点固定，按 world 自动注入，省掉手动发 /initialpose。
     # 依据（用场地 STL 世界包围盒 vs pgm 已知区域比对得出，见 docs/smoke_test_runbook.md §0.5）：
     #   RMUC / RMUL 的 pgm 是 sim 建图导出 → map 原点 = 机器人出生点 → (0, 0, 0)
@@ -157,11 +177,12 @@ def generate_launch_description():
         'nav',
         default_value='rpp',
         # ★ 2026-09-26：新增 'mppi'（A/B 对照用；默认仍是 rpp ⇒ 现有已验证路径零影响）。
-        #   文件名由 nav2_params_file_dir 的 PythonExpression 派生 ⇒ nav:=mppi 自动指向
-        #   rm_navigation/params/nav2_params_sim_mppi.yaml（该文件 = rpp 的副本，只有 controller_server 段不同）。
+        # ★ 2026-10-05：nav 现在只决定 **controller 槽位文件**（nav2_params_sim_controller_<nav>.yaml），
+        #   由它与公共段 base 组合，不再是「一个组合一份 full copy」（见 docs §J）。
         choices=['rpp', 'dwb', 'teb', 'mppi'],
         description='Choose local planner variant: rpp | dwb | teb | mppi '
-                    '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml；'
+                    '(对应 rm_navigation/params/nav2_params_sim_controller_<nav>.yaml，'
+                    '与公共段 nav2_params_sim_base.yaml 按顺序叠加；'
                     'mppi = nav2_mppi_controller::MPPIController，A/B 用；回退 = 省略本参数或 nav:=rpp)')
 
     declare_planner_cmd = DeclareLaunchArgument(
@@ -172,8 +193,9 @@ def generate_launch_description():
                     'navfn = 已验证默认（不要动；nav2_navfn_planner/NavfnPlanner）；'
                     'smac2d = COD 2026 风格的代价感知 A*（nav2_smac_planner/SmacPlanner2D，'
                     'cost_travel_multiplier 越大越贴通道中心），只用于 A/B。'
-                    '对应 rm_navigation/params/nav2_params_sim_<nav>.yaml 与 '
-                    'nav2_params_sim_<nav>_smac2d.yaml；回退 = 省略本参数或 planner:=navfn')
+                    '对应 rm_navigation/params/nav2_params_sim_planner_navfn.yaml 与 '
+                    'nav2_params_sim_planner_smac2d.yaml（planner_server 槽位，与公共段 base 叠加）；'
+                    '回退 = 省略本参数或 planner:=navfn')
 
     declare_global_obstacle_cmd = DeclareLaunchArgument(
         'global_obstacle',
@@ -347,7 +369,7 @@ def generate_launch_description():
                 launch_arguments = {
                     'use_sim_time': use_sim_time,
                     'map': nav2_map_dir,
-                    'params_file': nav2_params_file_dir,
+                    **nav2_params_launch_args,
                     'initial_pose_x': amcl_init_x,
                     'initial_pose_y': amcl_init_y,
                     'initial_pose_z': '0.0',
@@ -420,7 +442,7 @@ def generate_launch_description():
                 launch_arguments={
                     'use_sim_time': use_sim_time,
                     'map': nav2_map_dir,
-                    'params_file': nav2_params_file_dir,
+                    **nav2_params_launch_args,
                     'container_name': 'nav2_container'}.items())
         ]
     )
@@ -575,7 +597,7 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': use_sim_time,
             'map': empty_map_dir,
-            'params_file': nav2_params_file_dir,
+            **nav2_params_launch_args,
             'global_obstacle': LaunchConfiguration('global_obstacle'),
             'local_obstacle': LaunchConfiguration('local_obstacle'),
             'nav_rviz': use_nav_rviz}.items()

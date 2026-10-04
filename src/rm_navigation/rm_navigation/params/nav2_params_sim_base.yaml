@@ -1,0 +1,358 @@
+# =============================================================================
+# nav2 仿真参数 —— 公共段（base）
+#   ★ 2026-10-05 分层重构（动机/验证见 docs/cod_nav_2026_migration_worksheet.md §J）：
+#     base（本文件）                          = 除 planner_server / controller_server 外的**全部**段；
+#     nav2_params_sim_planner_<planner>.yaml  = planner_server 段（planner:=navfn | smac2d）；
+#     nav2_params_sim_controller_<nav>.yaml   = controller_server 段（nav:=rpp | dwb | teb | mppi）。
+#   三份文件由 bringup_sim.launch.py 按 base → planner 槽 → controller 槽 的顺序**一起**传给
+#   同一个 nav2 节点（ROS 2 的 parameters= 支持多文件按顺序叠加，后写的覆盖先写的）；每个节点
+#   只读自己名字那一段，所以三段互不冲突。改公共参数只改本文件一处，不再改 N 份副本。
+#   ⚠️ 旧的 nav2_params_sim_<nav>[_smac2d].yaml（8 份 full copy）已废弃，仅留作参考/回滚。
+# =============================================================================
+amcl:
+  ros__parameters:
+    use_sim_time: True
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: "base_link"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    laser_model_type: "likelihood_field"
+    max_beams: 60
+    max_particles: 2000
+    min_particles: 500
+    odom_frame_id: "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: "nav2_amcl::OmniMotionModel"
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0
+    update_min_a: 0.2
+    update_min_d: 0.25
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    scan_topic: scan
+    # sim 自动初值（map 系原点约定见 docs/smoke_test_runbook.md §0.5）：
+    #   RMUC / RMUL 的 pgm 由 sim 建图导出 → map 原点 = 机器人出生点 → 初值 (0,0)
+    #   RMUL2026 的 pgm 由场地几何生成     → map 系 = world 系      → 初值 (4.3,3.35)
+    # 实际数值由 bringup_sim.launch.py 按 world 参数用 RewrittenYaml 全路径覆盖
+    set_initial_pose: true
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+    always_reset_initial_pose: false
+
+amcl_map_client:
+  ros__parameters:
+    use_sim_time: True
+
+amcl_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: map
+    robot_base_frame: base_link_fake
+    odom_topic: /Odometry
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 20.0
+      publish_frequency: 10.0
+      global_frame: odom
+      robot_base_frame: base_link_fake
+      use_sim_time: True
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.02
+      # ★ 2026-09-24：0.2 → 0.35（= 车体半径 0.2 + 近距盲区余量 0.15）。
+      #   本仓库没有 footprint 多边形 ⇒ nav2 的"实心圈"(代价 253, INSCRIBED) 半径就等于 robot_radius。
+      #   实测现象：车贴到内墙很近时墙会"碎掉"（进 p2l 的 range_min=0.2 盲区后被丢/被清）。
+      #   把它加大到"车体+盲区"⇒ 规划器不会再把车带进盲区，墙自然不会被贴脸。
+      #   代价：<0.7m 的窄缝会判为不可通行 ⇒ 若太保守，回退 0.25~0.30。
+      # ★ 2026-09-26：robot_radius 0.40 → 0.22（≈ 真实车体半径 0.2）——回到"真实几何"。
+      #   原因：0.40 = 车体 0.2 + 近距盲区 0.2 的"虚拟放大"⇒ **costmap 几何 ≠ 真实几何**；
+      #     车一进入 0.40 内就被当成"已在致命/内切带" ⇒ planner 把起点视为障碍、
+      #     控制器报无有效轨迹 ⇒ **卡死且无法脱困**。
+      #   盲区安全改由 inflation_radius（局部 0.5 / 全局 0.55，软带因此变宽到 0.28~0.33 m）
+      #     + 限速 / 碰撞监控承担。
+      #   回退：改回 0.40。
+      robot_radius: 0.22
+      # 局部障碍来源 = 两个可切换图层（bench 槽位，launch 用 local_obstacle 参数切 enabled）：
+      #   obstacle_layer       = /scan（几何 2D；链路单点，且 p2l 有 45cm 盲区）
+      #   obstacle_cloud_layer = /segmentation/obstacle 点云直投（不经 p2l；默认关，A/B 用）
+      plugins: ["obstacle_layer", "obstacle_cloud_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          # /scan 由 pointcloud_to_laserscan 以 SensorDataQoS(best-effort) 发布，这里必须匹配，否则收不到数据
+          # ⚠️ 2026-09-24 核实：下面两个键在 nav2 1.1.20 里**是惰性的**——
+          #   nav2_costmap_2d/plugins/obstacle_layer.cpp:221 硬编码 rmw_qos_profile_sensor_data（best effort），
+          #   全包内 grep 不到 reliability_policy/qos_policy 的读取。保留只为留痕，改它们没有任何效果。
+          reliability_policy: "best_effort"
+          qos_policy: "best_effort"
+          # ★ 失效检测：超过该间隔没更新 → isCurrent()=false → layer current_=false →
+          #   nav2 控制器/规划器拒绝算速度，velocity_smoother 的 velocity_timeout(1.0s) 发零速停车，
+          #   同时日志出 WARN。0（默认）= 不检查 → costmap 会冻在最后一帧且毫无提示（静默失效）。
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。
+          raytrace_max_range: 6.0
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.1
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          inf_is_valid: true
+          data_type: "LaserScan"
+      # 第二路（3D 点云直投）：**不经过 p2l** → 无 45cm 盲区，且 p2l 挂了这路还在（破单点）。
+      # 输入 /segmentation/obstacle 已由 linefit 去地面，所以这里不再靠高度带去地面；
+      # min_obstacle_height 只用于兜底：odom 的 z=0 ≈ base_link 起始高度（地面约 -0.05），
+      # 万一 linefit 地面模型失效、地面点混进来，这一层还能挡住。
+      obstacle_cloud_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: false                      # 默认关（launch 按 local_obstacle 覆盖）；A/B 验证过再开
+        observation_sources: cloud
+        cloud:
+          topic: /segmentation/obstacle
+          data_type: "PointCloud2"
+          min_obstacle_height: -0.02
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.0           # ★ 从 0 起 → 消掉 p2l 的 45cm 盲区
+          obstacle_max_range: 3.0
+          raytrace_max_range: 4.0
+          clearing: true
+          marking: true
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 5.0
+        # ★ 2026-09-24：0.6 → 0.5（"虚"的外扩收小一点，按用户体感）
+        #   注意：必须 ≥ robot_radius(0.35)，否则 nav2 会告警并夹紧。
+        inflation_radius: 0.5
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: map
+      robot_base_frame: base_link_fake
+      use_sim_time: True
+      # ★ 2026-09-24：0.2 → 0.35（同上，**全局这张才是规划用的**，漏改会导致 planner 仍允许贴脸）
+      # ★ 2026-09-26：robot_radius 0.40 → 0.22（≈ 真实车体半径 0.2）——回到"真实几何"。
+      #   原因：0.40 = 车体 0.2 + 近距盲区 0.2 的"虚拟放大"⇒ **costmap 几何 ≠ 真实几何**；
+      #     车一进入 0.40 内就被当成"已在致命/内切带" ⇒ planner 把起点视为障碍、
+      #     控制器报无有效轨迹 ⇒ **卡死且无法脱困**。
+      #   盲区安全改由 inflation_radius（局部 0.5 / 全局 0.55，软带因此变宽到 0.28~0.33 m）
+      #     + 限速 / 碰撞监控承担。
+      #   回退：改回 0.40。
+      robot_radius: 0.22
+      resolution: 0.04
+      track_unknown_space: true
+      # 实时障碍来源二选一（由 launch 的 global_obstacle 参数切 enabled，默认 stvl 保持原行为）：
+      #   stvl_layer     = 3D 体素层（吃 /segmentation/obstacle，高度带 0.2~2.0，带时间衰减）
+      #   obstacle_layer = 2D /scan 障碍层（与 local_costmap 同源 → "什么算障碍"只在感知域 p2l 决策一处）
+      plugins: ["static_layer", "obstacle_layer", "stvl_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: false                      # 默认关（launch 按 global_obstacle 覆盖）
+        observation_sources: scan
+        scan:
+          topic: /scan
+          # ⚠️ 2026-09-24 核实：下面两个键在 nav2 1.1.20 里**是惰性的**——
+          #   nav2_costmap_2d/plugins/obstacle_layer.cpp:221 硬编码 rmw_qos_profile_sensor_data（best effort），
+          #   全包内 grep 不到 reliability_policy/qos_policy 的读取。保留只为留痕，改它们没有任何效果。
+          reliability_policy: "best_effort"  # 惰性键（见上）；真正生效的是 obstacle_layer 硬编码的 sensor QoS
+          qos_policy: "best_effort"
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          inf_is_valid: true
+          # ⚠️ 不能照抄 local 的 6.0：global 是**全图**（RMUL 13×10 m），
+          # raytrace 只能清 raytrace_max_range 以内的旧标记 → 范围太小会累积"幽灵障碍"。
+          # 这里与 p2l 的 range_max 对齐（10 m），即"扫描能看到多远就能清多远"。
+          obstacle_max_range: 10.0
+          raytrace_max_range: 10.0
+          obstacle_min_range: 0.1
+          max_obstacle_height: 2.0
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。           # ★ 失效检测（0=不检查 → 静默失效）
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true                       # 默认开（launch 按 global_obstacle 覆盖）
+        # https://github.com/SteveMacenski/spatio_temporal_voxel_layer
+        voxel_decay:              0.5                               # 如果是线性衰减，单位为秒；如果是指数衰减，则为 e 的 n 次方
+        decay_model:              0                                 # 衰减模型，0=线性，1=指数，-1=持久
+        voxel_size:               0.05                              # 每个体素的尺寸，单位为米
+        track_unknown_space:      true                              # default space is unknown
+        mark_threshold:           0                                 # voxel height
+        update_footprint_enabled: true
+        combination_method:       1                                 # 1=max, 0=override
+        origin_z:                 0.0                               # 单位为米
+        publish_voxel_map:        true                              # default false, 是否发布体素地图
+        transform_tolerance:      0.2                               # 单位为秒
+        mapping_mode:             false                             # default off, saves map not for navigation
+        map_save_duration:        60.0                              # default 60s, how often to autosave
+        observation_sources:      livox_mark livox_clear
+        livox_mark:
+          data_type: PointCloud2
+          topic: /segmentation/obstacle
+          marking: true
+          clearing: false
+          obstacle_range: 3.0                                       # meters
+          # ★ 2026-09-24：min_obstacle_height 0.2 → 0.0。
+          #   原来把 20cm 以下全丢 ⇒ 矮内墙在 stvl 里天然不存在；而全局 costmap 才是规划用的那一张
+          #   ⇒「stvl 有的才规避」的现象由此而来。代价：贴地噪声更易成为障碍（幽灵障碍）⇒ 出现就回退 0.05。
+          #   ⚠️ 前提：stvl 必须真收到点云；若终端仍刷 'Message Filter dropping … livox_frame'，改这里无效（先修 TF，见 docs/debug_fastlio_cartographer.md §9.2）。
+          min_obstacle_height: 0.0                                  # default 0, meters（2026-09-24 由 0.2 调低）
+          max_obstacle_height: 2.0                                  # default 3, meters
+          expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
+                              #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
+                              #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。                                 # ★ 0=不检查(默认)→静默失效；0.5=源超时即告警
+          observation_persistence: 0.0                              # default 0, use all measurements taken during now-value, 0=latest
+          inf_is_valid: false                                       # default false, for laser scans
+          filter: "voxel"                                           # default passthrough, apply "voxel", "passthrough", or no filter to sensor data, recommend on
+          voxel_min_points: 0                                       # default 0, minimum points per voxel for voxel filter
+          clear_after_reading: true                                 # default false, clear the buffer after the layer gets readings from it
+        livox_clear:
+          enabled: true                                             # default true, can be toggled on/off with associated service call
+          data_type: PointCloud2
+          topic: /segmentation/obstacle
+          marking: false
+          clearing: true
+          max_z: 8.0                                                # default 10, meters
+          min_z: 1.0                                                # default 0, meters
+          vertical_fov_angle: 1.029                                 # 垂直视场角，单位为弧度，For 3D lidars it's the symmetric FOV about the planar axis.
+          vertical_fov_padding: 0.05                                # 3D Lidar only. Default 0, in meters
+          horizontal_fov_angle: 6.29                                # 3D 激光雷达水平视场角
+          decay_acceleration: 5.0                                   # default 0, 1/s^2.
+          model_type: 1                                             # 0=深度相机，1=3D激光雷达
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        footprint_clearing_enabled: True
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 8.0
+        # ★ 2026-09-24：0.7 → 0.55（同上，全局的"虚"也收小）
+        inflation_radius: 0.55
+      always_send_full_costmap: True
+
+map_saver:
+  ros__parameters:
+    use_sim_time: True
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+behavior_server:
+  ros__parameters:
+    # 注意：Humble 的节点名是 behavior_server（Galactic 叫 recoveries_server）。
+    # 曾经这里写的是 recoveries_server，导致整段参数被静默忽略、实际走 nav2 内置默认
+    # （robot_base_frame=base_link、max_rotational_vel=1.0、只加载默认插件列表）。
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: odom
+    robot_base_frame: base_link_fake   # 与 local/global costmap、controller 保持一致（哨兵云台系）
+    transform_tolerance: 0.1
+    use_sim_time: True
+    simulate_ahead_time: 1.0
+    max_rotational_vel: 3.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.0
+map_server:
+  ros__parameters:
+    use_sim_time: True
+    # 必须保留该键：nav2 的 RewrittenYaml 只会替换“已存在的键”，launch 会把实际地图路径写进来
+    yaml_filename: ""
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: True
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [2.0, 2.0, 3.0]
+    min_velocity: [-2.0, -2.0, -3.0]
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+    max_accel: [4.0, 4.0, 6.0]
+    max_decel: [-4.0, -4.0, -6.0]
+    odom_topic: "odom"      # T2：LIO 里程计已统一到 /odom
+    odom_duration: 0.1

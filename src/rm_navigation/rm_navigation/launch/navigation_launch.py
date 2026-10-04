@@ -34,6 +34,14 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     autostart = LaunchConfiguration('autostart')
     params_file = LaunchConfiguration('params_file')
+    # ★ 2026-10-05 params 分层（见 docs/cod_nav_2026_migration_worksheet.md §J）：
+    #   params_file = 公共段（base）；params_file_planner / params_file_controller = 槽位文件
+    #   （planner_server / controller_server 段）。三份按 base → planner → controller 顺序给节点，
+    #   ROS 2 按参数逐键叠加（同名后写覆盖；后一份文件里没写的键仍来自前一份）。
+    #   独立使用本 launch 且只给 params_file 时，两个槽位默认 = params_file（重复叠加同一份文件幂等）。
+    params_files = [params_file,
+                    LaunchConfiguration('params_file_planner'),
+                    LaunchConfiguration('params_file_controller')]
     use_composition = LaunchConfiguration('use_composition')
     container_name = LaunchConfiguration('container_name')
     container_name_full = (namespace, '/', container_name)
@@ -89,11 +97,14 @@ def generate_launch_description():
         lc + 'obstacle_layer.enabled': local_scan_enabled,
         lc + 'obstacle_cloud_layer.enabled': local_cloud_enabled}
 
-    configured_params = RewrittenYaml(
-            source_file=params_file,
+    # 每份文件各套一层同样的 RewrittenYaml（use_sim_time / 图层开关等 rewrite 对三份都生效）
+    configured_params = [
+        RewrittenYaml(
+            source_file=f,
             root_key=namespace,
             param_rewrites=param_substitutions,
             convert_types=True)
+        for f in params_files]
 
     stdout_linebuf_envvar = SetEnvironmentVariable(
         'RCUTILS_LOGGING_BUFFERED_STREAM', '1')
@@ -125,6 +136,17 @@ def generate_launch_description():
         default_value=os.path.join(bringup_dir, 'params', 'nav2_params.yaml'),
         description='Full path to the ROS2 parameters file to use for all launched nodes')
 
+    # ★ 2026-10-05 params 分层：另两份槽位文件（默认 = params_file ⇒ 单文件用法行为不变）
+    declare_params_file_planner_cmd = DeclareLaunchArgument(
+        'params_file_planner',
+        default_value=params_file,
+        description='第二份参数文件（planner 槽：planner_server 段）；默认 = params_file')
+
+    declare_params_file_controller_cmd = DeclareLaunchArgument(
+        'params_file_controller',
+        default_value=params_file,
+        description='第三份参数文件（controller 槽：controller_server 段）；默认 = params_file')
+
     declare_autostart_cmd = DeclareLaunchArgument(
         'autostart', default_value='true',
         description='Automatically startup the nav2 stack')
@@ -154,7 +176,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
             Node(
@@ -164,7 +186,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings),
             Node(
@@ -174,7 +196,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings),
             Node(
@@ -184,7 +206,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings),
             Node(
@@ -194,7 +216,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings),
             Node(
@@ -204,7 +226,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings),
             Node(
@@ -214,7 +236,7 @@ def generate_launch_description():
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings +
                         [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]),
@@ -238,43 +260,43 @@ def generate_launch_description():
                 package='nav2_controller',
                 plugin='nav2_controller::ControllerServer',
                 name='controller_server',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
             ComposableNode(
                 package='nav2_smoother',
                 plugin='nav2_smoother::SmootherServer',
                 name='smoother_server',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings),
             ComposableNode(
                 package='nav2_planner',
                 plugin='nav2_planner::PlannerServer',
                 name='planner_server',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings),
             ComposableNode(
                 package='nav2_behaviors',
                 plugin='behavior_server::BehaviorServer',
                 name='behavior_server',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings),
             ComposableNode(
                 package='nav2_bt_navigator',
                 plugin='nav2_bt_navigator::BtNavigator',
                 name='bt_navigator',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings),
             ComposableNode(
                 package='nav2_waypoint_follower',
                 plugin='nav2_waypoint_follower::WaypointFollower',
                 name='waypoint_follower',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings),
             ComposableNode(
                 package='nav2_velocity_smoother',
                 plugin='nav2_velocity_smoother::VelocitySmoother',
                 name='velocity_smoother',
-                parameters=[configured_params],
+                parameters=[*configured_params],
                 remappings=remappings +
                            [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]),
             ComposableNode(
@@ -299,6 +321,9 @@ def generate_launch_description():
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
     ld.add_action(declare_params_file_cmd)
+    # 槽位文件入参必须在 params_file 之后声明（默认值引用 LaunchConfiguration('params_file')）
+    ld.add_action(declare_params_file_planner_cmd)
+    ld.add_action(declare_params_file_controller_cmd)
     ld.add_action(declare_autostart_cmd)
     ld.add_action(declare_use_composition_cmd)
     ld.add_action(declare_container_name_cmd)

@@ -291,3 +291,145 @@ ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity "{name: tmp_obstac
 4. **卡住的唯一检测器是 controller 的 progress checker**：内置树里没有 `IsStuck` 条件、没有 `PathLongerOnApproach`，`GoalUpdated` 只用于"目标变了就跳过恢复"。⇒ ① "慢慢蹭不动"要 **10 s** 才被发现；② `RecoveryNode` 6 次用尽后 `NavigateToPose` 直接 **abort**（不会无限重试）—— 在长目标分段（`segment_goal_navigator.py`）里表现为"这一段失败"，需注意上层是否处理。
 5. **`behavior_server` 未配 `assisted_teleop`**（1.1.20 该插件存在）⇒ "人工接管把车蹭出来"这条路我们暂时没有；要加就是 `behavior_plugins` 里加一个 id + 一段参数（未做）。
 6. `local_frame` 等 Jazzy 键：**不要**从参考队 yaml 抄进来（I.2），1.1.20 既不报错也不生效。
+
+---
+
+## J. params 分层重构：`base + 槽位文件`（2026-10-05，已提交）
+
+### J.1 问题（为什么要改）
+
+旧结构 = **「一个组合一份 full copy」**：`nav2_params_sim_{rpp,dwb,teb,mppi}.yaml` 与
+`nav2_params_sim_{rpp,dwb,teb,mppi}_smac2d.yaml` 共 **8 份、每份 400~500 行**，每份都含全部 12 段。
+
+| # | 代价 | 具体表现 |
+|---|---|---|
+| ① | **改一个公共参数要改 N 份** | `robot_radius` / `inflation_radius` / AMCL 初值这类公共键散在 8 份里，漏改一份 = "同一参数在不同 nav 下不同值"的**静默漂移**（本次就查出一例，见 §J.5） |
+| ② | **组合 = 文件夹里有没有这个文件** | 新加一个 nav/planner 忘了补文件 ⇒ launch 直接报 `nav2_params_sim_x.yaml` 不存在；补了又要把 400 行抄一遍 |
+| ③ | **A/B 对照无法保证"只差一个变量"** | 8 份副本会各自漂移，做 planner/controller A/B 时说不清差异是不是来自"唯一变量" |
+
+### J.2 新结构（文件清单，都在 `src/rm_navigation/rm_navigation/params/`）
+
+| 文件 | 内容 | 谁选它 |
+|---|---|---|
+| `nav2_params_sim_base.yaml` | **公共段**：除 `planner_server` / `controller_server` 外的全部 10 段（`amcl`、`amcl_map_client`、`amcl_rclcpp_node`、`bt_navigator`、`local_costmap`、`global_costmap`、`map_saver`、`behavior_server`、`map_server`、`velocity_smoother`），逐字节取自 `nav2_params_sim_rpp.yaml`（注释全保留），文件头加了分层说明 | 总是加载 |
+| `nav2_params_sim_planner_navfn.yaml` | `planner_server:` 段（NavFn） | `planner:=navfn`（默认） |
+| `nav2_params_sim_planner_smac2d.yaml` | `planner_server:` 段（SmacPlanner2D + 键清单注释） | `planner:=smac2d` |
+| `nav2_params_sim_controller_rpp.yaml` | `controller_server:` 段（RPP）**+ 一处 `local_costmap` 键**（见 §J.5） | `nav:=rpp`（默认） |
+| `nav2_params_sim_controller_dwb.yaml` | `controller_server:` 段（DWB） | `nav:=dwb` |
+| `nav2_params_sim_controller_teb.yaml` | `controller_server:` 段（TEB） | `nav:=teb` |
+| `nav2_params_sim_controller_mppi.yaml` | `controller_server:` 段（MPPI）**+ 同一处 `local_costmap` 键**（见 §J.5） | `nav:=mppi` |
+
+共 **7 份新文件**；旧的 8 份 full copy **一份没删、一个字节没改**，只是 launch 不再引用它们（§J.6）。
+
+### J.3 launch 行为（多文件 + 顺序）
+
+- `bringup_sim.launch.py`：`nav2_params_file_dir` 从"一个路径"变成**三个槽位的 list**，再按槽位拆成三个入参传给 include：
+  `params_file`（公共段 base）/ `params_file_planner` / `params_file_controller`。
+  - ⚠️ **不能把 list 直接塞进 `launch_arguments`**：launch 的 `normalize_to_list_of_substitutions` +
+    `perform_substitutions` 会把 list 里每个 substitution 逐个 perform 后**拼接成一个字符串**
+    （实测 `[TextSubstitution('/a/base.yaml'), TextSubstitution('/a/planner.yaml')] → '/a/base.yaml/a/planner.yaml'`）
+    ⇒ 传给节点的是假路径。所以按槽位拆成三个入参。
+- 消费者 launch（`navigation_launch.py`、`bringup_rm_navigation.py`、`localization_amcl_launch.py`、`map_server_launch.py`）
+  各多声明两个入参（**默认值 = `params_file`** ⇒ 单独用这些 launch、只给一个文件时行为不变），并把
+  `configured_params` 从「一个 `RewrittenYaml`」改成「**三个 `RewrittenYaml` 的 list**」——每份文件各套一层
+  **同样的** rewrite（`use_sim_time` / `yaml_filename` / `*.enabled` 图层开关 / `amcl...initial_pose.*` / `root_key=namespace`），
+  再原样铺进 `parameters=[*configured_params, …]`。
+  - ⚠️ 这里必须是 `[*configured_params]`：若仍写 `parameters=[configured_params]`，那个 list 会被
+    `ParameterFile(...)` 当成"一个路径"，三份 temp 文件路径被拼成一串 ⇒ 启动即报文件不存在（本次实测踩到过）。
+- **顺序 = base → planner 槽 → controller 槽**。ROS 2 的多份 params 文件是**按参数逐键叠加**（同名后写覆盖；
+  **后一份文件里没写的键仍来自前一份文件**，不是整段替换）。用最小 rclpy 节点实测（无话题/服务/rosout）：
+  base 给整段 `local_costmap`（`update_frequency` / `publish_frequency` / `width` / `obstacle_layer.*` / `tf=0.1`）
+  + 槽位只给 `transform_tolerance: 0.3` ⇒ `update_frequency=20.0`、`publish_frequency=10.0`、
+  `obstacle_layer.*` 全在、`transform_tolerance=0.3`（后写赢）；两份都没有的键 ⇒ 保留节点自己 `declare` 的默认值。
+  ⇒ 段是"逐键叠加"不是"整段替换"，所以槽位文件里放零散键是安全的（这正是 §J.5 方案的前提）。
+
+### J.4 等价性证明：8/8 组合、0 处差异
+
+两条独立通道，都在重构后实跑通过（脚本：`.tmp_cache/params_refactor/proof_equivalence.py`，**一次性、未提交**）：
+
+- **(a) 逐键 deep merge**：把三份新文件按 base→planner→controller 逐键合并，与旧 full 文件的 `yaml.safe_load` 结果
+  做全路径 diff（`dict` 递归、列表整体比较）。
+- **(a2) 端到端**：`importlib` 加载**真实的消费者 launch**（4 个），用 `launch_ros.utilities.evaluate_parameters`
+  真跑 `RewrittenYaml`，算出每个节点最终拿到的参数字典；对比「旧用法 `params_file=<旧 full 文件>`」与
+  「新用法 base + 两个槽位」。覆盖 container(1 节点) / nav2(8 节点) / amcl(3 节点) / map_server(2 节点)，
+  含 `use_sim_time`、`yaml_filename`、图层开关等全部 rewrite。
+
+| 组合（nav / planner） | 差异键路径数 |
+|---|---|
+| rpp / navfn | **0** |
+| rpp / smac2d | **0** |
+| dwb / navfn | **0** |
+| dwb / smac2d | **0** |
+| teb / navfn | **0** |
+| teb / smac2d | **0** |
+| mppi / navfn | **0** |
+| mppi / smac2d | **0** |
+
+另核实：`nav` / `planner` 两个 launch 入参的**默认值与 choices 未改**（默认 `nav:=rpp`、`planner:=navfn`）；
+`nav:=foo` / `planner:=astar` 仍被 `choices` 拒绝；5 个 launch 文件 `py_compile` 通过；7 份新文件
+`yaml.safe_load` 通过；**旧 8 份文件相对 `HEAD` 零改动**。
+
+复验命令（**必须先 build**：`--symlink-install` 只对构建时已存在的文件建符号链接，新文件不 build 不会进 `install/`）：
+
+```bash
+colcon build --symlink-install --packages-select rm_navigation
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav localization:=amcl          # 默认 rpp/navfn
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav localization:=amcl nav:=mppi
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav localization:=amcl planner:=smac2d
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav localization:=amcl nav:=mppi planner:=smac2d
+```
+
+### J.5 顺带查出的历史漂移：`local_costmap...transform_tolerance`（**本次不改值、不改旧文件**）
+
+证据链：
+
+1. `git log -S'transform_tolerance: 0.3'` ⇒ 该键是 **2026-09-24 的 `f6c2e71`**（"定位 mode:=nav 车不动"）
+   **只加/改在 rpp** 上：`local_costmap.local_costmap.ros__parameters.transform_tolerance` 由 `1000.0` 改成 `0.3`
+   （撤销"用超长 tf 等待绕过上游 `isGoalReached()` 丢弃 `transformPose` 失败"的错误尝试）；dwb/teb 未被该提交触及。
+2. 三个 nav 变体是 2026-09-16 `553737b` 一起建的**独立副本** ⇒ 从那天起 dwb/teb（及其 `_smac2d`）**没有这个键**，
+   一直走 nav2 的声明默认值。
+3. 上游默认值就是 **0.3**：`third_party/nav2/nav2_costmap_2d/src/costmap_2d_ros.cpp:98`
+   `declare_parameter("transform_tolerance", rclcpp::ParameterValue(0.3))`
+   （本机运行时是 `ros-humble-nav2-costmap-2d 1.1.20`，与 `third_party/nav2` 同版本）。
+4. ⇒ 现状是「**rpp/mppi 显式 0.3 vs dwb/teb 依赖 nav2 默认 0.3**」，**值相同、纯文本差异**。
+5. 这是本次分层重构**顺带查出来的**（按"base = rpp 去两段"的直觉做，逐键比对时 dwb/teb 各报 1 处差异才暴露）。
+   **本次既不改这个值，也不动旧文件**（旧 8 份相对 `HEAD` 零改动已由证明 (c) 核实）。
+
+处理方式与影响面：该键属于 `local_costmap` 段，但"只在 rpp/mppi 显式存在"是 **nav 维度**的差异 ⇒ 只能由
+**per-nav 的槽位文件**携带，`base` 不能写它（写了 dwb/teb 就会从"缺键 ⇒ 走默认"变成"显式 0.3"，虽然值相同，
+但逐键比对就不再严格相等）。因此：
+
+- `nav2_params_sim_controller_rpp.yaml` / `nav2_params_sim_controller_mppi.yaml` 各含 **2 个顶层键**：
+  `controller_server:` + 一段只带 `transform_tolerance: 0.3`（含原注释）的 `local_costmap:`；
+  dwb/teb 的两份仍是**严格单段**。影响面就这一处、只影响 `nav:=rpp` 与 `nav:=mppi` 两个组合。
+- 好处：**旧 8 份文件零改动 + 8/8 组合逐键严格相等**。
+- 代价：槽位文件不再"严格单段"（形式上的不整齐，值上无影响）。
+
+**后续可选（本次不做，必须单独提交）**：重构落地后，可以再开一个独立提交把这行显式写进
+`nav2_params_sim_base.yaml` 的 `local_costmap`（四个 nav 统一显式 0.3，**值不变、行为不变**），
+然后从两个 controller 槽位里删掉这段 ⇒ 槽位文件回到"严格单段"。那一提交要在 message 里写明"值中性"，
+不要混进本次重构。
+
+### J.6 旧文件与回滚
+
+- 旧 8 份 `nav2_params_sim_<nav>[_smac2d].yaml` **保留、未改动**，launch 已不再引用 ⇒ 仅作**参考/回滚**。
+  （`bringup_sim.launch.py` 里对应位置有 ⚠️ 注释。）
+- 回滚：
+  ```bash
+  git log --oneline -1        # 本次重构提交（默认即 HEAD）
+  git revert HEAD             # 或 git revert <该提交 hash>
+  ```
+  回滚后 launch 回到"单文件 `nav2_params_sim_<nav>[_smac2d].yaml`"，旧参数文件一直都在；
+  `install/` 里多出来的 7 个符号链接无害（`--symlink-install` 产物，不属于 git 内容）。
+  只想临时回到旧行为（不提交）：`git checkout <旧提交> -- src/rm_nav_bringup/launch/bringup_sim.launch.py src/rm_navigation/rm_navigation/launch/`。
+
+### J.7 以后怎么加一个 planner / controller（只加一个文件）
+
+1. **新全局规划器**：复制 `nav2_params_sim_planner_navfn.yaml` → `nav2_params_sim_planner_<新名>.yaml`，
+   只改 `plugin` 与该插件**真正声明**的键（键名以 `nav2_<pkg>/src/...` 里的 `declare_parameter` 为准，
+   别抄 Jazzy/COD 的专有键 —— 写了是静默失效）；然后把 `bringup_sim.launch.py` 里
+   `declare_planner_cmd` 的 `choices` 加上 `<新名>`（路径由 `PythonExpression` 派生，不用改拼接逻辑）。
+2. **新局部控制器**：同理 `nav2_params_sim_controller_<新名>.yaml` + `declare_nav_cmd` 的 `choices` 加一项。
+3. 两处都不需要动 base、不需要动别的槽位、不需要动消费者 launch。
+4. ⚠️ 加完必须 `colcon build --symlink-install --packages-select rm_navigation`（新文件才会被装到 `install/`），
+   否则 launch 会报 `..._<新名>.yaml` 不存在。

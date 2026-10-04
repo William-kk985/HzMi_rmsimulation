@@ -1,0 +1,127 @@
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    # ★ 2026-09-26：20.0 → 30.0 —— MPPI 的硬约束：model_dt 必须 == 1/controller_frequency
+    #   （见下方 FollowPath.model_dt）。RPP/DWB/TEB 用 20.0 时没有这个约束。
+    controller_frequency: 30.0
+    min_x_velocity_threshold: 0.001
+    # ★ 2026-09-26：0.5 → 0.001 —— RPP 不产生 vy 所以 0.5 无害；MPPI(Omni) 会产生，
+    #   而 nav2_controller 的 getThresholdedTwist() 会把 |vy| < 阈值的**里程计反馈**抹成 0
+    #   ⇒ 侧移反馈恒 0（车表现为"只会前后 + 转向"）。
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"] 
+    controller_plugins: ["FollowPath"]
+    
+    # Progress checker parameters
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+    
+    # Goal checker parameters
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+    
+    # 局部规划器变体：MPPI（nav:=mppi，A/B 对照专用）
+    #   本文件 = nav2_params_sim_rpp.yaml 的副本，**除 controller_server 段外逐字节相同**
+    #   （diff -u 只有 2 个 hunk，全部落在 controller_server 内）⇒ A/B 是单变量。
+    #   键只写 nav2 **1.1.20** 真正声明的（三重核实，方法同 §H 的 Smac2D）：
+    #     ① strings /opt/ros/humble/lib/libmppi_controller.so 与 libmppi_critics.so 的编译期字面量；
+    #     ② third_party/nav2/nav2_mppi_controller/src/{optimizer,controller,path_handler,
+    #        noise_generator,trajectory_visualizer,critic_manager}.cpp + src/critics/*.cpp 的 getParam；
+    #     ③ /opt/ros/humble/share/nav2_mppi_controller/{mppic.xml,critics.xml} 的插件类名。
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"   # mppic.xml: nav2_mppi_controller::MPPIController
+      # mecanum ⇒ Omni（与 amcl 的 OmniMotionModel 一致）；optimizer.cpp:406-420 只认 DiffDrive/Omni/Ackermann
+      motion_model: "Omni"
+      # 时域 = time_steps × model_dt = 60 × 1/30 = 2.0 s
+      time_steps: 60
+      # ⚠️ 硬约束：optimizer.cpp:95-113 要求 1/controller_frequency == model_dt（eps = 1e-6），
+      #   否则 throw "Controller period more then model dt" ⇒ controller_server configure 失败、整栈起不来。
+      #   1/30 = 0.0333333… 与 0.0333333 之差 ≈ 3.2e-8 ≪ 1e-6 ⇒ 走"相等"分支（shift_control_sequence=ON），不抛。
+      #   ⚠️ 改 controller_frequency 必须同步改这里（反之亦然）。
+      model_dt: 0.0333333
+      batch_size: 1500       # 1500 × 60 = 9e4 采样/周期 @30 Hz：sim 里 CPU 开销大，掉帧就把这个调小
+      temperature: 0.25
+      gamma: 0.008
+      # 速度：按参考队实车配置的数量级，但我们的 velocity_smoother.max_velocity = [2.0, 2.0, 3.0]
+      #   ⇒ 实际可用上限被它夹在 2.0 m/s / 3.0 rad/s（这里的 2.5 只是 MPPI 自己的约束）。
+      #   vx_min = -vx_max ⇒ 允许全速倒车（sim 里危险，A/B 时留意）。
+      vx_max: 2.5
+      vx_min: -2.5
+      vy_max: 2.5            # 1.1.20 只有 vy_max 一个键 ⇒ vy 对称 ±2.5（**没有** vy_min，写了=静默失效）
+      wz_max: 2.5            # 同上，wz 对称 ±2.5（没有 wz_min）
+      prune_distance: 1.7
+      transform_tolerance: 0.1
+      visualize: false
+      reset_period: 1.0
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      # critic 的启用只由这份列表决定（critic_manager.cpp:39 与 :50-59）；类名取自
+      # /opt/ros/humble/share/nav2_mppi_controller/critics.xml（= mppi::critics::<名字>）
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic",
+                "PathAlignCritic", "PathFollowCritic", "ObstaclesCritic"]
+      # 每个 critic 自己的参数都在 `FollowPath.<CriticName>.*` 命名空间下
+      # （critic_function.hpp:81 声明 enabled；各 critic 的 getParam 以 name_ 为前缀）
+      ConstraintCritic:
+        enabled: true
+        cost_weight: 4.0
+      CostCritic:
+        enabled: true
+        cost_weight: 3.0
+        critical_cost: 253.0      # ⚠️ 语义 = **惩罚幅度**（默认 300.0），不是"触发阈值"；
+                                  #   "只有 inscribed 以上才罚"是源码硬编码（cost_critic.cpp:165）
+        # ⚠️ 必须 false：cost_critic.cpp:56-65 判 costmap_ros_->getUseRadius() == consider_footprint_，
+        #   我们**没有 footprint 多边形**（只有 robot_radius）⇒ use_radius_ = true
+        #   ⇒ 写 true 即 true == true ⇒ configure 阶段 throw、控制器起不来。（ObstaclesCritic 有同一检查）
+        consider_footprint: false
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+      GoalCritic:
+        enabled: true
+        cost_weight: 25.0
+        threshold_to_consider: 4.0
+      PathAlignCritic:
+        enabled: true
+        cost_weight: 10.0
+        threshold_to_consider: 1.5
+        max_path_occupancy_ratio: 0.05
+        offset_from_furthest: 20
+        trajectory_point_step: 4
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_weight: 5.0
+        threshold_to_consider: 1.5
+        offset_from_furthest: 5
+      ObstaclesCritic:
+        enabled: true
+        cost_weight: 3.0
+        consider_footprint: false   # 同 CostCritic：obstacles_critic.cpp:46-55 是同一个检查
+        collision_cost: 1000000.0
+        repulsion_weight: 1.5
+        # ⚠️ 参考配置里的 ObstaclesCritic.critical_cost 与 throw_on_min_obstacle 已按"不写死键"规则剔除：
+        #   · throw_on_min_obstacle：整个 1.1.20（源码 getParam + 已装 so 字节）**grep 命中 0**，彻底不存在；
+        #   · critical_cost：这个键名存在，但**只有 cost_critic.cpp 声明它** ⇒ 写在 ObstaclesCritic 命名空间下
+        #     没有任何代码读（= 静默失效）。ObstaclesCritic 真正的"关键惩罚"旋钮是
+        #     critical_weight（默认 20.0，本次未写 = 取默认）。
+        #   同理未写 CostCritic.trajectory_point_step（只有 path_align_critic 读它）。
+      # 回退：launch 用默认 nav:=rpp 即回到已验证的 RPP 路径（本文件不被读取）。
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      # ★ 2026-09-24 记录：曾把这里放大到 1000.0 想绕过上游 isGoalReached() 丢弃 transformPose 失败的问题 ——
+      #   「已撤销」。原因：这个值经 nav2_util::getCurrentPose() 传成了 tf2 的「等待超时」；遇到
+      #   「过去的时间点」这种永远等不来的查询，会让 costmap 线程一次阻塞到超时（1000 秒），小病治成大病。
+      #   真正要修的是 costmap 的 tf 摄入（见 docs/issues_and_findings.md 的 2026-09-24 条目）。
+      #   ★ 2026-10-05 分层重构：本键只显式写在 rpp/mppi 两份旧 full 文件里（dwb/teb 靠 nav2 默认值
+      #     0.3，见 nav2_costmap_2d/src/costmap_2d_ros.cpp:98）⇒ 归到 nav 槽位文件携带，base 不写。
+      transform_tolerance: 0.3

@@ -1,0 +1,39 @@
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 5.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    # ★ 2026-09-26：`planner:=smac2d` 槽（A/B 对照专用）—— 只把 GridBased 换成 COD 2026 风格的
+    #   `SmacPlanner2D`（2D A* + 代价感知），其余一切与 nav2_params_sim_rpp.yaml 相同。
+    #   本文件 = nav2_params_sim_rpp.yaml 的副本，**除本块外逐字节相同**（保证 A/B 是单变量）。
+    #   键只写 nav2 1.1.20 的 SmacPlanner2D 真正声明的（依据 docs/cod_nav_2026_params_review.md §A.7）：
+    #     9 个顶层键（插件源码 `name + ".<key>"`）+ `<plugin>.smoother.*` 子块（types.hpp 的 SmootherParams::get）。
+    #   ⚠️ COD 那份 yaml 里另有 16 个 Hybrid/Lattice/Jazzy 专有键（motion_model_for_search /
+    #     minimum_turning_radius / angle_quantization_bins / analytic_expansion_* / cost_penalty /
+    #     cache_obstacle_heuristic / reverse_penalty / change_penalty / non_straight_penalty /
+    #     retrospective_penalty / rotation_penalty / lookup_table_size / allow_reverse_expansion /
+    #     smooth_path 等），SmacPlanner2D 一个都不读（写了 = 静默失效）→ 一律不抄。
+    #   ⚠️ NavFn 的 `use_astar` 也不属于本插件 → 本块不含。
+    #   回退：launch 用默认 `planner:=navfn` 即回到已验证的 NavFn 路径（本文件不被读取）。
+    GridBased:
+      # ★ 2026-09-26：robot_radius 已同步为 0.22（与 rpp/dwb/teb 一致，见 commit dc03e11）——
+      #   保证本文件与 nav2_params_sim_rpp.yaml 只差 planner_server 段：做 planner A/B 时唯一变量是全局规划器。
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.5
+      allow_unknown: true
+      downsample_costmap: false
+      downsampling_factor: 1
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      # 5.0 仅为 A/B 先取一个宽松上界（上游默认 2.0；COD 用 4.5）。观察到规划耗时被顶到 5 s 就调小。
+      max_planning_time: 5.0
+      # ★ 代价感知的关键旋钮（上游默认 1.0）：越大越贴通道中心、越愿意绕开 inflation 代价。
+      #   COD 用 4.0；§A.7 建议 1.0~2.0（我们已有 robot_radius 0.40 的粗安全几何）。
+      #   A/B 第一轮先按 4.0 复现他们的行为，若要"少绕、贴原路径"再降。
+      cost_travel_multiplier: 4.0
+      use_final_approach_orientation: false
+      # 平滑器子块（2D 侧 `_smoother->smooth()` 是无条件调用，参数无效也照样平滑）
+      smoother:
+        w_smooth: 0.4
+        w_data: 0.1
+        do_refinement: true

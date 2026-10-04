@@ -24,6 +24,14 @@ def generate_launch_description():
     map_yaml_file = LaunchConfiguration('map')
     use_sim_time = LaunchConfiguration('use_sim_time')
     params_file = LaunchConfiguration('params_file')
+    # ★ 2026-10-05 params 分层（见 docs/cod_nav_2026_migration_worksheet.md §J）：
+    #   params_file = 公共段（base）；另两份是同一次传参的槽位文件（planner_server / controller_server 段）。
+    #   三份按 base → planner → controller 的顺序给节点（ROS 2 按参数逐键叠加，后写覆盖）。
+    #   单独用本 launch 且只给 params_file 时，两个槽位默认 = params_file
+    #   （同一份文件重复叠加是幂等的 ⇒ 单文件老用法行为不变）。
+    params_files = [params_file,
+                    LaunchConfiguration('params_file_planner'),
+                    LaunchConfiguration('params_file_controller')]
     autostart = LaunchConfiguration('autostart')
     use_composition = LaunchConfiguration('use_composition')
     use_respawn = LaunchConfiguration('use_respawn')
@@ -38,11 +46,14 @@ def generate_launch_description():
         'use_sim_time': use_sim_time,
         'yaml_filename': map_yaml_file}
 
-    configured_params = RewrittenYaml(
-        source_file=params_file,
-        root_key=namespace,
-        param_rewrites=param_substitutions,
-        convert_types=True)
+    # 每份文件各套一层同样的 RewrittenYaml（use_sim_time / yaml_filename 等 rewrite 对三份都生效）
+    configured_params = [
+        RewrittenYaml(
+            source_file=f,
+            root_key=namespace,
+            param_rewrites=param_substitutions,
+            convert_types=True)
+        for f in params_files]
 
     stdout_linebuf_envvar = SetEnvironmentVariable(
         'RCUTILS_LOGGING_BUFFERED_STREAM', '1')
@@ -76,6 +87,17 @@ def generate_launch_description():
         'params_file',
         default_value=os.path.join(bringup_dir, 'params', 'nav2_params.yaml'),
         description='Full path to the ROS2 parameters file to use for all launched nodes')
+
+    # ★ 2026-10-05 params 分层：另两份槽位文件（默认 = params_file ⇒ 单文件用法行为不变）
+    declare_params_file_planner_cmd = DeclareLaunchArgument(
+        'params_file_planner',
+        default_value=params_file,
+        description='第二份参数文件（planner 槽：planner_server 段）；默认 = params_file')
+
+    declare_params_file_controller_cmd = DeclareLaunchArgument(
+        'params_file_controller',
+        default_value=params_file,
+        description='第三份参数文件（controller 槽：controller_server 段）；默认 = params_file')
 
 
     declare_autostart_cmd = DeclareLaunchArgument(
@@ -122,7 +144,7 @@ def generate_launch_description():
             name='nav2_container',
             package='rclcpp_components',
             executable='component_container_mt',
-            parameters=[configured_params, {'autostart': autostart}],
+            parameters=[*configured_params, {'autostart': autostart}],
             arguments=['--ros-args', '--log-level', log_level],
             remappings=remappings,
             output='screen'),
@@ -133,6 +155,9 @@ def generate_launch_description():
                               'use_sim_time': use_sim_time,
                               'autostart': autostart,
                               'params_file': params_file,
+                              # ★ 2026-10-05 params 分层：槽位文件一并透传给 navigation_launch
+                              'params_file_planner': LaunchConfiguration('params_file_planner'),
+                              'params_file_controller': LaunchConfiguration('params_file_controller'),
                               'global_obstacle': LaunchConfiguration('global_obstacle'),
                               'local_obstacle': LaunchConfiguration('local_obstacle'),
                               'use_composition': use_composition,
@@ -158,6 +183,9 @@ def generate_launch_description():
     ld.add_action(declare_map_yaml_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
+    # 槽位文件入参必须在 params_file 之后声明（默认值引用 LaunchConfiguration('params_file')）
+    ld.add_action(declare_params_file_planner_cmd)
+    ld.add_action(declare_params_file_controller_cmd)
     ld.add_action(declare_autostart_cmd)
     ld.add_action(declare_use_composition_cmd)
     ld.add_action(declare_use_respawn_cmd)
