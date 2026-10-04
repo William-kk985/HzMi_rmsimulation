@@ -47,3 +47,25 @@
 ⑤ goal_approach_controller（先修帧 bug + spin 开关）
 ── 每步：nav_smoke_regression.py 验收 → algorithm_matrix.md §四 记一行 → 本表状态改 DONE/REVERTED
 ```
+
+---
+
+## E. 决策记录（2026-09-26，用户确认）
+
+### E1. 静态 `map→odom`：**不采用**（明确不做）
+理由：撞我们 `mode:=nav` 的核心资产（先验图 + 4 种重定位）；作者原话也承认它只在「环境简单、面积小、误差容忍度大」时成立。仅保留"纯在线建图无重定位"这一档（`mode:=nav + localization:=''`，我们本来就有）作为**调试对照**，不作为方案。
+
+### E2. `linefit` 地面分割：**保留**（不抄 COD 的"去掉"）
+COD 2026 去掉 patchwork++/地面分割的原因（有据）：① 2026 改由**两层 STVL 直接吃 3D 点云**，地面点由 STVL 的 `min_obstacle_height: 0.1` + p2l 的高度带一起挡掉，不再需要专门的地面分割器；② 做减法/减依赖（他们 2026 主线是"提速"）；③ 固定安装高度 + 场地基本水平 ⇒ 固定高度带比在线地面拟合更可预测。
+**我们不该抄的原因**：① 实测我们**近场回波 `z_livox ≈ −0.12~−0.03`，全在 0.10 以下** ⇒ 照抄他们的 `min_height 0.15/0.10` 会把近场墙**整段砍掉**（= 又制造"缝"）；② linefit 是我们**可测/可 A/B 的资产**（`cloud_z_profile.py`、`costmap_marking_check.py` 都建立在它输出的 `/segmentation/obstacle` 上）；③ 场地若有坡道/台阶，高度带假设直接失效。
+
+### E3. `small_point_lio`：**要，且提升为 `lio` 槽位的同级取值**
+目标形态：`lio: = fastlio | pointlio | **smallpointlio** | none | cartographer`（与 fastlio/pointlio 同级，可 A/B）。
+落地清单（P3）：
+1. 代码位置：`src/rm_localization/small_point_lio`（上游 <https://github.com/Yancey2023/small_point_lio>，MIT，分支 `ros2`；**不要放 `third_party/`**，那里有 `COLCON_IGNORE` 不会被构建）；
+2. TF 契约：它直接发 `odom→base_link` ⇒ 与 fastlio 的 `camera_init→body` + `lio_tf_adapter` 路径不同，launch 里必须**按槽位切换**（选 smallpointlio 时不经 adapter）；
+3. **硬门槛（必须先解决）**：其 PointCloud2 适配器要求点云带 `tag`(uint8) 与 `timestamp`(float64, 秒) 字段（`src/lidar_adapter/livox_pointcloud2.h`，只保留 `(tag & 0b00111111)==0`），并硬编码 `frame_id/child_frame_id = odom/base_link`；我们的仿真点云没有这两个字段 ⇒ 需要写一个**适配器节点**补 `tag=0` 与**逐点 timestamp**（逐点时间正是 Point-LIO 系的价值所在，必须从我们雷达插件的扫描时序/CSV 图案里合成，不能简单全填同一时间）；
+4. 配置：`mid360_sim.yaml`（`lidar_type: livox_pointcloud2`、`map_resolution` 与 `save_pcd` 要改掉他们的 0.5/编译期写死路径）；
+5. 已知短板：仓库里 `twist` 六行**仍是注释**（无速度输出）；`save_pcd` 写到 `@CMAKE_CURRENT_SOURCE_DIR@`；
+6. 验收判据：`/Odometry`（或等价）10 Hz 出数 + `odom→base_link` TF 连续 + `lio:=smallpointlio` 下 **P0 回归 PASS** + 与 fastlio/pointlio 的**漂移对比**（同一条轨迹的 end-to-end 误差）。
+
