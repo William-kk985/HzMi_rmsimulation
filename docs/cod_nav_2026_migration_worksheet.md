@@ -113,3 +113,37 @@ COD 2026 去掉 patchwork++/地面分割的原因（有据）：① 2026 改由*
 
 **零成本预研动作（随时可做，不动主链路）**：把 `small_point_lio` 当**独立进程**跑起来（不接 Nav2、不改 `lio` 槽位），只验证它能从我们的仿真点云产出 `/Odometry` + `odom→base_link` TF —— 即"**喂得进去**"。这一步就能把上面三条门槛里最难的那条（逐点时间）**提前证伪或证实**。
 
+---
+
+## H. D3-① 实施记录：`planner:=smac2d` 槽位（2026-09-26，已提交）
+
+**提交**：`d4e662b`（master 已推送）。**改动 2 个文件**：`src/rm_nav_bringup/launch/bringup_sim.launch.py`（+18/−1）、新增 `src/rm_navigation/rm_navigation/params/nav2_params_sim_rpp_smac2d.yaml`（435 行）。
+**默认未变**：`planner` 默认 `navfn` ⇒ 解析出的 params 路径与改动前**完全相同**（用 `importlib` 加载 launch、对六种 `nav × planner` 组合实测过）⇒ **现有已验证路径零影响**。
+
+**新 yaml 的单变量保证**：与 `nav2_params_sim_rpp.yaml` 的 `diff -u` **只有 1 个 hunk**（整段落在 `planner_server` 内）。
+**写入的 12 个键**（每个都在**已安装的 1.1.20** 里核实过）：
+`tolerance 0.5` · `allow_unknown true` · `downsample_costmap false` · `downsampling_factor 1` · `max_iterations 1000000` · `max_on_approach_iterations 1000` · `max_planning_time 5.0` · **`cost_travel_multiplier 4.0`** · `use_final_approach_orientation false` · `smoother.{w_smooth 0.4, w_data 0.1, do_refinement true}`。
+**核实方法**（三重）：① `strings libnav2_smac_planner_2d.so`（插件用 `name + ".<key>"` 声明参数）；② 已装头文件 `types.hpp` 的 `SmootherParams::get()`；③ 交叉核对 `third_party/nav2/nav2_smac_planner/src/smac_planner_2d.cpp:64-92`（同版本 1.1.20）。
+**按规则剔除**：`refinement_num`（1.1.20 **不存在** ⇒ 写了就是静默失效，这正是我们防的那类错）· `use_astar`（NavFn 专有）· `smooth_path` 与 16 个 Hybrid/Lattice/Jazzy 专有键（2D 插件里 strings 命中 0）。
+（另注：`smoother.max_iterations`(默认 1000) 与 `smoother.tolerance`(默认 1e-10) 在 1.1.20 确实存在，本次未写；要复现 COD 的 10000 再补。）
+
+### ⚠️ 新踩到的坑（值得记进 §10.4 通用规律）
+**新增 params 文件后必须先重新 build**：`install/` 里**不会**因为 `--symlink-install` 就自动出现新文件（已核对 `install/rm_navigation/share/rm_navigation/params/` 里没有 smac2d 文件）⇒ 必须先
+`colcon build --symlink-install --packages-select rm_navigation`
+否则 launch 会因为找不到 params 文件而失败（表现为"改了配置没生效/启动报错"，极易误判为插件问题）。
+
+### 待验收（未实测项）
+实跑尚未进行 ⇒ **"Smac2D 插件运行时真的加载成功 + 路径形态变好"两点未经实测**（离线证据仅到 pluginlib 声明 + ament resource index 存在）。
+验收命令：见下方 §H.1；**回退**：省略 `planner` 或 `planner:=navfn`（一行）。
+
+### H.1 验收清单（用户执行）
+```bash
+colcon build --symlink-install --packages-select rm_navigation      # ← 新增文件必须先 build
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio localization:=amcl nav:=rpp planner:=smac2d spin_speed:=0.0 nav_rviz:=True
+ros2 param get /planner_server GridBased.plugin               # 期望 nav2_smac_planner/SmacPlanner2D
+ros2 param get /planner_server GridBased.cost_travel_multiplier   # 期望 4.0
+python3 tools/scripts/regress/nav_smoke_regression.py --goal 2.0 -2.5
+```
+判据：① 两个 `param get` 正确；② 启动日志出现 `Configuring GridBased of type SmacPlanner2D ... tolerance 0.50, maximum iterations 1000000`；③ **P0 回归 PASS**；④ RViz 里 `/plan` **不再贴缝走、更居中**；⑤ 规划耗时可接受（用 `navigate_to_pose` 结果里的 `planning_time` 或 smoke 工具"用时"与 NavFn 对照）。
+
