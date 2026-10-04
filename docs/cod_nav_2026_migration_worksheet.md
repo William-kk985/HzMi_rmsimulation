@@ -69,3 +69,27 @@ COD 2026 去掉 patchwork++/地面分割的原因（有据）：① 2026 改由*
 5. 已知短板：仓库里 `twist` 六行**仍是注释**（无速度输出）；`save_pcd` 写到 `@CMAKE_CURRENT_SOURCE_DIR@`；
 6. 验收判据：`/Odometry`（或等价）10 Hz 出数 + `odom→base_link` TF 连续 + `lio:=smallpointlio` 下 **P0 回归 PASS** + 与 fastlio/pointlio 的**漂移对比**（同一条轨迹的 end-to-end 误差）。
 
+---
+
+## F. 候选实验记录：**两层 STVL**（全局 + 局部都上 `spatio_temporal_voxel_layer`）　【用户标记：后面可以尝试】
+
+> 来源：COD_NAV 2026（`singlenav2_params.yaml` / `multiplenav2_params.yaml`，两张 costmap 的 `plugins` 里都有 STVL）
+> 状态：**候选（TODO，未实施）**。与 §A-5（STVL 参数块）、§B-3（裁剪盒）、§E2（linefit 保留）互为引用。
+
+### F1. 他们的做法（参数）
+`voxel_decay 0.5`（线性衰减，`decay_model 0`）· `voxel_size 0.05` · `observation_persistence 0.0` · `combination_method 1` · `track_unknown_space true` · **`model_type: 1`（3D 雷达）** · `vertical_fov_angle 2.00` / `horizontal_fov_angle 6.28` · `filter: "voxel"` · `transform_tolerance 0.2`；**层级 `obstacle_range 3.0` 被源级 `8.0/9.0`（obstacle/raytrace）覆盖**；`min_obstacle_height 0.1`、`max_obstacle_height 1.0`。
+
+### F2. 两层 STVL「导致」了什么（连带效应 —— 这才是值得记的部分）
+1. **给局部加了时间维**：障碍体素 **~0.5 s 自动消失** ⇒ 局部不再累积"幽灵障碍"。我们现在 local **没有时间维**（只靠 `obstacle_layer` 的射线清除），这是与他们的实质差距。
+2. **局部也能吃原生 3D 点云**：STVL 是体素层 ⇒ 局部不必只依赖 p2l 的 2D 投影（对应我们 `local_obstacle:=cloud` 那条路的"升级版"）。
+3. **这是他们能删掉地面分割的前提之一**：地面点由 STVL 的 `min_obstacle_height` + p2l 高度带共同挡掉 ⇒ 少一个独立模块（与 §E2 相连）。
+4. **必须与"车体裁剪盒"配套**：**STVL 没有"最小障碍半径"概念**（他们 `box_lidar_filter` README 原话）⇒ 自身点云只能先从点云里抠掉。**「两层 STVL + 裁剪盒」是一套，不能只上其一**，否则车身自身点会进体素图。
+5. **代价**：两张图都做体素化+射线清除 ⇒ CPU 上升；清除过激会擦薄结构；**与 static/obstacle 层的写序耦合** —— 我们已经见过"缝"就是后写层的清除覆盖了 static 层写下的墙（见 `debug_fastlio_cartographer.md`），两层 STVL 会**增加一个清除来源**。
+
+### F3. 我们的现状与尝试方案（一次一个变量）
+- 现状：**global 已有 STVL**（`min_obstacle_height 0.0`、`voxel_decay 0.5`）；**local 没有**，是 `[obstacle_layer, obstacle_cloud_layer, inflation_layer]`；`stvl_layer.min_obstacle_height` 全局已为 **0.0**（对应我们近场 `z_livox < 0.1` 的实测，**这正是不能照抄他们 0.1 的地方**）。
+- 方案（顺序不可颠倒）：**① 先上裁剪盒**（§B-3，按我们 `livox_frame` 重算 box）→ **② 再给 local 加 `stvl_layer`**（保守：`obstacle_range 8.0` / `raytrace_range 9.0` / `voxel_decay 0.5` / `voxel_size 0.05` / **`min_obstacle_height 0.0`（不是 0.1）** / `max_obstacle_height 1.0` / `model_type 1`），图层顺序建议 **`stvl` 放在 `obstacle*` 之后、`inflation` 之前**，并观察"缝"是否恶化。
+- 判据：**P0 回归 PASS**（能走到目标）· 幽灵障碍消失时间（人放一个临时障碍后 ~0.5 s 内清掉）· 墙面**没有变薄/裂缝变宽** · CPU/RTF 无明显下降。
+- 回退：从 local `plugins` **移除一行**即恢复；或用 `local_obstacle:=cloud`（保留点云、不加时间维）。
+- 关联风险：若"缝"恶化 ⇒ 说明多了一个清除来源 ⇒ 转去查 `inf_is_valid`（他们 `obstacle_layer.inf_is_valid: true` 与我们一致）与图层顺序。
+
