@@ -883,6 +883,10 @@ aft_tf_vel.angular.z = (msg->angular.z != 0) ? spin_speed_ : 0;   // 把 nav 角
 2. **QoS / 类型必须匹配**：latched 话题（`/tf_static`、`/map`、`costmap_raw`）读端要 **`TRANSIENT_LOCAL`**；传感器话题（`/scan`、`/clock`、`/livox/*`）要 **`BEST_EFFORT`**；`costmap_raw` 的类型是 **`nav2_msgs/msg/Costmap`**（不是 `OccupancyGrid`）。这三条坑了本轮 4 次。
 3. **工具不许"静默退化"**：`pose or goal`、`path.poses[0]` 不判空、用 `/map` 冒充 costmap —— 三次都制造了假象（其中一次直接导致"直冲远目标撞墙"）。一律 **fail-fast + 打印诊断**。
 
+4. **移植别人的 yaml 之前先对齐键名**：本机 nav2 = **1.1.20（Humble）**，而参考仓库（COD_NAV 2026）的 yaml 混入大量**只有 Jazzy/main 才有的键** —— `vy_min/wz_min/ax_*/ay_*/az_*`、`publish_critics_stats`、`path_length_tolerance`、`CostCritic.trajectory_point_step`、planner 段里 **16 个 Hybrid/Lattice 专用键**、`local_costmap_topic` 等 ⇒ **照抄会静默失效**。自查方式：`ros2 param list <node>` 逐键核对（本仓库出现过同类惰性键：`{use_sim_time: use_sim_time}`）。
+5. **我们 `fake_vel_transform` 里"线速度按 −yaw 旋转"的那段是死逻辑**：它依赖 `/local_plan`，而 1.1.20 的 `controller_server` **不发布**该话题、我们栈内也没有其它发布者（发布者是参考仓库自研的 PID 控制器）⇒ 那段一直空转。`spin_speed == 0` 直通修复后一切正常，与此无关。
+6. **MPPI 的三个硬约束**（接 MPPI 前必须做）：① `model_dt` 必须 = 1/`controller_frequency`（否则 `optimizer.cpp` 抛异常，controller_server **起不来**）；② `CostCritic.consider_footprint: true` 在**无 footprint 的圆形 costmap** 上抛异常（我们只有 `robot_radius`）⇒ 设 false 或先加 footprint；③ `min_y_velocity_threshold` 会把**侧向**里程计反馈抹零 ⇒ 接 Omni MPPI 前降到 0.001。
+
 ### 10.5 遗留清单（明确挂着，择日再动）
 
 | # | 事项 | 判据/入口 |
