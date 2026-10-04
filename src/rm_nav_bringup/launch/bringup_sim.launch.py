@@ -156,9 +156,13 @@ def generate_launch_description():
     declare_nav_cmd = DeclareLaunchArgument(
         'nav',
         default_value='rpp',
-        choices=['rpp', 'dwb', 'teb'],
-        description='Choose local planner variant: rpp | dwb | teb '
-                    '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml)')
+        # ★ 2026-09-26：新增 'mppi'（A/B 对照用；默认仍是 rpp ⇒ 现有已验证路径零影响）。
+        #   文件名由 nav2_params_file_dir 的 PythonExpression 派生 ⇒ nav:=mppi 自动指向
+        #   rm_navigation/params/nav2_params_sim_mppi.yaml（该文件 = rpp 的副本，只有 controller_server 段不同）。
+        choices=['rpp', 'dwb', 'teb', 'mppi'],
+        description='Choose local planner variant: rpp | dwb | teb | mppi '
+                    '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml；'
+                    'mppi = nav2_mppi_controller::MPPIController，A/B 用；回退 = 省略本参数或 nav:=rpp)')
 
     declare_planner_cmd = DeclareLaunchArgument(
         'planner',
