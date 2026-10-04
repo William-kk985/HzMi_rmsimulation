@@ -147,3 +147,147 @@ python3 tools/scripts/regress/nav_smoke_regression.py --goal 2.0 -2.5
 ```
 判据：① 两个 `param get` 正确；② 启动日志出现 `Configuring GridBased of type SmacPlanner2D ... tolerance 0.50, maximum iterations 1000000`；③ **P0 回归 PASS**；④ RViz 里 `/plan` **不再贴缝走、更居中**；⑤ 规划耗时可接受（用 `navigate_to_pose` 结果里的 `planning_time` 或 smoke 工具"用时"与 NavFn 对照）。
 
+
+---
+
+## I. 卡住恢复链核查（2026-09-26；**只读核查 + 用户执行步骤，本步不改任何代码**）
+
+> 起因：车可能**开进** inflation/内切带后卡死（planner 把起点当障碍、controller 报无效控制）。Step 1 已把
+> `robot_radius` 从 0.40 改回 0.22（commit `dc03e11`）。本节核查"改回之后，恢复链是否真的会救场"。
+> 引用行号：params = `src/rm_navigation/rm_navigation/params/nav2_params_sim_rpp.yaml`（**step 1 之后**的行号）；
+> `N2/xxx` = `third_party/nav2/nav2_mppi_controller` 等**同版本 1.1.20** 源码。
+
+### I.1 我们实际加载的是哪棵 BT
+
+- `bt_navigator` 段（params:61-100）**没有** `default_nav_to_pose_bt_xml` / `default_nav_through_poses_bt_xml`
+  （全 params 文件 grep `bt_xml` 命中 0；launch 侧 `RewrittenYaml` 只重写 `use_sim_time` / `yaml_filename`，
+  不注入 BT）⇒ **走 nav2 内置默认**。默认值的产生处：`N2 bt_navigator/src/navigators/navigate_to_pose.cpp:58-79`
+  与 `navigate_through_poses.cpp:52-73`（`has_parameter(...)` 为假时 `declare_parameter` 成
+  `get_package_share_directory("nav2_bt_navigator") + "/behavior_trees/<名字>.xml"`；已装
+  `/opt/ros/humble/lib/libbt_navigator_core.so` 里的字符串正是这两个文件名）。
+- **加载的精确路径**：
+  - `NavigateToPose` → `/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml`
+  - `NavigateThroughPoses` → `/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml`
+- 我们自己的两个 goal 发送端都**不填** `NavigateToPose.Goal.behavior_tree`
+  （`tools/scripts/regress/nav_smoke_regression.py:235`、`tools/scripts/nav/segment_goal_navigator.py:134`）
+  ⇒ 一定落到上面这棵默认树（运行期铁证见 I.4 的 `ros2 param get /bt_navigator default_nav_to_pose_bt_xml`）。
+
+**内置树里有没有恢复元素**（两个文件逐字读完）：
+
+| 元素 | 在不在 | 参数 / 重试次数 |
+|---|---|---|
+| `RecoveryNode`（外层 `NavigateRecovery`） | ✅ | **`number_of_retries="6"`** |
+| `RecoveryNode`（`ComputePathToPose`） | ✅ | **1**（失败 → `ClearEntireCostmap` 全局） |
+| `RecoveryNode`（`FollowPath`） | ✅ | **1**（失败 → `ClearEntireCostmap` 局部） |
+| `RateController` | ✅ | `hz="1.0"`（to_pose）/ `hz="0.333"`（through_poses） |
+| `ClearEntireCostmap` | ✅ | 4 处（2 处上下文恢复 + `ClearingActions` 里 local/global 各一） |
+| `Spin` | ✅ | `spin_dist="1.57"`；`time_allowance` 默认 10.0（`N2 nav2_behavior_tree/plugins/action/spin_action.hpp:57`） |
+| `Wait` | ✅ | `wait_duration="5"` |
+| `BackUp` | ✅ | `backup_dist="0.30"` / `backup_speed="0.05"`；`time_allowance` 默认 10.0（`back_up_action.hpp:56-58`） |
+| 恢复顺序（`RoundRobin`） | ✅ | `Sequence(ClearLocal,ClearGlobal)` → `Spin` → `Wait` → `BackUp`（`GoalUpdated` 在前，目标没变才做恢复） |
+
+- `plugin_lib_names`（params:69-100）与树所需节点逐一对照：树用到的 13 个 BT 节点库**全部**在列表里，且
+  `/opt/ros/humble/lib/libnav2_*_bt_node.so` 同名文件全存在（含 `nav2_recovery_node_bt_node` /
+  `nav2_round_robin_node_bt_node` / `nav2_rate_controller_bt_node` / `nav2_clear_costmap_service_bt_node` /
+  `nav2_back_up_action_bt_node` / `nav2_spin_action_bt_node` / `nav2_wait_action_bt_node`）
+  ⇒ 树能被完整实例化，**不会**出现"节点未注册"的加载失败。
+
+### I.2 `behavior_server` 配了没有 / 1.1.20 有哪些恢复插件
+
+- **配了**（params:368-392，dwb/teb 同）：
+  `costmap_topic: local_costmap/costmap_raw` · `footprint_topic: local_costmap/published_footprint` ·
+  `cycle_frequency: 10.0` · `behavior_plugins: ["spin","backup","drive_on_heading","wait"]`
+  （类型 `nav2_behaviors/Spin|BackUp|DriveOnHeading|Wait`）· `global_frame: odom` ·
+  `robot_base_frame: base_link_fake` · `transform_tolerance: 0.1` · `simulate_ahead_time: 1.0` ·
+  `max_rotational_vel: 3.0` · `min_rotational_vel: 0.4` · `rotational_acc_lim: 3.0`。
+- 启动链：`bringup_sim.launch.py` → `rm_navigation/launch/bringup_rm_navigation.py` →
+  `rm_navigation/launch/navigation_launch.py`；`behavior_server` 在 `lifecycle_nodes`（`navigation_launch.py:46`），
+  非组合（`:182`）与组合（`:257` `behavior_server::BehaviorServer`）两条路都起 ⇒ **节点确实被拉起来**
+  （Humble 节点名是 `behavior_server`，不是 Galactic 的 `recoveries_server`，params 里已注明）。
+- **键名核对（对已装 1.1.20）**：`costmap_topic` / `footprint_topic` / `cycle_frequency` / `behavior_plugins` /
+  `global_frame` / `robot_base_frame` / `transform_tolerance` 由 `N2 nav2_behaviors/src/behavior_server.cpp:34-57`
+  + `include/nav2_behaviors/timed_behavior.hpp:119-122` 声明；`simulate_ahead_time` 由
+  `plugins/drive_on_heading.hpp:235`（BackUp/DriveOnHeading）与 `plugins/spin.cpp:53-56`（Spin）声明；
+  `max_rotational_vel` / `min_rotational_vel` / `rotational_acc_lim` 只被 Spin 读（`spin.cpp:58-71`）。
+  **`local_frame` 在 1.1.20 不存在**（`strings libbehavior_server_core.so libnav2_*_behavior.so | grep -cx local_frame` = 0；
+  `local_costmap_topic` / `global_costmap_topic` / `local_footprint_topic` 同为 0）⇒ 那是 Jazzy 键，我们没写是对的。
+- 已装恢复插件（`/opt/ros/humble/share/nav2_behaviors/behavior_plugin.xml` +
+  `/opt/ros/humble/lib/libnav2_*_behavior.so`）：**`Spin` ✅ · `BackUp` ✅ · `DriveOnHeading` ✅ · `Wait` ✅ ·
+  `AssistedTeleop` ✅**（五个都在）。我们只加载前四个；`assisted_teleop` 未配（见 I.5-5）。
+  动作名 = 插件 id ⇒ `/spin`、`/backup`、`/drive_on_heading`、`/wait`。
+
+### I.3 恢复链能转的两个前提（一个已满足，一个是 Step 1 给的）
+
+1. **`Spin`/`BackUp` 会被"当前位置已在碰撞态"一票否决**：两者每周期都做前向 `isCollisionFree()`
+   （`N2 nav2_behaviors/plugins/spin.cpp:149-153`、`include/nav2_behaviors/plugins/drive_on_heading.hpp:165-169`），
+   不通过就 `stopRobot()` + `RCLCPP_WARN("Collision Ahead - Exiting Spin / DriveOnHeading")` + 返回
+   **`Status::FAILED`**。⇒ `robot_radius: 0.40` 时车一进带，`local_costmap/costmap_raw` 就把车自己标成内切
+   ⇒ 每个恢复动作都立刻 FAILED（BT 日志上"一直在恢复"，车一动不动）——这就是那个死锁的第二个根。
+   **Step 1 把半径改回 0.22 正是让这个前提成立**：车贴墙 ~0.25 m 时仍判无碰撞，恢复才有机会成功。
+   两者是配套的：以后再放大 `robot_radius` 会**重新关掉**这条链。
+2. **FVT 不会吃掉恢复的角速度**（与参考队的关键差异）：`fake_vel_transform.cpp:80-84` 有
+   `spin_speed_ == 0.0` 的**直通分支**（角速度原样下发、且不做 TF 查询）；参考队的 FVT 无论 `spin_speed` 取值
+   都把 `angular.z` 换成 `spin_speed`（其 launch 不传参 ⇒ 0.0）⇒ 他们的 `Spin` 转不动、只能从树里删掉
+   （§C-2）。**我们 `spin_speed:=0.0` 时 `Spin` 与一切角速度指令有效 ⇒ 内置树的恢复可用，不能照抄他们的树。**
+   ⚠️ 但 `spin_speed:=5.0`（默认）时 `fake_vel_transform.cpp:94` 仍会把 `angular.z` 替换成常量 5.0 rad/s：
+   底盘确实转，但**不是** Spin 行为闭环控制的那 1.57 rad ⇒ **验证恢复链请用 `spin_speed:=0.0`**（也正好是 §H.1 口径）。
+
+**恢复指令从哪出去**（看错话题会以为"没有倒车速度"）：`navigation_launch.py` 里 `behavior_server` **只 remap 了 TF**，
+它直接发 **`/cmd_vel`**、**绕过 `velocity_smoother`**（smoother 是 `cmd_vel→cmd_vel_nav` 进、`cmd_vel_smoothed→cmd_vel` 出，
+`:219-220` / `:278-279`），再进 FVT（`/cmd_vel` → `/cmd_vel_chassis`）。
+⇒ 看倒车速度要看 **`/cmd_vel` 或 `/cmd_vel_chassis`**；`/cmd_vel_nav` 只是 controller 的输出口，**看不到 BackUp**。
+
+### I.4 运行时验证步骤（用户执行；全程只读，不改文件）
+
+```bash
+# 0) step 1 改的是既有文件（--symlink-install 已生效）；若还没 build 过 step 3 的新文件，见 §H.1
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio localization:=amcl nav:=rpp spin_speed:=0.0 nav_rviz:=True
+```
+```bash
+# 1) 先确认链"接上了"（3 条）
+ros2 action list | grep -E "backup|spin|wait|drive_on_heading"   # 期望 /backup /spin /wait /drive_on_heading
+ros2 param get /behavior_server behavior_plugins                  # 期望 ["spin","backup","drive_on_heading","wait"]
+ros2 param get /bt_navigator default_nav_to_pose_bt_xml           # 期望 .../behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
+```
+```bash
+# 2) 开观察窗口（另开终端）
+ros2 topic echo /behavior_tree_log     # BT 每个节点的状态迁移 → 恢复链最直接的证据
+ros2 topic echo /cmd_vel               # controller(经 smoother) 与恢复动作的实际下发
+ros2 topic echo /cmd_vel_chassis       # FVT 之后真正给底盘的量
+```
+```bash
+# 3) 造"路径被堵"（要 FollowPath 失败，不是 planner 失败）：车正前方 ~0.6 m 放一个临时障碍
+#    Gazebo GUI：Insert → Box，放在 world ≈ (4.9, 3.35, 0.3)（RMUL2026 出生点 world(4.3,3.35)，yaw=0）
+#    或命令行：
+ros2 service call /spawn_entity gazebo_msgs/srv/SpawnEntity "{name: tmp_obstacle, xml: '<sdf version=\"1.7\"><model name=\"tmp_obstacle\"><static>true</static><link name=\"l\"><collision name=\"c\"><geometry><box><size>0.5 0.5 0.6</size></box></geometry></collision><visual name=\"v\"><geometry><box><size>0.5 0.5 0.6</size></box></geometry></visual></link></model></sdf>', initial_pose: {position: {x: 4.9, y: 3.35, z: 0.3}, orientation: {w: 1.0}}, reference_frame: world}"
+#    用完删掉：
+ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity "{name: tmp_obstacle}"
+#    然后 RViz 用 2D Goal Pose 让车继续朝那个方向走（别直接发到障碍里，否则失败的是 planner）
+```
+拿一个**死胡同/墙角**做同样的事也可以（RViz 发一个"必须转身才能出去"的目标，车会贴进去再被 progress checker 抓住）。
+
+> ⚠️ 别指望**第一次**恢复就看到 `Spin`：`RoundRobin` 从下标 0 开始，而 `ClearingActions`（清两张 costmap）几乎必然 SUCCESS
+> ⇒ 第 1 次恢复 = 只清图并重试主树；**第 2 次**才是 `Spin`，第 3 次 `Wait`，第 4 次 `BackUp`（然后回绕）。
+> 即"清图救不了 → 才转/等/退"。所以障碍要留着别撤，让它连着失败几轮。
+
+| 顺序 | 看什么 | 期望 | 在哪看 |
+|---|---|---|---|
+| ① | controller 报错 | `RegulatedPurePursuitController detected collision ahead!`（RPP，`N2 nav2_regulated_pure_pursuit_controller/src/regulated_pure_pursuit_controller.cpp:359`）或 **`Failed to make progress`**（progress checker 超时：`required_movement_radius 0.5 m` / `movement_time_allowance 10.0 s`，`N2 nav2_controller/src/controller_server.cpp:475`） | launch 终端 |
+| ② | BT 进恢复 | `NavigateRecovery` 连续失败 → `RecoveryFallback`；随后 `RateController` 仍按 1 Hz 重规划 | `/behavior_tree_log` |
+| ③ | 恢复动作依次执行 | `ClearLocalCostmap-Subtree` / `ClearGlobalCostmap-Subtree` → `Spin` → `Wait` → `BackUp`（`RoundRobin` 顺序：当前子节点 SUCCESS 即返回，FAILURE 才顺延到下一个，`N2 nav2_behavior_tree/plugins/control/round_robin_node.cpp:40-79`） | 同上 + launch 终端 |
+| ④ | 动作自身日志 | `Running spin` / `spin completed successfully` / `Running backup` / `backup completed successfully`（`N2 nav2_behaviors/include/nav2_behaviors/timed_behavior.hpp:187/239`） | launch 终端 |
+| ⑤ | 倒车速度 | `/cmd_vel.linear.x ≈ -0.05`（`BackUp backup_dist 0.30 / backup_speed 0.05`；`time_allowance` 默认 10 s ⇒ 6 s 走完 0.30 m，余量够） | `/cmd_vel` 或 `/cmd_vel_chassis` |
+| ⑥ | 车真的退了 | 里程计位置后退 **≥ 0.2 m**，随后 `/plan` 变化、`ComputePathToPose` 再次 SUCCESS、车继续走 | RViz + `/behavior_tree_log` |
+
+**判据**：BT 日志里出现过 `BackUp` + `/cmd_vel.linear.x` 出现负值 + 车实际后退 ≥0.2 m + 之后重新规划成功 ⇒ 恢复链成立。
+（默认 `global_obstacle:=stvl local_obstacle:=scan` 即可；`local_obstacle:=cloud` 时 `/segmentation/obstacle` 也能看到这个盒子。）
+
+### I.5 发现的缺口（只登记，本次不修）
+
+1. **恢复动作会被"自身已在碰撞态"一票否决**（I.3-1）⇒ 恢复链**不是**卡死的万能兜底，它只在"costmap 认为当前位置无碰撞"时有效。与 Step 1 配套；任何再次放大 `robot_radius` 的改动会重新关掉它。
+2. **`bt_navigator.odom_topic: /Odometry` 是死订阅**：fastlio 的发布话题已被 remap 成 `/odom`（`bringup_sim.launch.py:271-272`）⇒ `/Odometry` 无发布者，`OdomSmoother` 恒 0。内置树里**没有**节点读 `{odom_smoother}`（两棵 XML 全文无该 port）⇒ **对恢复链无影响**，属清理项（§A.10 已记）。
+3. **`BackUp 0.30 m` 与"贴墙"是紧张关系**：车尾 0.30 m 内有障碍/膨胀代价时 BackUp 会提前 `Collision Ahead` 失败（RoundRobin 会顺延，不会死锁，但这一轮恢复白费）。窄场地可考虑把 BT 的 `backup_dist` 调小 —— 那属于**改树**，本次未做。
+4. **卡住的唯一检测器是 controller 的 progress checker**：内置树里没有 `IsStuck` 条件、没有 `PathLongerOnApproach`，`GoalUpdated` 只用于"目标变了就跳过恢复"。⇒ ① "慢慢蹭不动"要 **10 s** 才被发现；② `RecoveryNode` 6 次用尽后 `NavigateToPose` 直接 **abort**（不会无限重试）—— 在长目标分段（`segment_goal_navigator.py`）里表现为"这一段失败"，需注意上层是否处理。
+5. **`behavior_server` 未配 `assisted_teleop`**（1.1.20 该插件存在）⇒ "人工接管把车蹭出来"这条路我们暂时没有；要加就是 `behavior_plugins` 里加一个 id + 一段参数（未做）。
+6. `local_frame` 等 Jazzy 键：**不要**从参考队 yaml 抄进来（I.2），1.1.20 既不报错也不生效。
