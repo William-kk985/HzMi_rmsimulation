@@ -60,9 +60,14 @@ def generate_launch_description():
     nav2_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world]), ".yaml"
     empty_map_dir = os.path.join(rm_nav_bringup_dir, 'map', 'empty_map.yaml')
     # nav2 参数已回归自研 rm_navigation 包 params/（R1）；按 nav 选择局部规划器变体
+    # ★ 2026-09-26：再叠一层 planner 槽（全局规划器 A/B 用，与 nav 正交）——
+    #   planner:=navfn  → nav2_params_sim_<nav>.yaml        （默认；与今天**逐字节等价**）
+    #   planner:=smac2d → nav2_params_sim_<nav>_smac2d.yaml （只多一个后缀；文件不存在时 nav2 会直接报错，不会静默回退）
     nav2_params_file_dir = PathJoinSubstitution([
         get_package_share_directory('rm_navigation'), 'params',
-        PythonExpression(["'nav2_params_sim_' + '", LaunchConfiguration('nav'), "' + '.yaml'"])
+        PythonExpression([
+            "'nav2_params_sim_' + '", LaunchConfiguration('nav'), "' + ",
+            "('_smac2d' if '", LaunchConfiguration('planner'), "' == 'smac2d' else '') + '.yaml'"])
     ])
     # AMCL 初值（map 系，米/弧度）：sim 出生点固定，按 world 自动注入，省掉手动发 /initialpose。
     # 依据（用场地 STL 世界包围盒 vs pgm 已知区域比对得出，见 docs/smoke_test_runbook.md §0.5）：
@@ -154,6 +159,17 @@ def generate_launch_description():
         choices=['rpp', 'dwb', 'teb'],
         description='Choose local planner variant: rpp | dwb | teb '
                     '(对应 rm_navigation/params/nav2_params_sim_<nav>.yaml)')
+
+    declare_planner_cmd = DeclareLaunchArgument(
+        'planner',
+        default_value='navfn',
+        choices=['navfn', 'smac2d'],
+        description='全局规划器槽位（A/B 对照用，只换 planner_server 的 GridBased，其它一律不动）: '
+                    'navfn = 已验证默认（不要动；nav2_navfn_planner/NavfnPlanner）；'
+                    'smac2d = COD 2026 风格的代价感知 A*（nav2_smac_planner/SmacPlanner2D，'
+                    'cost_travel_multiplier 越大越贴通道中心），只用于 A/B。'
+                    '对应 rm_navigation/params/nav2_params_sim_<nav>.yaml 与 '
+                    'nav2_params_sim_<nav>_smac2d.yaml；回退 = 省略本参数或 planner:=navfn')
 
     declare_global_obstacle_cmd = DeclareLaunchArgument(
         'global_obstacle',
@@ -576,6 +592,7 @@ def generate_launch_description():
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)
     ld.add_action(declare_nav_cmd)
+    ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
