@@ -152,3 +152,37 @@ small_point_lio/           ← ★ LIO 就是它：**仓库内自带目录，不
 3. 他们 2026 的文档主要在 **`CLAUDE.md`（5.3 KB）**，`README.md` 只有 1.1 KB ⇒ 想看他们的设计意图，读 `CLAUDE.md`；
 4. **我们的最短对齐路径**：我们工作区**已经有 Point-LIO**（`src/rm_localization/point_lio`，槽位 `lio:=pointlio`）——`small_point_lio` 属同一族（名字即 "Small Point-LIO"），所以**先用 `lio:=pointlio` 做等效验证，零引入成本**；确有效益再考虑 vendor 他们的 `small_point_lio`（那是 P3，且要先看它的 license 与依赖）。
 5. 顺带修正一条认知：**"2026 架构"不能整体照搬** —— 它同时**砍掉了重定位**（`map→odom` 静态）和**地面分割**，这两条在我们这里是资产（四种重定位可选、linefit 可测），**只借它做加法的部分（裁剪盒/STVL 双图/MPPI/Smac/SG 平滑）**。
+
+---
+
+## 8. 融入可行性分析（结论：**架构不用改，只加"候选"**）
+
+判据来自我们架构的三条硬约束：① 槽位化（同一链路换算法做 A/B）；② 契约固定（TF 链、`robot_base_frame: base_link_fake`、仿真钟、cmd_vel 转换）；③ 先验图与在线建图两条路都要保留 + 仿真要能验收。
+
+| COD_NAV 2026 组件 | 判定 | 关键理由 |
+|---|---|---|
+| `cpp_lidar_filter` 车体裁剪盒 | **✅ 直接融** | 纯 ROS 节点，进出都是 PointCloud2；**必须按我们的 `livox_frame` 重算 box**（他们的 marker 在 `base_link` 是 bug）；`leaf_size` 是死参 ⇒ 要降采样得自己加 |
+| STVL 双图 + 衰减 | **✅ 直接融** | 包已装、纯 YAML；照抄 `decay_model 0`、`voxel_decay 0.5`、`voxel_size 0.05`、**`model_type: 1`**、`filter: voxel`、`obstacle/raytrace 8/9 m` |
+| `range_max: 10 → 20` | **✅ 直接融** | 一行参数；我们地图 15×28 m 比他们 72 m 小，耗时/RTF 风险低 |
+| 高度带 `min/max_height` | **⚠️ 必须重算，禁止照抄** | 他们的 `min_height 0.10/0.15`（livox_frame）**会砍掉我们近场回波**：实测近场 `z_map 0.107~0.196` ⇒ `z_livox ≈ −0.12~−0.03`，**全在 0.10 以下** ⇒ 照抄等于把近场墙全删（= 又制造"缝"） |
+| Smac2D（`cost_travel_multiplier 4.0`、`tolerance 0.5`、`allow_unknown true`） | **✅ 直接融** | `nav2_smac_planner` 已装；注意 `motion_model_for_search`/`minimum_turning_radius`/`angle_quantization_bins` 是 **Hybrid 专用**，Smac2D 下是惰性键（别抄） |
+| Smac 的 `smooth_path: true` + 内建 smoother | **✅ 直接融** | 这才是他们真正的平滑（`smoother_server` 在他们链里是**死代码**，BT 无 `<SmoothPath>`）⇒ 比接 savgol 便宜 |
+| MPPI Omni + 他们的调参史 | **✅ 融（成本中等）** | 包已装；需新 params + `nav:=mppi` 槽 + velocity_smoother 匹配。**速度必须降**（7.5 m/s 是实车）；**与自转模式互斥**（见下） |
+| BT 结构（3 Hz 重规划 / BackUp） | **△ 要自己写** | 他们 XML 里**没有 `IsStuck`**，`BackUp` 只在 through-poses 且是 **1.0 m @ 1.0 m/s** ⇒ 借结构得自己加节点，收益一般 |
+| `small_point_lio` | **❌ 不能直接融** | 其 PointCloud2 适配**要求 `tag`(uint8)+`timestamp`(float64 秒)** 字段（我们点云没有）；`twist` 全零、帧硬编码。**替代：用我们已有的 `lio:=pointlio`（同族）先验证收益** |
+| `map_resolution 0.5` / PCD 写编译期源码目录 | **❌ 不该融** | 写死路径 + 往源码目录写文件，不适合可复现的 bench |
+| slam_toolbox `lifelong`（纯在线） | **△ 可作为 `mapper` 新取值** | 但必须**让它发 `map→odom`**（他们设 `transform_publish_period 0.0` = 不发 ⇒ 才需要静态桥）；与重定位槽**互斥** |
+| 静态 `map→odom`(z=0.05) + 零重定位 | **❌ 不融（与核心资产冲突）** | 我们 `mode:=nav` 的意义就是"先验图 + 重定位"；静态桥要求机器人**从图原点原朝向起飞**（他们图仅 10.65×10.2 m）。最多作为 slam_nav 调试的临时开关 |
+| 去掉 `linefit`（改高度带） | **❌ 不该融** | linefit 是我们可测/可 A/B 的资产（z-profile 诊断就靠它），且他们的高度带会砍掉我们近场回波 |
+| `enable_rotation: false` + `yaw_goal_tolerance 6.28` | **△ 作为我们自己的模式** | **注意**：他们**从不自转**（`spin_speed` 全分支无一处非零）⇒ "他们为自转而这样做"是错的推断；真实作用只是"目标朝向随便"。`sentry_spin` 是我们的设计 |
+| 未知区 / 动态障碍 / ESDF / 前沿探索 | **—（无内容可融）** | 他们全分支 grep 0 命中；得我们自己定策略 |
+
+### 融入的三个前置冲突（必须先解决，否则会重演"指令被静默替换"）
+
+1. **`wz` 归属冲突**：MPPI（或任何控朝向的控制器）要控 `wz` ⇒ 必须 `spin_speed=0`；要自转 ⇒ 必须放弃控制器控朝向。**launch 层必须互斥**，不能两个都开。
+2. **`map→odom` 双发布者**：`localization:=*`（四种）与 `mapper:=slam_toolbox_lifelong` 都会发 ⇒ `mapper` 新取值必须加进 launch 的互斥条件。
+3. **高度带标定**：`min_height`/`max_height` 必须按我们传感器的**实测 z 剖面**重算（近场 `z_livox < 0.10`），否则融入即制造新"缝"。
+
+### 一句话结论
+
+**能融，但"融入"的正确形状不是搬他们的架构，而是把他们 6~8 个组件作为我们槽位的"新取值/新参数集"加进来**：默认路径（rpp + cartographer + amcl + linefit）一个字不动，随时可 A/B 与回退。**不能融的三样**（静态 `map→odom` 零重定位、去掉 linefit、直接 vendor `small_point_lio`）都触及我们的核心资产或硬门槛。
