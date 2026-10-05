@@ -7,6 +7,14 @@
 //   GICP(source → map) → T_map←sensor_est
 //   T_map←odom = T_map←sensor_est · T_sensor←odom  → 接受/拒绝 → TF / ~/pose / ~/fitness_score
 //
+// **可切换配准后端（backend 参数，2026-10-05）**：`pcl`（默认，本文档描述的就是它）|
+//   `small_gicp`（vendored koide3/small_gicp，MIT，pinned commit 57c1106…= v1.0.1）。
+//   两个后端共用同一份参数/同一份体素下采样/同一套接受判据，只把"目标预处理 + 单帧 align + 评分"
+//   交给 gicp_registration::RegistrationBackend（src/registration_backend.cpp）分流
+//   ⇒ A/B 的唯一变量就是 backend。**~/fitness_score 的语义不因后端改变**（见 registration_backend.hpp）。
+//   切回 PCL 只需 `backend: pcl`（或运行时 -p backend:=pcl）——契约、话题、时间戳、QoS 全不变。
+//   详细对照、实测数据与风险：docs/gicp_backend_small_gicp.md。
+//
 // **两级下采样（two-tier leaf，2026-10-05）**：先验地图（target）用粗 leaf（voxel_leaf_size_，
 //   默认 0.10 m）——建地图点云本身密度不均、粗一点省内存/CPU 且给 GICP 稳定的平面协方差；
 //   实时点云（source）用细 leaf（voxel_leaf_size_scan_，默认 0.05 m）——单帧只有几千点，
@@ -58,7 +66,6 @@
 
 #include <pcl/common/common.h>
 #include <pcl/filters/filter.h>
-#include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/types.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -194,6 +201,28 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   rotation_epsilon_ = declare_parameter<double>("rotation_epsilon", 2.0e-3);
   correspondence_randomness_ = declare_parameter<int>("correspondence_randomness", 20);
   maximum_optimizer_iterations_ = declare_parameter<int>("maximum_optimizer_iterations", 20);
+  // ---- 配准后端（2026-10-05 新增；契约见 docs/gicp_backend_small_gicp.md）----
+  //   "pcl"        = pcl::GeneralizedIterativeClosestPoint（**默认**；今天已验证的那条路，行为不变）
+  //   "small_gicp" = vendored koide3/small_gicp（MIT，pinned commit，多线程 GICP）
+  // 未识别的取值 ⇒ WARN + 退回 pcl：**绝不静默换成未验证路径**。
+  backend_param_raw_ = declare_parameter<std::string>("backend", "pcl");
+  {
+    bool ok = false;
+    backend_kind_ = parseRegistrationBackendKind(backend_param_raw_, ok);
+    if (!ok) {
+      RCLCPP_WARN(
+        get_logger(),
+        "backend='%s' 不是已知取值（pcl | small_gicp）⇒ 退回默认 'pcl'（已验证路径）",
+        backend_param_raw_.c_str());
+      backend_kind_ = RegistrationBackendKind::PCL;
+      backend_param_raw_ = "pcl";
+    }
+  }
+  // 仅 small_gicp 生效：OpenMP 线程数（= COD small_gicp_relocalization 的 num_threads 同一个键）。
+  // 默认 4（COD 用 8）：本节点与 LIO/nav2/Gazebo 同机跑，28 核上留余量比抢核更稳。
+  // 实测（无 -O 构建、target 12450/source 3701）：1/2/4/8 线程 = 559/412/206/205 ms（median），
+  // 4 线程即可（8 线程无进一步收益）；对照 pcl 后端同条件 387 ms ⇒ 约 1.9×。详见 docs。
+  small_gicp_num_threads_ = declare_parameter<int>("small_gicp_num_threads", 4);
   publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 50.0);
   // 与 AMCL 的 transform_tolerance 同语义：把 map→odom（和 ~/pose）盖成**未来**时间戳，
   // 保证 nav2 消费者在 now+margin 处能查到。
@@ -249,6 +278,12 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     RCLCPP_WARN(get_logger(), "maximum_iterations=%d 非法 ⇒ 用 16", maximum_iterations_);
     maximum_iterations_ = 16;
   }
+  // small_gicp_num_threads <= 0 ⇒ OpenMP 的 num_threads(0) 是未定义行为；退回 4（backend=pcl 时该键无意义）
+  if (small_gicp_num_threads_ <= 0) {
+    RCLCPP_WARN(
+      get_logger(), "small_gicp_num_threads=%d 非法（必须 >= 1）⇒ 用 4", small_gicp_num_threads_);
+    small_gicp_num_threads_ = 4;
+  }
   if (tf_lookahead_sec_ < 0.0) {
     // 负的前瞻 = 把 map→odom 盖成过去 ⇐ 正是本次要修的 bug（tf2 extrapolation）。
     RCLCPP_WARN(
@@ -282,7 +317,7 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   pcl::Indices finite_indices;
   PointCloudT::Ptr map_finite(new PointCloudT);
   pcl::removeNaNFromPointCloud(*raw_map, *map_finite, finite_indices);
-  map_cloud_ = downsample(map_finite, voxel_leaf_size_);  // 两级 leaf 之"粗"档：先验地图/target
+  map_cloud_ = voxelDownsample(map_finite, voxel_leaf_size_);  // 两级 leaf 之"粗"档：先验地图/target
   const size_t n_raw = raw_map->size();
   const size_t n_finite = map_finite->size();
   const size_t n_map = map_cloud_->size();
@@ -307,14 +342,28 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     throw std::runtime_error("gicp_registration: map cloud too small");
   }
 
-  // ============================ GICP 配置 ============================
-  gicp_.setMaxCorrespondenceDistance(max_correspondence_distance_);
-  gicp_.setMaximumIterations(maximum_iterations_);
-  gicp_.setTransformationEpsilon(transformation_epsilon_);
-  gicp_.setRotationEpsilon(rotation_epsilon_);
-  gicp_.setCorrespondenceRandomness(correspondence_randomness_);
-  gicp_.setMaximumOptimizerIterations(maximum_optimizer_iterations_);
-  gicp_.setInputTarget(map_cloud_);  // 目标只设一次；目标协方差在首次 align 时预计算并复用
+  // ============================ 配准后端（backend 参数） ============================
+  // 两个后端**共用同一份参数**（leaf、max_corr_dist、迭代/收敛阈值、协方差 KNN 逐项对应），
+  // 只在这一处分流 ⇒ A/B 时唯一变量就是 backend（+ small_gicp_num_threads）。
+  //   · pcl        ：pcl::GeneralizedIterativeClosestPoint —— **改动前逐行等同的配置**；
+  //   · small_gicp ：Registration<GICPFactor, ParallelReductionOMP>（LM 优化器 + OpenMP 归约）。
+  // 目标（先验地图）在这里一次性交给后端：
+  //   · pcl        → setInputTarget（目标协方差按 PCL 原行为**首帧 align** 才算 ⇒ 首帧 ~1.5 s 起）；
+  //   · small_gicp → 转点云 + 建 KdTree + 估计协方差（**构造期一次**，耗时量在 target_prep_ms_）。
+  // 两者都只做一次，故启动期多出的这点时间不影响每帧 align 的 A/B 口径。
+  {
+    RegistrationBackendOptions backend_options;
+    backend_options.kind = backend_kind_;
+    backend_options.max_correspondence_distance = max_correspondence_distance_;
+    backend_options.maximum_iterations = maximum_iterations_;
+    backend_options.transformation_epsilon = transformation_epsilon_;
+    backend_options.rotation_epsilon = rotation_epsilon_;
+    backend_options.correspondence_randomness = correspondence_randomness_;
+    backend_options.maximum_optimizer_iterations = maximum_optimizer_iterations_;
+    backend_options.small_gicp_num_threads = small_gicp_num_threads_;
+    backend_ = std::make_unique<RegistrationBackend>(backend_options);
+    target_prep_ms_ = backend_->setTarget(map_cloud_);
+  }
 
   // ============================ 状态初值 ============================
   last_cloud_stamp_ = now();
@@ -365,6 +414,13 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "~/fitness_score", rclcpp::QoS(1).transient_local());
   converged_pub_ =
     create_publisher<std_msgs::msg::Bool>("~/converged", rclcpp::QoS(1).transient_local());
+  // ~/small_gicp_error：**只在 backend=small_gicp 时创建**（PCL 路径下这条话题根本不存在 ⇒
+  // "PCL 路径行为不变"包括"不多出话题"）。语义 = small_gicp RegistrationResult::error 原值，
+  // **不是** m²、**不能**与 max_fitness_score 比较；与 ~/fitness_score 的分工见 .hpp 的成员注释。
+  if (backend_kind_ == RegistrationBackendKind::SmallGicp) {
+    small_gicp_error_pub_ = create_publisher<std_msgs::msg::Float64>(
+      "~/small_gicp_error", rclcpp::QoS(1).transient_local());
+  }
 
   tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
@@ -383,9 +439,15 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   // ============================ 启动摘要 ============================
   // A/B 要看的三件事都在这里：**两个 leaf**、**target 点数**（下采样后参与 GICP 的地图点数）、
   // 以及 max_correspondence_distance（它同时决定 getFitnessScore 的球半径 ⇒ 影响评分量级）。
+  // 2026-10-05 追加：**当前生效的配准后端**（backend 参数；A/B 时第一眼就要能看到自己在跑哪条路）。
   RCLCPP_INFO(
     get_logger(),
     "\n===== gicp_registration 启动 =====\n"
+    "  ★ 配准后端 backend=%s（参数原值 '%s'；可选 pcl | small_gicp，默认 pcl）\n"
+    "     · pcl        = pcl::GeneralizedIterativeClosestPoint（单线程，已验证路径）\n"
+    "     · small_gicp = koide3/small_gicp（MIT，vendored，pinned 57c1106/v1.0.1；"
+    "OpenMP 多线程，num_threads=%d）\n"
+    "     目标侧一次性预处理：%.1f ms%s\n"
     "  pcd_path=%s\n"
     "  地图点数（GICP target）：原始 %zu → 去 NaN %zu → 体素 %.3f m 后 %zu\n"
     "  两级下采样 leaf（来源：COD 2025 small_gicp_relocalization 的 global/registered_leaf_size）："
@@ -398,7 +460,7 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     " transformation_epsilon=%.2e,\n"
     "        rotation_epsilon=%.2e, correspondence_randomness=%d, maximum_optimizer_iterations=%d\n"
     "  初值: use_initial_pose=%s initial_pose=[%s]%s\n"
-    "  输出: TF %s→%s @%.1f Hz + ~/pose + ~/fitness_score + ~/converged"
+    "  输出: TF %s→%s @%.1f Hz + ~/pose + ~/fitness_score + ~/converged%s"
     "（fitness warn=%.3f / accept=%.3f m²）\n"
     "  时间戳: TF 与 ~/pose 都用 now+%.2f s（tf_lookahead_sec，≈ AMCL transform_tolerance；"
     "点云时间戳不用来盖 TF）\n"
@@ -407,8 +469,15 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "        ⇒ 单帧 align 再慢也不会饿死 TF 定时器（改前单线程：实测 /tf 只有 ~2 Hz）\n"
     "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f；"
     "状态行每 ~1 s 一条（含 align 耗时 ms 与 fitness score）\n"
-    "  注：首个 fitness score 之前会先做一次目标协方差预计算（target 越密越慢），可能耗时数秒\n"
+    "  注：pcl 后端在首个 fitness score 之前要先做一次目标协方差预计算（target 越密越慢），"
+    "可能耗时数秒；\n"
+    "      small_gicp 后端的目标协方差已在启动时算完（见上面「目标侧一次性预处理」），首帧不额外慢。\n"
     "==================================",
+    backend_->name(), backend_param_raw_.c_str(), small_gicp_num_threads_,
+    target_prep_ms_,
+    backend_kind_ == RegistrationBackendKind::PCL ?
+    "（PCL 惰性：目标协方差在首帧 align 里算 ⇒ 首帧明显变慢）" :
+    "（small_gicp：建 KdTree + 估协方差，构造期一次）",
     pcd_path_.c_str(), n_raw, n_finite, voxel_leaf_size_, n_map,
     voxel_leaf_size_, voxel_leaf_size_scan_,
     map_min.x, map_min.y, map_min.z, map_max.x, map_max.y, map_max.z,
@@ -419,23 +488,14 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     use_initial_pose_ ? "true" : "false", init_pose_str.c_str(),
     use_initial_pose_ ? "（首帧点云 + TF odom→base 就绪时生效）" : "（已忽略）",
     map_frame_id_.c_str(), odom_frame_id_.c_str(), publish_rate_hz_,
+    backend_kind_ == RegistrationBackendKind::SmallGicp ?
+    " + ~/small_gicp_error（small_gicp 原生 error，**非 m²**）" : "",
     fitness_score_warn_, max_fitness_score_, tf_lookahead_sec_,
     publish_rate_hz_,
     no_improve_cycles_warn_, stale_warn_sec_);
 }
 
 // ============================ 工具 ============================
-
-PointCloudT::Ptr GicpNode::downsample(const PointCloudT::Ptr & in, double leaf_size) const
-{
-  PointCloudT::Ptr out(new PointCloudT);
-  pcl::VoxelGrid<PointT> voxel;
-  const float leaf = static_cast<float>(leaf_size);
-  voxel.setLeafSize(leaf, leaf, leaf);
-  voxel.setInputCloud(in);
-  voxel.filter(*out);
-  return out;
-}
 
 bool GicpNode::lookupTf(
   const std::string & target, const std::string & source, const rclcpp::Time & stamp,
@@ -530,7 +590,7 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   pcl::Indices finite_indices;
   PointCloudT::Ptr finite(new PointCloudT);
   pcl::removeNaNFromPointCloud(*raw, *finite, finite_indices);
-  PointCloudT::Ptr source = downsample(finite, voxel_leaf_size_scan_);
+  PointCloudT::Ptr source = voxelDownsample(finite, voxel_leaf_size_scan_);
   const size_t min_points = static_cast<size_t>(std::max(4, correspondence_randomness_)) + 1;
   if (source->size() < min_points) {
     RCLCPP_WARN_THROTTLE(
@@ -611,28 +671,42 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     return;
   }
 
-  // --- ⑥ GICP ---
+  // --- ⑥ 配准（backend 参数决定走 PCL 还是 small_gicp；两条路共用同一份参数与同一份下采样） ---
   if (!first_align_done_) {
-    RCLCPP_INFO(
-      get_logger(), "首次 GICP align：会先预计算目标（地图 %zu 点）协方差，可能耗时数秒…",
-      map_cloud_->size());
+    if (backend_kind_ == RegistrationBackendKind::PCL) {
+      RCLCPP_INFO(
+        get_logger(), "首次 GICP align（backend=pcl）：会先预计算目标（地图 %zu 点）协方差，"
+        "可能耗时数秒…", map_cloud_->size());
+    } else {
+      RCLCPP_INFO(
+        get_logger(), "首次 GICP align（backend=small_gicp，num_threads=%d）：目标（地图 %zu 点）的 "
+        "KdTree/协方差已在启动时算完（%.1f ms）⇒ 首帧没有额外的预计算开销",
+        small_gicp_num_threads_, map_cloud_->size(), target_prep_ms_);
+    }
   }
   bool converged = false;
   double score = std::numeric_limits<double>::quiet_NaN();
+  double backend_error = std::numeric_limits<double>::quiet_NaN();  // 仅 small_gicp：原生 error
   Eigen::Matrix4d T_map_sensor = guess;
   // 每帧配准耗时（ms）：两级 leaf 变细后这是最直接的 CPU 指标（A/B 要能看见它）。
+  // 口径：**只包住 backend_->align()**（= setInputSource/预处理 + 迭代 + 评分），与两个后端一致。
   const auto align_t0 = std::chrono::steady_clock::now();
   try {
-    gicp_.setInputSource(source);  // 每帧设源：GICP 会重算源协方差（地图侧协方差被复用）
-    PointCloudT aligned;
-    gicp_.align(aligned, guess.cast<float>());
-    converged = gicp_.hasConverged();
-    // getFitnessScore 的入参在 PCL 里是**平方距离**阈值（impl/registration.hpp:152 直接拿它与
-    // kd-tree 的平方距离比较），所以要传 r²；返回**内点的平均平方距离（m²）**，
-    // 没有任何内点时返回 numeric_limits<double>::max()。
-    score =
-      gicp_.getFitnessScore(max_correspondence_distance_ * max_correspondence_distance_);
-    T_map_sensor = gicp_.getFinalTransformation().cast<double>();
+    // 后端内部做的事（两条路一一对应）：
+    //   pcl        ：setInputSource（重算源协方差）→ align → hasConverged → getFitnessScore(r²)
+    //   small_gicp ：源转点云 → 源协方差（OMP）→ Registration<GICPFactor,OMP>::align →
+    //                converged → **PCL 等价 fitness**（另算，见 registration_backend.cpp）
+    const RegistrationOutcome outcome = backend_->align(source, guess);
+    converged = outcome.converged;
+    score = outcome.fitness_score;  // 两个后端同定义：内点平均平方距离（m²）
+    backend_error = outcome.backend_error;
+    T_map_sensor = outcome.T_target_source;
+    if (backend_kind_ == RegistrationBackendKind::SmallGicp && std::isfinite(backend_error)) {
+      RCLCPP_DEBUG(
+        get_logger(),
+        "small_gicp 原生量：error=%.6f（Σ0.5·rᵀΩr，**非 m²**）, num_inliers=%zu, iterations=%zu",
+        backend_error, outcome.num_inliers, outcome.iterations);
+    }
   } catch (const std::exception & ex) {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000, "GICP align 抛异常（%s）⇒ 本帧不更新 map→odom", ex.what());
@@ -701,6 +775,14 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     }
   }
   publishHealth(true, score, accepted && score <= fitness_score_warn_);
+  // small_gicp 后端：**另发**一条 small_gicp 原生 error（无内点/未收敛时为 nan）。
+  // 只在这条路里发布（PCL 路径下该 publisher 是 nullptr、话题不存在）⇒ 两个后端的
+  // ~/fitness_score **定义完全一致**，不会被原生 error 悄悄改写。
+  if (small_gicp_error_pub_) {
+    std_msgs::msg::Float64 raw;
+    raw.data = backend_error;
+    small_gicp_error_pub_->publish(raw);
+  }
 
   // --- ⑧ 调试位姿：map 系机器人位姿（≈ /amcl_pose 语义，便于 A/B 对照） ---
   // 戳不再用点云时间戳（那是"过去"），而是与 TF 同一条 lookahead 戳 ⇒ 见 publishPose 注释。
@@ -825,16 +907,17 @@ void GicpNode::publishTimerCallback()
       if (n_tot == 0) {
         // 还没跑过任何一帧 align ⇒ 只报状态，避免打出误导性的 0 ms / nan
         RCLCPP_INFO(
-          get_logger(), "[status] 尚无配准帧：%s | target=%zu 点（地图 leaf %.3f m）",
+          get_logger(), "[status] backend=%s 尚无配准帧：%s | target=%zu 点（地图 leaf %.3f m）",
+          backend_->name(),
           valid ? "等点云 / 等 TF" :
           "**无初值 ⇒ 不发 map→odom**（等 /initialpose 或 initial_pose + TF odom→base）",
           map_cloud_->size(), voxel_leaf_size_);
       } else {
         RCLCPP_INFO(
           get_logger(),
-          "[status] 采纳 %d/%d 帧 | 最近 score=%s m² | align=%.1f ms | "
+          "[status] backend=%s 采纳 %d/%d 帧 | 最近 score=%s m² | align=%.1f ms | "
           "source=%zu 点（leaf %.3f）→ target=%zu 点（leaf %.3f）| map→odom %s",
-          n_acc, n_tot, scoreToStr(last_score).c_str(), last_align_ms,
+          backend_->name(), n_acc, n_tot, scoreToStr(last_score).c_str(), last_align_ms,
           last_src_pts, voxel_leaf_size_scan_, map_cloud_->size(), voxel_leaf_size_,
           poseToStr(T_map_odom).c_str());
       }

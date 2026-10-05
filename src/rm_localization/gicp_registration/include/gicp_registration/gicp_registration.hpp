@@ -22,13 +22,16 @@
 //   ① PCL 1.12.1 的 GICP **自己算协方差**（pcl/registration/impl/gicp.hpp:51-125 的
 //      computeCovariances 只读 x/y/z，累计 mean/cov 后做 SVD），normal_*/curvature/intensity
 //      这些字段它一个都不读 ⇒ 用 PointNormal / PointXYZINormal 只是在浪费内存和 IO。
+//      small_gicp 同理（estimate_covariances_omp 只用 x/y/z）。
 //   ② 我们的 PCD 资产字段并不统一：RMUL2026.pcd = x y z intensity normal_x..curvature；
 //      RMUC.pcd = normal_x..z x y z _（**没有 intensity**）。用 PointXYZ 三种资产都能读；
 //      若用 PointXYZI 去读 RMUC.pcd，PCL 会因缺 intensity 报 "Failed to find match for field"
 //      并整帧失败。实时点云同理（不依赖 intensity）。
+//   ⇒ PointT / PointCloudT 的定义已移到 registration_backend.hpp（两个后端共用同一份）。
 
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -47,15 +50,10 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl/registration/gicp.h>
+#include "gicp_registration/registration_backend.hpp"
 
 namespace gicp_registration
 {
-
-using PointT = pcl::PointXYZ;
-using PointCloudT = pcl::PointCloud<PointT>;
 
 class GicpNode : public rclcpp::Node
 {
@@ -69,9 +67,8 @@ private:
   void publishTimerCallback();
 
   // ---- 工具 ----
-  // 体素下采样：leaf_size 由调用方给（**两级 leaf**：地图 target 用 voxel_leaf_size_，
-  // 实时点云 source 用 voxel_leaf_size_scan_）。两个 leaf 均为正数（构造时已校验）。
-  PointCloudT::Ptr downsample(const PointCloudT::Ptr & in, double leaf_size) const;
+  // 体素下采样：**已移到 registration_backend.hpp 的 voxelDownsample()**（两个后端共用同一实现，
+  // leaf_size 仍由调用方给：地图 target 用 voxel_leaf_size_，实时点云 source 用 voxel_leaf_size_scan_）。
   bool lookupTf(
     const std::string & target, const std::string & source, const rclcpp::Time & stamp,
     bool try_exact_stamp, Eigen::Matrix4d & out, bool & used_latest);
@@ -104,6 +101,15 @@ private:
   double transformation_epsilon_, rotation_epsilon_;
   int correspondence_randomness_;
   int maximum_optimizer_iterations_;
+  // ---- 配准后端（2026-10-05 新增）----
+  // `backend` = "pcl"（默认，今天的已验证路径）| "small_gicp"（vendored koide3/small_gicp）。
+  // 未识别的取值 ⇒ WARN + 退回 pcl（**绝不静默换成未验证路径**）。
+  RegistrationBackendKind backend_kind_ = RegistrationBackendKind::PCL;
+  std::string backend_param_raw_;  // 参数原值（banner 回显，便于确认 launch/命令行覆盖生效）
+  // **仅 small_gicp**：OpenMP 线程数（PCL 路径单线程，该键对它无影响）。
+  //   注意与节点自己的 MultiThreadedExecutor 是两套线程：align 回调组是 MutuallyExclusive
+  //   ⇒ 同一时刻只有一个 align 在跑，small_gicp 的 num_threads 只在这一个 align 内部并行。
+  int small_gicp_num_threads_;
   double publish_rate_hz_;
   double fitness_score_warn_, max_fitness_score_, stale_warn_sec_;
   int no_improve_cycles_warn_;
@@ -116,8 +122,14 @@ private:
   double tf_lookahead_sec_;
 
   // ---- 地图 / 配准器 ----
-  PointCloudT::Ptr map_cloud_;  // 已体素下采样、已去 NaN（GICP 的 target）
-  pcl::GeneralizedIterativeClosestPoint<PointT, PointT> gicp_;
+  PointCloudT::Ptr map_cloud_;  // 已体素下采样、已去 NaN（后端 target）
+  // 可切换配准后端（backend 参数）：pcl = pcl::GeneralizedIterativeClosestPoint（默认，行为与改动前一致）；
+  // small_gicp = koide3/small_gicp 的 Registration<GICPFactor, ParallelReductionOMP>。
+  // **非线程安全** ⇒ 与原来的 gicp_ 成员一样，只在 align_cb_group_ 内被触碰（组内互斥保证不并发 align）。
+  std::unique_ptr<RegistrationBackend> backend_;
+  // small_gicp 后端的目标侧一次性预处理耗时（ms；setTarget 里量，banner 打印）。
+  // PCL 路径恒为 0（它的目标协方差按 PCL 原行为在**首帧 align** 里惰性计算 ⇒ 首帧明显变慢）。
+  double target_prep_ms_ = 0.0;
 
   // ---- 状态（mutex_ 保护） ----
   // mutex_ 的职责（2026-10-05 逐项审计，MT executor + 双回调组之后这是正确性的关键）：
@@ -136,6 +148,7 @@ private:
   //   Publisher::publish() 本身线程安全，而**持锁发布**会让一次阻塞的 DDS 写把定时器线程一起拖住
   //   ⇒ 等于把刚修好的"饿死"换个姿势带回来 ⇒ 发布**不进状态锁**，靠"单一回调组拥有"这条不变量保证。
   //   同理 tf_broadcaster_->sendTransform 只在定时器组里调用（它不与 align 组共享 publisher）。
+  //   2026-10-05 新增的 ~/small_gicp_error 也是 align 组独占（且只在 backend=small_gicp 时创建）。
   mutable std::mutex mutex_;
   Eigen::Matrix4d T_map_odom_ = Eigen::Matrix4d::Identity();
   bool estimate_valid_ = false;
@@ -153,7 +166,7 @@ private:
   std::string last_tf_error_ = "n/a";
 
   // ---- 可观测量（~1 Hz 状态行用）：A/B 时要看**每帧配准耗时**与**评分量级** ----
-  double last_align_ms_ = 0.0;                                    // 最近一帧 gicp_.align() 墙钟耗时
+  double last_align_ms_ = 0.0;                                    // 最近一帧 backend_->align() 墙钟耗时
   double last_score_ = std::numeric_limits<double>::quiet_NaN();  // 最近一帧 fitness score（m²）
   size_t last_source_points_ = 0;                                 // 最近一帧下采样后的源点数
   std::chrono::steady_clock::time_point last_status_log_tp_{};    // 状态行限频（~1 Hz）
@@ -169,6 +182,11 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr fitness_score_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr converged_pub_;
+  // **仅 backend=small_gicp**（其余情况下恒为 nullptr、话题不存在）：
+  // small_gicp 的 RegistrationResult::error **原值**（Σ 0.5·rᵀΩr，Mahalanobis 加权、无量纲）。
+  // 与 ~/fitness_score（PCL 等价：内点平均平方距离 m²）**不是一回事**，故意分成两条话题，
+  // 免得有人拿它去比 max_fitness_score 阈值（见 docs/gicp_backend_small_gicp.md 的"指标语义"）。
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr small_gicp_error_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;

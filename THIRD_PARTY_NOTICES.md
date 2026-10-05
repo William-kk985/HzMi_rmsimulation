@@ -33,6 +33,7 @@
 | `third_party/point_lio` | hku-mars/Point-LIO | BSD-3-Clause | 原版参考（不编译） | — |
 | `third_party/cartographer` | cartographer-project/cartographer | Apache-2.0 | 原版参考（不编译） | — |
 | `third_party/nav2` | ros-navigation/navigation2（humble） | Apache-2.0 | 原版参考（不编译） | — |
+| `third_party/small_gicp`（**参与编译**：`gicp_registration` 的 `backend: small_gicp` 依赖） | koide3/small_gicp（© 2024 Kenji Koide，AIST） | **MIT**（`third_party/small_gicp/LICENSE`） | 官方源码 vendored（去 `.git`），**pinned commit `57c1106daf83c2c79ee0c58a9c7ed0032298ff4e` = tag v1.0.1**（2026-06-13） | **无源码改动**；`gicp_registration/CMakeLists.txt` 用 `add_subdirectory` 消费（只用 header-only 模板 API）。clone 命令、实测 A/B 与回退见 `docs/gicp_backend_small_gicp.md` |
 
 ## 三、许可证义务要点（分发时注意）
 
