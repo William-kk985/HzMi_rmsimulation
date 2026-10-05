@@ -27,6 +27,23 @@
 //      transform_tolerance 同语义。**不能用点云时间戳**：nav2 消费者在 now+margin 处查
 //      map→odom，盖成"当前/过去"会让 buffer 里最新条目比请求时间旧 ⇒ tf2 抛
 //      "Lookup would require extrapolation into the future" ⇒ follow_path 每周期 abort。
+//
+// **并发契约（2026-10-05 新增，治"align 饿死 TF 定时器"）**：两级 leaf 变细后单帧 align 实测
+//   ~350 ms（327~389 ms），而 TF 定时器原来与点云订阅挤在**单线程 executor** 的同一个默认回调组里
+//   ⇒ align 期间定时器排不上队：节点独占机器时实测 `/tf` 上的 map→odom 只剩 **~2 Hz**
+//   （TF 条数 ≈ 采纳帧数）⇒ 上面 ④ 的 tf_lookahead_sec=0.45 余量被吃满 ⇒ 整栈又见
+//   "extrapolation into the future"（"刚修好的洞在别处漏水"）。修法**不改契约、只改调度**：
+//     · 可执行文件跑 **MultiThreadedExecutor**（CMakeLists.txt 的 `EXECUTOR MultiThreadedExecutor`；
+//       生成的 main 就是 exec.add_node(node) + exec.spin()）；
+//     · **TF/状态定时器独占 tf_cb_group_**（MutuallyExclusive），**点云订阅（重活）+ /initialpose
+//       放 align_cb_group_**（另一个 MutuallyExclusive）⇒ 两组由 MT executor 并行调度，
+//       一次 350 ms 的 align 再也阻塞不了 50 Hz 的 TF 定时器；
+//     · /initialpose **故意与点云同组**：人工初值与"align 读改写 map→odom"必须串行
+//       （否则点击会被在飞的 align 结果覆盖），组内互斥同时保证 PCL GICP 对象 / first_align_done_
+//       仍是单线程访问（PCL GICP 自身不是线程安全的，绝不允许并发 align）；
+//     · 跨两组共享的成员一律在既有 mutex_ 下读写（逐项清单见 .hpp 的"状态"块），本轮唯一补锁的
+//       是 last_tf_error_（std::string，真并发就是 UB）；三个健康话题只由 align 组发布，
+//       故意**不**持状态锁发布 —— 一次阻塞的 DDS 写会把定时器线程一起拖住，等于把"饿死"带回来。
 
 #include "gicp_registration/gicp_registration.hpp"
 
@@ -52,10 +69,12 @@ namespace gicp_registration
 {
 namespace
 {
-// TF 查询超时（秒）：精确时间戳那一档故意很短 —— 单线程 executor 里 TF 数据要等当前回调
-// 返回后才会被 TransformListener 处理，"带超时等待"其实等不到新数据（tf2_ros/buffer.hpp:314
-// 的告警即指此），短超时只保证失败路径快速返回（对比 icp_registration 用的 10 s：TF 缺失时
-// 会把点云回调卡住 10 s）。
+// TF 查询超时（秒）：两档都故意很短 —— 本节点的 TF 查询**只发生在 align 回调组里**
+// （pointcloudCallback / initialPoseCallback / publishPose），而该组是 MutuallyExclusive
+// ⇒ 一次长等待会直接推迟下一帧配准（点云 KEEP_LAST(1)，等 10 s 等于丢 10 s 的定位）。
+// 注：TransformListener 自带专用线程（tf2_ros::TransformListener 构造时创建
+// MutuallyExclusive 回调组 + SingleThreadedExecutor + dedicated_listener_thread_），
+// 所以 TF 的**接收**不受本节点 executor 影响；这里短的只是"查不到就快点失败"。
 constexpr double kTfExactTimeoutSec = 0.05;
 constexpr double kTfLatestTimeoutSec = 0.05;
 
@@ -159,7 +178,18 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   // 给初值（LIO 里程计递推）多留收敛余量；注意 getFitnessScore 用的球半径同步变大
   // （1.5² = 2.25 m² vs 原来 1.0² = 1.0 m²）⇒ fitness 量级会整体上移，阈值需按实测量级重看。
   max_correspondence_distance_ = declare_parameter<double>("max_correspondence_distance", 1.5);
-  maximum_iterations_ = declare_parameter<int>("maximum_iterations", 32);
+  // 2026-10-05：32 → 16（兜底默认与 config/gicp_registration_sim.yaml 保持一致）。
+  // 依据：32 次迭代时本机单节点实测稳态 align = 327~389 ms（首个 2460 ms，含目标协方差预计算）；
+  // GICP 通常 10~20 次内收敛，32 次属于过量迭代。
+  // **实测提醒（别把它当"单帧成本砍半"）**：同一合成扫描下 maximum_iterations = 1/4/16/32/64 的
+  // align 分别是 363/475/486/471/427 ms（噪声量级、非单调），fitness 全部 0.00123 m²。
+  // 原因见 PCL 1.12.1 impl/gicp.hpp:420（`while (!converged_)`）与 :496（`nr_iterations_ >= max_iterations_
+  // || delta < 1`）：
+  // 跟踪场景（初值来自里程计递推、上一帧已收敛）里 delta 判据远早于 16 次就成立 ⇒ 上限不生效，
+  // 每帧成本由固定开销（源协方差 KNN + 最近邻 + getFitnessScore）主导。
+  // 保留 16 的理由：上限更低不会更慢/更差（实测一致），且能给"初值差的场景"的单帧耗时封顶。
+  // 迭代数是"CPU ↔ 精度"旋钮：若 ~/fitness_score 变差 / ~/converged 掉 false，调回 32（config 同）。
+  maximum_iterations_ = declare_parameter<int>("maximum_iterations", 16);
   transformation_epsilon_ = declare_parameter<double>("transformation_epsilon", 5.0e-4);
   rotation_epsilon_ = declare_parameter<double>("rotation_epsilon", 2.0e-3);
   correspondence_randomness_ = declare_parameter<int>("correspondence_randomness", 20);
@@ -216,8 +246,8 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     publish_rate_hz_ = 50.0;
   }
   if (maximum_iterations_ <= 0) {
-    RCLCPP_WARN(get_logger(), "maximum_iterations=%d 非法 ⇒ 用 32", maximum_iterations_);
-    maximum_iterations_ = 32;
+    RCLCPP_WARN(get_logger(), "maximum_iterations=%d 非法 ⇒ 用 16", maximum_iterations_);
+    maximum_iterations_ = 16;
   }
   if (tf_lookahead_sec_ < 0.0) {
     // 负的前瞻 = 把 map→odom 盖成过去 ⇐ 正是本次要修的 bug（tf2 extrapolation）。
@@ -299,16 +329,35 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   }
 
   // ============================ ROS 接口 ============================
+  // ---- 回调组（2026-10-05：把 50 Hz 的 TF 定时器与重配准解耦）----
+  // 为什么要两个组：单帧 align 实测 ~350 ms（327~389 ms）；原来定时器与点云订阅共用**单线程 executor 的
+  // 默认回调组** ⇒ align 期间定时器排不上队，`/tf` 上的 map→odom 实测只剩 ~2 Hz ⇒ nav2 在
+  // now+transform_tolerance 处查到的最新条目越来越旧 ⇒ "extrapolation into the future" 复发。
+  // 现在：MultiThreadedExecutor（CMakeLists.txt 的 EXECUTOR）+ 下面两个 MutuallyExclusive 组
+  // 并行调度 ⇒ 定时器再也不受 align 影响（契约、话题、QoS、时间戳语义全不变）。
+  //   · tf_cb_group_    ：只放 TF/状态定时器（组类型 MutuallyExclusive ⇒ 定时器回调不自我重叠）；
+  //   · align_cb_group_ ：点云订阅（GICP 重活）+ /initialpose。
+  // /initialpose 与点云同组的理由：初值写入与 align 的读改写必须串行，且 GICP 对象不是线程安全的。
+  tf_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  align_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
   // 点云：BEST_EFFORT（发布端 livox 用 SensorDataQoS；默认 RELIABLE 订阅会永远收不到
   // —— 这正是 icp_registration 在 f033d96 之前"跑起来但没数据"的原因）。KEEP_LAST(1)：
   // 配准慢时宁可丢旧帧，也不要排队处理过期点云。
+  rclcpp::SubscriptionOptions cloud_sub_options;
+  cloud_sub_options.callback_group = align_cb_group_;  // 重活组：与 TF 定时器组并行
   pointcloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
     pointcloud_topic_, rclcpp::SensorDataQoS().keep_last(1),
-    std::bind(&GicpNode::pointcloudCallback, this, std::placeholders::_1));
+    std::bind(&GicpNode::pointcloudCallback, this, std::placeholders::_1),
+    cloud_sub_options);
   // /initialpose：RELIABLE（RViz 的 2D Pose Estimate 就是 RELIABLE 发的，不能共用点云 QoS）
+  // 与点云同组（见上）：人工初值必须与在飞的 align 串行，否则会被旧估计覆盖。
+  rclcpp::SubscriptionOptions init_pose_sub_options;
+  init_pose_sub_options.callback_group = align_cb_group_;
   initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "/initialpose", rclcpp::QoS(rclcpp::KeepLast(10)),
-    std::bind(&GicpNode::initialPoseCallback, this, std::placeholders::_1));
+    std::bind(&GicpNode::initialPoseCallback, this, std::placeholders::_1),
+    init_pose_sub_options);
 
   pose_pub_ =
     create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("~/pose", rclcpp::QoS(1));
@@ -324,9 +373,12 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   tf_buffer_->setCreateTimerInterface(timer_interface);
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
+  // TF/状态定时器：**独占 tf_cb_group_** ⇒ 与 align_cb_group_ 并行（MT executor），
+  // 单帧 350 ms 的 GICP 再也阻塞不了它。这也是本次"extrapolation"修复的关键一环。
   publish_timer_ = create_wall_timer(
     std::chrono::duration<double>(1.0 / publish_rate_hz_),
-    std::bind(&GicpNode::publishTimerCallback, this));
+    std::bind(&GicpNode::publishTimerCallback, this),
+    tf_cb_group_);
 
   // ============================ 启动摘要 ============================
   // A/B 要看的三件事都在这里：**两个 leaf**、**target 点数**（下采样后参与 GICP 的地图点数）、
@@ -350,6 +402,9 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "（fitness warn=%.3f / accept=%.3f m²）\n"
     "  时间戳: TF 与 ~/pose 都用 now+%.2f s（tf_lookahead_sec，≈ AMCL transform_tolerance；"
     "点云时间戳不用来盖 TF）\n"
+    "  并发: MultiThreadedExecutor + 两个回调组 —— TF/状态定时器组（%.1f Hz）‖ 点云+/initialpose 组"
+    "（GICP align）\n"
+    "        ⇒ 单帧 align 再慢也不会饿死 TF 定时器（改前单线程：实测 /tf 只有 ~2 Hz）\n"
     "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f；"
     "状态行每 ~1 s 一条（含 align 耗时 ms 与 fitness score）\n"
     "  注：首个 fitness score 之前会先做一次目标协方差预计算（target 越密越慢），可能耗时数秒\n"
@@ -365,6 +420,7 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     use_initial_pose_ ? "（首帧点云 + TF odom→base 就绪时生效）" : "（已忽略）",
     map_frame_id_.c_str(), odom_frame_id_.c_str(), publish_rate_hz_,
     fitness_score_warn_, max_fitness_score_, tf_lookahead_sec_,
+    publish_rate_hz_,
     no_improve_cycles_warn_, stale_warn_sec_);
 }
 
@@ -393,6 +449,9 @@ bool GicpNode::lookupTf(
       out = transformToMatrix(tf.transform);
       return true;
     } catch (const tf2::TransformException & ex) {
+      // last_tf_error_ 是 std::string：跨回调（点云 / /initialpose / publishPose）共享，
+      // MT executor 下必须加锁写（读走 lastTfError() 的加锁快照）。
+      std::lock_guard<std::mutex> lock(mutex_);
       last_tf_error_ = ex.what();
     }
   }
@@ -404,9 +463,17 @@ bool GicpNode::lookupTf(
     used_latest = try_exact_stamp;  // 只有"本想用精确时间戳"时才值得提示
     return true;
   } catch (const tf2::TransformException & ex) {
+    std::lock_guard<std::mutex> lock(mutex_);
     last_tf_error_ = ex.what();
     return false;
   }
+}
+
+std::string GicpNode::lastTfError() const
+{
+  // 加锁快照：日志里打印 last_tf_error_ 一律走这里（不要裸读成员）。
+  std::lock_guard<std::mutex> lock(mutex_);
+  return last_tf_error_;
 }
 
 Eigen::Matrix4d GicpNode::initialPoseParamToMatrix() const
@@ -482,7 +549,7 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       get_logger(), *get_clock(), 2000,
       "TF %s←%s 查询失败（%s）⇒ 跳过本帧。map→odom 仍沿用上一次估计"
       "（若从未有过估计则**不发 TF**，global_costmap 会报 Invalid frame ID \"map\"）",
-      sensor_frame.c_str(), odom_frame_id_.c_str(), last_tf_error_.c_str());
+      sensor_frame.c_str(), odom_frame_id_.c_str(), lastTfError().c_str());
     publishHealth(false, 0.0, false);
     return;
   }
@@ -527,7 +594,7 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         get_logger(), *get_clock(), 2000,
         "有 initial_pose 参数，但 TF %s←%s 还查不到（%s）⇒ 暂不发布 map→odom；"
         "TF 就绪后会自动初始化，也可用 RViz 的 2D Pose Estimate 手动给初值",
-        odom_frame_id_.c_str(), base_frame_id_.c_str(), last_tf_error_.c_str());
+        odom_frame_id_.c_str(), base_frame_id_.c_str(), lastTfError().c_str());
     }
   }
   if (!valid_cur) {
@@ -661,7 +728,7 @@ void GicpNode::initialPoseCallback(
   if (!lookupTf(odom_frame_id_, base_frame_id_, stamp, true, T_odom_base, used_latest)) {
     RCLCPP_WARN(
       get_logger(), "/initialpose 收到，但 TF %s←%s 查不到（%s）⇒ 忽略本次初值（LIO/TF 未就绪？）",
-      odom_frame_id_.c_str(), base_frame_id_.c_str(), last_tf_error_.c_str());
+      odom_frame_id_.c_str(), base_frame_id_.c_str(), lastTfError().c_str());
     return;
   }
   const Eigen::Matrix4d T_map_odom = T_map_base * T_odom_base;
@@ -684,6 +751,10 @@ void GicpNode::initialPoseCallback(
 
 void GicpNode::publishTimerCallback()
 {
+  // 运行上下文（2026-10-05）：本回调跑在**独立的 tf_cb_group_**（MutuallyExclusive）里，
+  // 由 MultiThreadedExecutor 与 align_cb_group_（GICP 重活）**并行**调度 ⇒ 单帧 align 350 ms
+  // 也饿不死 50 Hz 的 TF/状态发布（改前实测 /tf 掉到 ~2 Hz，正是 extrapolation 的根因）。
+  // ⇒ 本回调读到的每个共享成员都必须在 mutex_ 下取快照（逐项清单见 .hpp 的"状态"块）。
   Eigen::Matrix4d T_map_odom;
   bool valid = false;
   bool cloud_seen = false;
@@ -795,9 +866,11 @@ rclcpp::Time GicpNode::publishTf(const Eigen::Matrix4d & T_map_odom)
   //   AMCL 之所以从来不出这个错，是因为 **transform_tolerance 让它把 map→odom 盖成未来时间戳**
   //   （本仓库 amcl transform_tolerance=0.3，见 nav2_params_sim_base.yaml）；我们原来用 now() 盖戳，
   //   buffer 里最新条目就永远比请求时间旧 0.1 s ⇒ tf2 抛 ExtrapolationException。
-  // 修法：戳 = now() + tf_lookahead_sec_（默认 0.3，与 AMCL 同语义）；值（map→odom 的数值语义）
-  //   完全不变，只改"这条变换属于哪个时刻"。**故意不用点云时间戳**盖 TF。
+  // 修法：戳 = now() + tf_lookahead_sec_（参数文件现值 0.45，与 AMCL 同语义）；值（map→odom 的
+  //   数值语义）完全不变，只改"这条变换属于哪个时刻"。**故意不用点云时间戳**盖 TF。
   // 过大/过小的取舍见 config/gicp_registration_sim.yaml 的 tf_lookahead_sec 注释。
+  // 2026-10-05：光靠 0.45 的余量撑不住"定时器被饿死"（实测 /tf 掉到 ~2 Hz）⇒ 本轮把定时器
+  //   搬进独立回调组 + MultiThreadedExecutor（见文件顶部的"并发契约"）。0.45 保持不变（契约不动）。
   // ======================================================================================
   const rclcpp::Time stamp = lookaheadStamp();
   geometry_msgs::msg::TransformStamped tf_msg;
@@ -811,6 +884,10 @@ rclcpp::Time GicpNode::publishTf(const Eigen::Matrix4d & T_map_odom)
 
 void GicpNode::publishPose(const Eigen::Matrix4d & T_map_odom, double score)
 {
+  // 运行上下文（2026-10-05）：~/pose 仍**只由 align 组**发布（pointcloudCallback 每采纳帧一次、
+  // /initialpose 一次），**没有**搬到 TF 定时器里 —— 话题语义/频率与改动前完全一致；
+  // 定时器组只负责 TF（map→odom）与状态行。last_tf_stamp_ 是"定时器组写、本组读"的跨组共享
+  // 成员 ⇒ 下面的取戳在 mutex_ 下做。
   // ① 戳：与 TF **同一条**（优先复用最近一次真正发出去的 TF 戳；若还没有 TF 就用同一条公式）。
   //    这样"pose 的戳"与"TF 的覆盖范围"天然对齐；用点云时间戳则 pose 会显得比 TF 旧一整帧。
   rclcpp::Time stamp;
@@ -829,7 +906,7 @@ void GicpNode::publishPose(const Eigen::Matrix4d & T_map_odom, double score)
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 5000,
       "TF %s←%s 查不到（%s）⇒ 本帧不发布 ~/pose（TF map→odom 不受影响）",
-      odom_frame_id_.c_str(), base_frame_id_.c_str(), last_tf_error_.c_str());
+      odom_frame_id_.c_str(), base_frame_id_.c_str(), lastTfError().c_str());
     return;
   }
   const Eigen::Matrix4d T_map_base = T_map_odom * T_odom_base;

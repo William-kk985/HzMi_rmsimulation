@@ -20,7 +20,8 @@
 #   max_correspondence_distance  → setMaxCorrespondenceDistance → corr_dist_threshold_
 #                                （impl/gicp.hpp:414 用它当距离门限；构造默认 5.0 m，本节点 1.0→1.5）
 #   maximum_iterations           → setMaximumIterations → max_iterations_
-#                                （impl/gicp.hpp:496 的收敛判据之一；构造默认 200，本节点给 32 省 CPU）
+#                                （impl/gicp.hpp:496 的收敛判据之一；构造默认 200，本节点 32→16 省 CPU，
+#                                 2026-10-05；依据与"精度退化就回 32"见本键的注释）
 #   transformation_epsilon       → setTransformationEpsilon（impl/gicp.hpp:474-483 的平移部分）
 #   rotation_epsilon             → setRotationEpsilon（同上，旋转部分；GICP 特有的"两段式"收敛判据）
 #   correspondence_randomness    → setCorrespondenceRandomness → k_correspondences_
@@ -76,12 +77,14 @@
     #     · 实时点云（source）侧：**原实现复用地图的 leaf（0.25 m）**给实时点云下采样 ⇒ 单帧被砍到
     #       几百点，等于自己把配准精度掐死。改成 0.05 m（= COD registered_leaf_size）保住单帧几何。
     #     · 代价（本机**单节点实测**，target 12450 + source 3701 点）：首个 align 2296 ms（含目标协方差
-    #       预计算），其后每帧 **≈330~570 ms**。align 跑在单线程 executor 里 ⇒ 50 Hz 的 TF 定时器会被它
-    #       阻塞（同一次实测里 `/tf` 的 map→odom 实际只有 ~2 Hz）⇒ 若整栈出现
-    #       "extrapolation into the future" 或 "Control loop missed its desired rate"，**回退顺序**：
+    #       预计算），其后每帧 **327~389 ms**（更早一次实测到 570 ms）。align 原来跑在单线程 executor 里 ⇒ 50 Hz 的 TF 定时器被它
+    #       阻塞（同一次实测里 `/tf` 的 map→odom 实际只有 2.3 Hz）⇒ 若整栈再出现
+    #       "extrapolation into the future" 或 "Control loop missed its desired rate"，**回退阶梯**：
     #       ① `voxel_leaf_size_scan` 0.05→0.10（先牺牲实时点云精度，保住地图侧的精度收益）
-    #       ② `maximum_iterations` 32→16 ③ 最后才把 `voxel_leaf_size` 回到 0.25。
+    #       ② `maximum_iterations` 16→8（精度优先的话反过来回 32） ③ 最后才把 `voxel_leaf_size` 回 0.25。
     #       （COD 的对策是 small_gicp 的 `num_threads: 8` 多线程；本节点是单线程 PCL GICP，无此档。）
+    #       **2026-10-05 已治本**：TF 定时器搬进独立回调组 + MultiThreadedExecutor（见 CMakeLists.txt）
+    #       ⇒ 实测 /tf 从 ~2 Hz 回到 ~50 Hz；上面这条阶梯只剩"整栈总算力不够"时才需要用。
     #       align 耗时（ms）与两个 leaf、两侧点数都每 ~1 s 打在 [status] 行，先看那一行再调。
     #     · 两个 leaf 都必须 > 0（<=0 判非法并退回默认值；本节点**不提供**"0 = 不下采样"档：不采样会
     #       让单帧点数/协方差计算量失控）。
@@ -92,7 +95,29 @@
     max_correspondence_distance: 1.5     # m；1.0→1.5，对齐 COD max_dist_sq 2.5（√2.5≈1.58 m），给初值更多收敛余量。
                                          #    注意 getFitnessScore 的球半径同步从 1.0 m 变成 1.5 m（2.25 m² 门限）
                                          #    ⇒ 下面两个 fitness 阈值要按**实测量级**重看，别直接沿用旧经验值
-    maximum_iterations: 32               # PCL GICP 构造默认 200；32 是 CPU 与收敛的折中（未实测调优）
+    # ★ 2026-10-05：maximum_iterations 32 → 16。背景与依据（本机**单节点**实测，不启 Gazebo/nav2；
+    #   target 12450 / source 3701 点，同一合成扫描、注入 (+0.15,-0.15) m 偏移）：
+    #   · 098078d 把两级 leaf 收到 0.10/0.05 后，32 次迭代的稳态 align = **327~389 ms**（首个 align
+    #     2460 ms，含目标协方差预计算）—— 单帧太贵，且在（原来的）单线程 executor 里饿死 50 Hz 的
+    #     TF 定时器：实测 `/tf` 的 map→odom 只剩 **2.3 Hz** ⇒ nav2 又见 "Lookup would require
+    #     extrapolation into the future"。**"饿死"是由多线程 executor + 独立回调组治本的**
+    #     （见 CMakeLists.txt 的 EXECUTOR MultiThreadedExecutor 与 src/gicp_registration.cpp 的
+    #     tf_cb_group_ / align_cb_group_：实测 /tf 2.3 Hz → **50.0 Hz**）。
+    #   · 本键 32 → 16 的**实测**结果（别把它当成"单帧成本砍半"——不是）：
+    #     同一扫描下 maximum_iterations = 1 / 4 / 16 / 32 / 64 的 align 分别是 363 / 475 / 486 /
+    #     471 / 427 ms（噪声量级、非单调；1 次反而最快），fitness 全部 0.00123 m²、~/converged 全 true。
+    #     原因（PCL 1.12.1 impl/gicp.hpp:420 的 `while (!converged_)` + :496 的收敛判据）：外层每次迭代做一次
+    #     **BFGS 求解**（内层上限 = maximum_optimizer_iterations=20，`rigid_transformation_estimation_`），
+    #     而收敛判据是 `nr_iterations_ >= max_iterations_ || delta < 1`（delta 由 transformation_epsilon/
+    #     rotation_epsilon 加权）⇒ **在"上一帧已收敛 + 初值来自里程计递推"的跟踪场景里，delta 判据
+    #     远早于 16 次就成立，上限根本不生效**；每帧成本由固定开销（源协方差 KNN、最近邻配对、
+    #     getFitnessScore）主导。GICP 通常 10~20 次内收敛（PCL 构造默认 200，本节点一直在省 CPU）。
+    #   · 那为什么还改成 16：① 上限低于实际需要 ≠ 更差或更慢（实测 fitness/converged 与 32 完全一致）；
+    #     ② 在"初值差、需要更多迭代才收敛"的场景（重定位、被搬动、/initialpose 给错）它给单帧耗时
+    #     封顶，避免偶尔出现更大的尖峰。**若精度退化**（`ros2 topic echo
+    #     /gicp_registration/fitness_score` 量级变差、~/converged 掉 false、[status] 采纳率下降）
+    #     **直接调回 32** —— 这是纯 CPU↔精度交换，没有别的副作用。
+    maximum_iterations: 16               # PCL GICP 构造默认 200；32→16（2026-10-05；实测上限不生效，精度退化就回 32）
     transformation_epsilon: 5.0e-4       # = PCL GICP 构造默认
     rotation_epsilon: 2.0e-3             # = PCL GICP 构造默认
     correspondence_randomness: 20        # = PCL GICP 构造默认（算协方差的 KNN 数）
@@ -100,6 +125,12 @@
 
     # ---------- 输出与健康 ----------
     publish_rate_hz: 50.0                # TF map→odom 的发布频率（与配准帧率无关）
+                                         # ★ 2026-10-05：这个 50 Hz 原来只是"名义值"——单线程 executor 下
+                                         #   被 350 ms 的 align 饿死（`ros2 topic hz /tf` 实测 ~2 Hz，
+                                         #   TF 条数 ≈ 采纳帧数）⇒ nav2 的 extrapolation 根因。现在定时器
+                                         #   独占 tf_cb_group_ + MultiThreadedExecutor（CMakeLists.txt
+                                         #   的 EXECUTOR MultiThreadedExecutor）⇒ 实测 ~50 Hz，
+                                         #   align 多慢都不影响 TF 的发布节奏。
     # ★ 时间戳前瞻（秒）—— 与 AMCL 的 transform_tolerance **同语义**：把 map→odom（和 ~/pose）
     #   盖成 now + tf_lookahead_sec 的时间戳，而不是"当前/点云时间戳"。
     #   为什么必须有：nav2 的消费者**不在"此刻"查 map→odom**，而是在 now + transform_tolerance
