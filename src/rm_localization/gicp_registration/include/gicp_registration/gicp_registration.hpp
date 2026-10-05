@@ -5,6 +5,8 @@
 //
 // 契约（与 icp_registration / amcl / slam_toolbox / cartographer 一致，见 docs/localization_slots.md）：
 //   **只发布 map→odom**（TF）+ 调试/健康话题；绝不碰 odom→base_link（那是 LIO 的职责）。
+//   时间戳契约：TF map→odom 与 ~/pose 都用 **now + tf_lookahead_sec** 盖戳（与 AMCL 的
+//   transform_tolerance 同语义），因为 nav2 消费者是在 now+margin 处查 map→odom 的。
 //
 // 点类型选择：pcl::PointXYZ —— 只用 XYZ，两个理由：
 //   ① PCL 1.12.1 的 GICP **自己算协方差**（pcl/registration/impl/gicp.hpp:51-125 的
@@ -61,8 +63,12 @@ private:
     const std::string & target, const std::string & source, const rclcpp::Time & stamp,
     bool try_exact_stamp, Eigen::Matrix4d & out, bool & used_latest);
   Eigen::Matrix4d initialPoseParamToMatrix() const;
-  void publishTf(const Eigen::Matrix4d & T_map_odom);
-  void publishPose(const rclcpp::Time & stamp, const Eigen::Matrix4d & T_map_odom, double score);
+  // TF / ~/pose 的**发布戳** = now()（节点时钟；use_sim_time=true 时 = 仿真时间）+ tf_lookahead_sec_。
+  // 与 AMCL 的 transform_tolerance 同语义，理由见 src/gicp_registration.cpp 里 publishTf 的注释。
+  rclcpp::Time lookaheadStamp() const;
+  // 返回本条 TF 用的戳（= lookaheadStamp()），供 publishPose 复用同一戳
+  rclcpp::Time publishTf(const Eigen::Matrix4d & T_map_odom);
+  void publishPose(const Eigen::Matrix4d & T_map_odom, double score);
   void publishHealth(bool has_score, double score, bool healthy);
 
   // ---- 参数（键名与依据逐条见 config/gicp_registration_sim.yaml） ----
@@ -80,6 +86,10 @@ private:
   double publish_rate_hz_;
   double fitness_score_warn_, max_fitness_score_, stale_warn_sec_;
   int no_improve_cycles_warn_;
+  // TF map→odom（以及 ~/pose）的时间戳前瞻量（秒）。默认 0.3 = AMCL transform_tolerance 语义：
+  // 把 map→odom 盖成**未来**时间戳，nav2 消费者在 now+margin 处才查得到（否则 tf2 抛
+  // "Lookup would require extrapolation into the future"）。详见 config 与本文件 publishTf 注释。
+  double tf_lookahead_sec_;
 
   // ---- 地图 / 配准器 ----
   PointCloudT::Ptr map_cloud_;  // 已体素下采样、已去 NaN（GICP 的 target）
@@ -92,6 +102,10 @@ private:
   bool param_init_pending_ = false;
   bool cloud_seen_ = false;
   rclcpp::Time last_cloud_stamp_;
+  // 最近一次真正发出去的 TF map→odom 的戳（= now+tf_lookahead_sec_）。~/pose 复用它，
+  // 保证 "pose 的戳 == TF 的戳"（消费端拿 pose 的戳去查 TF 时不会落在最新条目之外）。
+  rclcpp::Time last_tf_stamp_;
+  bool last_tf_stamp_valid_ = false;
   int no_improve_cycles_ = 0;
   int accepted_cycles_ = 0;
   int total_cycles_ = 0;

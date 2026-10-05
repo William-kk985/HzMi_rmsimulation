@@ -11,7 +11,7 @@
 |---|---|---|---|
 | `amcl` | `nav2_amcl` | `rm_navigation/params/nav2_params_sim_base.yaml`（已调：`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 已打开，见工单 §K） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ |
 | `icp` | `icp_registration/icp_registration_node`（**我们自己的包**，可改） | `icp_registration/config/icp_registration_sim.yaml`（含 `pcd_path`） | 先验点云 `rm_nav_bringup/PCD/RMUL2026.pcd` ✅（RMUL/RMUC 也有文件，但 **RMUC.pcd 是退化资产**，见 §1.1） |
-| `gicp` | `gicp_registration/gicp_registration_node`（**我们自己的包**，2026-10-05 新增） | `gicp_registration/config/gicp_registration_sim.yaml`（含 `pcd_path`） | 先验点云 `rm_nav_bringup/PCD/<world>.pcd` ✅（RMUL2026 实测可用；**必须有初值**，见 §1.1） |
+| `gicp` | `gicp_registration/gicp_registration_node`（**我们自己的包**，2026-10-05 新增） | `gicp_registration/config/gicp_registration_sim.yaml`（含 `pcd_path`、`tf_lookahead_sec`） | 先验点云 `rm_nav_bringup/PCD/<world>.pcd` ✅（RMUL2026 实测可用；**必须有初值**，见 §1.1） |
 | `slam_toolbox` | `slam_toolbox/localization_slam_toolbox_node` | `slam_toolbox/config/mapper_params_localization_sim.yaml` + launch 注入 `map_file_name=map/<world>`、`map_start_pose=[0,0,0]` | **序列化位姿图 `map/RMUL2026.posegraph(+.data)` ❌ 缺**（RMUC/RMUL 有）⇒ 需先建图并 `serialize_map` |
 | `cartographer` | `cartographer_node`（纯定位） | cartographer 配置 | `map/RMUL2026.pbstream` ✅ |
 | `''`（留空） | 无重定位：LIO 当绝对定位 + 静态桥补帧 | — | — |
@@ -34,6 +34,30 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
   `~/pose`（map 系机器人位姿 ≈ `/amcl_pose` 语义，便于 A/B）、
   `~/fitness_score`（m² = 内点平均平方距离；无内点时 nan）、`~/converged`(bool = 本帧被采纳且
   score ≤ `fitness_score_warn`)。后两者 `transient_local` ⇒ 监控端后订阅也能拿到最后一帧。
+- **时间戳契约 `tf_lookahead_sec`（2026-10-05 修复；≈ AMCL 的 `transform_tolerance`）**：
+  TF `map→odom` 与 `~/pose` 都盖 **`now() + tf_lookahead_sec`（默认 0.3 s）**，其中 `now()` 是节点时钟
+  （`use_sim_time=true` 时 = 仿真时间）——**故意不用点云 `header.stamp` 盖 TF**。
+  为什么：nav2 的消费者**不在「此刻」查 `map→odom`**，而是在 `now + transform_tolerance` 那一档查
+  （MPPI 的 `PathHandler::transformPose` 用 `FollowPath.transform_tolerance`；本仓库 = 0.1 s）。
+  2026-10-05 实跑 `localization:=gicp` 的 `controller_server` 日志逐条是 `requested = 最新数据 + 0.100 s`：
+  `Exception in transformPose: Lookup would require extrapolation into the future. Requested time
+  654.682000 but the latest data is at time 654.582000, when looking up transform from frame [odom]
+  to frame [map]` ⇒ `Unable to transform robot pose into global plan's frame` ⇒ `[follow_path] Aborting
+  handle`（每周期 abort + BT 反复恢复 ⇒ 导航卡死）。
+  **AMCL 从不报这个错，正是因为 `transform_tolerance` 让它把 `map→odom` 盖成未来时间戳**
+  （本仓库 amcl `transform_tolerance: 0.3`，`nav2_params_sim_base.yaml`）；gicp 原来用 `now()` 盖戳，
+  最新条目就永远比请求时间旧 0.1 s ⇒ tf2 抛 `ExtrapolationException`。
+  取值：**过小** ⇒ 复现上述报错；**过大** ⇒ 位姿被外推过头（2 m/s 时 0.3 s ≈ 0.6 m 提前量），
+  高速/转弯表现为定位滞后→猛修正→来回抖（与 `transform_tolerance` 1.0→0.3 同一个理由）。
+  调法：**≥ 消费端最大的 `transform_tolerance` + 一个 TF 发布周期**（50 Hz ⇒ 20 ms），先与 AMCL 一致（0.3）。
+  本次**静态 + 探针实测**（只跑 gicp 节点，不启 Gazebo/nav2）：`tf_lookahead_sec=0.0`（≈ 修复前的
+  `now()` 盖戳）时，`now+0.00…+0.40 s` 的 `map→odom` 查询**全部**抛 `ExtrapolationException`
+  （报文与实跑日志逐字一致，含 `from frame [odom] to frame [map]`）；`=0.3`（新默认）时
+  `now+0.00/0.05/0.10/0.20 s` 全部成功（覆盖 MPPI 的 0.1 前瞻，余量 0.2 s），
+  而 `now+0.30 s`（正好等于 lookahead）仍可能因"最新条目比查询时刻旧约 1~20 ms"而失败
+  ⇒ 所以余量要算上发布周期，不能只等于消费端的 `transform_tolerance`。
+  附带：`~/fitness_score`/`~/converged` 是 `std_msgs/Float64`/`Bool`（**没有 header，没有 stamp**），
+  只给人看、不参与 TF 查询 ⇒ 本次不给它们加前瞻；`~/pose` 与 TF 用**同一条**戳。
 - **初值（硬要求）**：`/initialpose`（RELIABLE，RViz 2D Pose Estimate，语义 = **map 系下机器人位姿**，
   与 AMCL 一致）或参数 `initial_pose`（默认 `[0,0,0]`，3 或 6 元）。
   **没有初值就不发 TF**（每 2 s 日志说明一次）——不发比发错的更安全；
@@ -70,7 +94,11 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
   `voxel_leaf_size`（0.25）与 `maximum_iterations`（32）是 CPU/精度旋钮，若跟不上再调；
   ② `fitness_score_warn / max_fitness_score`（0.05 / 0.3 m²）是按 PCL 语义给的**首跑起始值**，
   必须按实测量级收紧；③ 与 icp 一样**初值敏感**：给错初值会静默收敛到局部极小，
-  只能靠 `~/fitness_score` + `~/converged` 发现 ⇒ 要"随便摆"仍需 `scan_context` 类全局检索。
+  只能靠 `~/fitness_score` + `~/converged` 发现 ⇒ 要"随便摆"仍需 `scan_context` 类全局检索；
+  ④ `tf_lookahead_sec`（0.3）按 AMCL 语义实现，并用 tf2 探针做过 A/B（见上）；但**整栈运行时**
+  是否还有别的消费者在更远的时间点查 `map→odom`、以及 TF 是否平滑，仍需实跑确认
+  （验证方法：`ros2 topic hz /tf` 看 map→odom 是否稳定 ~50 Hz、`ros2 run tf2_ros tf2_echo map odom`
+  是否连续无跳变，再跑一次 P0 回归 `--goal -1.0 2.0`）。
 
 运行 / 检查（新包必须先 build，否则 `install/` 里没有参数文件）：
 

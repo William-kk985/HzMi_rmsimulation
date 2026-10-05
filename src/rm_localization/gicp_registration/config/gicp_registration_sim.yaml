@@ -23,8 +23,9 @@
 #                                （impl/gicp.hpp:51-125 算协方差的 KNN 数；构造默认 20）
 #   maximum_optimizer_iterations → setMaximumOptimizerIterations → max_inner_iterations_
 #                                （BFGS 内层迭代上限；构造默认 20）
-#   publish_rate_hz / fitness_score_warn / max_fitness_score / no_improve_cycles_warn /
-#   stale_warn_sec / use_initial_pose —— 本节点自有（输出与健康判定）
+#   publish_rate_hz / tf_lookahead_sec / fitness_score_warn / max_fitness_score /
+#   no_improve_cycles_warn / stale_warn_sec / use_initial_pose —— 本节点自有（输出、时间戳与健康判定）；
+#   tf_lookahead_sec 是 nav2 互操作参数（≈ AMCL transform_tolerance），依据见文件末尾该键的注释。
 #
 # ⚠️ 两个候选键**已核实对本节点无效，故意不写**（写了是静默失效，与 nav2 "Jazzy 键不声明" 同一个坑）：
 #   euclidean_fitness_epsilon —— PCL 1.12.1 里只被 IterativeClosestPoint / JointIterativeClosestPoint
@@ -66,6 +67,29 @@
 
     # ---------- 输出与健康 ----------
     publish_rate_hz: 50.0                # TF map→odom 的发布频率（与配准帧率无关）
+    # ★ 时间戳前瞻（秒）—— 与 AMCL 的 transform_tolerance **同语义**：把 map→odom（和 ~/pose）
+    #   盖成 now + tf_lookahead_sec 的时间戳，而不是"当前/点云时间戳"。
+    #   为什么必须有：nav2 的消费者**不在"此刻"查 map→odom**，而是在 now + transform_tolerance
+    #   那一档查（本仓库 FollowPath.transform_tolerance=0.1，MPPI 的 transformPose 用它做 tf2 前瞻）。
+    #   2026-10-05 实跑 localization:=gicp 的日志逐条是 requested = 最新数据 + 0.100 s：
+    #     [controller_server] Exception in transformPose: Lookup would require extrapolation into the
+    #       future. Requested time 654.682000 but the latest data is at time 654.582000,
+    #       when looking up transform from frame [odom] to frame [map]
+    #     ⇒ Unable to transform robot pose into global plan's frame ⇒ [follow_path] Aborting handle
+    #     ⇒ 每周期 abort + BT 反复恢复（behavior_server 的 Spin/BackUp 也超时）⇒ 导航卡死。
+    #   AMCL 之所以从不报这个错：transform_tolerance 让 AMCL 也把 map→odom 盖成**未来**戳
+    #   （本仓库 amcl transform_tolerance=0.3，见 nav2_params_sim_base.yaml）。
+    #   过小 ⇒ 复现上面的 "extrapolation into the future"；
+    #   过大 ⇒ 位姿被外推过头（车按 2 m/s 跑 0.3 s ≈ 0.6 m 的"提前量"，本质是拿旧位姿外推），
+    #          高速/转弯时表现为定位滞后→猛修正→来回抖（与 2026-10-05 把 amcl
+    #          transform_tolerance 从 1.0 收到 0.3 是同一个理由）。
+    #   调法：**≥ 消费端最大的 transform_tolerance + 一个发布周期**（50 Hz ⇒ 20 ms 抖动）。
+    #   2026-10-05 用 tf2 探针实测（不启 Gazebo，只跑本节点）：tf_lookahead_sec=0.0 时
+    #   "now+0.00…+0.40 s" 的查询**全部**抛 extrapolation（= 现状 bug）；= 0.3 时
+    #   now+0.00/0.05/0.10/0.20 全部成功（覆盖本仓库 MPPI 的 0.1 前瞻，余量 0.2 s），
+    #   而 now+0.30（正好等于 lookahead）仍可能因"最新条目比查询时刻旧 ~1~20 ms"而失败 ——
+    #   这正是"要留一个发布周期"的原因（AMCL 用同样的语义，边界情形同理）。
+    tf_lookahead_sec: 0.3
     fitness_score_warn: 0.05             # m²；= 内点平均平方距离（RMS≈0.22 m）。超过 ⇒ ~/converged=false
     max_fitness_score: 0.3               # m²；超过就**拒绝**本帧结果（RMS≈0.55 m）。首跑按实测再收紧
     no_improve_cycles_warn: 10           # 连续多少帧未采纳后打一条"定位已失效"的醒目 WARN

@@ -14,6 +14,11 @@
 //      并（限频 WARN + 连续 N 帧后一条明确的 WARN）说明"定位已失效"。
 //   ③ 健康信号：~/fitness_score(m²，无内点时为 nan) + ~/converged(bool)。二者都是
 //      transient_local ⇒ 后订阅的监控端也能立刻拿到最后一帧的值。
+//   ④ **时间戳契约（tf_lookahead_sec）**：TF map→odom（以及 ~/pose）用
+//      now()（节点时钟；use_sim_time=true 时 = 仿真时间）+ tf_lookahead_sec 盖戳 —— 与 AMCL 的
+//      transform_tolerance 同语义。**不能用点云时间戳**：nav2 消费者在 now+margin 处查
+//      map→odom，盖成"当前/过去"会让 buffer 里最新条目比请求时间旧 ⇒ tf2 抛
+//      "Lookup would require extrapolation into the future" ⇒ follow_path 每周期 abort。
 
 #include "gicp_registration/gicp_registration.hpp"
 
@@ -137,6 +142,13 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   correspondence_randomness_ = declare_parameter<int>("correspondence_randomness", 20);
   maximum_optimizer_iterations_ = declare_parameter<int>("maximum_optimizer_iterations", 20);
   publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 50.0);
+  // 与 AMCL 的 transform_tolerance 同语义：把 map→odom（和 ~/pose）盖成**未来**时间戳，
+  // 保证 nav2 消费者在 now+margin 处能查到。
+  //   过小 ⇒ tf2 抛 "Lookup would require extrapolation into the future"（最新条目比请求时间旧）
+  //           ⇒ MPPI 的 transformPose 失败 ⇒ follow_path 每周期 abort、BT 反复恢复；
+  //   过大 ⇒ 位姿被外推过头（消费端认为"车已经在未来位置上"）⇒ 高速下表现为定位滞后/猛修正、
+  //           转弯时横向甩动。AMCL 默认 transform_tolerance=0.3（本仓库 nav2_params_sim_base.yaml 同值）。
+  tf_lookahead_sec_ = declare_parameter<double>("tf_lookahead_sec", 0.3);
   fitness_score_warn_ = declare_parameter<double>("fitness_score_warn", 0.05);
   max_fitness_score_ = declare_parameter<double>("max_fitness_score", 0.3);
   no_improve_cycles_warn_ = declare_parameter<int>("no_improve_cycles_warn", 10);
@@ -165,6 +177,14 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   if (maximum_iterations_ <= 0) {
     RCLCPP_WARN(get_logger(), "maximum_iterations=%d 非法 ⇒ 用 32", maximum_iterations_);
     maximum_iterations_ = 32;
+  }
+  if (tf_lookahead_sec_ < 0.0) {
+    // 负的前瞻 = 把 map→odom 盖成过去 ⇐ 正是本次要修的 bug（tf2 extrapolation）。
+    RCLCPP_WARN(
+      get_logger(),
+      "tf_lookahead_sec=%.3f 非法（负值会让 map→odom 落后于消费者的查询时间，"
+      "直接复现 'extrapolation into the future'）⇒ 用 0.3", tf_lookahead_sec_);
+    tf_lookahead_sec_ = 0.3;
   }
   std::string init_pose_str;
   for (size_t i = 0; i < initial_pose_param_.size(); ++i) {
@@ -282,6 +302,8 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "  初值: use_initial_pose=%s initial_pose=[%s]%s\n"
     "  输出: TF %s→%s @%.1f Hz + ~/pose + ~/fitness_score + ~/converged"
     "（fitness warn=%.3f / accept=%.3f m²）\n"
+    "  时间戳: TF 与 ~/pose 都用 now+%.2f s（tf_lookahead_sec，≈ AMCL transform_tolerance；"
+    "点云时间戳不用来盖 TF）\n"
     "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f\n"
     "  注：首个 fitness score 之前会先做一次目标协方差预计算，可能耗时数秒\n"
     "==================================",
@@ -294,7 +316,8 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     use_initial_pose_ ? "true" : "false", init_pose_str.c_str(),
     use_initial_pose_ ? "（首帧点云 + TF odom→base 就绪时生效）" : "（已忽略）",
     map_frame_id_.c_str(), odom_frame_id_.c_str(), publish_rate_hz_,
-    fitness_score_warn_, max_fitness_score_, no_improve_cycles_warn_, stale_warn_sec_);
+    fitness_score_warn_, max_fitness_score_, tf_lookahead_sec_,
+    no_improve_cycles_warn_, stale_warn_sec_);
 }
 
 // ============================ 工具 ============================
@@ -549,13 +572,14 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   publishHealth(true, score, accepted && score <= fitness_score_warn_);
 
   // --- ⑧ 调试位姿：map 系机器人位姿（≈ /amcl_pose 语义，便于 A/B 对照） ---
+  // 戳不再用点云时间戳（那是"过去"），而是与 TF 同一条 lookahead 戳 ⇒ 见 publishPose 注释。
   {
     std::lock_guard<std::mutex> lock(mutex_);
     T_map_odom_cur = T_map_odom_;
     valid_cur = estimate_valid_;
   }
   if (valid_cur) {
-    publishPose(stamp, T_map_odom_cur, accepted ? score : -1.0);
+    publishPose(T_map_odom_cur, accepted ? score : -1.0);
   }
 }
 
@@ -587,9 +611,9 @@ void GicpNode::initialPoseCallback(
   RCLCPP_INFO(
     get_logger(), "/initialpose 更新初值：map 系机器人位姿 %s ⇒ map→odom = %s",
     poseToStr(T_map_base).c_str(), poseToStr(T_map_odom).c_str());
-  // 注意：rclcpp::Time::is_zero() 是 Kilted 之后才有的 API，Humble 里用 nanoseconds()==0 判断
-  publishPose(
-    stamp.nanoseconds() == 0 ? now() : stamp, T_map_odom, -1.0 /*本次没有 fitness score*/);
+  // ~/pose 的戳由 publishPose 统一盖成"与 TF 相同的那条 lookahead 戳"
+  // （不再用点击时刻：点击时刻是"过去"，且与 TF 不一致）。
+  publishPose(T_map_odom, -1.0 /*本次没有 fitness score*/);
 }
 
 // ============================ 发布 ============================
@@ -609,8 +633,12 @@ void GicpNode::publishTimerCallback()
   }
 
   if (valid) {
-    // 按 publish_rate_hz 重复发布：nav2 每帧都查 map→odom，不能只依赖配准帧率
-    publishTf(T_map_odom);
+    // 按 publish_rate_hz 重复发布：nav2 每帧都查 map→odom，不能只依赖配准帧率。
+    // 戳用 now()+tf_lookahead_sec（**不是**点云时间戳）——见 publishTf。
+    const rclcpp::Time tf_stamp = publishTf(T_map_odom);
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_tf_stamp_ = tf_stamp;
+    last_tf_stamp_valid_ = true;  // ~/pose 复用这条戳 ⇒ pose 与 TF 的时间戳一致
   } else {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
@@ -629,22 +657,61 @@ void GicpNode::publishTimerCallback()
   }
 }
 
-void GicpNode::publishTf(const Eigen::Matrix4d & T_map_odom)
+rclcpp::Time GicpNode::lookaheadStamp() const
 {
+  // now() = 节点时钟：use_sim_time=true 时是 Gazebo 的仿真时间（由 launch 注入，见 config 顶部）。
+  // 用节点时钟而不是点云 header.stamp：点云戳是"采集那一刻"（已经过去几十~上百 ms），
+  // 拿它盖 TF 会让 buffer 里的最新条目落在消费者的查询时间之前。
+  return now() + rclcpp::Duration::from_seconds(tf_lookahead_sec_);
+}
+
+rclcpp::Time GicpNode::publishTf(const Eigen::Matrix4d & T_map_odom)
+{
+  // ============================ TF 时间戳契约（本次修复的核心） ============================
+  // 症状（用户实跑 localization:=gicp）：
+  //   [controller_server] Exception in transformPose: Lookup would require extrapolation into the
+  //     future. Requested time 654.682000 but the latest data is at time 654.582000,
+  //     when looking up transform from frame [odom] to frame [map]
+  //   [controller_server] Unable to transform robot pose into global plan's frame
+  //   [controller_server] [follow_path] [ActionServer] Aborting handle.   ← 每周期 abort ⇒ 导航卡死
+  // 原因：nav2 的消费者**不在"此刻"查 map→odom**，而是在 now + transform_tolerance 那一档查
+  //   （MPPI 的 PathHandler::transformPose 把 transform_tolerance 当 tf2 等待/前瞻；
+  //    本仓库 nav2_params_sim_controller_mppi.yaml 里 FollowPath.transform_tolerance=0.1，
+  //    日志里 requested 恒 = 最新数据 + 0.100 s 正好对应它）。
+  //   AMCL 之所以从来不出这个错，是因为 **transform_tolerance 让它把 map→odom 盖成未来时间戳**
+  //   （本仓库 amcl transform_tolerance=0.3，见 nav2_params_sim_base.yaml）；我们原来用 now() 盖戳，
+  //   buffer 里最新条目就永远比请求时间旧 0.1 s ⇒ tf2 抛 ExtrapolationException。
+  // 修法：戳 = now() + tf_lookahead_sec_（默认 0.3，与 AMCL 同语义）；值（map→odom 的数值语义）
+  //   完全不变，只改"这条变换属于哪个时刻"。**故意不用点云时间戳**盖 TF。
+  // 过大/过小的取舍见 config/gicp_registration_sim.yaml 的 tf_lookahead_sec 注释。
+  // ======================================================================================
+  const rclcpp::Time stamp = lookaheadStamp();
   geometry_msgs::msg::TransformStamped tf_msg;
-  tf_msg.header.stamp = now();  // 用"当前"时间戳：nav2 在 now() 上查 map→odom
+  tf_msg.header.stamp = stamp;
   tf_msg.header.frame_id = map_frame_id_;
   tf_msg.child_frame_id = odom_frame_id_;
   matrixToTransform(T_map_odom, tf_msg.transform);
   tf_broadcaster_->sendTransform(tf_msg);
+  return stamp;
 }
 
-void GicpNode::publishPose(
-  const rclcpp::Time & stamp, const Eigen::Matrix4d & T_map_odom, double score)
+void GicpNode::publishPose(const Eigen::Matrix4d & T_map_odom, double score)
 {
+  // ① 戳：与 TF **同一条**（优先复用最近一次真正发出去的 TF 戳；若还没有 TF 就用同一条公式）。
+  //    这样"pose 的戳"与"TF 的覆盖范围"天然对齐；用点云时间戳则 pose 会显得比 TF 旧一整帧。
+  rclcpp::Time stamp;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stamp = last_tf_stamp_valid_ ? last_tf_stamp_ : lookaheadStamp();
+  }
+
+  // ② 值：T_odom←base 一律取**最新可用**（不做精确时间戳查询）。两个理由：
+  //    · pose 的语义是"此刻机器人在 map 系的位姿"，与某个历史帧时间无关；
+  //    · 上面的 stamp 是 **now+lookahead（未来戳）**，拿未来戳做精确查询在 tf2 里必然
+  //      extrapolation 失败 ⇒ 每次都白等一个超时（0.05 s）+ 污染 last_tf_error_。
   Eigen::Matrix4d T_odom_base;
   bool used_latest = false;
-  if (!lookupTf(odom_frame_id_, base_frame_id_, stamp, true, T_odom_base, used_latest)) {
+  if (!lookupTf(odom_frame_id_, base_frame_id_, stamp, false, T_odom_base, used_latest)) {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 5000,
       "TF %s←%s 查不到（%s）⇒ 本帧不发布 ~/pose（TF map→odom 不受影响）",
@@ -677,6 +744,10 @@ void GicpNode::publishPose(
 
 void GicpNode::publishHealth(bool has_score, double score, bool healthy)
 {
+  // 时间戳：**健康信号不带戳**——std_msgs/Float64、std_msgs/Bool 都没有 header 字段，没有可设的
+  // stamp；它们隐含的时间就是发布时刻（sim now）。这两个话题只给人/监控用，不参与 TF 查询，
+  // 因此本次的时间戳修复**不需要**（也不应该）给它们加前瞻：诊断用的"这一帧是什么时候算的"
+  // 恰恰应该留在"现在"。若以后要看"每帧的处理延迟"，应显式加 header，用点云戳而非 lookahead 戳。
   if (has_score) {
     std_msgs::msg::Float64 msg;
     msg.data = score;
