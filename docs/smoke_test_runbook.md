@@ -90,7 +90,7 @@ sleep 2
 | `lio_rviz` / `nav_rviz` | `True` / `False` | `False` / `True` |
 | `spin_speed` | 任意（rad/s） | `5.0` |
 | **`global_obstacle`** | `stvl`（3D 体素层）/ `scan`（2D，与 local 同源）/ `none` | `stvl` |
-| **`local_obstacle`** | `scan`（`/scan`，原行为）/ `cloud`（3D 点云直投，不经 `p2l`）/ `both`（双源冗余） | `scan` |
+| **`local_obstacle`** | `scan`（`/scan`，原行为）/ `cloud`（3D 点云直投，不经 `p2l`）/ `both`（scan+cloud 双源冗余）/ `stvl`（3D 体素层，带时间衰减）/ `stvl_both`（stvl+scan+cloud） | `scan` |
 
 ### 0.4 看哪块 RViz（别把两个都关掉）
 
@@ -236,7 +236,7 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 | `mapper` | `slam_toolbox` / `cartographer` | `slam_toolbox` | 在线 2D 建图后端；`mapping`/`slam_nav` 生效 |
 | `nav` | `rpp` / `dwb` / `teb` | `rpp` | 局部规划器变体；`nav`/`slam_nav` 生效 |
 | **`global_obstacle`** | `stvl` / `scan` / `none` | `stvl` | 全局代价地图的实时障碍来源（A/B 槽位，见 `docs/3d_to_2d_survey.md` §七） |
-| **`local_obstacle`** | `scan` / `cloud` / `both` | `scan` | 局部代价地图障碍来源（A/B 槽位，§7.2）：`cloud` 用点云直投破 `p2l` 单点并消 45cm 盲区；`both` = 双源冗余 |
+| **`local_obstacle`** | `scan` / `cloud` / `both` / `stvl` / `stvl_both` | `scan` | 局部代价地图障碍来源（A/B 槽位，§7.2）：`cloud` 用点云直投破 `p2l` 单点；`both` = scan+cloud 双源冗余；`stvl` = 3D 体素层（带 0.5 s 时间衰减，= COD 2026 双图做法，实测见 `docs/stvl_local_costmap.md`）；`stvl_both` = stvl+scan+cloud |
 | `spin_speed` | 任意（rad/s） | `5.0` | `fake_vel_transform` 小陀螺固定角速度；排查导航先用 `0.0`（§0.4.1） |
 | `lio_rviz` | `True` / `False` | `False` | 开 LIO 点云 RViz |
 | `nav_rviz` | `True` / `False` | `True` | 开 nav2 RViz（`mode:=mapping` 也会给一块） |
@@ -676,11 +676,28 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fast
 # C：双源冗余（任一路挂掉仍能避障）
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL mode:=nav lio:=fastlio \
   localization:=amcl nav:=rpp spin_speed:=0.0 local_obstacle:=both
+# D：局部也上 3D 体素层（STVL，带 0.5 s 时间衰减；= COD 2026 双图做法）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=small_point_lio \
+  localization:=gicp nav:=mppi planner:=smac2d spin_speed:=0.0 local_obstacle:=stvl
+# E：三层全开（stvl + scan + cloud；最贵，未做 bench）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=small_point_lio \
+  localization:=gicp nav:=mppi planner:=smac2d spin_speed:=0.0 local_obstacle:=stvl_both
 ```
 
-**这一槽位解决什么**：`/scan` 是**串行单点**（插件 → `linefit` → `p2l`），且 `p2l` 有 45 cm 盲区；
-`cloud` 这一路直接吃 `/segmentation/obstacle`（3D 障碍点云），**绕过 `p2l`** → 破单点 + 消盲区。
+`stvl` / `stvl_both` 的实测结论（A/B 四次跑，含贴墙终点专项）、参数来源、代价与未验证清单：
+**`docs/stvl_local_costmap.md`**。一句话：导航结果与 `scan` 不可区分、RTF 代价 1~3%，
+但局部图 lethal 核心会从连续线变成周期 0.05 m 的点状线 ⇒ 默认仍推荐 `scan`。
+槽位 ↔ 图层开关的唯一真值表：`rm_navigation/launch/navigation_launch.py` 的
+`LOCAL_OBSTACLE_LAYER_TABLE`；不起栈就能自查：`python3 tools/scripts/regress/local_obstacle_truth_table.py`。
+
+**这一槽位解决什么**：`/scan` 是**串行单点**（插件 → `linefit` → `p2l`）；
+`cloud` 这一路直接吃 `/segmentation/obstacle`（3D 障碍点云），**绕过 `p2l`** → 破单点。
 注意它是**部分冗余**：仍依赖 `linefit`（点云来源），只是不再依赖 `p2l`。
+
+> ★ 2026-10-05 更正：原文写『`p2l` 有 45 cm 盲区』——`p2l` 的 `range_min` 已从 0.45 降到 **0.05**
+> （2026-09-26），盲区**已不存在**：实测车停到离墙 0.35 m 时 `/scan` 仍有 **35 个回波**、
+> local costmap 也照样标到墙（见 `docs/stvl_local_costmap.md` §3.2）。`cloud`/`both` 现在的
+> 价值主要在**破 `p2l` 单点**，不再在『消盲区』。
 
 运行期也能切（两个图层都支持 `enabled` 动态参数，不必重启整场仿真）：
 ```bash

@@ -39,6 +39,7 @@
 | `glossary.md` | 术语表：一句话定义 + 指向详述 | 名词定义 |
 | `issues_and_findings.md` | 实际踩到的故障（根因/修复/证据）+ 静默失效坑 + 待办 | 故障根因库 |
 | `3d_to_2d_survey.md` | 各家 3D→2D 实现对照（p2l / nav2 / STVL / cartographer / octomap） | 降维机制与参数 |
+| `stvl_local_costmap.md` | **局部代价地图也上 STVL**（`local_obstacle:=stvl`）：槽位/机制、参数来源（COD `singlenav2_params.yaml:200-262`）、A/B 四次跑、代价与未验证清单 | 槽位取值、参数、实测数字 |
 | `tf_interface_contract.md` | TF / 接口契约（**T1–T5 已实施，T6 撤销**） | 帧树与话题契约 |
 | `params_ownership_checklist.md` | 参数归属清单（R1–R5 逐项状态） | 参数该放哪个包 |
 | `sim_real_contract.md` | **仿真 ↔ 实车契约**：分界点/替身清单、共用接口、参数分家、三分类判据、禁止清单、验收判据 | **"改动会不会上实车 / 该不该为仿真动算法"的唯一真值** |

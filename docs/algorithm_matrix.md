@@ -29,7 +29,7 @@
 | **全局规划器** | —（固定） | `NavfnPlanner` | `nav2_navfn_planner` | 同上 |
 | **场地** | `world` | `RMUC` / `RMUL` / `RMUL2026` | `hzmi_rm_simulation` 世界 + `map/<world>.*` + `PCD/<world>.pcd` | 全形态 |
 | **全局障碍来源** | `global_obstacle` | `stvl`（3D 体素层，默认）/ `scan`（2D `/scan`，与 local 同源）/ `none`（只 static+inflation） | `nav` / `slam_nav` |
-| **局部障碍来源** | `local_obstacle` | `scan`（`/scan`，默认=原行为）/ `cloud`（`/segmentation/obstacle` 点云直投，不经 `p2l`）/ `both`（双源冗余） | `nav` / `slam_nav` |
+| **局部障碍来源** | `local_obstacle` | `scan`（`/scan`，默认=原行为）/ `cloud`（`/segmentation/obstacle` 点云直投，不经 `p2l`）/ `both`（scan+cloud 双源冗余）/ **`stvl`（3D 体素层，带 0.5s 时间衰减；= COD 2026 双图做法）** / **`stvl_both`（stvl+scan+cloud）** | `nav` / `slam_nav` |
 | **小陀螺** | `spin_speed` | `5.0`（哨兵语义）/ `0.0`（角速度直通，排查用） | `fake_vel_transform` | 全形态 |
 | 可视化 | `lio_rviz` / `nav_rviz` | True/False | `fastlio.rviz` / `pointlio.rviz` / `nav2.rviz` | 全形态 |
 
@@ -138,14 +138,15 @@
 
 **三个"装配级开关"会成倍影响行为，A/B 时一次只动一个（注意各自生效范围不同）**：
 
-| 形态 | 核心组合 | `spin_speed`(×2) | `global_obstacle`(×3) | `local_obstacle`(×3) | 小计 |
+| 形态 | 核心组合 | `spin_speed`(×2) | `global_obstacle`(×3) | `local_obstacle`(**×5**) | 小计 |
 |---|---|---|---|---|---|
 | `mapping` | 12 | ✅ 生效 | ❌ 不起 nav2，不适用 | ❌ 不适用 | **24** |
-| `slam_nav` | 36 | ✅ | ✅ | ✅ | **648** |
-| `nav` | 72 | ✅ | ✅ | ✅ | **1296** |
-| **合计** | **120** | | | | **1968** |
+| `slam_nav` | 36 | ✅ | ✅ | ✅ | **1080** |
+| `nav` | 72 | ✅ | ✅ | ✅ | **2160** |
+| **合计** | **120** | | | | **3264** |
 
-（若把 `localization:=''` 回退用法计入，nav 变 90 → 合计 **2292**；`*_rviz` 属纯可视化开关，不计入。）
+（若把 `localization:=''` 回退用法计入，nav 变 90 → 合计 **3804**；`*_rviz` 属纯可视化开关，不计入。
+`local_obstacle` 由 ×3 变 ×5 = 2026-10-05 新增 `stvl` / `stvl_both`，见 §七 更新日志与 `docs/stvl_local_costmap.md`。）
 
 ## 三、资产可用性矩阵（决定组合"能不能真跑"）
 
@@ -237,7 +238,8 @@ CustomMsg QoS 背压、`use_sim_time` 键名漏引号、上游 nav2 丢弃 `tran
 |---|---|---|---|
 | **P0** | **把"链路看门狗 + 无头目标点"做成一键回归**（`tools/scripts/diag/watch_startup_chain.py` + `ros2 action send_goal` 固定点） | 全绿 + 到点 + 无 `Failed to make progress`；**任何改动跑一次** | 极低（工具已就绪） |
 | **P0** | **四跳命令链回归**：`/cmd_vel_nav → /cmd_vel → /cmd_vel_chassis → /odom_ground_truth` | 每跳数值一致且真值变化（今天就是靠它抓到 bug 6） | 极低 |
-| **P1** | `local_obstacle: scan → cloud / both`（同一目标点 A/B） | 贴墙 0.3 m 时 local 是否看到；`/scan` 45 cm 盲区是否被覆盖；是否绕开 | 低（改一个槽位） |
+| **P1** | `local_obstacle: scan → cloud / both`（同一目标点 A/B） | 贴墙 0.3 m 时 local 是否看到；近距盲区是否被覆盖；是否绕开 | 低（改一个槽位） |
+| **P1** | **`local_obstacle: scan → stvl`（2026-10-05 实测完成，见 `docs/stvl_local_costmap.md`）** | local 是否有多出 `/scan` 看不到的障碍；RTF/`missed rate` 代价 | 低（改一个槽位） |
 | **P1** | `nav: rpp → dwb` | 窄缝通过率、震荡幅度、到达时间、CPU；rpp 作为基线 | 中（调参） |
 | **P1** | 修 `stvl_layer` 丢点云（时间区间）或改用 `global_obstacle:=scan` | 全局是否绕开临时障碍；两者 CPU 与保守度对比 | 低~中 |
 | **P2** | `localization: amcl → icp`（配 `PCD/<world>.pcd`） | LIO 漂移下是否仍到点；重定位收敛时间 | 中 |
@@ -307,6 +309,8 @@ CustomMsg QoS 背压、`use_sim_time` 键名漏引号、上游 nav2 丢弃 `tran
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-05 | **`local_obstacle` 新增取值 `stvl` / `stvl_both`**（局部代价地图也上 STVL，= COD 2026 双图做法）：`stvl` = 只开 `stvl_layer`（3D 体素、0.5 s 线性衰减）；`stvl_both` = stvl+scan+cloud。开关表唯一真值来源 = `navigation_launch.py` 的 `LOCAL_OBSTACLE_LAYER_TABLE`，静态校验脚本 `tools/scripts/regress/local_obstacle_truth_table.py`。A/B（`--goal -1.0 2.0` + 贴墙终点两组、四次跑）：四次全 PASS、`missed rate` 恒 0、RTF 0.75→0.73；**局部图 lethal 从连续线变点状线（占位率 71%→40%）、0~0.5 m 环带两边都为空** ⇒ 结论『导航上不可区分、默认保持 `scan`』。详见 `docs/stvl_local_costmap.md` |
+| 2026-10-05 | 局部 STVL 的观测口径修正：`global_costmap` **不能**当局部 STVL 的对照组（它含 `static_layer`）；`/scan` 的 45 cm 盲区在 p2l `range_min=0.05` 之后**已不存在**（实测贴墙 0.35 m 处仍有 35 个回波） |
 | 2026-09-16 | 建文件：§一 槽位与实现（102 个核心组合）、§一.1 维度归类、§三 资产可用性矩阵、§四 实测状态、§五 阻塞项、§六 扩展位 |
 | 2026-09-16 | 新增装配级槽位 **`global_obstacle`**（`stvl`/`scan`/`none`，默认 `stvl` 行为不变）：全局代价地图的实时障碍来源可切换，用于 A/B 研究「谁来做 3D→2D」 |
 | 2026-09-16 | 新增 `docs/glossary.md`（术语表）并登记进 architecture/runbook 文档索引 |
