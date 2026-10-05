@@ -208,6 +208,160 @@ ros2 topic echo /gicp_registration/converged         # false ⇒ 本帧未采纳
 
 ### 1.2 `beluga` 槽位细节（2026-10-05 新增；`beluga_amcl` = AMCL 的现代实现）
 
+#### 1.2.0 ★★ 2026-10-05 修复：`localization:=beluga` 节点**启动即崩**（`laser_min_range: -1.0`）
+
+**症状**（`localization:=beluga` 第一次实跑；本文件曾把 nav2 的哨兵值原样搬过来）：
+
+```
+[amcl_node] terminate called after throwing an instance of 'rclcpp::exceptions::InvalidParameterValueException'
+  what():  parameter 'laser_min_range' could not be set: Parameter {laser_min_range} doesn't comply with floating point range.
+[ERROR] [amcl_node-13]: process has died [exit code -6]      # -6 = SIGABRT
+```
+
+**根因（已按装机二进制 + 源码逐行核实）**：beluga 给 `laser_min_range` / `laser_max_range` 声明的是
+**浮点区间 `[0.0, DBL_MAX]`**（`ros2_common.cpp:296-310` @2.1.1，`floating_point_range[0].from_value = 0`；
+上游文档 likewise 写 "Must be nonnegative"），而 **nav2_amcl 对同一对键的默认是 `-1.0` =
+"用 /scan 自己的 range_min"**（`third_party/nav2/nav2_amcl/src/amcl_node.cpp:114`，且 nav2 只在
+`> 0` 时才 clamp，`amcl_node.cpp:828-829`）。本文件第一版照抄了 nav2 的值 ⇒ 参数文件覆盖值
+在 **节点构造期**（`declare_parameter` 应用 override）就被 rcl 的区间校验拒掉 ⇒ 抛异常 → 进程 abort。
+
+三个必须记住的判据：
+1. **抛在构造期，不是 configure 期**：`lifecycle_manager` 连 configure 都发不出去（节点进程已经没了）
+   ⇒ `/amcl/get_state` 之类的"救火"手段一律无效，**只能改参数文件**；
+2. **级联现象不是独立故障**：没有 `map→odom` ⇒ `planner_server` 一直
+   `Invalid frame ID "map"` / `Timed out waiting for transform`（本次报告里那些报错都是这一条引起的）；
+3. **ROS 2 对"文件里有、节点没声明"的键是静默忽略，但对"声明了、值越界"是直接抛**——
+   这两类错误的处置完全不同（本仓库 §1.1 踩过的是前一类）。
+
+**修法（本文件已改）**：**删掉 `laser_min_range` 整个键**，用 beluga 的默认 `0.0`；`laser_max_range: 100.0` 保留。
+为什么这是**语义等价**而不是"妥协"：
+- beluga 侧是 **clamp**：`min_range_ = max(scan->range_min, laser_min_range)`、
+  `max_range_ = min(scan->range_max, laser_max_range)`（`beluga_ros/include/beluga_ros/laser_scan.hpp:55-61` @2.1.1）；
+- 本仓 `/scan` 由 `pointcloud_to_laserscan` 产生，`range_min: 0.05` / `range_max: 10.0`
+  （`src/rm_perception/pointcloud_to_laserscan/config/laserscan_params.yaml`）；
+- 于是默认 `0.0` ⇒ `max(0.05, 0.0) = 0.05` = `scan.range_min`，**与 nav2 的 `-1.0` 逐字等价**；
+  `100.0` ⇒ `min(10.0, 100.0) = 10.0` = `scan.range_max`，与 nav2（`ldata.range_max = min(scan.range_max, 100)`）一致；
+- 上游自己的参考参数文件 `beluga_example/params/default.ros2.yaml` **也不写 `laser_min_range`**（同为默认 0.0）——
+  也就是说"省略该键"正是上游的推荐用法。
+
+⚠️ **`laser_max_range` 在 beluga 里是"一键两用"**（审计时发现的唯一语义差，**不致命**）：
+除了上面的 clamp，它还**直接**被当作 `LikelihoodFieldModelParam::max_laser_distance`
+（`amcl_node.cpp:379` @2.1.1），而后者是似然场里 `z_rand` 项的归一化分母
+（`offset = z_random / max_laser_distance`，`beluga/include/beluga/sensor/likelihood_field_model_base.hpp:142`）。
+nav2 用的是**被 clamp 后的 `scan.range_max`**（=10.0）⇒ 两边随机项地板不同：
+**beluga = 0.5/100 = 0.005，nav2 = 0.5/10 = 0.05**（差 10 倍，只影响权重形状，不影响能否起节点）。
+**A/B 时若 beluga 明显更差，第一个旋钮就是把它设成 `/scan` 的 `range_max`（本仓 = `10.0`）**，
+让两边的传感器模型数值完全对齐；保持 100.0 的理由是"与 amcl 槽的键值逐字一致"+ 上游默认值。
+
+**装机二进制的实测约束表（本次审计；证据来自跑起来的节点本身）**
+
+证据获取方式：把节点按修好的参数文件**真的起起来**，再对 `/amcl` 调
+`rcl_interfaces/srv/DescribeParameters`（脚本 `.tmp_beluga_verify/dump_descriptors.py`，原始输出
+`.tmp_beluga_verify/log_131559/param_descriptors.txt`）⇒ 下表"声明区间"列**不是读源码抄的，是节点自己报的**；
+交叉核对源码：`ros2_common.cpp:33-405` + `amcl_node.cpp:89-203` @2.1.1（tag = deb 版本 2.1.1，
+`beluga_amcl/include/beluga_amcl/{amcl_node,ros2_common}.hpp` 与上游 md5 逐字节一致）。
+`/amcl` 共声明 **72** 个参数（含 10 个 `qos_overrides.*` 只读键）。
+
+| 参数键（本文件写的 45 个） | 类型 | 装机二进制声明的区间 | 不写时的默认 | 本文件取值 | 判定 |
+|---|---|---|---|---|---|
+| `use_sim_time` | bool | — | `false` | `True`（launch 注入） | ✅ |
+| `global_frame_id` / `odom_frame_id` / `base_frame_id` | string | — | `map` / `odom` / **`base_footprint`** | `map` / `odom` / `base_link` | ✅（`base_frame_id` 必须显式写）|
+| `robot_model_type` | string | — | `differential_drive` | `nav2_amcl::OmniMotionModel` | ✅（接受 nav2 插件名；非法值只在建滤波器时 ERROR，不崩）|
+| `alpha1`…`alpha5` | double | float `[0, 1.79769e+308]` | `0.2` | `0.2` ×5 | ✅ |
+| `min_particles` / `max_particles` | integer | int `[0, 2147483647]` step=1 | `500` / `2000` | `500` / `2000` | ✅ |
+| `pf_err` | double | float `[0, 1]` | `0.05` | `0.05` | ✅ |
+| `pf_z` | double | — | `0.99` | `0.99` | ✅ |
+| `resample_interval` | integer | int **`[1, 2147483647]`** step=1 | `1` | `1` | ✅（写 0 会抛）|
+| `recovery_alpha_fast` / `recovery_alpha_slow` | double | float `[0, 1]` | `0.0` / `0.0` | **`0.1` / `0.001`**（§九 搬运） | ✅ |
+| `spatial_resolution_x` / `_y` | double | float `[0, 1.79769e+308]` | `0.5` | `0.5` | ✅ |
+| `spatial_resolution_theta` | double | float **`[0, 6.28319]`** | `0.174533`(10°) | `0.174533` | ✅ |
+| `execution_policy` | string | — | `seq` | `seq` | ✅（`seq`/`par` 之外的串只在建滤波器时 ERROR）|
+| `selective_resampling` | bool | — **只读** | `false` | `false` | ✅（只读只挡"运行期 set"；参数文件里的初值照收，已实测 `:=true` 也不抛）|
+| `update_min_d` | double | float `[0, 1.79769e+308]` | `0.25` | **`0.05`**（§九） | ✅ |
+| `update_min_a` | double | float **`[0, 6.28319]`** | `0.2` | **`0.05`**（§九） | ✅ |
+| `transform_tolerance` | double | float `[0, 1.79769e+308]` | `1.0` | **`0.3`**（§九） | ✅ |
+| `laser_model_type` | string | — | `likelihood_field` | `likelihood_field` | ✅ |
+| `laser_likelihood_max_dist` | double | float `[0, 1.79769e+308]` | `2.0` | `2.0` | ✅ |
+| **`laser_min_range`** | double | float **`[0, 1.79769e+308]`** | **`0.0`** | **删掉（=默认 0.0）** | ✅ **本次修复**：`-1.0` 违反区间 ⇒ 构造期抛（就是本节的故障）|
+| `laser_max_range` | double | float `[0, 1.79769e+308]` | `100.0` | `100.0` | ✅（⚠️ 一键两用，见上面语义差）|
+| `max_beams` | integer | int **`[2, 2147483647]`** step=1 | `60` | `60` | ✅ |
+| `z_hit` / `z_max` / `z_rand` / `z_short` | double | float `[0, 1]` | `0.5` / `0.05` / `0.5` / `0.05` | 同左 | ✅ |
+| `sigma_hit` / `lambda_short` | double | float `[0, 1.79769e+308]` | `0.2` / `0.1` | 同左 | ✅ |
+| `model_unknown_space` | bool | — | `false` | `false` | ✅ |
+| `only_obstacle_boundaries` | bool | — | `true` | `true` | ✅ |
+| `scan_topic` / `map_topic` / `initial_pose_topic` | string | — | `""`（回落 `scan`）/ `map` / `initialpose` | `scan` / `map` / `initialpose` | ✅（`scan_topic` 与 `point_cloud_topic` **互斥**，两个都非空 ⇒ activate 期抛异常）|
+| `tf_broadcast` | bool | — | `true` | `true` | ✅ |
+| `set_initial_pose` | bool | — | `false` | `true` | ✅ |
+| `initial_pose.x` / `.y` / `.yaw` | double | — | `0.0` | `0.0`（launch 按 world 覆盖） | ✅ |
+| `initial_pose.covariance_x` / `_y` / `_yaw` | double | — | `1e-6` | `1.0e-6`（YAML 科学计数法实测被当 double，不是 string） | ✅ |
+| `initial_pose.covariance_xy` / `_xyaw` / `_yyaw` | double | — | `0.0` | `0.0` | ✅ |
+| `always_reset_initial_pose` / `first_map_only` | bool | — | `false` | `false` | ✅ |
+
+**故意不写的键**（写了也只会被静默忽略，或者根本不存在）：
+
+| 键 | 为什么 |
+|---|---|
+| `initial_pose.z` / `save_pose_rate` / `do_beamskip` / `beam_skip_distance` / `beam_skip_threshold` / `beam_skip_error_threshold` | **beluga 2.1.1 根本没声明**（grep 上游 `beluga_amcl/src` 无命中；nav2 侧确实有）⇒ 写了静默失效（`localization_beluga_launch.py` 也因此不注入 `initial_pose_z`）|
+| `point_cloud_topic` / `map_path` | 存在但不用（`map_path` 只在 HDF5 加载路径用；`point_cloud_topic` 与 `scan_topic` 互斥）|
+| `autostart` / `autostart_delay` | 默认 `false`，由 `lifecycle_manager` 管（与 amcl 槽同形态）|
+| `bond_timeout` | 默认 `4.0`，与 `lifecycle_manager` 心跳配合（**注意**：见下面"已知残留问题"）|
+| `debug` | 默认 `false`；`true` 会多发 `/likelihood_field` 并降性能 |
+| `qos_overrides.*` | 节点自动声明的只读键（`/tf` 发布 100/reliable/volatile 等），**不要写** |
+
+**本次孤立实跑验证（不启 Gazebo / 不启 nav2 controller/planner/bt_navigator）**
+
+```bash
+# 一键复现本节的验证（隔离域 88 + 工作区内 ROS_LOG_DIR；只起 map_server + amcl_node + lifecycle_manager）
+bash .tmp_beluga_verify/run_isolated.sh          # 脚本 + 探针在 .tmp_beluga_verify/（临时目录，未入库）
+```
+实测结果（原始输出 `.tmp_beluga_verify/run_report.txt`，日志 `log_131559/`）：
+
+| 要求 | 实测 |
+|---|---|
+| configure/activate 不抛 | ✅ `lifecycle_manager_localization`: `Configuring amcl` → `Activating amcl` → `Server amcl connected with bond.` → `Managed nodes are active`；`ros2 lifecycle get /amcl` = **`active [3]`**；`amcl.log` 里 **0 条 WARN/ERROR**（除了 SIGINT 收尾那条，见下）|
+| `/scan` 订阅 QoS | ✅ `ros2 topic info /scan -v`：`Reliability: BEST_EFFORT`（SensorDataQoS，KEEP_LAST 5）|
+| 有扫描就发 `map→odom` | ✅ 合成 `/scan`（BEST_EFFORT，frame_id=`base_link`，`range_min 0.05`/`range_max 10.0`，360 束）+ `odom→base_link` 静态/动态 TF ⇒ **首条 `map→odom` 在探针开始后 104 ms 出现**（车还没动）|
+| `map→odom` 速率 | ✅ **139 条 / 13.80 s = 10.07 Hz**（`/scan` 10.00 Hz；相邻间隔中位 100.0 ms、max 102.3 ms）⇒ **≈ /scan 速率，不是固定 50 Hz**（与 §1.2 契约表一致）|
+| 是否"发到未来"（nav2 消费者要求） | ✅ `tf.stamp − scan.stamp` = **0.2997 / 0.2998 / 0.2999 s（min/均值/max）= `transform_tolerance` 0.3**，与 `amcl_node.cpp:628-630` 的 `expiration_stamp = scan.stamp + transform_tolerance` 逐字吻合；**139/139 条戳都在"收到时刻"之后**（未来量均值 0.2992 s）|
+| 真滤波更新（不是只重发 TF） | ✅ `/pose` 共 40 条：静止段（0~6 s，`update_min_d=0.05` 不触发）**1 条**，运动段（0.3 m/s）39 条 ≈ **4.9 Hz**（`Particle filter update iteration stats: 500 particles 360 points - ~0.3 ms`）|
+| 只发 `map→odom` | ✅ `/tf` 上只出现 `map→odom` 与（探针自己发的）`odom→base_link`，beluga 没碰 `odom→base_link` |
+| SIGINT 干净退出 | ❌ **不干净**：`Destroying` → `Shutting down` → `Deactivating` → `terminate called ... RCLError: Couldn't initialize rcl timer handle ... rcl_shutdown() was called` ⇒ **exit 134 (SIGABRT)** |
+
+**★ 已知残留问题：SIGINT 收尾会 abort（上游 bug，与本次参数修复无关）**
+
+gdb 抓到的栈（`handle SIGINT nostop pass` + SIGABRT 时 `bt`）：
+
+```
+#11 ?? () from /opt/ros/humble/lib/libbondcpp.so        <- 抛 RCLError 的地方
+#12 bond::Bond::~Bond() () from /opt/ros/humble/lib/libbondcpp.so
+#13 beluga_amcl::BaseAMCLNode::on_deactivate(rclcpp_lifecycle::State const&)
+#14 beluga_amcl::BaseAMCLNode::on_shutdown(rclcpp_lifecycle::State const&)
+#15 beluga_amcl::AmclNode::~AmclNode()
+#16 main
+```
+因果链：`rclcpp` 的 SIGINT handler **先** `rcl_shutdown()` → `spin()` 返回 → `main` 析构节点 →
+`~AmclNode` 里**又**调 `on_shutdown` → `on_deactivate` → `bond_.reset()` → `~Bond()` 在这个**已失效的
+context** 上 `create_timer`（bondcpp 的 `xxxTimerReset` 家族）⇒ 异常从析构函数里逃出 ⇒ `std::terminate`。
+机制侧上游相关 issue：[rclcpp#2793 "create_timer throws but isn't documented to throw"](https://github.com/ros2/rclcpp/issues/2793)；
+beluga 侧另有症状不同的旧 issue：[beluga#67 "amcl_node doesn't terminate after SIGINT"](https://github.com/Ekumen-OS/beluga/issues/67)。
+
+**实测的变体表（决定要不要为此改接线）**：
+
+| 变体 | 节点 active? | `lifecycle_manager` 反应 | SIGINT 退出码 | 结论 |
+|---|---|---|---|---|
+| A 默认（`bond_timeout` 不写 = 4.0） | active | 正常，bond 成型 | **134（abort）** | 本仓现状 |
+| B 只给节点 `bond_timeout:=0.0` | active | bond 0.2 s 就"broken" ⇒ `CRITICAL FAILURE: SERVER amcl IS DOWN ... Shutting down related nodes` ⇒ 反复 deactivate/re-activate（**定位会被拆掉**） | 0 | ❌ **不可用** |
+| C 先 `ros2 lifecycle set /amcl deactivate` 再 SIGINT | inactive | — | 0 | 证明"bond 还在 ⇒ 必崩" |
+| D `bond_disable_heartbeat_timeout:=true`（bondcpp 自带键，`/bond_disable_heartbeat_timeout`） | active | 正常，无 CRITICAL | **134** | ❌ 无效 |
+| E 节点 **和** manager **都** `bond_timeout:=0.0` | active | manager 不建 bond 监视（日志里连 bond 行都没有） | **0** | ✅ 唯一可用的"退出码干净"方案，但**等于关掉 bond 看门狗**（manager 不再能发现卡死的 amcl）|
+
+**本次决定**：**保持 A（不动 bond 配置）**——理由是 ① 与 `localization:=amcl` 槽行为对齐（bond 是
+lifecycle_manager 的安全网）；② 这个 abort 只发生在**进程收尾**（Ctrl-C 时整栈本来就在退），
+**不影响启动/激活/发 TF/定位**；③ 我们 launch 里 `use_respawn` 默认 `False`，不会因此触发重启循环。
+若用户不接受 Ctrl-C 时那条 `terminate called ...`/`exit code -6` 日志，按 **E** 改两处即可
+（参数文件加 `bond_timeout: 0.0` + `localization_beluga_launch.py` 的 manager 参数加 `bond_timeout: 0.0`），
+代价是失去 bond 看门狗——**这是一个需要用户拍板的取舍，本次没有替用户改**。
+
 **事实核对（均在 2.1.1 上核实，出处见括号）**
 
 - **上游 / 许可**：`Ekumen-OS/beluga`，**Apache-2.0**（GitHub API `license.spdx_id = apache-2.0`），默认分支
@@ -299,7 +453,7 @@ ROS 2 对「参数文件里写了但节点没声明」的键是**静默忽略**�
 | `scan_topic` | `scan` | ✅ 存在 | beluga 默认为空串 → 回落 `scan`；显式写更清楚 |
 | `map_topic` | （未写，默认 `map`） | ✅ 存在 | beluga 显式写 `map` |
 | `laser_model_type` | `likelihood_field` | ✅ 存在 | beluga 另有 `likelihood_field_prob` |
-| `laser_min_range` / `laser_max_range` | `-1.0` / `100.0` | ✅ 存在（**阈值语义不同**） | beluga 是 **clamp**：`min_range=max(scan.range_min, 值)`、`max_range=min(scan.range_max, 值)`（`beluga_ros/include/beluga_ros/laser_scan.hpp:55-61`）⇒ `-1.0` 等价于"用 `/scan` 的 `range_min`"，与 nav2 对负值的处理一致 |
+| `laser_min_range` / `laser_max_range` | `-1.0` / `100.0` | ⚠️ 存在但**区间不同** | beluga 是 **clamp**：`min_range=max(scan.range_min, 值)`、`max_range=min(scan.range_max, 值)`（`beluga_ros/include/beluga_ros/laser_scan.hpp:55-61`），且声明区间是 **`[0, DBL_MAX]`** ⇒ **nav2 的 `-1.0` 会把节点打成构造期异常**。本文件**删掉 `laser_min_range`**（默认 0.0，与本仓 `/scan` 的 `range_min 0.05` 组合后与 nav2 的 `-1.0` 等价），`laser_max_range` 保持 `100.0`。详见 §1.2.0 |
 | `max_beams` / `max_particles` / `min_particles` | 60 / 2000 / 500 | ✅ 存在 | |
 | `pf_err` / `pf_z` | 0.05 / 0.99 | ✅ 存在 | |
 | `resample_interval` | 1 | ✅ 存在 | beluga 声明了整数范围 `[1, INT_MAX]` |
@@ -358,10 +512,14 @@ colcon build --symlink-install --packages-up-to beluga_amcl
   且会把一个 C++ 库塞进我们的 workspace（升级/回退成本都更高）。**没有 vendor 任何代码**，因此
   **没有新增子模块、没有 pin 到仓库里的 commit**（pin 的是 apt 版本 2.1.1 = 上游 commit `b06f906…`，
   记录在本文）。
-- ⚠️ 本沙箱里 `sudo` 被禁（"no new privileges"），所以**没有真的装到 `/opt/ros/humble`**：
-  静态验证是用 `apt-get download` 把 3 个 deb 下下来、`dpkg -x` 解到
+- ✅ **2026-10-05（同日稍后）：路线 (A) 已真正落地**——`ros-humble-beluga-amcl / beluga / beluga-ros
+  2.1.1-1jammy.20260908.012840` 已装进 `/opt/ros/humble`（`dpkg -l | grep beluga` 三条；
+  `ros2 pkg prefix beluga_amcl` = `/opt/ros/humble`；`/opt/ros/humble/include/beluga_amcl/**` 与上游
+  tag `2.1.1` 的对应头文件 **md5 逐字节一致**）。§1.2.0 的全部结论与实测都跑在这个装机二进制上。
+- ⚠️ 历史记录（本节第一版写的时候）：那时本沙箱 `sudo` 被禁（"no new privileges"），**没有真的装到
+  `/opt/ros/humble`**：静态验证是用 `apt-get download` 把 3 个 deb 下下来、`dpkg -x` 解到
   `.tmp_cache/beluga_overlay/opt/ros/humble` 再 source 该 overlay 做的（`ros2 pkg prefix beluga_amcl` 解析成功、
-  `ldd` 无缺失、launch 预检通过）。**在真机上请走上面的 `apt install`**（或同样用 overlay）。
+  `ldd` 无缺失、launch 预检通过）。⇒ **那条"未在真机验证过安装"的保留意见现在已作废**。
 
 **运行 / 检查**
 
@@ -416,27 +574,43 @@ python3 tools/scripts/diag/record_tf_monotonic.py
 
 - 槽位级：`localization:=` 换回 `amcl`（或留空 + LIO 当绝对定位 + 静态桥）——**beluga 分支是纯增量**，
   不选它就完全不生效（连 `beluga_amcl` 没装都不影响，已实测 `--show-args` 与本文件之外的槽位）；
-- 代码级：`git revert <本次 commit>`（3 个文件：bringup 的 choices/分支/map_server 条件 +
-  新增 launch + 新增 params）；
+- 代码级（本槽整体，commit `21fc301`）：`git revert 21fc301`（3 个文件：bringup 的 choices/分支/
+  map_server 条件 + 新增 launch + 新增 params）；
+- 代码级（**本次启动崩溃修复**，2 个文件：`nav2_params_sim_beluga.yaml` + 本文档）：
+  `git revert <本次 commit>`；**只想临时回到"能起但不发 TF"的状态**没有意义——修复前的版本是
+  **节点构造期 abort**，所以回退这个 commit = 回到完全不可用，除非另配 `laser_min_range` 的合法值
+  （唯一要求：`>= 0`；`0.0` 与"删掉该键"等价）；
+- 只回退行为、不改代码：把 `laser_max_range: 100.0` 改成 `10.0`（= p2l 的 `range_max`，见 §1.2.0 的两用说明）
+  即可，无需动别的键；
 - 卸载：`sudo apt remove ros-humble-beluga-amcl`（连带 beluga/beluga_ros）。
 
-**⚠️ 未验证清单（本次只做静态验证：`py_compile` / `yaml.safe_load` / `--show-args` / colcon / 逐条
-`IfCondition` 真值表；**没有启动 Gazebo、nav2 或 beluga 节点**）**
+**⚠️ 未验证清单（2026-10-05 更新版）**
 
-1. **整栈运行时的定位精度、收敛性、CPU**：全部未测（本机不启仿真）；
-2. **`map→odom` 实测速率/连续性**：按代码应为 `/scan` 速率，未实跑确认；
-3. **beluga 与 nav2 amcl 的 A/B 结论**：`--goal -1.0 2.0` 回归、到达误差、用时、恢复次数**均未跑**；
-4. **`autostart` 路径**：本仓库走 lifecycle_manager（`autostart: false`），beluga 自带的 `autostart: true`
+> 第一版写的"只做静态验证、没有启动 Gazebo/nav2/beluga 节点"**已被 §1.2.0 的孤立实跑取代**：
+> 节点**单独**起过（map_server + amcl_node + lifecycle_manager，隔离域），configure/activate、
+> `/scan` QoS、`map→odom` 速率与盖戳、真滤波更新、SIGINT 退出码都已实测。**仍未验证的**是"整栈"：
+
+1. **整栈运行时的定位精度、收敛性、CPU/RTF**：**仍未测**（不启 Gazebo；孤立探针喂的是合成 `/scan`，
+   只有"起得来 + 发 TF"的结论，**没有任何精度结论**）；
+2. **beluga 与 nav2 amcl 的 A/B 结论**：`--goal -1.0 2.0` 回归、到达误差、用时、恢复次数**均未跑**；
+   另外注意 §1.2.0 里那条 `laser_max_range` 一键两用导致的 `z_rand` 地板差 10 倍 ⇒ A/B 前先决定要不要把它改成 10.0；
+3. **`map→odom` 在真栈里的连续性**：孤立实测是 10.07 Hz / 间隔 max 102 ms（合成扫描 10 Hz）；真栈里
+   `/scan` 由 LIO+p2l 产生，**丢帧/抖动下的表现未测**；
+4. **`use_sim_time:=true` 路径**：孤立验证为了让节点自己走时钟用的是 `-p use_sim_time:=false`；
+   **仿真时钟（/clock、Gazebo）下的表现未测**（真栈由 bringup 注入 `true`）；
+5. **`autostart` 路径**：本仓库走 lifecycle_manager（`autostart: false`），beluga 自带的 `autostart: true`
    免 manager 路径未试；
-5. **`use_composition: true` 路径**：`beluga_amcl::AmclNode` 组件与 `nav2_container` 的组合未试
+6. **`use_composition: true` 路径**：`beluga_amcl::AmclNode` 组件与 `nav2_container` 的组合未试
    （默认 false；amcl 槽的这条路同样没在 bringup 里接容器）；
-6. **`only_obstacle_boundaries` / `model_unknown_space` / `selective_resampling` / `execution_policy: par`
+7. **`only_obstacle_boundaries` / `model_unknown_space` / `selective_resampling` / `execution_policy: par`
    的实际影响**：未调、未测；
-7. **`localization:=beluga` + `lio:=cartographer` 这个非法组合**：与 amcl 一样会「两个槽都不起 + 无
+8. **`localization:=beluga` + `lio:=cartographer` 这个非法组合**：与 amcl 一样会「两个槽都不起 + 无
    map_server」（`lio==cartographer` 时 beluga 分支条件为假，而独立 map_server 又被排除）——**这是
    amcl 早就有的同款行为**，本次只做"与 amcl 对齐"，未修；
-8. **apt 安装本身**：本沙箱 `sudo` 被禁，只验证了「deb 解包 + overlay source 后包可解析、依赖无缺失」，
-   没有在真机 `/opt/ros/humble` 上执行 `apt install`。
+9. **SIGINT 收尾 abort（§1.2.0）**：根因已定位（bondcpp `~Bond` 在 `rcl_shutdown()` 之后建 timer），
+   但**没有修**（属上游 + 只在收尾）⇒ 整栈 Ctrl-C 时 beluga 进程会以 **exit code 134 / -6** 收场，
+   整栈层面的观感（launch 日志、`use_respawn:=true` 时会不会触发重启）**未实测**；
+10. **apt 安装**：已完成（`/opt/ros/humble`，2.1.1-1jammy.20260908.012840），**此项销案**。
 
 ## 2. 待补入口（**已登记、未实现**）
 

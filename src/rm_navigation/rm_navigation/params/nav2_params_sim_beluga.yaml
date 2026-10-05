@@ -25,6 +25,14 @@
 #     recovery_alpha_slow 0.001 / recovery_alpha_fast 0.1 —— 这 5 个键 beluga **全部同名存在**，
 #     数值原样搬过来（语义核对见 docs/localization_slots.md §1.2 映射表）。
 #     §九 里 nav2 侧被删/不存在的键（beam skip 四件套、save_pose_rate）在 beluga 里同样不存在 ⇒ 不写。
+#
+#   ★★ 2026-10-05 修复（本文件第一版让 amcl_node 起不来，进程 exit -6 / SIGABRT）：
+#     laser_min_range 原来照抄了 nav2 的哨兵值 -1.0，但 beluga 给该键声明的是**浮点区间
+#     [0.0, DBL_MAX]**（ros2_common.cpp:306-310 @2.1.1；上游文档 likewise "Must be nonnegative"）
+#     ⇒ 节点**构造期**就抛 InvalidParameterValueException: parameter 'laser_min_range' ... doesn't
+#     comply with floating point range（不是 configure 期，故 lifecycle/参数文件都救不了）。
+#     修法 = **删掉该键**（beluga 默认 0.0，与本仓 /scan 组合后与 nav2 的 -1.0 逐字等价，
+#     论证见"观测模型"段）。全键审计表见 docs/localization_slots.md §1.2。
 # =============================================================================
 amcl:
   ros__parameters:
@@ -77,11 +85,27 @@ amcl:
     # ---- 观测模型（键名/取值与 amcl 槽逐项对齐，保证 A/B 公平）----
     laser_model_type: "likelihood_field"
     laser_likelihood_max_dist: 2.0
-    # beluga 语义是 **clamp** 而不是 override：min_range=max(scan.range_min, 本值)、
-    # max_range=min(scan.range_max, 本值)（beluga_ros/include/beluga_ros/laser_scan.hpp:55-61 @2.1.1）
-    # ⇒ -1.0 等价于「用 /scan 自己的 range_min」，与 nav2 对负值的处理一致；100.0 同理不设上限。
-    laser_min_range: -1.0
+    # ★★ 2026-10-05 修复（localization:=beluga 起不来，exit -6）：
+    #   beluga 给 laser_min_range/laser_max_range 声明的是 **浮点区间 [0.0, DBL_MAX]**
+    #   （ros2_common.cpp:296-310 @2.1.1；上游 docs/ros2-reference.md 也写 "Must be nonnegative"）
+    #   ⇒ 照抄 nav2 的哨兵值 -1.0 会在**构造期**直接抛异常：
+    #     InvalidParameterValueException: parameter 'laser_min_range' ... doesn't comply with floating point range
+    #   ⇒ 本文件**故意不写 laser_min_range**，用 beluga 的默认 0.0。
+    #   语义等价性：beluga 是 clamp —— min_range = max(scan.range_min, 本值)
+    #   （beluga_ros/include/beluga_ros/laser_scan.hpp:55-61 @2.1.1）；本仓 /scan 的 range_min=0.05
+    #   （src/rm_perception/pointcloud_to_laserscan/config/laserscan_params.yaml）
+    #   ⇒ 默认 0.0 得到 max(0.05, 0.0) = 0.05 = scan.range_min，**与 nav2 的 -1.0 逐字等价**
+    #   （nav2 只在 >0 时才 clamp，见 third_party/nav2/nav2_amcl/src/amcl_node.cpp:828-829）。
+    #   上游自己的 example 参数文件 likewise 不写 laser_min_range。
     laser_max_range: 100.0
+    # ⚠️ 100.0 在上游区间 [0, DBL_MAX] 内，clamp 侧 = min(scan.range_max=10.0, 100.0) = 10.0，
+    #   与 amcl 槽（nav2 在 laser_max_range>0 时同样得到 min(10.0, 100.0)）**完全一致**。
+    #   但 beluga 把这个键**两用**：还直接当 LikelihoodFieldModelParam::max_laser_distance
+    #   （amcl_node.cpp:379 @2.1.1）= z_rand 项的归一化分母（likelihood_field_model_base.hpp:142
+    #   的 offset = z_random / max_laser_distance）；nav2 用的是**被 clamp 后的 scan.range_max**
+    #   （=10.0）⇒ beluga 的随机项地板 = 0.5/100 = 0.005，nav2 = 0.5/10 = 0.05（差 10 倍，
+    #   只影响权重形状、不影响能否起节点）。A/B 若 beluga 明显更差，第一个旋钮就是把它设成
+    #   /scan 的 range_max（本仓 = 10.0），使两边数值完全对齐——见 docs/localization_slots.md §1.2。
     max_beams: 60
     z_hit: 0.5
     z_max: 0.05
