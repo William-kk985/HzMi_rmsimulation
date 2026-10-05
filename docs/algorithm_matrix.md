@@ -315,3 +315,84 @@ CustomMsg QoS 背压、`use_sim_time` 键名漏引号、上游 nav2 丢弃 `tran
 | 2026-09-21 | 修 **全包形态静止漂移**：给 `lio:=cartographer` 接一路底盘里程计（lua `use_odometry=true` + `cartographer_sim.launch.py` 新增 `odom_topic` 参数，bringup 传 `/odom_ground_truth`）。实测不加时 `odom→base_link` 漂 ≈4 cm/s、13°/min（`map→odom` 恒定 → 非回环问题）；cartographer 只用 odom 增量，故世界系绝对位姿可直接喂 |
 | 2026-09-21 | `tools/scripts/control/improved_teleop.sh` 键位改为**方向键**（↑↓ 前进后退 / ←→ 左右转 / `<` `>` 线速度 / `,` `.` 角速度 / 空格停 / q 退出，支持 `TELEOP_TOPIC` 覆盖话题）；键位表写进 runbook §1 |
 | 2026-09-21 | 修**静默失效**：所有障碍源加 `expected_update_rate: 0.5`（原默认 0=不检查）→ 源停即 WARN + 拒绝算速度 + `velocity_timeout` 1s 停车；另修 `p2l` 的 `range_min: 0.45 → 0.2`（45cm 盲区会被反向清成 free）、`scan_time: 0.3333 → 0.1` |
+
+---
+
+## 九、重定位线结果记录（2026-10-05）
+
+> 本轮只动重定位（`localization`）一线：AMCL 调参 → 终点检查器 → ICP 订阅 QoS → 新增 GICP 槽 →
+> TF 盖戳契约 → 下采样口径 → 调度解耦 → 回归工具语义对齐。验收记录另见 `docs/localization_slots.md §7`。
+>
+> 两句话结论：**`localization:=gicp` 已可验收**（P0 回归 PASS / SUCCEEDED / 3.2 s / `recoveries=0`）；
+> **`localization:=icp` 属"局部配准、初值敏感"** —— 无初值/初值差时会静默收敛到局部极小，
+> believed pose 落进图内墙体 ⇒ 控制器冻死（28~68 s、19~23 次恢复、ABORT）；
+> 手动 RViz 点目标（人会给合理初值/时机）正常。
+
+### 本轮修复链（按提交顺序）
+
+| 提交 | 做了什么 | 根因 / 实测 |
+|---|---|---|
+| `48703e6` | AMCL 高速跟踪参数：`transform_tolerance 1.0→0.3`、`update_min_d/a 0.25/0.2→0.05/0.05`、`recovery_alpha_slow/fast 0.0→0.001/0.1` | 根因：map→odom 被外推到未来 1 s、阈值触发导致更新被节流、随机重采样恢复被关闭；详见工单 §K |
+| `47d7411` | 终点检查器 `SimpleGoalChecker → PositionGoalChecker` | 全向车没有"车头"概念 ⇒ 终点只约束位置；删掉该插件不存在的 `yaw_goal_tolerance` |
+| `f033d96` | `icp_registration` 点云订阅 QoS → `SensorDataQoS` | 原来 RELIABLE 与 BEST_EFFORT 发布者不兼容 ⇒ 收不到点云 ⇒ 不发 map→odom ⇒ global_costmap 卡在 `Invalid frame ID "map"` |
+| `28deaf1` | 新增 `localization:=gicp` 槽（GICP 精配准） | 初值来自 `/initialpose` 或 `initial_pose`；健康话题 `~/pose`、`~/fitness_score`、`~/converged` |
+| `36a71cf`＋`c8863f1` | TF 盖戳契约：TF 与 `~/pose` 用 `now + tf_lookahead_sec`（= AMCL `transform_tolerance` 语义；0.3→0.45） | 根因：消费者请求 `now+0.1`（MPPI `FollowPath.transform_tolerance`），发布者若用 now 盖戳 ⇒ 最新条目永远旧 0.1 s ⇒ `ExtrapolationException` ⇒ `follow_path` 每周期 abort |
+| `098078d` | 两级下采样（图 0.10 / 点云 0.05，照 COD 2025 `small_gicp_relocalization` 的 `global_leaf_size`/`registered_leaf_size` 配方）+ `max_correspondence_distance 1.0→1.5` | 实测：target 2438→**12450** 点，fitness **0.00976→0.00123 m²**，align **120→350 ms**，`/tf` **7→2 Hz** |
+| `8b47ff9` | 调度解耦：`MultiThreadedExecutor` + TF/状态定时器独立 callback group（点云与 `/initialpose` 同组） | 实测（单节点配对对照）：`/tf` **2.3 Hz → 50.0 Hz**，fitness 不变；对照组证明 50 Hz 来自解耦而非迭代数。另：`maximum_iterations 32→16` 实测**不降 CPU**（1/4/16/32/64 → align 363/475/486/471/427 ms、fitness 全同） |
+| `629c971` | 回归工具发目标语义对齐人工 RViz | `--yaw auto`（用 TF 链平面复合出的车当前朝向）、`--settle`（等 map→odom 稳定再发）、目标可达性预检（非 free ⇒ exit 3 且不发）、新增 JSON 字段 |
+
+### 验收结论（`localization:=gicp`，commit `708b35d` 记于 `docs/localization_slots.md §7`）
+
+| 判据 | 实测 | 结论 |
+|---|---|---|
+| `/tf` 速率 | **92~94 Hz（聚合）** = `map→odom` 满速 | ✅ 多线程解耦生效（改前 2 Hz 级） |
+| `fitness_score` | **0.0023 m²**（RMS ≈4.8 cm） | ✅ 与单节点合成测 0.00123 同量级 |
+| P0 回归 `--goal -1.0 2.0` | **PASS / SUCCEEDED / 3.2 s / `recoveries=0` / 轨迹 2.45 m** | ✅ 修复前同目标 28 s / 23 次恢复 / ABORT |
+| 命令链 | `nav=(0.72,0.78)` → `smooth` → `chassis` **四跳一致**，`spin_speed=0.0` 直通 | ✅ 无 Spin/Backup 介入 |
+
+### 四条"通了的关卡"（供复用）
+
+| 关卡 | 做法 | 为什么 |
+|---|---|---|
+| **口径** | 两级 leaf（图 0.10 / 点云 0.05）+ `max_correspondence_distance 1.5` | 点数与对应关系同时够用；单调调一个参数会顾此失彼 |
+| **盖戳** | TF 与位姿话题用 `now + tf_lookahead_sec` | 规则 = **消费端最大 tolerance + 发布周期 + 最坏掉帧余量**（AMCL 的 `transform_tolerance` 就是这个语义） |
+| **调度** | `MultiThreadedExecutor` + TF/状态定时器独立 callback group | 单线程下 350 ms 的 align 会把 50 Hz TF 饿到 2.3 Hz |
+| **初值** | 默认 `use_initial_pose:true` + `initial_pose [0,0,0]` ⇒ 开机即发 | 真正的"不发 TF"只在 `use_initial_pose:true` **且**无 `odom→base` TF **且**无 `/initialpose` 时出现（最后保护分支，不是常见路径） |
+
+### 遗留 / 待办
+
+1. 工具 settle 阈值偏严：静止 30 s 漂 3.4 cm / 0.0139 rad 略超 0.02 m / 0.01 rad ⇒ 应视为 **GICP 噪声底参考**（要消 WARNING 可放宽 `TH.settle_dxy→0.05` / `settle_dyaw→0.02`，一行可回退）。
+2. `Control loop missed its desired rate of 30 Hz` = **总算力不足**（解耦只治"饿死"这一种，不治总量）。
+3. `RMUC.pcd` 退化资产（0.10 m 体素后 8 点）⇒ `world:=RMUC` 用 icp/gicp 启动即报错（设计如此）。
+4. `RMUL2026.pcd` 仅 53164 点 ⇒ 想让精度再上层须先有**更密的先验 PCD**（属建图侧）。
+5. **三方对比（amcl/icp/gicp）待做** —— 协议见 §9.1（工具已就绪）。
+6. 其他路线候选：`scan_context` 全局检索（解决"随便摆"）、Beluga AMCL、small_gicp（多线程实现）。
+
+### 9.1 三方对比怎么跑
+
+**同一条命令，只换 `localization:=`**；其余（world / 目标 / 规划器 / `spin_speed`）必须逐字一致，否则不可比。
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=True \
+  localization:=gicp          # ① 先 gicp，再 ② amcl，再 ③ icp：每次**重启整个栈**后跑这一条
+python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0
+```
+
+三次跑完后（**快照按时间顺序排，先跑的在上**）：
+
+```bash
+# 快照不记录 localization ⇒ 方法列默认是 ?，用 --label 事后标注（时间戳数字取快照文件名里的那串）
+python3 tools/scripts/regress/compare_regress_snapshots.py --last 3 --markdown \
+  --label regress_<第1次时间戳>=gicp --label regress_<第2次时间戳>=amcl --label regress_<第3次时间戳>=icp
+
+# 不想标注也能出表（方法列全为 ?，靠"时间顺序"自己对号）：
+python3 tools/scripts/regress/compare_regress_snapshots.py --markdown
+```
+
+**纪律（否则表格会骗人）**：
+
+- 换 `localization` **必须重启栈**（`map→odom` 只能有一个发布者，同一次运行里比不了）；
+- 三次都用同一条 `--goal -1.0 2.0`，`spin_speed` 固定 0.0，`--settle` 用默认值（工具语义 = 人在 RViz 里等定位稳了再点目标）；
+- `icp` 那次若"启动就不动"，先看它有没有初值：**局部配准 + 初值差 = 静默局部极小**，这本身就是对比结论的一条，不要当成工具故障；
+- 把工具输出的表贴回本节（或 `§四` 加一行），并写清每次的 `result/用时/recoveries`。
