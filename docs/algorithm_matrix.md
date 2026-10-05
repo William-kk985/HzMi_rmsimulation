@@ -22,7 +22,7 @@
 | 槽位 | 参数 | 现有实现 | 对应包 / 节点 | 生效条件 |
 |---|---|---|---|---|
 | **场景形态** | `mode` | `mapping` 纯建图 / `slam_nav` 边建边导 / `nav` 先建后导 | — | 必填 |
-| **里程计** | `lio` | `fastlio` / `pointlio` / `none` / **`cartographer`（全包）** | `src/rm_localization/FAST_LIO`、`point_lio`；`none` 需外部提供 odom/TF；`cartographer` = 同一个 cartographer 兼任里程计源（`mapper`/`localization` 槽被跳过，lua `cartographer_lio*.lua`） | 全形态 |
+| **里程计** | `lio` | `fastlio` / `pointlio` / **`small_point_lio`**（2026-10-05 新增）/ `none` / **`cartographer`（全包）** | `src/rm_localization/FAST_LIO`、`point_lio`、**`small_point_lio`**（vendored `Yancey2023/small_point_lio`@`688d75c`，MIT）；`none` 需外部提供 odom/TF；`cartographer` = 同一个 cartographer 兼任里程计源（`mapper`/`localization` 槽被跳过，lua `cartographer_lio*.lua`）。**`small_point_lio` 自己直发 `odom→base_link` ⇒ 不起 `lio_tf_adapter`**；契约、实测与回退见 `docs/lio_slots.md` | 全形态 |
 | **在线建图** | `mapper` | `slam_toolbox` / `cartographer` | `src/rm_localization/slam_toolbox`（async）、`cartographer_ros`（+ `cartographer_occupancy_grid_node`） | `mapping` / `slam_nav` |
 | **重定位** | `localization` | `amcl` / `slam_toolbox`(纯定位) / `icp` | `nav2_amcl`(+`map_server`)、`slam_toolbox`(localization)、`src/rm_localization/icp_registration` | 仅 `nav` |
 | **局部规划器** | `nav` | `rpp` / `dwb` / `teb` | `nav2_regulated_pure_pursuit_controller` / `nav2_dwb_controller` / `teb_local_planner`（+ `costmap_converter`） | `nav` / `slam_nav` |

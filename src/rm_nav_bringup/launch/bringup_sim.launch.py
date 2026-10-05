@@ -49,6 +49,15 @@ def generate_launch_description():
     pointlio_rviz_cfg_dir = os.path.join(rm_nav_bringup_dir, 'rviz', 'pointlio.rviz')
     #################################### POINT_LIO parameters end #####################################
 
+    ################################# SMALL_POINT_LIO parameters start ###############################
+    # 参数放在 vendored 包自身 config/（与 fastlio/pointlio 同一口径：算法参数随包走）
+    small_point_lio_params = os.path.join(
+        get_package_share_directory('small_point_lio'), 'config', 'mid360_sim.yaml')
+    # RViz 直接复用 pointlio 的配置（Fixed Frame = odom，含 TF/Odometry/Path/CloudRegistered 四类显示）
+    # —— 本槽位的话题名与点云语义都相同，不值得为它多维护一份 .rviz。
+    small_point_lio_rviz_cfg_dir = os.path.join(rm_nav_bringup_dir, 'rviz', 'pointlio.rviz')
+    ################################## SMALL_POINT_LIO parameters end #################################
+
     ################################## slam_toolbox parameters start ##################################
     slam_toolbox_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world])
     # slam_toolbox 已源码化，参数回归其自身 config/（R1）
@@ -179,12 +188,17 @@ def generate_launch_description():
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
         default_value='fastlio',
-        choices=['fastlio', 'pointlio', 'none', 'cartographer'],
+        # ★ 2026-10-05：新增 'small_point_lio'（RM26 东莞理工 ACE 的 Point-LIO 2~3× 加速变体，
+        #   vendored MIT，pin 688d75c；与 fastlio/pointlio 同级、可 A/B。默认值不变。）
+        choices=['fastlio', 'pointlio', 'small_point_lio', 'none', 'cartographer'],
         description='里程计源（谁发 odom→base_link）: fastlio | pointlio | '
+                    'small_point_lio（vendored Yancey2023/small_point_lio，**自己直发 odom→base_link，'
+                    '因此不经过 lio_tf_adapter**；无 /odom 之外的 path 话题）| '
                     'none（不启动 LIO，需外部提供 odom/TF，如轮式里程计）| '
                     'cartographer（**全包形态**：cartographer 兼任里程计源 → 同时跳过 mapper 槽与 '
                     'localization 槽；mode:=nav 时用 map/<world>.pbstream 做纯定位。'
-                    '它不发 /odom 话题 → nav:=teb 不适用，用 rpp/dwb。见 docs/tf_interface_contract.md）')
+                    '它不发 /odom 话题 → nav:=teb 不适用，用 rpp/dwb。见 docs/tf_interface_contract.md；'
+                    'small_point_lio 的契约、验证与回退见 docs/lio_slots.md）')
 
     declare_nav_cmd = DeclareLaunchArgument(
         'nav',
@@ -342,6 +356,39 @@ def generate_launch_description():
                 arguments=['-d', pointlio_rviz_cfg_dir],
                 condition = IfCondition(use_lio_rviz),
             )
+        ]),
+
+        # ===== lio:=small_point_lio（vendored Yancey2023/small_point_lio，MIT，pin 688d75c）=====
+        # 与上面两个槽位的**本质区别**：它自己就发 `odom→base_link`（源码硬编码，
+        # small_point_lio_node.cpp:61-62），所以：
+        #   ① /Odometry → /odom 仍要 remap（统一话题口径）；
+        #   ② **绝不能**再起 lio_tf_adapter（否则 odom→base_link 两个发布者 → 双父边/抖动）；
+        #   ③ 它不认 camera_init/body ⇒ T1 回退静态桥也要排除它（见下面 icp_frame_bridge_condition）。
+        # 它**需要** base_link→livox_frame 这条静态 TF（源码 lookupTransform(lidar_frame,"base_link")，
+        # 失败就丢帧、连 /Odometry 都不发）—— 仿真里由 robot_state_publisher 从 URDF 提供
+        # （实测 /tf_static 里有 base_link→livox_frame (0.12,0,0.175)，见 docs/lio_slots.md §2）。
+        GroupAction(
+            condition = LaunchConfigurationEquals('lio', 'small_point_lio'),
+            actions=[
+            Node(
+                package='small_point_lio',
+                executable='small_point_lio_node',
+                name='small_point_lio',
+                output='screen',
+                parameters=[
+                    small_point_lio_params,
+                    # 装配级：use_sim_time（算法参数都在 mid360_sim.yaml 里）
+                    {'use_sim_time': use_sim_time}
+                ],
+                # T2：统一里程计话题为 /odom（源话题硬编码为 /Odometry，见 small_point_lio_node.cpp:26）
+                remappings=[('/Odometry', '/odom')],
+            ),
+            Node(
+                package='rviz2',
+                executable='rviz2',
+                arguments=['-d', small_point_lio_rviz_cfg_dir],
+                condition = IfCondition(use_lio_rviz),
+            ),
         ])
     ])
 
@@ -521,10 +568,17 @@ def generate_launch_description():
 
     # T3：LIO 位姿 → 标准帧树适配（odom→base_link），启用 LIO 时启动
     # （配合 T4 关闭 Gazebo 的 odom→base_link，使其成为唯一位姿来源；T2 已把里程计话题统一为 /odom）
+    # ★ 2026-10-05：新增排除 'small_point_lio' —— 它**自己就发 odom→base_link**（源码硬编码），
+    #   再叠加本适配器就是两个发布者（= 我们文档里反复强调的多父边）。
+    #   它不需要适配器的另一个理由：适配器存在的意义是（a）把 LIO 的话题改名成 /odom、
+    #   （b）补掉 body/imu_link 与 base_link 之间 0.125 m 杆臂；而 small_point_lio 是
+    #   **先在节点内部用 TF 把雷达位姿换算到 base_link** 再发 TF 的（small_point_lio_node.cpp:63-76），
+    #   杆臂由它自己处理（⚠️ 该换算的写法有瑕疵，见 docs/lio_slots.md §6 第 2 条）。
     lio_tf_adapter_node = Node(
         condition = IfCondition(PythonExpression([
             "'", LaunchConfiguration('lio'), "' != 'none' and '",
-            LaunchConfiguration('lio'), "' != 'cartographer'"])),
+            LaunchConfiguration('lio'), "' != 'cartographer' and '",
+            LaunchConfiguration('lio'), "' != 'small_point_lio'"])),
         package='lio_tf_adapter',
         executable='lio_tf_adapter_node',
         name='lio_tf_adapter',
@@ -544,11 +598,15 @@ def generate_launch_description():
     # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
     # amcl / beluga(= beluga_amcl) / slam_toolbox / icp_registration / gicp_registration 都会自行
     # 发布 map→odom，绝不能再叠加静态桥（否则 map/odom 多父边）。
+    # ★ 2026-10-05：再排除 'small_point_lio' —— 它既不发 camera_init→body（那条链的两个帧都不存在），
+    #   又把 odom 直接当世界系（自己发 odom→base_link）⇒ 它需要的是 **map≡odom 单条静态桥**，
+    #   见下面的 tf_bridge_spl_map_to_odom_node。
     icp_frame_bridge_condition = IfCondition(PythonExpression([
         "'", LaunchConfiguration('mode'), "' == 'nav' and '",
         LaunchConfiguration('localization'), "' == '' and '",
         LaunchConfiguration('lio'), "' != 'none' and '",
-        LaunchConfiguration('lio'), "' != 'cartographer'"]))
+        LaunchConfiguration('lio'), "' != 'cartographer' and '",
+        LaunchConfiguration('lio'), "' != 'small_point_lio'"]))
 
     tf_bridge_node = Node(
         condition=icp_frame_bridge_condition,
@@ -565,6 +623,21 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='tf_bridge_body_to_odom',
         arguments=['0', '0', '0', '0', '0', '0', 'body', 'odom'],
+        parameters=[{'use_sim_time': use_sim_time}]
+    )
+
+    # lio:=small_point_lio + localization:=''（回退用法：LIO 当绝对定位）的帧桥。
+    # 它的 world 帧就叫 odom（自己发 odom→base_link，没有 camera_init/body）⇒ map≡odom 恒等即可。
+    # 只发 map→odom 一条：绝不发 camera_init/body 桥（那两个帧在本槽位根本不存在，发了就是孤立岛）。
+    tf_bridge_spl_map_to_odom_node = Node(
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mode'), "' == 'nav' and '",
+            LaunchConfiguration('localization'), "' == '' and '",
+            LaunchConfiguration('lio'), "' == 'small_point_lio'"])),
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_bridge_spl_map_to_odom',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
         parameters=[{'use_sim_time': use_sim_time}]
     )
 
@@ -691,6 +764,8 @@ def generate_launch_description():
     # T1：ICP 模式的帧桥（由条件控制，仅 nav+icp+LIO 时生效）
     ld.add_action(tf_bridge_node)
     ld.add_action(tf_bridge_node2)
+    # lio:=small_point_lio 的回退帧桥（仅 nav + localization:='' + 该槽位时生效）
+    ld.add_action(tf_bridge_spl_map_to_odom_node)
     
     # 启动时序：Gazebo 生成机器人 + LIO 初始化需要几秒，
     # 定位链延后 4s、Nav2 延后 10s，避免 costmap/amcl 在 odom/map 尚未出现时激活失败
