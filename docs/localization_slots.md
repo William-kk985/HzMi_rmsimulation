@@ -253,3 +253,29 @@ ros2 topic echo /gicp_registration/converged         # false ⇒ 本帧未采纳
 | **`gicp` 已落地**（2026-10-05） | 新包 `src/rm_localization/gicp_registration/` + `localization:=gicp` 槽（choices 加一项 + launch 分支，与 icp 同 `IfCondition` 形态、同资产 `PCD/<world>.pcd`） | 与"用现代实现"的取向一致；**独立包**而非改 `icp_registration` ⇒ icp 后端保持原样，形成 AMCL / ICP / GICP 三方 A/B。细节、参数核实、资产实测见 §1.1 |
 | **goal checker 改位置-only**（2026-10-05） | 四个 controller 槽文件（`nav2_params_sim_controller_{rpp,dwb,teb,mppi}.yaml`）的 `general_goal_checker.plugin`：`SimpleGoalChecker` → **`PositionGoalChecker`**，只留 `xy_goal_tolerance: 0.25`（删掉 `yaw_goal_tolerance`），别名 `general_goal_checker` 与 `stateful: True` 不变 | 全向车（mecanum）**没有"车头"概念** ⇒ 终点只约束位置；顺带消除"位置到了但朝向过不了 → progress checker 判失败 → 反复恢复 → ABORT"这一失败模式。已核已装 nav2 **1.1.20**：`share/nav2_controller/plugins.xml` 有该类、`libposition_goal_checker.so` 导出其符号，且该插件**只声明** `xy_goal_tolerance` / `stateful`（`yaw_goal_tolerance`、`path_length_tolerance` 在 1.1.20 的该插件里不存在 ⇒ 写了是静默失效，故删除） |
 
+
+---
+
+## 7. 验收记录：`localization:=gicp`（2026-10-05，用户验收"效果可以接受"）
+
+**验收条件**（一次完整运行，栈：`world:=RMUL2026 mode:=nav lio:=fastlio localization:=gicp nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=True`）：
+
+| 判据 | 实测 | 结论 |
+|---|---|---|
+| `/tf` 速率 | **92~94 Hz（聚合）** = `map→odom` 50 + `base_link_fake` ~20 + `odom→base_link` ~10 + 静态/wheel | ✅ `map→odom` 满速（多线程解耦生效；改前 2 Hz 级） |
+| `~/fitness_score` | **0.0023 m²**（RMS ≈ 4.8 cm） | ✅ 与单节点合成测 0.00123 同量级 |
+| P0 回归 `--goal -1.0 2.0` | **PASS / SUCCEEDED / 用时 3.2 s / `recoveries=0` / 轨迹 2.45 m** | ✅ 对比修复前 28 s / 23 次恢复 / ABORT ⇒ abort 风暴消失 |
+| 命令链 | `nav=(0.72,0.78)` → `smooth` → `chassis` **四跳一致**，`spin_speed=0.0` 直通 | ✅ 无 Spin/Backup 介入 |
+
+**通的四关（修复链条，供以后复用）**：
+1. **口径**：两级下采样 图 0.10 m / 点云 0.05 m（COD 2025 `small_gicp_relocalization` 的 `global_leaf_size`/`registered_leaf_size` 配方）+ `max_correspondence_distance 1.5`（≈ `max_dist_sq 2.5`）；
+2. **盖戳**：TF 与 `~/pose` 用 `now + tf_lookahead_sec(0.45)`（≈ AMCL `transform_tolerance`；规则 = 消费端最大 tolerance + 发布周期 + 最坏掉帧余量）；
+3. **调度**：`MultiThreadedExecutor` + TF/状态定时器**独立 callback group**（align ~350 ms 不再饿死 50 Hz TF）；跨组共享状态加锁，健康话题**故意不持锁发布**；
+4. **初值**：默认 `use_initial_pose: true` + `initial_pose [0,0,0]` ⇒ **开机即发**；真正的"不发 TF"只在 `use_initial_pose: true` **且**无 `odom→base` TF **且**无 `/initialpose` 时出现（最后保护分支，不是常见路径）。
+
+**已知遗留（均为"可接受/待办"，非阻塞）**：
+1. **工具 settle 阈值偏严**：车静止时 30 s 漂 3.4 cm / 0.0139 rad，略超工具默认（0.02 m / 0.01 rad）⇒ 该值应视为**GICP 噪声底**参考信息；如需消除每次 WARNING，可放宽 `TH.settle_dxy→0.05` / `settle_dyaw→0.02`（一行、可回退）。
+2. **`Control loop missed its desired rate of 30 Hz`**：属"总算力不够"（MPPI 30 Hz + GICP 10 Hz + Gazebo + LIO + RViz，RTF≈0.72），**解耦只治"TF 被饿死"、不治这一条**；真降 CPU 靠 leaf 阶梯（`voxel_leaf_size_scan 0.05→0.10` → `maximum_iterations 16→8` → 地图 leaf 回 0.25）。
+3. **`maximum_iterations 32→16` 不降 CPU**（实测 1/4/16/32/64 迭代 align 363/475/486/471/427 ms，非单调、fitness 全同）⇒ 跟踪场景下该上限不生效，成本由固定开销主导。
+4. **资产**：`PCD/RMUC.pcd` 退化（65 万点挤在 ±1 cm，0.10 m 体素后 8 点）⇒ `world:=RMUC` 用 icp/gicp 会启动即报错（设计如此）；`RMUL.pcd @0.10 = 97642` 点；`RMUL2026.pcd` 仅 53164 点 ⇒ 12450 target 已近上限（**要再提精度须先有更密的先验 PCD**，属建图侧）。
+5. **三方对比暂缓（用户决定）**：`amcl` / `icp` / `gicp` 同一 world、同一目标 `--goal -1.0 2.0`、同一 `nav:=mppi planner:=smac2d spin_speed:=0.0`，各跑一次并把 `.tmp_bags/regress_<ts>.json` 聚合进 `docs/algorithm_matrix.md §四`。
