@@ -5,6 +5,14 @@
 > "与 FAST-LIO 参照同量级（长度 0.95~1.15×、形状误差 ATE 0.24~0.42 m）"，新参数文件
 > `config/mid360_sim_tuned.yaml`（只改 4 个键）。**新增内容集中在 §0.7 与 §5.5~§5.8**；
 > 上游默认参数档（`config/mid360_sim.yaml`）**原样保留**作为对照基线。
+> 2026-10-05（同日第三批）· **两件事**：
+> ① **全栈闭环跑通了**：Gazebo + nav2 + AMCL 下 `lio:=small_point_lio` 的 P0 回归 **PASS**，
+>    与 `lio:=fastlio` 同命令对照逐项同量级 —— 证据表在 **§5.9**（这是本槽位第一次进全栈）；
+> ② **修了一个"连别的组合都起不来"的 launch bug**：`bringup_sim.launch.py` 原来在**描述构建期**
+>    无条件 `get_package_share_directory('small_point_lio')` ⇒ 没装这个包的机器（或没重新
+>    `source install/setup.bash`）连 `lio:=fastlio localization:=amcl` 都起不来
+>    （`PackageNotFoundError: "package 'small_point_lio' not found"`）。现已改成**惰性解析**：
+>    只有真选到这个槽位时才查包，缺包给"可操作"的报错而不是 Python traceback。详见 **§4.1**。
 > **与 `docs/localization_slots.md` 的分工**：那篇是**重定位槽**（谁发 `map→odom`）的登记表；
 > 本文是**里程计槽**（谁发 `odom→base_link`）新增取值的登记。之所以另开一篇：`localization_slots.md`
 > 正在被"五路重定位对比"那条线占用，避免并发改同一文件。
@@ -57,7 +65,23 @@
    ⇒ **不是只对第一个窗口过拟合**。
    新参数文件 = `src/rm_localization/small_point_lio/config/mid360_sim_tuned.yaml`，
    `bringup_sim.launch.py` 的 `lio:=small_point_lio` 分支已改读它（回退只需改回一行，§8）。
-   ⚠️ 但**全栈闭环仍未验证**（本任务禁止起 Gazebo/nav2）——见 §9。
+   ✅ **全栈闭环已跑通（同日第三批，见 §5.9）**：Gazebo + nav2 + AMCL 下 P0 回归 **PASS**
+   （`--goal -1.0 2.0`，SUCCEEDED 74.0 s / recoveries=4），RTF **0.74**、`/odom` **7.3 Hz**、
+   TF 链 `map→odom→base_link` 连续（501 条采样、0 条过期、最大戳间隔 0.100 s、最大单步 3.9 mm）、
+   `odom→base_link` **只有一个发布者**（`/lio_tf_adapter` 根本没起）、LIO 侧**零 ERROR**；
+   与 `lio:=fastlio` 对照（RTF 0.78、`/odom` 8.0 Hz、同样 PASS/4 次恢复、同样 1 次 missed rate）
+   **逐项同量级**。⚠️ 仍未验的见 §9（全栈里 `/odom` vs `/odom_ground_truth` 的**逐点漂移/ATE**
+   本次**没有**采集；`spin_speed≠0`、建图产物、多场地都没测）。
+
+8. ✅ **【同日第三批修复】launch 不再要求"本机装了 `small_point_lio`"**：这是**与算法无关**的一类硬伤 ——
+   `bringup_sim.launch.py` 在 `generate_launch_description()` 里（= **描述构建期，无条件执行**）调
+   `get_package_share_directory('small_point_lio')`，于是**任何** `ros2 launch` 组合（哪怕
+   `lio:=fastlio localization:=amcl`）都会在解析 launch 文件时直接抛
+   `PackageNotFoundError: "package 'small_point_lio' not found"`（用户 2026-10-05 实测踩到）。
+   现已把所有**新增槽位**的包查询改成**惰性解析**（选到才查、缺包给可操作的报错）：
+   `lio:=small_point_lio`、`localization:=icp`、`localization:=gicp | small_gicp`。
+   `beluga` / `small_gicp` 后端本身没有这类调用（已逐条核对）⇒ 无需改。
+   症状/根因/证据/仍未改的老槽位见 **§4.1**。
 
 ---
 
@@ -179,15 +203,89 @@ new_point.timestamp = base_time + static_cast<double>(point.offset_time) * 1e-9;
 | 位置 | 改动 | 理由 |
 |---|---|---|
 | `lio` 参数 `choices` | `['fastlio','pointlio','none','cartographer']` → **加入 `'small_point_lio'`**（**默认值仍是 `fastlio`**） | 新槽位；描述里写明"自己直发 odom→base_link，不经 adapter" |
-| `bringup_LIO_group` | 新增 `GroupAction(condition=LaunchConfigurationEquals('lio','small_point_lio'))`：起 `small_point_lio/small_point_lio_node`（`name='small_point_lio'`，这是参数文件键名，**不能改**），`parameters=[.../config/mid360_sim.yaml, {'use_sim_time': use_sim_time}]`，`remappings=[('/Odometry','/odom')]` | 与 pointlio 分支同构 |
-| `lio_tf_adapter_node` 条件 | 追加 `and lio != 'small_point_lio'` | 它自己发 `odom→base_link` ⇒ 再起 adapter 就是**双父边** |
+| `bringup_LIO_group` | 新增 `GroupAction(condition=LaunchConfigurationEquals('lio','small_point_lio'))`：起 `small_point_lio/small_point_lio_node`（`name='small_point_lio'`，这是参数文件键名，**不能改**），`parameters=[<惰性解析到的 config/mid360_sim_tuned.yaml>, {'use_sim_time': use_sim_time}]`，`remappings=[('/Odometry','/odom')]` | 与 pointlio 分支同构；参数文件 2026-10-05 起是 **tuned 版**（§5.7） |
+| 同分支新增 `LogInfo` | 启动时把**实际加载的参数文件路径**打进 launch 日志（`lio:=small_point_lio 使用的参数文件 = …`） | 省得用户猜"到底读的是 `mid360_sim.yaml` 还是 tuned 版"；全栈实测里就是靠它 + `ros2 param get` 双重确认（§5.9） |
+| `lio_tf_adapter_node` 条件 | 追加 `and lio != 'small_point_lio'` | 它自己发 `odom→base_link` ⇒ 再起 adapter 就是**双父边**（§5.9 的 TF 发布者清单是这条的实测证据） |
 | `icp_frame_bridge_condition`（`camera_init→map` + `body→odom` 两条静态桥） | 追加 `and lio != 'small_point_lio'` | 本槽位**不存在** `camera_init`/`body` 这两个帧，发出去就是孤立岛；且 `map→odom` 会缺 |
 | 新增 `tf_bridge_spl_map_to_odom_node` | 仅 `mode:=nav and localization:='' and lio:='small_point_lio'` 时发**一条** `map→odom` 恒等静态桥 | 保留"`localization` 留空 = 把 LIO 当绝对定位"的回退语义（它对 `odom` 就是世界系） |
+| **包查询改成惰性**（同日第三批，§4.1） | `small_point_lio_params` / `icp_registration_params_dir` / `gicp_registration_params_dir` 三处由 `os.path.join(get_package_share_directory(...), ...)` 改为 `_PackageShareFile(...)` | 原来在描述构建期无条件查包 ⇒ 没装该包的机器**任何**组合都起不来（用户实测） |
 | RViz | 复用 `rviz/pointlio.rviz`（`Fixed Frame: odom`，TF/Odometry/Path/PointCloud2 四类显示都在） | 不值得为它多维护一份 300 行 `.rviz` |
 | **未动** | `nav2_params_sim_beluga.yaml`、beluga launch、重定位槽、mapper 槽、`nav2` 参数 | 任务要求不打扰 |
 
 > ℹ️ **重定位槽照旧可用**（`amcl/beluga/slam_toolbox/icp/gicp/cartographer`）：`lio` 与 `localization`
 > 是两根独立的轴，本槽位只换"谁发 `odom→base_link`"。
+
+### 4.1 修一个与算法无关、但会挡住**所有**组合的 launch bug（2026-10-05 同日第三批）
+
+**(a) 症状（用户实测）**：在一台**没装 `small_point_lio`** 的机器上（或装了但 shell 没重新
+`source install/setup.bash`），想跑最普通的组合：
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+    lio:=fastlio localization:=amcl nav:=rpp spin_speed:=0.0
+```
+
+结果**一条 launch 命令都起不来**，报的是：
+
+```
+ament_index_python.packages.PackageNotFoundError: "package 'small_point_lio' not found, searching: [...]"
+launch.invalid_launch_file_error.InvalidLaunchFileError: Caught multiple exceptions when trying to load file of format [py]:
+ - PackageNotFoundError: "package 'small_point_lio' not found, searching: [...]"
+```
+
+`--show-args` 也一样炸（它同样要先构建 `LaunchDescription`）。信息误导性极强：
+命令里**根本没提** `small_point_lio`。
+
+**(b) 根因**：`generate_launch_description()` 里这行是**描述构建期、无条件执行**的：
+
+```python
+small_point_lio_params = os.path.join(
+    get_package_share_directory('small_point_lio'), 'config', 'mid360_sim_tuned.yaml')
+```
+
+`get_package_share_directory()` 走 `AMENT_PREFIX_PATH` 查 ament 索引，**查不到就抛异常**。
+它跟"这次选了哪个槽位"**没有任何关系** ⇒ 一个槽位的包缺失会污染**全部**组合。
+同一类写法在 `icp_registration`（`localization:=icp`）与 `gicp_registration`
+（`localization:=gicp | small_gicp`）两处也在，同样是 2026-10-05 新加的槽位。
+
+**(c) 修法**：新增 `_PackageShareFile`（`launch.substitution.Substitution` 的子类），把"查包"
+**推迟到真正要用这个路径的那一刻**（= 对应 `Node` 被执行时；`Node.execute()` 才 `perform()` 参数）：
+
+| 情形 | 行为 |
+|---|---|
+| 没选该槽位 | 该 Substitution **永不 perform** ⇒ 包在不在都**毫无影响**（`--show-args` 同理） |
+| 选了、包不在 | 抛一条**可操作**的 `RuntimeError`；launch 打成 `[ERROR] [launch]: Caught exception in launch (see debug for traceback): …`（**不是** Python traceback，退出码 1），消息里直接给出 `colcon build --symlink-install --packages-select <包名>` 与可替代的槽位值 |
+| 选了、包在但文件不在（加文件后没重编） | 同上，报错里带上缺失的绝对路径 |
+
+**(d) 证据（`AMENT_PREFIX_PATH` 过滤掉 `install/<pkg>` = 模拟"没装"，未真卸任何东西）**：
+
+| 场景 | 修复前（HEAD 版本） | 修复后 |
+|---|---|---|
+| `--show-args`，包**在** | ✅ 64 个参数 | ✅ 64 个参数（**逐行一致**） |
+| `--show-args`，`small_point_lio` **不在** | ❌ `PackageNotFoundError` + `InvalidLaunchFileError`（exit 1） | ✅ 64 个参数（exit 0） |
+| `--show-args`，`gicp_registration` **不在** | ❌ 同类报错 | ✅ 64 个参数（exit 0） |
+| `--show-args`，`icp_registration` **不在** | ❌ 同类报错 | ✅ 64 个参数（exit 0） |
+| 真启动 `lio:=small_point_lio`，包**不在** | —（构建期就炸，达不到这里） | ✅ 立刻以**可操作报错**退出（exit 1，无 traceback）：<br>`[launch] 缺少本次 launch 需要的 ROS 包 'small_point_lio'：当前 AMENT_PREFIX_PATH 里找不到这个包（= 没构建过，或构建之后没有重新 source install/setup.bash）… colcon build --symlink-install --packages-select small_point_lio …` |
+| 真启动 `lio:=fastlio localization:=amcl`，`small_point_lio` **不在** | ❌ 起不来 | ✅ **全栈正常起**：`/clock`、`/odom`、TF 链 `map→odom→base_link` 全就绪、`/odom` 7.5 Hz（§5.9 的 Run C） |
+| 真启动 `lio:=small_point_lio`，包**在** | ✅ | ✅ 解析到 `…/small_point_lio/share/small_point_lio/config/mid360_sim_tuned.yaml`，全栈里 `ros2 param get` 复核 4 个调参键（§5.9） |
+
+**(e) 逐条核对任务点名的四处**：
+
+| 槽位/引用 | 有没有 `get_package_share_directory` | 结论 |
+|---|---|---|
+| `small_point_lio` | 有（无条件） | **已改惰性** |
+| `icp_registration` | 有（无条件） | **已改惰性** |
+| `gicp_registration` | 有（无条件） | **已改惰性**（`localization:=gicp` 与 `:=small_gicp` 共用） |
+| `beluga` | **没有**：只是 `IncludeLaunchDescription`（在 `IfCondition` 里 ⇒ 本来就惰性）+ 一个 `rm_navigation` 包内的兄弟 YAML | 无需改 |
+| `small_gicp` | **没有**：只是一个字符串 `backend` 值（库 vendored 在 `gicp_registration` 内） | 无需改 |
+
+**(f) 仍未改的老槽位（已知项，不是遗漏）**：`fast_lio`、`point_lio`、`slam_toolbox`、
+以及那批**常开节点**（`linefit_ground_segmentation_ros` / `pointcloud_to_laserscan` /
+`imu_complementary_filter` / `fake_vel_transform` / `lio_tf_adapter` / `hzmi_rm_simulation` /
+`rm_navigation` / `rm_nav_bringup`）**仍然是构建期查包**。理由：它们属"基础安装集"，
+且多处路径要被 `os.path.join` / `PathJoinSubstitution` 在**构建期**拼接（改成惰性要动更多结构）。
+⇒ 换句话说：**现在只有"2026-10-05 这批新槽位"做到了"缺一个包只挡住它自己"**；
+如果你把 `point_lio` 卸了，`lio:=fastlio` 仍然起不来（同类硬伤，登记为待办）。
 
 ---
 
@@ -425,7 +523,82 @@ DDS 投递抖动会让每帧点云到达时"后面那几条 IMU 到没到"不同
   （长度 1.09~1.15× 参照，vs 0.95~0.98×）。**真跑时是从静止起步** ⇒ 用 0 s 那一档更贴近实际。
 - ⚠️ **`/odom.twist` 仍然恒 0**、杆臂写法瑕疵仍在（§6.2/§6.3），它们不影响上面的判据，
   但会影响"谁读 twist/谁读 TF"的下游模块。
-- ❌ **全栈闭环仍未验证**：上面全部是"只跑 LIO 节点 + 离线重放"，没有 Gazebo/nav2/AMCL/costmap 参与（§9）。
+- ✅ **全栈闭环已经补上了**（2026-10-05 同日第三批，见 §5.9）：上面这些仍是"只跑 LIO 节点 + 离线重放"
+  的结论，但**全栈里"能不能跑完一次导航"这一问已有实测答案**（A/B 对照，PASS）。
+  ⚠️ 仍未测的是全栈里的**逐点轨迹精度**（§9 第 2 条）。
+
+---
+
+### 5.9 全栈闭环实测：Gazebo + nav2 + AMCL 下的 A/B（2026-10-05，本槽位**第一次**进全栈）
+
+**(a) 怎么跑的（可复现口径）**：headless（`unset DISPLAY`）、`HOME=/tmp/…`、`ROS_DOMAIN_ID=79`、
+`GAZEBO_MASTER_URI=http://127.0.0.1:11351`，**起栈 + 测量 + 收尾在同一个 bash 调用里**
+（本沙箱每条命令一个 PID namespace）。两条命令**只差 `lio:=`**：
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+    lio:=small_point_lio localization:=amcl nav:=rpp spin_speed:=0.0 nav_rviz:=False   # Run A
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+    lio:=fastlio        localization:=amcl nav:=rpp spin_speed:=0.0 nav_rviz:=False   # Run B（对照）
+python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization <lio 名>
+```
+
+> ⚠️ 与 `docs/algorithm_matrix.md` §9 那批"五路重定位对比"**不是同一口径**：那批用
+> `nav:=mppi planner:=smac2d`（3.2 s 到点、0 次恢复），本文按本槽位**文档命令**用
+> `nav:=rpp planner:=navfn`（~70 s、4 次恢复）。所以**只能 A 与 B 互比**，
+> 不要拿本文的 74 s 去和 §9 的 3.2 s 比。
+
+**(b) 结果表（同一台机器、同一时段、连续两次，中间无编译）**
+
+| 观测项 | **Run A `lio:=small_point_lio`** | **Run B `lio:=fastlio`（对照）** |
+|---|---|---|
+| P0 回归 | ✅ **PASS**（exit 0） | ✅ **PASS**（exit 0） |
+| 导航结果 | **SUCCEEDED**，74.0 s，`d_min=0.0 m`，`recoveries=4` | **SUCCEEDED**，69.8 s，`d_min=0.0 m`，`recoveries=4` |
+| RTF（回归快照 / 日志） | **0.739** / 0.74 | **0.784** / 0.78 |
+| `Control loop missed its desired rate` | **1** 次（启动瞬态，见 (d)） | **1** 次（同） |
+| `/odom` 频率 | 回归窗口 **7.33 Hz**；`ros2 topic hz` **7.45~7.55 Hz** | 回归窗口 **8.00 Hz**；`ros2 topic hz` **7.79~7.83 Hz** |
+| `/livox/lidar/pointcloud` / `/scan` / `/livox/imu` | 7.67 / 7.67 / 75.0 Hz | 8.00 / 7.67 / 78.7 Hz |
+| `tf_age`（最旧 TF 落后 /clock） | 0.10 s | 0.10 s |
+| `map→odom→base_link` **连续性** | 501 条采样、**0 条** `map→odom` 过期、最大戳间隔 **0.100 s**、最大单步 **3.9 mm** | 593 条、0 条过期、0.100 s、最大单步 6.1 mm |
+| `odom→base_link` **发布者** | **唯一 = `/small_point_lio`**；`/lio_tf_adapter` **不存在** | `/lio_tf_adapter`（fastlio 经适配器发） |
+| `/tf` 发布者（rclpy graph API 实测） | `/amcl`、`/complementary_filter_gain_node`、`/fake_vel_transform`、`/robot_state_publisher`、**`/small_point_lio`** | 上述 − `/small_point_lio` + `/laser_mapping`、`/lio_tf_adapter` |
+| TF 边集（`view_frames`） | **7 条**，**没有 `camera_init→body`**（本槽位不发它） | 8 条，**含 `camera_init→body`**（FAST-LIO 的孤立岛，见 `tf_interface_contract.md`） |
+| 真值位移 `/odom_ground_truth`（机器人真的走了多远） | 2.637 m | 2.671 m |
+| 指令峰值 `(v,ω)` | nav=smooth=chassis=(0.44, 0.75) | (0.42, 0.75) |
+| LIO 侧 ERROR | **0** | 0（运行中） |
+| 进程级 ERROR（整段日志） | 只有 `gzclient` 退出码 −6（**headless 无 DISPLAY，预期**） | `gzclient` −6；`spawn_entity.py` 报 spawn 服务超时退出 1（**实体其实已生成**，链路全通）；**收尾 SIGINT 时** `fastlio_mapping` SIGSEGV(−11) + `joint_state_publisher` 退出 1（只发生在关栈阶段，不影响本次测量） |
+| 参数文件（日志 + 参数服务器双重确认） | 日志：`lio:=small_point_lio 使用的参数文件 = …/config/mid360_sim_tuned.yaml`；`ros2 param get /small_point_lio`：`space_downsample=False`、`imu_meas_omg_cov=0.2`、`velocity_cov=0.3`、`acceleration_cov=50.0` | — |
+
+**(c) 读表（能得出什么、不能得出什么）**
+
+- ✅ **"能跑通全栈"这一问：能**。目标 SUCCEEDED、命令链四跳都通（`nav→smooth→chassis` 三处非零）、
+  真值确实位移 2.6 m、costmap footprint 持续更新（`fp_distinct=105`）。
+- ✅ **"会不会因为多进程/RTF<1 就掉链子"：与 FAST-LIO 同量级**。`/odom` 7.3 Hz vs 8.0 Hz（−8%）、
+  RTF 0.739 vs 0.784（−5%）、missed rate 都是 1 次、TF 都连续、恢复次数都是 4 次。
+  这个差值与离线测到的 CPU 代价（§5.8d：关掉降采样后每帧点数 ×5.6）方向一致、量级合理。
+- ✅ **"`lio_tf_adapter` 有没有被排除"：排除了**。Run A 的 `/tf` 发布者清单里**没有** `/lio_tf_adapter`，
+  `ros2 node list` 也没有它；Run B（fastlio）则有 —— 这正是"同一个 `odom→base_link` 绝不双发"的直接证据。
+- ✅ **"解析出来的是不是 tuned 配置"：是**（日志 + `ros2 param get` 两道证据）。
+- ⚠️ **不能得出**："全栈里它的轨迹精度 = 离线那么好"。本次**没有**采集 `/odom` 与
+  `/odom_ground_truth` 的逐点对照（只有导航层面的"到达/成功/链路"）⇒ 见 §9 第 2 条。
+- ⚠️ **`recoveries=4` / ~70 s 是 `nav:=rpp + planner:=navfn` 在这张图上的固有表现**（A/B 完全同值），
+  **不是**本槽位引入的；要 3.2 s 到点那批数据请用 `nav:=mppi planner:=smac2d`
+  （`docs/algorithm_matrix.md` §9 的"五路重定位对比"）。
+
+**(d) 那 1 次 `Control loop missed its desired rate of 20.0000Hz` 是什么**：出现在收到目标后
+~50 ms（`[WARN] … Control loop missed its desired rate of 20.0000Hz`，紧跟 `Received a goal, begin
+computing control effort.`），随后立刻 `Passing new path to controller.` 正常推进；Run B 同样 1 次、
+位置相同 ⇒ **是收到首个目标时的瞬态，不是本槽位的问题**。
+
+**(e) 附带跑的一个"缺包隔离"全栈验证（Run C）**：把 `small_point_lio` 从 `AMENT_PREFIX_PATH`
+过滤掉（模拟"这台机器没装它"），起 `lio:=fastlio localization:=amcl` 全栈 ⇒
+`/clock`、`/odom`（7.5 Hz）、TF 链 `map→odom→base_link` **全部就绪**，日志里**没有**
+`PackageNotFoundError`（§4.1(d) 最后一行）。这是"修复真的解决了用户那个场景"的端到端证据。
+
+**(f) 产物位置（未提交，属临时证据）**：`.tmp_cache/spl_ab/` 下
+`splA.log` / `splB.log`（全量 launch 日志）、`*.regress.log`（P0 回归）、`*.probe.log`（话题/TF/参数探针）、
+`*.metrics.json`（机器可读汇总）、`*.tf.json` + `*.frames.gv`（TF 边集与帧图）、
+`hidden_fastlio.log`（Run C）。
 
 ---
 
@@ -436,7 +609,8 @@ DDS 投递抖动会让每帧点云到达时"后面那几条 IMU 到没到"不同
    轨迹长度 = FAST-LIO 参照的 0.95~1.15 倍、形状误差 ATE 0.24~0.42 m、末位置差 0.10 m。
    改的 4 个键与物理理由见 §5.7/§5.8。**上游默认参数（`mid360_sim.yaml`）仍保留**，
    它现在是"复现/对照用的基线"，不再是槽位的默认（launch 已改读 tuned 版）。
-   ⚠️ 但这只是**离线开环**结论；全栈闭环仍未验证（§9）。
+   ✅ **全栈闭环已于同日补上（§5.9）**：`lio:=small_point_lio localization:=amcl nav:=rpp` PASS，
+   与 `lio:=fastlio` 对照逐项同量级。⚠️ 但"全栈里的**逐点轨迹精度**"仍未测（§9 第 2 条）。
 2. **`odom→base_link` 的杆臂换算写法有瑕疵**（读码结论，未闭环验证）：`small_point_lio_node.cpp:75`
    用的是**共轭** `T_bl⁻¹ · T_ol · T_bl`，而正确写法是 `T_ol · T_bl⁻¹`。在"base_link→livox 只有平移
    `u`、没有旋转"（我们的 URDF 正是如此）时可化简为**结果 = 正确值 + u**（即恒定偏 0.12/0.175 m，
@@ -463,7 +637,12 @@ DDS 投递抖动会让每帧点云到达时"后面那几条 IMU 到没到"不同
 10. **【新】调参后的参数与帧率耦合**：`imu_meas_omg_cov` 的最优值对应"角速度时间常数 ≈ 一个雷达帧长"
     （§5.8a）。我们仿真实测 7.85 Hz（真机 10 Hz）⇒ **如果以后雷达帧率变了（改 `update_rate`、
     或 RTF 变化导致实际频率漂移），这组参数需要按同一比例重调**。当前实测帧率 7.85 Hz、
-    配置按 0.126 s 对齐。
+    配置按 0.126 s 对齐。全栈实测频率 **7.67 Hz**（§5.9）⇒ 与离线口径基本一致（差 2%），
+    这组参数在全栈里**仍然成立**（至少在这一次跑里）。
+11. ✅ **【同日第三批修复】"没装本包 ⇒ 所有组合都起不来"**（launch 描述构建期无条件查包）：
+    症状/根因/修法/证据见 **§4.1**。⚠️ 只修了 2026-10-05 这批新槽位
+    （`small_point_lio` / `icp_registration` / `gicp_registration`）；
+    `fast_lio` / `point_lio` / `slam_toolbox` / 常开节点那批**仍是构建期查包**（§4.1(f)、§9 第 14 条）。
 
 ---
 
@@ -477,8 +656,11 @@ colcon build --symlink-install --packages-select small_point_lio
 source install/setup.bash
 
 # ② 起全栈（默认值不变，只有这一条命令是新槽位）
-#    注：launch 的 lio:=small_point_lio 分支**已经默认加载 mid360_sim_tuned.yaml**（§5.7），
-#    不需要在命令行里传任何调参文件。
+#    注 1：launch 的 lio:=small_point_lio 分支**已经默认加载 mid360_sim_tuned.yaml**（§5.7），
+#          不需要在命令行里传任何调参文件。启动日志里会打一行
+#          `lio:=small_point_lio 使用的参数文件 = …/mid360_sim_tuned.yaml` 让你确认。
+#    注 2：**没装 small_point_lio 不影响别的组合**（§4.1）：`lio:=fastlio localization:=amcl`
+#          照常能起；只有**真选了** `lio:=small_point_lio` 才会报"缺哪个包 + 该怎么建"。
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
   lio:=small_point_lio localization:=amcl nav:=rpp spin_speed:=0.0
 ```
@@ -487,13 +669,15 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
 
 ```bash
 # (1) 里程计出数且频率对得上点云（期望 ≈7~8 Hz，与 /livox/lidar 同量级）
+#     全栈实测口径：RTF≈0.74 时 /odom = 7.3~7.6 Hz（§5.9）
 ros2 topic hz /odom
 
 # (2) TF 真在动、且量纲合理（期望位置在米级、平滑；不是恒 0 也不是每秒几十米）
 ros2 run tf2_ros tf2_echo odom base_link
 
 # (3) ★ 关键：/odom 的轨迹要跟真值/基线对得上
-#     —— 2026-10-05 起本槽位**离线已调住**（§5.7）；但"全栈里到底差多少"仍必须自己看一遍。
+#     —— 2026-10-05 起本槽位**离线已调住**（§5.7）、**全栈已跑通**（§5.9）；
+#     但"全栈里的**逐点**精度差多少"仍必须自己看一遍（§9 第 2 条没测）。
 #     同一条路线分别用 lio:=fastlio 与 lio:=small_point_lio 跑一遍，比 end-to-end 到达误差/漂移；
 #     或先用离线重放做 A/B（不需要 Gazebo、一轮 = duration 秒）：
 python3 tools/lio_node_alone_check.py --duration 40          # 看"轨迹长度 / 末位置 / 参照"那几行
@@ -502,8 +686,12 @@ python3 tools/lio_param_sweep.py --configs tools/lio_sweep_configs/single_knob_w
 
 # (4) 帧树：主链应是 map→odom→base_link→base_link_fake→…，且**没有多父边/闭环**
 ros2 run tf2_tools view_frames            # 本槽位不应出现 camera_init→body 那条孤岛（见 docs/tf_interface_contract.md §P1）
-#     注：map→odom 的唯一发布者 = localization 槽那一个节点（本槽位不参与），可用
-#     `ros2 run tf2_tools view_frames` 的图 + `ros2 node info <重定位节点>` 交叉确认
+#     注：map→odom 的唯一发布者 = localization 槽那一个节点（本槽位不参与）。
+#     ⚠️ ROS 2 的 view_frames 只能给"边 + 速率"，**给不出 broadcaster 节点名**（实测全是 default_authority）
+#     ⇒ "odom→base_link 只有一个发布者"要这样确认（§5.9 就是这么做的）：
+#         ros2 node list | grep lio_tf_adapter               # 本槽位必须**没有输出**
+#         ros2 topic info /tf -v                             # 发布者里只应有 small_point_lio 这一路 LIO
+#         ros2 param get /small_point_lio space_downsample   # 应为 False（= 确实加载了 tuned 版）
 
 # (5) P0 回归（另开一个终端；脚本只发目标并监视，不自起栈）
 python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 \
@@ -513,36 +701,52 @@ python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 \
 **判据**：`/odom` ≈7~8 Hz 且 `tf2_echo odom base_link` 连续 → 链路 OK；
 **再加两条**：①「同轨迹 vs `lio:=fastlio` 的漂移差」；②「全程路径长度量级」——
 离线口径下 tuned 版 ≈ FAST-LIO 的 0.95~1.15 倍（真跑会因 CPU/RTF 不同而变，但**不该出现 3 倍以上**）。
+**全栈对照参照值（`nav:=rpp planner:=navfn`，`spin_speed:=0.0`，§5.9）**：PASS / SUCCEEDED ≈70~74 s /
+`recoveries=4` / RTF 0.74 vs 0.78 / `/odom` 7.3 vs 8.0 Hz / missed rate 各 1 次 ——
+与 FAST-LIO 的差在 5~10% 以内算正常；`/odom` 掉到 4 Hz 以下或 TF 出现断链才算异常。
 
 ## 8. 回退
 
 - **不改默认值** ⇒ 什么都不用做，`lio` 仍是 `fastlio`（本槽位所有改动都在 `lio:=small_point_lio` 分支内）；
 - 单次回退：去掉 `lio:=small_point_lio`（或显式 `lio:=fastlio`）；
 - **【最常用】把本槽位退回"上游默认滤波参数"**：把
-  `src/rm_nav_bringup/launch/bringup_sim.launch.py:61-62` 的 `'mid360_sim_tuned.yaml'`
-  改回 `'mid360_sim.yaml'`（**一行**；两个文件都还在，`mid360_sim.yaml` 未被修改）。
+  `src/rm_nav_bringup/launch/bringup_sim.launch.py:153`（`small_point_lio_params = _PackageShareFile(...)`
+  那一处）的 `'mid360_sim_tuned.yaml'` 改回 `'mid360_sim.yaml'`（**一行**；
+  两个文件都还在，`mid360_sim.yaml` 未被修改）。
   退回后**它会重新变成"跟不住"**（30 m 级、且不可重复），所以这只用于对照实验；
+- **回退 launch 的惰性解析改动（§4.1）要单独想清楚**：`git revert <该提交>` 会把它一起退回，
+  退回后又变成"缺任何一个新槽位的包 ⇒ **所有**组合都起不来"。一般**不要**退这一条；
 - 只想临时试别的参数：不改文件，直接在 `ros2 run` 上手传（见 `mid360_sim_tuned.yaml` 头部注释）；
 - 整体回退：`git revert <本次提交>`（新增包是独立目录，删掉即可，不留残留）；
 - 若怀疑是那个 `timebase` 补丁：把 `src/rm_localization/small_point_lio/src/lidar_adapter/livox_custom_msg.h`
   恢复成上游原版并重编 —— 但那样它会**静默不出 odom**（§5.3），所以正确顺序是"先改仿真插件补 `timebase`"。
 
-## 9. 未验证清单（本次**没有**做、也不该假装做了的）
+## 9. 未验证清单（**没有**做、也不该假装做了的）
 
-1. ⚠️ **全栈闭环（仍然是第一条）**：本任务禁止起 Gazebo/nav2 ⇒ `lio:=small_point_lio`
-   **至今没有**和 nav2/costmap/AMCL/mapper/Gazebo 一起跑过。§5 **全部**是"只跑 LIO 节点 +
-   离线重放 bag"的结果，**没有任何一条是全栈里的**。具体没验的：
-   ① 全栈下 `/odom` 的实速率与实时性（重放是 1:1 墙钟，Gazebo 里 RTF<1、CPU 还要和 nav2 分）；
-   ② 与 `map→odom`（AMCL/beluga 等）叠加后的整体 TF 行为；③ end-to-end 到达误差/任务成功率。
-2. **精度/漂移**：§5.7 的结论是**离线开环、单条 bag、四个窗口**上的；同一份数据上
-   长度 0.95~1.15× FAST-LIO 参照、ATE 0.24~0.42 m。**"在我们的场地里跑一条完整路线差多少"仍没有答案**
+> 📌 2026-10-05 同日第三批更新：第 1 条（全栈闭环）**已从"未验证"移出**，进了 §5.9 的实测表；
+> 下面每条都写清"全栈里验过什么、还剩什么没验"。
+
+1. ✅ **【已补上，见 §5.9】全栈闭环**：`lio:=small_point_lio localization:=amcl nav:=rpp spin_speed:=0.0`
+   已在 Gazebo + nav2 + AMCL + costmap 下跑完 P0 回归（**PASS / SUCCEEDED 74.0 s / RTF 0.74 /
+   `/odom` 7.3 Hz / TF 链连续 / `lio_tf_adapter` 未启动**），并与 `lio:=fastlio` **同命令对照**。
+   **但下面这些仍属"没验"**：
+   ① 只跑了**一条**目标点（`--goal -1.0 2.0`）、**一个**场地（RMUL2026）、**一次**重复
+   （对照也只有一次）⇒ 没有统计意义，只能说明"能跑通、与 FAST-LIO 同量级"；
+   ② `localization:=''` 的回退路径（LIO 当绝对定位 + 那条 `map→odom` 恒等静态桥）**没跑**；
+   ③ 其它重定位槽（beluga / slam_toolbox / icp / gicp / small_gicp / cartographer）与本槽位的组合**没跑**；
+   ④ `mode:=mapping` / `mode:=slam_nav` 下本槽位**没跑**；`nav:=dwb|teb|mppi`、`planner:=smac2d` **没跑**。
+2. ⚠️ **全栈里的"逐点轨迹精度"仍未测**：§5.7 的 0.95~1.15× / ATE 0.24~0.42 m 是**离线开环、单条 bag、
+   四个窗口**上的；§5.9 给出的全是**导航层面**的证据（到达/成功/链路/速率），
+   **没有**采集全栈里 `/odom` 与 `/odom_ground_truth` 的逐点对照（ATE、末位置漂移、路径长度比）。
+   ⇒ **"在我们的场地里跑一条完整路线，它的 `/odom` 到底差多少米"仍没有答案**
    （bag 里的路线是真实的 RMUL2026 场地回波，但只是一小段）。
-3. **CPU/实时性**：本轮**测了 LIO 节点自己**（§5.8d：上游默认 0.8 s / tuned 3.1 s CPU 每 40 s 重放，
-   ≈2% / 8% 单核）—— 但这是**离线重放**、且 Python 喂数据端也在抢 CPU。
-   **全栈里（Gazebo + nav2 + costmap + 本节点同时跑）的真实占用与最坏帧耗时仍未测**；
-   与 FAST-LIO 的同口径 CPU 对比也**没有**数据（上游自称比 Point-LIO 快 2~3×，**未复核**）。
-4. **`spin_speed != 0`（小陀螺）下的表现**、以及 §6.2 那个杆臂偏置在**转弯/自转**时的影响：
-   本轮 bag 里最大偏航角速度只有 0.24 rad/s，**没有**覆盖高速自转。
+3. **CPU/实时性**：离线侧只测过 LIO 节点自己（§5.8d：上游默认 0.8 s / tuned 3.1 s CPU 每 40 s 重放）。
+   **全栈侧本次只拿到间接证据**：同机同时段 A/B 下 RTF 0.739 vs 0.784、`/odom` 7.3 vs 8.0 Hz
+   ⇒ 本槽位比 FAST-LIO 多花约 **5~9%**；但**单进程 CPU 占用、最坏帧耗时、余量**都没测，
+   与 FAST-LIO 的同口径 CPU 数字也**没有**（上游自称比 Point-LIO 快 2~3×，**未复核**）。
+4. **`spin_speed != 0`（小陀螺）下的表现**：§5.9 的两次跑**都是 `spin_speed:=0.0`**；
+   默认的小陀螺（5.0）下本槽位 + nav2 **一次都没跑**。§6.2 那个杆臂偏置在**转弯/自转**时的影响
+   同样**未验**（本轮 bag 里最大偏航角速度只有 0.24 rad/s，**没有**覆盖高速自转）。
 5. **建图产物**：`save_pcd` 关着 ⇒ 本槽位没有 PCD 输出，`PCD/<world>.pcd` 不会被它更新。
 6. **与 `localization:=''` 回退路径的联调**：那条 `map→odom` 恒等静态桥只做了静态检查（条件互斥性），
    **没有**实跑过。
@@ -561,3 +765,9 @@ python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 \
 12. **【新】扫描是"单键 + 少量组合"**，不是全局最优搜索：一共 15 批、约 100 次重放。
     没有做的：贝叶斯/网格联合搜索、`map_resolution × leaf` 二维、`extrinsic_est_en: true`
     （在线估计雷达-IMU 外参）——**都没有**试。
+13. **【新，同日第三批】全栈那次跑**：Run A 的收尾是"namespace 整体销毁"（不是干净 SIGINT），
+    所以**没有**观察本槽位在 SIGINT 关栈时的行为；对照 Run B 在 SIGINT 时 `fastlio_mapping`
+    出现了 SIGSEGV(−11)（**仅收尾阶段**，不影响测量）⇒ 关栈路径各槽位都不算干净，**没验**。
+14. **【新，同日第三批】`bringup_sim.launch.py` 的惰性解析只覆盖了 2026-10-05 这批新槽位**：
+    `fast_lio` / `point_lio` / `slam_toolbox` / 常开节点那批**仍然是构建期查包**（§4.1(f)）
+    ⇒ "把 `point_lio` 卸了还能不能跑 `lio:=fastlio`"这类隔离性**没有**做（现在答案是不能）。
