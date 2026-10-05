@@ -829,6 +829,36 @@ ros2 param get /global_costmap/global_costmap.obstacle_layer.enabled          # 
 | `tools/pcd_to_grid_map.py` | 离线把 LIO 的 `.pcd` 投成 `.pgm`（第三条建图路线）；`--compare` 可与已有栅格图比对结构一致性 |
 | `global_obstacle` 生效确认 | `ros2 param get /global_costmap/global_costmap.{stvl_layer,obstacle_layer}.enabled` —— 两个里恰有一个 True |
 | `local_obstacle` 生效确认 | `ros2 param get /local_costmap/local_costmap.{obstacle_layer,obstacle_cloud_layer}.enabled` —— `scan` → 前者 True；`both` → 都 True |
+| `tools/scripts/regress/nav_smoke_regression.py` | ⭐ **P0 验收闸门**（链路体检 → 发目标 → 命令链/结果断言 → JSON 快照）；发目标语义已对齐"人在 RViz 里点目标"，见 **§9.4** |
+
+### 9.4 P0 回归工具 `nav_smoke_regression.py`：**发目标语义 = 人在 RViz 里的做法**（2026-09 新增）
+
+`tools/scripts/regress/nav_smoke_regression.py` 是每个候选组合的验收闸门（链路就绪 → 发目标 → 四跳命令链/真值 → 结果断言 → JSON 快照）。
+2026-09 之前它"链路刚就绪就发目标 + 目标朝向写死 `w=1.0`（yaw=0，即到点朝地图东）"，实测产生过**误导性 FAIL**：
+同一条链路，人手动在 RViz 里点 `2D Goal Pose` 却正常。现在它按人类的三个习惯来（三个新旗标）：
+
+| 新旗标 | 默认 | 为什么存在（人类语义 / 发目标时机 / 目标可用性） |
+|---|---|---|
+| `--yaw {auto\|<rad>}` | `auto` | **人类语义**：人在 RViz 里拖 `2D Goal Pose`，箭头默认朝**车当前朝向**，而旧工具写死 yaw=0。`auto` 用工具本来就在跟踪的三条 TF（`map→odom` ∘ `odom→base_link` ∘ `base_link→base_link_fake`）做**平面复合**（只算 yaw：`p_map=p_a+R(yaw_a)·p_b`、`yaw=yaw_a+yaw_b`，**不引入 tf_transformations**）取车在 `map` 系里的当前朝向；TF 还不全时依次退回"车→目标方向"、"yaw 0"，并在输出与 JSON 里写明来源（`yaw_source: tf\|to_goal\|fallback`，`--yaw <rad>` 时为 `explicit`）。注意 goal checker 已是 `PositionGoalChecker`（位置-only）⇒ 朝向只影响"像不像人"，不影响成败判定；`--yaw 0` 可复现旧行为做 A/B |
+| `--settle <sec>` / `--settle-timeout <sec>` | `3.0` / `30.0` | **发目标时机**：人点目标前会先确认定位稳了（粒子云收敛、ICP 配准完、SLAM 没在跳变）。链路就绪后、发目标前，等 `map→odom` 在最近 `--settle` 秒内平移漂移 ≤0.02 m、yaw 漂移 ≤0.01 rad（~10 Hz 轮询 + 每秒打印进度）；超过 `--settle-timeout` 只打 **WARNING** 并继续发目标（JSON 记 `settled:false` + 实测漂移），**不会静默跳过**。理由是实测里"在 localizer 收敛瞬态发目标"会被 nav2 ABORT，看起来像导航坏了。`--settle 0` = 不等（旧行为） |
+| `--no-precheck`（配套 `--map-topic` / `--map-timeout`） | 关（即默认**做**预检） | **目标可用性**：先读先验地图 `/map`（RELIABLE + TRANSIENT_LOCAL，map_server 是 latched），按 `info.resolution/origin/data` 把目标格分类 `free`/`occupied`/`unknown`/`out_of_map`（0=free、100=occupied、-1=unknown，与 `tools/scripts/nav/segment_goal_navigator.py` 同一套规则）。**非 free 就打印可操作错误并 exit 3、不发目标**（"请换一个 free 点；这不算导航失败"）—— 把"选点不对"和"导航链坏了"彻底分开；`/map` 收不到（话题名不同 / 发布端非 latched）只告警并跳过预检，仍然发目标 |
+
+**用法示例**（栈先在终端 A 跑起来；选点先看 §0.6，同一连通域）：
+
+```bash
+# 默认：等定位稳定 → 预检目标 → 以"车当前朝向"发目标（复跑曾经误导的用例）
+python3 tools/scripts/regress/nav_smoke_regression.py --goal 1.0 -1.0
+# A/B 与单独用法
+python3 tools/scripts/regress/nav_smoke_regression.py --goal 1.0 -1.0 --yaw 1.57 --settle 5
+python3 tools/scripts/regress/nav_smoke_regression.py --skip-goal                 # 只体检链路（不停留等稳定/预检）
+python3 tools/scripts/regress/nav_smoke_regression.py --goal 1.0 -1.0 --no-precheck
+```
+
+**退出码**：`0`=PASS；`1`=FAIL（链路/导航，看 `fails[0]` 首个断点）；**`3`=目标在图上 occupied/unknown/图外（未发目标，不算导航失败）**
+—— 这一种情况下 JSON 里 `pass:false`（没验证过导航）但 `nav_failure:false`、`result:"goal_rejected"`、`abort` 写明原因，别把它当成"导航失败"。
+**JSON 快照**（`.tmp_bags/regress_<ts>.json`）在原有字段（`pass/fails/notes/rtf/hz/cmd/goal/...` 名字与含义不变）之外新增：
+`goal_yaw` / `goal_yaw_deg` / `yaw_arg` / `yaw_source` / `yaw_note`、`settle{enabled,settled,waited,drift_xy,drift_yaw,samples,settle_sec,timeout_sec}`、
+`map_check{enabled,checked,topic,state,value,cell,map}`、`result` / `exit_code` / `nav_failure` / `abort`。
 
 
 ---
