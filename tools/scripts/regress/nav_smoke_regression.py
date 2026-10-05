@@ -29,6 +29,12 @@
   python3 tools/scripts/regress/nav_smoke_regression.py --skip-goal          # 只体检链路
   python3 tools/scripts/regress/nav_smoke_regression.py --no-precheck        # 跳过目标可用性预检
   python3 tools/scripts/regress/nav_smoke_regression.py --ready-timeout 240 --goal-timeout 180
+  python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization gicp
+
+`--localization <NAME>`：给这次跑**贴标签**（通常 = launch 的 `localization:=<NAME>`，例如
+gicp / amcl / beluga / icp）。它只影响打印与快照，不改任何行为；给了就写进 JSON 的
+`localization` 字段（`compare_regress_snapshots.py` 的「方法」列会**自动**读出来，不必再用
+`--label` 事后标注）；不给则字段不写入（旧行为/向后兼容，表里显示 `?`）。
 
 退出码：0=PASS；1=FAIL（链路/导航，见 fails）；**3=目标在图上是 occupied/unknown/图外，未发目标**
 （"这不是导航失败"）；2 未被本工具使用。
@@ -387,12 +393,26 @@ def main():
                     help="先验地图话题（默认 /map；map_server 是 latched 的，用 RELIABLE+TRANSIENT_LOCAL 订阅）")
     ap.add_argument("--map-timeout", type=float, default=20.0,
                     help="等先验地图的秒数（默认 20.0）；等不到只告警并跳过预检（仍然会发目标）")
+    ap.add_argument("--localization", default=None, metavar="NAME",
+                    help="给本次跑贴标签（= launch 的 localization:=<NAME>，如 gicp/amcl/beluga/icp）："
+                         "打印在运行头部 + 写进快照的 localization 字段（对比工具自动读作「方法」列）；"
+                         "不给则快照不写该字段（向后兼容，表里显示 ?）")
     ap.add_argument("--outdir", default=".tmp_bags")
     a = ap.parse_args()
 
     rclpy.init()
     n = Regress(a)
     fails, notes = [], []
+
+    # ---------------- 运行头部：这次跑的是哪一路定位（--localization 贴的标签）----------------
+    print("=" * 72, flush=True)
+    print("P0 回归｜localization=%s（--localization%s）｜goal=%s｜%s"
+          % (a.localization or "?", "" if a.localization else " 未给，快照不写该字段",
+             a.goal, time.strftime("%Y-%m-%d %H:%M:%S")), flush=True)
+    print("=" * 72, flush=True)
+    if a.localization:
+        # 同时进 notes：老快照/文本解析路径（METHOD_RE）也能认出方法名
+        notes.append("localization=%s" % a.localization)
 
     def hp():
         print("  [%5.1fs] clock=%s | pcloud=%s | imu=%s | scan=%s | odom=%s | fp=%s | TF=%s"
@@ -602,6 +622,10 @@ def main():
             "spin_speed": n.spin_speed, "d_min": n.d_min,
             "gt_twist_max": n.gt_twist_max, "gt_pose_delta": n.gt_pose_delta,
             "goal": a.goal, "skip_goal": a.skip_goal,
+            # --localization 贴的标签：给了才写（None ⇒ 不写该字段，旧快照语义/向后兼容）
+            # 键名就用 "localization" —— compare_regress_snapshots.py 的 METHOD_KEYS 首位即是它，
+            # 「方法」列会自动读出来，不必再 --label 事后标注（docs/algorithm_matrix.md §9.1）。
+            **({"localization": a.localization} if a.localization else {}),
             # ↓ 本次新增（旧字段全部保持原名/原义，方便老的对比脚本继续读）
             "result": result, "exit_code": code, "nav_failure": bool(fails), "abort": abort,
             "goal_yaw": goal_yaw,
