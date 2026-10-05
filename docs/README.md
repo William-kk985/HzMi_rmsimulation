@@ -45,6 +45,7 @@
 | `sim_real_contract.md` | **仿真 ↔ 实车契约**：分界点/替身清单、共用接口、参数分家、三分类判据、禁止清单、验收判据 | **"改动会不会上实车 / 该不该为仿真动算法"的唯一真值** |
 | `debug_fastlio_cartographer.md` | **调试手册（针对 `mode:=mapping`+`lio:=fastlio`+`mapper:=cartographer` 这套链路，§0.1 有范围声明）**：分层判读法（L0–L6）、诊断工具、实测基线数字、症状→判据→处置速查表、踩坑清单；**§5.2.4 = "留不住"的离线复现结论与参数扫描表** | **"SLAM/建图异常怎么查"的方法论真值** |
 | `cartographer_2d_occupancy_semantics.md` | **cartographer 2D 占据栅格语义逐行考据**（2.0.9004/2.0.9002，与上游 master 逐字节相同）：命中/清除写入顺序与"同周期先写者胜"、`missing_data_ray_length` 只在超距回波分支生效、`kMin/kMaxProbability=0.1/0.9`、LaserScan 两级过滤（`inf` 被丢弃）、**`/map` 取值上限 75 的完整推导**（含 pycairo/C++ 两路复算） | 改 cartographer 参数前的**源码级依据**；§5.2.4 与 `cartographer.lua` 注释都引用它 |
+| `worlds.md` | **整场世界资产（`RMUC2026`，由附件 STL 生成）**：资产清单 / mm→m 与 z 抬升的依据 / 出生点怎么选 / 2D 图与先验 PCD 怎么来 / 无头实测（建图·AMCL·GICP）/ 场地对本车的坑 + `tools/scripts/world/stl_to_world.py` 一条命令复跑（§4.4） | **场地世界资产与生成口径的唯一真值**（含"可通行 ≈176 m²"等实测量） |
 
 ## 二、选型与路线（参考）
 
