@@ -22,11 +22,15 @@ controller_server:
       movement_time_allowance: 10.0
     
     # Goal checker parameters
+    # ★ 2026-10-05：SimpleGoalChecker → PositionGoalChecker —— 全向车（mecanum）**没有"车头"概念**
+    #   ⇒ 终点只约束位置；这同时消除了"位置到了但朝向过不了 → progress checker 判失败 → 反复恢复 → ABORT"这一失败模式。
+    #   键名已核实（已装 nav2 1.1.20）：该插件只声明 xy_goal_tolerance / stateful
+    #   （share/nav2_controller/plugins.xml + libposition_goal_checker.so 的编译期字面量）；
+    #   yaw_goal_tolerance / path_length_tolerance 在 1.1.20 的 PositionGoalChecker 里**不存在** ⇒ 删掉/不写（写了是静默失效）。
     general_goal_checker:
       stateful: True
-      plugin: "nav2_controller::SimpleGoalChecker"
+      plugin: "nav2_controller::PositionGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
     
     # 局部规划器变体：MPPI（nav:=mppi，A/B 对照专用）
     #   本文件 = nav2_params_sim_rpp.yaml 的副本，**除 controller_server 段外逐字节相同**
