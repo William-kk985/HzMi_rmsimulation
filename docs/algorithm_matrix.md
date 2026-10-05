@@ -477,10 +477,15 @@ python3 tools/scripts/regress/compare_regress_snapshots.py --markdown
    0.0077 m / 0.0032 rad（阈值 0.02 m / 0.01 rad，**过**）；`nav=smooth=chassis=(1.46,0.87)`
    四跳一致 ⇒ `spin_speed=0.0` 直通；真值位移 2.802 m；missed **0**；align 中位数 **15.7 ms**。
    与 `docs/build_optimization.md` §2.2 台架的 11.3 ms 同量级（节点里还有下采样/评分/日志开销）。
-2. **gicp / `backend: small_gicp`（13:57:11 起栈，13:57:45 PASS）** —— 唯一差别是把
+2. **`localization:=small_gicp`（13:57:11 起栈，13:57:45 PASS）** —— 唯一差别是槽位换成
+   `small_gicp`：**`small_gicp` 自成一个 `localization` 值，`backend: "small_gicp"` 由 launch
+   自己注入 ⇒ 不改任何 YAML、也不用 `git checkout`**（`gicp` 槽位不注入 ⇒ 保持节点默认 `pcl`；
+   见 `docs/localization_slots.md` §1 的"一槽位一行"表 + 实现细节脚注）。
+   （历史：2026-10-05 当时还没有这个槽位，测量时是把
    `src/rm_localization/gicp_registration/config/gicp_registration_sim.yaml` 的 `backend: "pcl"`
-   临时改成 `"small_gicp"`（`--symlink-install` ⇒ 免编译即生效），**跑完在同一调用里 `git checkout`
-   还原**（还原后 `git status` 干净、配置行回到 `pcl`）。accuracy 同级（0.00230 vs 0.00226 m²）、
+   临时改成 `"small_gicp"`（`--symlink-install` ⇒ 免编译即生效）、跑完 `git checkout` 还原，
+   当时快照记录的方法也是 `gicp` —— 两条路的代码路径完全相同，故下面数字仍然有效；
+   该做法已由 `2c42339`（2026-10-05 同日）简化。）accuracy 同级（0.00230 vs 0.00226 m²）、
    align 中位数 **15.7 → 2.9 ms（5.4×）**，与台架的 11.3 → 2.3 ms（4.9×）一致 ⇒ **两者互相印证**。
    注意 `smooth/chassis` 的 |v|,|w| 是 (1.41,0.71) 而 `nav` 是 (1.42,0.82)：**速度平滑器限幅**，
    不是命令链断（四跳仍逐级贯通，真值 twist 1.395 / 位移 2.782 m）。
@@ -520,16 +525,22 @@ source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select gicp_registration
 cat build/gicp_registration/cmake_args.last     # 必须含 -DCMAKE_BUILD_TYPE=Release
 
-# 1) 逐路跑（每一路都：起栈 → 回归 → 收尾，再起下一路；5 路只换 localization:= 和 backend）
+# 1) 逐路跑（每一路都：起栈 → 回归 → 收尾，再起下一路；5 路只换 localization:= 一个词）
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
   lio:=fastlio nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=False localization:=gicp
 python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization gicp
 
-# ① → ② gicp 换后端：改这一行（--symlink-install 免编译），跑完记得 git checkout 还原
-#     src/rm_localization/gicp_registration/config/gicp_registration_sim.yaml: backend: "pcl" → "small_gicp"
-# ③ amcl / ④ beluga / ⑤ icp：只把 localization:= 换成 amcl / beluga / icp（此时对应槽位不需要第①步的改动）
+# ① → ② gicp 换 small_gicp 后端：**只换槽位**（launch 自己注入 backend: "small_gicp" ——
+#     不用改 YAML、不用 -p backend:=...、也不用 git checkout；见 docs/localization_slots.md §1）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=False localization:=small_gicp
+python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization small_gicp
+# ⚠️ 2026-10-05 那次记录的快照是 --localization gicp（当时还没有 small_gicp 槽位，靠临时改 YAML 的
+#    backend 切换 ⇒ 快照 localization=gicp）；同一份表里的这个槽位名以当时的记录为准，今天重跑用上面这行
+# ③ amcl / ④ beluga / ⑤ icp：只把 localization:= 换成 amcl / beluga / icp
 
-# 2) 出表（--localization 已进快照 ⇒ 方法列自动填；两个 gicp 用 --label 显示区分 backend）
+# 2) 出表（--localization 已进快照 ⇒ 方法列自动填；本批两个 gicp 行的 localization 都记成 `gicp`，
+#    故用 --label 把方法列显式区分 backend）
 python3 tools/scripts/regress/compare_regress_snapshots.py --last 5 --markdown \
   --label regress_1791179769='gicp (pcl)' --label regress_1791179865='gicp (small_gicp)'
 python3 tools/scripts/regress/compare_regress_snapshots.py --last 5 --markdown   # 不标注也能出表（头两行都显 gicp）
@@ -545,6 +556,7 @@ python3 tools/scripts/regress/compare_regress_snapshots.py --last 5 --markdown  
   `compare_last5*.txt`；`probe.log` / `probe2.sh` 是 headless 可行性探针（`$HOME` 只读导致
   gzserver SIGABRT 的现场记录）。
 - **配置没有被永久改动**：`backend` 临时改成 `small_gicp` 后已在同一次调用里 `git checkout` 还原
-  （`git status` 干净）；快照写入的是既有的 `.tmp_bags/`（未跟踪）。
+  （`git status` 干净）；快照写入的是既有的 `.tmp_bags/`（未跟踪）。**该临时改法已不需要**（`2c42339`
+  起 `localization:=small_gicp` 即可，见 9.2.4 第 2 条），这里只是当时那次测量的现场记录。
 - **进程**：每次测量结束都 SIGINT→20 s→SIGKILL 进程组并 `pgrep` 复查无残留；
   沙箱本身用独立 PID namespace（调用一结束，该次的所有进程由内核清掉）⇒ 不会留下 gzserver/nav2。
