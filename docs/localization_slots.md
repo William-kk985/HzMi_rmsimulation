@@ -1,27 +1,73 @@
 # 重定位槽位登记表（localization slots）
 
 > 入口：`bringup_sim.launch.py` 的 `localization` 参数（**仅 `mode:=nav` 生效**）
-> 当前 choices：`['', 'amcl', 'beluga', 'slam_toolbox', 'icp', 'gicp', 'cartographer']`
+> 当前 choices：`['', 'amcl', 'beluga', 'slam_toolbox', 'icp', 'gicp', 'small_gicp', 'cartographer']`
+> （`ros2 launch rm_nav_bringup bringup_sim.launch.py --show-args` 能直接看到这行说明）
 > **统一契约**：重定位槽**只负责发布 `map→odom`**；`odom→base_link` 由 LIO（+ `lio_tf_adapter`）负责；Nav2 用 `base_link_fake`。
 > **`map→odom` 只能有一个发布者** ⇒ 重定位槽之间、以及与 `mapper:=*` 之间必须互斥。
 
-## 1. 已可用（现成入口）
+## 1. 槽位一览（**一个槽位值一行**，选一个就跑）
 
-| 槽位值 | 节点 / 包 | 参数文件 | 需要的资产（现状） |
-|---|---|---|---|
-| `amcl` | `nav2_amcl` | `rm_navigation/params/nav2_params_sim_base.yaml`（已调：`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 已打开，见工单 §K） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ |
-| `beluga` | `beluga_amcl/amcl_node`（AMCL 的现代实现，**同名参数、同 lifecycle 形态**；2026-10-05 新增，见 §1.2） | `rm_navigation/params/nav2_params_sim_beluga.yaml`（`amcl` 段；`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 原样搬运） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ **+ 需装 `ros-humble-beluga-amcl`**（Humble 有官方二进制；源码路线见 §1.2） |
-| `icp` | `icp_registration/icp_registration_node`（**我们自己的包**，可改） | `icp_registration/config/icp_registration_sim.yaml`（含 `pcd_path`） | 先验点云 `rm_nav_bringup/PCD/RMUL2026.pcd` ✅（RMUL/RMUC 也有文件，但 **RMUC.pcd 是退化资产**，见 §1.1） |
-| `gicp` | `gicp_registration/gicp_registration_node`（**我们自己的包**，2026-10-05 新增）；配准后端 `backend: pcl \| small_gicp` = **两个对等可选实现**（默认 `pcl` 是**选择**，不是因为另一个更差） | `gicp_registration/config/gicp_registration_sim.yaml`（含 `pcd_path`、`backend`、`tf_lookahead_sec`、两级 leaf `voxel_leaf_size 0.10` / `voxel_leaf_size_scan 0.05`，见 §1.1） | 先验点云 `rm_nav_bringup/PCD/<world>.pcd` ✅（RMUL2026 实测可用，0.10 m leaf 后 target ≈1.2e4 点；**必须有初值**，见 §1.1）。**两个后端都已过整栈 P0 回归**（Release 口径：align **15.7 vs 2.9 ms**、fitness **0.00226 vs 0.00230 m²**、采纳 **165/165 vs 167/167**；详见 `docs/gicp_backend_small_gicp.md` §4.5 与 `algorithm_matrix.md` §9.2.3） |
-| `slam_toolbox` | `slam_toolbox/localization_slam_toolbox_node` | `slam_toolbox/config/mapper_params_localization_sim.yaml` + launch 注入 `map_file_name=map/<world>`、`map_start_pose=[0,0,0]` | **序列化位姿图 `map/RMUL2026.posegraph(+.data)` ❌ 缺**（RMUC/RMUL 有）⇒ 需先建图并 `serialize_map` |
-| `cartographer` | `cartographer_node`（纯定位） | cartographer 配置 | `map/RMUL2026.pbstream` ✅ |
-| `''`（留空） | 无重定位：LIO 当绝对定位 + 静态桥补帧 | — | — |
+> **选槽位的人只需要看这张表**：一个槽位值 = 一个重定位器；"它内部怎么实现、要不要额外配参数"一律不用管
+> （`icp` / `gicp` / `small_gicp` 是**三个并列的值**，各自一条命令 —— 见下表与本节末尾的实现细节脚注）。
+>
+> 命令列 = `world:=RMUL2026` 下的**完整启动命令**（最小形态：`nav`/`planner` 走默认值）；
+> 要 A/B 就在后面追加同一组公共选项 `nav:=mppi planner:=smac2d spin_speed:=0.0`（几路必须一致，见 §4）。
 
-运行示例（把 `localization:=` 换成上表任一项）：
+| 槽位值 | 一句话是什么 | 需要的资产 | 运行命令 | 状态 | 已知限制 |
+|---|---|---|---|---|---|
+| `amcl` | `nav2_amcl` 粒子滤波（2D 栅格图上定位；**阈值触发**的离散修正器） | 2D 栅格图 `map/RMUL2026.pgm`+`.yaml` ✅（RMUC/RMUL 也有） | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=amcl` | ✅ 已验收（2026-10-05 五路对照：P0 回归 PASS / 3.2 s / `recoveries=0`） | 离散修正（`update_min_d,a` 决定何时更新）⇒ 高速下不如连续型跟手；需初值（launch 已按 world 自动注入出生点，见 `amcl_init_*` 注释）。参数在 `rm_navigation/params/nav2_params_sim_base.yaml`（已调 `transform_tolerance 0.3`） |
+| `beluga` | `beluga_amcl/amcl_node` —— **AMCL 的现代实现**（同名参数、同 lifecycle 形态） | 同 `amcl` 的 2D 栅格图 ✅ **+ 需装 apt 包 `ros-humble-beluga-amcl`**（2.1.1，不 vendor 代码） | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=beluga` | ✅ 已验收（同日五路对照：P0 回归 PASS / 3.3 s / `recoveries=0`） | 同 AMCL 的离散修正特性；`laser_min_range` 必须 **≥0**（与 nav2 的 `-1.0` 哨兵值不同，写错 = **启动即崩**，见 §1.2.0）；Ctrl-C 收尾会 `exit code -6`（只在收尾，不影响运行，见 §1.2.1）；`/scan` 用 BEST_EFFORT。参数在 `rm_navigation/params/nav2_params_sim_beluga.yaml`（兄弟文件，非复用 base） |
+| `slam_toolbox` | `slam_toolbox/localization_slam_toolbox_node` —— 序列化位姿图上的扫描匹配定位（**连续型**） | **`map/RMUL2026.posegraph`(+`.data`) ❌ 缺**（RMUC/RMUL 有）⇒ 需先建图并 `serialize_map` | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=slam_toolbox` | ⏸ **待实跑**（缺资产；入口与代码保留） | 要长期维护一份 `.posegraph`；**全局重定位弱**（依赖初值）；上游维护节奏慢（§6 决策记录）。参数在 `slam_toolbox/config/mapper_params_localization_sim.yaml` + launch 注入 `map_file_name=map/<world>` |
+| `icp` | `icp_registration/icp_registration_node` —— **PCL ICP** 逐帧精配准（点到点） | 先验点云 `PCD/<world>.pcd` ✅（RMUL2026 有；⚠️ **`RMUC.pcd` 是退化资产**，见 §1.1 资产表） | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=icp` | ✅ 已验收（同日五路对照：P0 回归 PASS / 3.2 s / `recoveries=0`；⚠️ 那次初值恰好正确 —— `algorithm_matrix.md` §9.2.4 第 5 条） | **初值敏感**：需 `/initialpose`（RViz 2D Pose Estimate）或 `initial_pose` 参数；给错初值会**静默**收敛到局部极小（只能靠 `map→odom` 是否合理发现）；点到点代价 ⇒ 精度/鲁棒性低于 GICP 族。参数在 `icp_registration/config/icp_registration_sim.yaml` |
+| `gicp` | `gicp_registration/gicp_registration_node` —— **GICP** 逐帧精配准（面元协方差，比 ICP 稳） | 先验点云 `PCD/<world>.pcd` ✅（RMUL2026 实测：0.10 m leaf 后 target ≈1.2e4 点） | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=gicp` | ✅ 已验收（用户验收"效果可以接受" §7 + 同日五路对照 P0 回归 PASS / 3.3 s / `recoveries=0`） | **必须有初值**（`/initialpose` 或 `initial_pose`；**没有初值就不发 TF**，每 2 s 日志说明一次）；与 `icp` 一样初值敏感；`fitness_score_warn / max_fitness_score`（0.05 / 0.3 m²）是**首跑起始值**，要按实测量级重定。参数在 `gicp_registration/config/gicp_registration_sim.yaml` |
+| `small_gicp` | **`small_gicp` 库的 GICP** 精配准（同一套 GICP 数学、另一个实现，多线程） | 先验点云 `PCD/<world>.pcd` ✅（与 `gicp` **完全同一份**资产） | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=small_gicp` | ⚠️ **待实跑**（本槽位是新增入口，尚未整栈验收）；**实测数据已有**：整栈 P0 回归 PASS / 3.4 s / `recoveries=0` | 与 `gicp` 同契约、同限制（**必须有初值**；初值敏感）；单帧更省 CPU（整栈 align 2.9 ms vs 15.7 ms），代价是 `~/converged` 有帧级抖动（89~92%，**位姿不受影响**）—— 并列取舍见本节末脚注 |
+| `cartographer` | `cartographer_node` **纯定位**（加载 `.pbstream`，frozen state） | `map/RMUL2026.pbstream` ✅ | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=cartographer` | ⚠️ **待实跑**（入口与资产就绪；本轮五路对照未含它） | 栅格另发 `/cartographer_map`（`/map` 留给 `map_server` 的先验图）；`lio:=cartographer` 的**全包形态**不走本槽（那时 `localization` 留空）；配置在 cartographer 包 |
+| `''`（留空） | **不回退到任何重定位**：把 LIO 直接当绝对定位，再用静态桥补帧 | —（不需要地图 / PCD 资产） | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio localization:=''` | ✅ 回退路径（长期在用；`mode:=mapping`/`slam_nav` 也是不用重定位） | **没有真正的重定位**：`map≡camera_init` 恒等静态桥 ⇒ LIO 漂多少就是多少，无回环、无先验图约束；`lio:=cartographer` 时不用它，`lio:=none` 时也无效 |
+
+**三个重定位器的命令只差 `localization:=` 一个词**（复制粘贴即可；`world` 换成 RMUC/RMUL 同理）：
+
 ```bash
-ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
-  lio:=fastlio localization:=icp nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=True
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio \
+  localization:=icp        nav:=mppi planner:=smac2d spin_speed:=0.0
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio \
+  localization:=gicp       nav:=mppi planner:=smac2d spin_speed:=0.0
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=fastlio \
+  localization:=small_gicp nav:=mppi planner:=smac2d spin_speed:=0.0
 ```
+
+> ### ※ 实现细节（槽位用户无需关心）
+>
+> `gicp` 与 `small_gicp` 共用**同一个节点**（`gicp_registration/gicp_registration_node`）、
+> 同一套 GICP 数学、**同一份参数文件**（`gicp_registration/config/gicp_registration_sim.yaml`）、
+> 同一份资产与初值契约，只有**库**不同；节点内部有一个 `backend`（`pcl` | `small_gicp`）开关。
+> **这个开关由 launch 各自的槽位分支注入**：`localization:=gicp` → 不注入（= 文件默认 `pcl`）；
+> `localization:=small_gicp` → launch 注入 `backend: "small_gicp"`。
+> ⇒ **选槽位的人不用改任何配置文件，也不用 `-p backend:=...`**。
+> 之所以仍然分成两个槽位值：① 体验者要的是"选一个重定位器"，不是"配一个后端"；
+> ② `map→odom` 同一时刻只能有一个发布者 ⇒ 两个实现**没法在同一次运行里比**，各自占一个槽位值才能各自复现
+> （这也是"分清楚、不要融合在一起"的落地方式）。
+>
+> 这两条路是**对等取舍，没有主次**（整栈实测，Release 口径，`world:=RMUL2026`，同一目标 `--goal -1.0 2.0`；
+> 出处 `docs/gicp_backend_small_gicp.md` §4.5 与 `algorithm_matrix.md` §9.2.3）：
+>
+> | 指标（整栈） | `localization:=gicp` | `localization:=small_gicp` | 谁更好 |
+> |---|---|---|---|
+> | align 中位数 | 15.7 ms（11.8~25.4） | **2.9 ms**（2.6~4.0） | `small_gicp` 快 **5.4×**（CPU 更省） |
+> | fitness（末帧） | **0.00226 m²** | 0.00230 m² | 同级（差 0.00004 m² = 噪声底） |
+> | 采纳帧数（末帧 `[status]`） | 165/165（100%） | 167/167（100%） | 并列 |
+> | `~/converged` true 比例 | **100%**（20/20、24/24、25/25、127/127） | 89~92%（113/127、117/127；小样本 92~96%） | `pcl` 更干净；`small_gicp` 的抖动是**帧级判定**问题，**位姿不受影响**（机理见 `docs/gicp_backend_small_gicp.md` §6.2） |
+> | 整栈 P0 回归 | PASS / 3.3 s / `recoveries=0` | PASS / 3.4 s / `recoveries=0` | 并列 |
+> | 库与线程 | PCL 1.12.1 `GeneralizedIterativeClosestPoint`（单线程） | vendored `koide3/small_gicp` v1.0.1（MIT，OpenMP，`small_gicp_num_threads: 4`） | — |
+>
+> **一句话**：`small_gicp` 省 CPU（单帧快 5.4×），`pcl` 的 `~/converged` 更干净；精度同级，两边都过整栈 P0 回归。
+> 配置里那句 `backend: "pcl"` **是"选择"，不是因为 `small_gicp` 更差**：现有阈值
+> （`fitness_score_warn 0.05` / `max_fitness_score 0.3` / `tf_lookahead_sec 0.45`）都是按 PCL 路径实测标定的，
+> 改默认值等于换一个未标定的定位栈。要在槽位层面用 `small_gicp`，**直接 `localization:=small_gicp` 即可**
+> （2026-10-05 五路对照时那种"临时把 YAML 改成 `small_gicp`、跑完 `git checkout` 还原"的做法**已不需要**，
+> 见 `algorithm_matrix.md` §9.2.4 第 2 条）。
+> 回退：`localization:=gicp`（= 文件默认 `pcl`）；整包回退 = `git revert` 引入 small_gicp 的那个 commit。
+> 节点内部细节见 §1.1，完整对照 / 台架数据见 `docs/gicp_backend_small_gicp.md`。
 
 ### 1.1 `gicp` 槽位细节（2026-10-05 新增；与 `icp` 同资产、同初值契约）
 
@@ -29,9 +75,11 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
   **两个对等配准后端**（`backend: pcl | small_gicp`，**默认 `pcl`**）：
   `pcl` = PCL `pcl::GeneralizedIterativeClosestPoint`（单线程，BFGS 内层迭代），
   `small_gicp` = vendored `koide3/small_gicp` @ `v1.0.1`（MIT，OpenMP 多线程，LM 优化器）。
-  两者**契约、话题、参数键、健康指标、点类型完全同一套**，切换只改 `backend` 一行；
-  并列的实测取舍（align / fitness / 采纳率 / `~/converged`）与回退见
-  **`docs/gicp_backend_small_gicp.md`**——那是"两个平等选项"的对照表，**没有主次**。
+  两者**契约、话题、参数键、健康指标、点类型完全同一套**。
+  ★ **槽位层面它们是两个独立的值**（`localization:=gicp` / `localization:=small_gicp`，由 `bringup_sim.launch.py`
+  各自的槽位分支注入 `backend`）—— **槽位用户不要在这里改 `backend`**；§1.1 以下讲的都是节点内部细节，
+  并列的实测取舍（align / fitness / 采纳率 / `~/converged`）与回退见 §1 末尾的脚注
+  与 **`docs/gicp_backend_small_gicp.md`**——那是"两个平等选项"的对照表，**没有主次**。
   点类型 = **`pcl::PointXYZ`**（两个后端共用）。
   为什么不用 `PointNormal/PointXYZINormal`：PCL 1.12.1 的 GICP 用 KNN 邻域**自己算协方差**
   （`pcl/registration/impl/gicp.hpp:51-125`，只读 x/y/z），normal/intensity 一律不读；而我们的
@@ -703,21 +751,26 @@ python3 tools/scripts/diag/record_tf_monotonic.py
 
 ## 2. 待补入口（**已登记、未实现**）
 
+下表这几条**还没有槽位值**（在 `--show-args` 的 choices 里选不到 ⇒ 与 §1 那八个值不冲突）；
+落地时按 §3 的三步加一个槽位值，然后从本表移进 §1。
+
 | 计划槽位值 | 用什么 | 依赖 / 资产 | 落地要点 | 估时 |
 |---|---|---|---|---|
 | `scan_context` | Scan Context **全局检索** + ICP/GICP **精配准**（两级） | 需引入 Scan Context 实现 + 用 PCD 建描述子库 | 解决"**车随便摆 / 被搬动**"（ICP 类天生初值敏感）；检索出粗位姿 → 现有精配准 | 2~3 天 |
 | `fastlio_loc` | LIO + 先验 PCD 做配准得 `map→odom`（一体化配方） | PCD 已有 | 与我们 `lio_tf_adapter` 有职责重叠 ⇒ 作为**对照实现** | 1~2 天 |
 | `teaserpp` | TEASER++ 无初值全局配准 | 需引入 TEASER++ + 特征 | 远期；开销大 | 远期 |
 
-> ✅ **`beluga` 已于 2026-10-05 落地**（`localization:=beluga`，装 `ros-humble-beluga-amcl` 2.1.1 即可，
-> 无需源码构建）⇒ 从上表移出，详见 §1.2。它**不新增算法包**、不 vendor 代码：走的正是原计划那条
-> "沿用 AMCL 参数语义做 A/B"的路（同名参数 + 兄弟参数文件），只是把"接口兼容"落实成了逐键映射表。
-
-> ✅ **`gicp` 已于 2026-10-05 落地**（独立包 `gicp_registration`，槽位值 `localization:=gicp`）⇒ 从上表移出，
-> 详见 §1.1。走的**不是**原计划"在 `icp_registration` 内换后端"那条路，而是**新包**：
-> 理由是 icp 槽要保留 ICP 原样做三方 A/B（AMCL / ICP / GICP），两套后端各占一个槽位互不干扰。
-> `small_gicp` **已于同日作为对等后端落地**（`backend` 参数，默认仍 `pcl`；见 §1.1 与
-> `docs/gicp_backend_small_gicp.md`）；`fast_gicp` 仍未引入。
+> **已从本表移出、进了 §1 槽位一览的三项**（都发生在 2026-10-05，都按"一个实现 = 一个槽位值"落的）：
+> · **`beluga`** —— apt 装 `ros-humble-beluga-amcl` 2.1.1（Humble 官方二进制，**不 vendor 代码、不新增算法包**），
+>   走的正是原计划那条"沿用 AMCL 参数语义做 A/B"的路（同名参数 + 兄弟参数文件），
+>   把"接口兼容"落实成了逐键映射表 ⇒ 细节见 **§1.2**。
+> · **`gicp`** —— **新包** `src/rm_localization/gicp_registration/`，**不是**原计划那条"在 `icp_registration` 内换后端"：
+>   理由是 icp 槽要保留 ICP 原样，好做 AMCL / ICP / GICP 的 A/B ⇒ 细节见 **§1.1**。
+> · **`small_gicp`** —— **同日、同包，但自己占一个槽位值 `localization:=small_gicp`**
+>   （不再只是"`gicp` 槽背后的一个 `backend` 参数"）：体验者从槽位表里直接选，**实现细节由 launch 注入**。
+>   并列取舍与实测数据见 §1 末尾的脚注，节点内部细节见 §1.1。
+>
+> 仍未引入：`fast_gicp`（另一个 GICP 实现，需要时按 §3 再加一个槽位值）、以及上表三条。
 
 ## 3. 新增一个重定位槽的**标准三步**（与 planner/controller 槽同构）
 

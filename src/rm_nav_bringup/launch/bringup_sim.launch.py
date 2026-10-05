@@ -134,6 +134,11 @@ def generate_launch_description():
     icp_registration_params_dir = os.path.join(get_package_share_directory('icp_registration'), 'config', 'icp_registration_sim.yaml')
     # ★ 2026-10-05：新增 localization:=gicp 槽（GICP 精配准）—— 与 icp 槽同一份资产（PCD/<world>.pcd），
     #   参数回归 gicp_registration 包自身 config/（见 docs/localization_slots.md §1）
+    # ★ 2026-10-05 同日：新增 localization:=small_gicp 槽 —— **与 gicp 槽共用这一份参数文件**，
+    #   唯一差别是 launch 注入 backend='small_gicp'（文件里的默认值仍是 "pcl"）。
+    #   ⇒ 两个槽位各自一行、互不干扰；文件里那个 backend 默认值**不代表推荐哪一个**，
+    #     而是"单独跑本节点 / 不经验收的用法"时的保守默认（依据见
+    #     docs/gicp_backend_small_gicp.md：两个后端是**对等**取舍）。
     gicp_registration_params_dir = os.path.join(get_package_share_directory('gicp_registration'), 'config', 'gicp_registration_sim.yaml')
     ################################# icp_registration parameters end #################################
 
@@ -174,15 +179,24 @@ def generate_launch_description():
                     '不加载磁盘地图、不起任何重定位模块）| '
                     'nav = 先建图后导航（加载磁盘地图 + 必须指定 localization 重定位模块）')
 
+    # ★ 2026-10-05：新增槽位值 'small_gicp'。三个 ICP 族重定位器（icp / gicp / small_gicp）在
+    #   **槽位层面是三个并列的值**：跑 bench 的人只选一个，不必知道也不必配置"它是怎么实现的"
+    #   （gicp / small_gicp 共用 gicp_registration 这个节点、共用同一套 GICP 数学、只换库 ——
+    #    其中的 backend 由下面各自的 launch 分支**注入**，无需改 YAML、无需 -p backend:=...）。
     declare_localization_cmd = DeclareLaunchArgument(
         'localization',
         default_value='',
-        choices=['', 'amcl', 'beluga', 'slam_toolbox', 'icp', 'gicp', 'cartographer'],
-        description='仅 mode:=nav 生效。重定位模块: amcl | beluga（beluga_amcl —— AMCL 的现代实现，'
+        choices=['', 'amcl', 'beluga', 'slam_toolbox', 'icp', 'gicp', 'small_gicp', 'cartographer'],
+        description='仅 mode:=nav 生效。重定位模块（选一个即可，实现细节无需关心）: '
+                    'amcl（2D 栅格图）| beluga（beluga_amcl —— AMCL 的现代实现，'
                     '与 amcl 同资产（2D 栅格图）/同契约/同 lifecycle 形态，需 ros-humble-beluga-amcl）| '
-                    'slam_toolbox（需 .posegraph）| '
-                    'icp（需 PCD/<world>.pcd）| gicp（GICP 精配准，需 PCD/<world>.pcd + 初值：'
-                    '/initialpose 或 initial_pose 参数）| cartographer（纯定位，需 map/<world>.pbstream）；'
+                    'slam_toolbox（需 map/<world>.posegraph）| '
+                    'icp（PCL ICP，需 PCD/<world>.pcd，初值敏感）| '
+                    'gicp（PCL GICP，需 PCD/<world>.pcd，初值敏感）| '
+                    'small_gicp（small_gicp 实现，需 PCD/<world>.pcd，初值敏感）| '
+                    'cartographer（纯定位，需 map/<world>.pbstream）；'
+                    'icp / gicp / small_gicp 三者都吃同一份 PCD/<world>.pcd，'
+                    '初值都给 /initialpose（RViz 2D Pose Estimate）或 initial_pose 参数；'
                     '留空 = 回退用法，直接用 LIO 当绝对定位并由静态桥补帧')
 
     declare_LIO_cmd = DeclareLaunchArgument(
@@ -527,15 +541,45 @@ def generate_launch_description():
                         ],
                         # arguments=['--ros-args', '--log-level', ['gicp_registration:=', 'DEBUG']]
                     ),
+
+                    # localization:=small_gicp —— **与 gicp 槽并列的第三个 ICP 族槽位**：
+                    # 同一个包、同一个节点、同一套 GICP 数学、同一份资产与初值契约，
+                    # 唯一区别是配准后端换成 vendored koide3/small_gicp（MIT，OpenMP 多线程）。
+                    # ★ 槽位用户**不需要**知道这一点：backend 由本分支注入（就在下面那个 dict 里），
+                    #   既不用改 config/gicp_registration_sim.yaml（那里的默认仍是 "pcl"），
+                    #   也不用 -p backend:=small_gicp。选 localization:=small_gicp 就够了。
+                    # ★ 故意不做成"一个槽 + 一个 backend 参数"：体验者要的是"选一个重定位器"，
+                    #   两个实现必须在槽位层面分得清清楚楚（A/B 也各自可复现）。
+                    # 契约与 gicp 槽逐条相同：只发 map→odom；必须有初值（/initialpose 或
+                    #   initial_pose 参数），否则不发 TF 并每 2 s 说明一次。
+                    # 健康信号：/gicp_registration/{fitness_score,converged,pose}
+                    #   （backend=small_gicp 时另加 ~/small_gicp_error，非 m²，别混用）。
+                    Node(
+                        condition=IfCondition(PythonExpression([
+                            "'", LaunchConfiguration('localization'), "' == 'small_gicp' and '",
+                            LaunchConfiguration('lio'), "' != 'cartographer'"])),
+                        package='gicp_registration',
+                        executable='gicp_registration_node',
+                        output='screen',
+                        parameters=[
+                            gicp_registration_params_dir,
+                            {'use_sim_time': use_sim_time,
+                                'pcd_path': icp_pcd_dir,
+                                # ★ 本槽位的全部"实现细节"就在这一行：由 launch 注入，无需人工配置
+                                'backend': 'small_gicp'}
+                        ],
+                    ),
                 ]
             ),
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'map_server_launch.py')),
-                # 仅 nav 模式 + icp/gicp（或未选重定位）时才单独起 map_server。
+                # 仅 nav 模式 + icp/gicp/small_gicp（或未选重定位）时才单独起 map_server。
                 # amcl / beluga 槽**自带** map_server（与定位节点同一个 lifecycle_manager），
                 # slam_toolbox 自己发 /map ⇒ 这三种都不能再起第二个 map_server（/map 双发布者 +
                 # 同名 lifecycle_manager_localization 冲突 ⇒ map_server 无法激活）。
+                # ⚠️ 三个 ICP 族槽位（icp / gicp / small_gicp）**都**需要这个独立 map_server
+                #   （它们只发 map→odom、不发 /map），因此下面这条排除条件**只排除 amcl/beluga/slam_toolbox**。
                 # ⚠️ 必须带 mode=='nav'：建图模式下 localization 为空，若不判断 mode，
                 # map_server 会把【磁盘上的旧 pgm】发到 /map，与 slam_toolbox/cartographer
                 # 抢同一个话题，导致 map_saver_cli 可能存下旧图（幽灵墙就是这么留下的）。
@@ -596,7 +640,8 @@ def generate_launch_description():
 
     # T1（修正版）：帧桥只在「nav + 未选择任何重定位模块 + 启用 LIO」时启动，
     # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
-    # amcl / beluga(= beluga_amcl) / slam_toolbox / icp_registration / gicp_registration 都会自行
+    # amcl / beluga(= beluga_amcl) / slam_toolbox / icp_registration / gicp_registration
+    # （= 槽位 gicp 与 small_gicp —— 两者是同一个节点、只换 backend）都会自行
     # 发布 map→odom，绝不能再叠加静态桥（否则 map/odom 多父边）。
     # ★ 2026-10-05：再排除 'small_point_lio' —— 它既不发 camera_init→body（那条链的两个帧都不存在），
     #   又把 odom 直接当世界系（自己发 odom→base_link）⇒ 它需要的是 **map≡odom 单条静态桥**，
@@ -650,7 +695,7 @@ def generate_launch_description():
     # ===== 场景形态（mode）三种，启动集明显不同 =====
     #   mapping  : Gazebo + LIO(+RViz) + 在线 SLAM 后端         —— 无导航栈、无地图加载、无重定位
     #   slam_nav : 上述 + 导航栈（costmap 直接吃在线 SLAM 的 /map 与 map→odom）—— 无 map_server、无重定位
-    #   nav      : Gazebo + LIO + 重定位(amcl/beluga/slam_toolbox-loc/icp/gicp/cartographer) + 导航栈 —— 无在线 SLAM 后端
+    #   nav      : Gazebo + LIO + 重定位(amcl/beluga/slam_toolbox-loc/icp/gicp/small_gicp/cartographer) + 导航栈 —— 无在线 SLAM 后端
     mode_nav = ["'", LaunchConfiguration('mode'), "' == 'nav'"]
     mode_slam_nav = ["'", LaunchConfiguration('mode'), "' == 'slam_nav'"]
     mode_mapping = ["'", LaunchConfiguration('mode'), "' == 'mapping'"]
