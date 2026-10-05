@@ -437,7 +437,9 @@ python3 tools/scripts/regress/compare_regress_snapshots.py --markdown
 方法列**不再需要 `--label` 人工标注**：`nav_smoke_regression.py` 现在把 `--localization` 写进快照
 （工具脚注自动报「方法来源：字段 localization」）。两个 gicp 的槽位名相同（都是 `gicp`），
 区分靠 `backend`（见下条），故本表用 `--label` 把方法列显式写成 `gicp (pcl)` / `gicp (small_gicp)`
-（**只改表头显示，快照原始内容未改**）：
+（**只改表头显示，快照原始内容未改**）。**历史口径**：本批快照都录于 `small_gicp` 槽出现之前
+（`2c42339`），故两份都带 `localization='gicp'`；`2c42339` 起 `localization:=small_gicp` 的运行会
+自动记成 `localization='small_gicp'` ⇒ 这个 backend 区分**不再需要 `--label`**：
 
 | 时间戳/文件 | 方法 | goal | pass | result/exit | status | 用时(s) | d_min(m) | rec | nav\|v\|,\|w\| | smooth | chassis | poseΔ(m) | 真值twist | settle(settled/xy/yaw) | map | yaw源 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -456,7 +458,7 @@ python3 tools/scripts/regress/compare_regress_snapshots.py --markdown
 | 配置 | RTF | `Control loop missed its desired rate` 条数 | gicp align 中位数（min~max） | gicp `采纳 N/M`（末帧） | fitness（末帧） | `map→odom`（末次 `[status]`） |
 |---|---|---|---|---|---|---|
 | `localization:=gicp`，`backend: pcl` | **0.760** | **0** | **15.7 ms**（11.8~25.4） | **165/165（100%）** | 0.00226 m² | x=0.001 y=0.016 z=-0.046 yaw=-0.06° |
-| `localization:=gicp`，`backend: small_gicp` | **0.776** | **0** | **2.9 ms**（2.6~4.0） | **167/167（100%）** | 0.00230 m² | x=0.011 y=0.008 z=-0.015 yaw=-0.00° |
+| `localization:=small_gicp`（该次运行早于 `2c42339`，当时靠临时改 YAML 的 `backend` 实现，等价于今天的 `localization:=small_gicp`） | **0.776** | **0** | **2.9 ms**（2.6~4.0） | **167/167（100%）** | 0.00230 m² | x=0.011 y=0.008 z=-0.015 yaw=-0.00° |
 | `localization:=amcl` | **0.780** | **0** | —（该槽无 `[status]`） | — | — | — |
 | `localization:=beluga` | **0.769** | **0** | — | — | — | — |
 | `localization:=icp` | **0.776** | **0** | — | — | — | — |
