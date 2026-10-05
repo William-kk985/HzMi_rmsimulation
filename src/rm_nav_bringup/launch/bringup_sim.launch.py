@@ -87,6 +87,13 @@ def generate_launch_description():
         'params_file_planner': nav2_params_file_dir[1],     # planner_server 槽
         'params_file_controller': nav2_params_file_dir[2],  # controller_server 槽
     }
+    # ★ 2026-10-05：localization:=beluga 槽（beluga_amcl，AMCL 的现代实现，Apache-2.0）。
+    #   位置选择：**兄弟参数文件**而不是复用 base 的 amcl 段 —— 两者参数集不是超集关系
+    #   （nav2 有 do_beamskip/beam_skip_*/save_pose_rate/initial_pose.z；beluga 有
+    #    initial_pose.covariance_*/spatial_resolution_*/model_unknown_space 等），
+    #   ROS 2 对未声明的键是**静默忽略** ⇒ 复用会同时留下无效键与缺失键。
+    #   逐键映射表见 docs/localization_slots.md §1.2。
+    beluga_params_file_dir = os.path.join(nav2_params_dir, 'nav2_params_sim_beluga.yaml')
     # ⚠️ 旧的 nav2_params_sim_<nav>[_smac2d].yaml（8 份 full copy）**已废弃**：本 launch 不再引用它们，
     #   文件保留只为「参考 / 回滚」（等价性已逐键核实：8/8 组合 0 处差异，见 docs §J）。
     # AMCL 初值（map 系，米/弧度）：sim 出生点固定，按 world 自动注入，省掉手动发 /initialpose。
@@ -161,8 +168,10 @@ def generate_launch_description():
     declare_localization_cmd = DeclareLaunchArgument(
         'localization',
         default_value='',
-        choices=['', 'amcl', 'slam_toolbox', 'icp', 'gicp', 'cartographer'],
-        description='仅 mode:=nav 生效。重定位模块: amcl | slam_toolbox（需 .posegraph）| '
+        choices=['', 'amcl', 'beluga', 'slam_toolbox', 'icp', 'gicp', 'cartographer'],
+        description='仅 mode:=nav 生效。重定位模块: amcl | beluga（beluga_amcl —— AMCL 的现代实现，'
+                    '与 amcl 同资产（2D 栅格图）/同契约/同 lifecycle 形态，需 ros-humble-beluga-amcl）| '
+                    'slam_toolbox（需 .posegraph）| '
                     'icp（需 PCD/<world>.pcd）| gicp（GICP 精配准，需 PCD/<world>.pcd + 初值：'
                     '/initialpose 或 initial_pose 参数）| cartographer（纯定位，需 map/<world>.pbstream）；'
                     '留空 = 回退用法，直接用 LIO 当绝对定位并由静态桥补帧')
@@ -380,6 +389,28 @@ def generate_launch_description():
                     'initial_pose_yaw': '0.0'}.items()
             ),
 
+            # ★ 2026-10-05：localization:=beluga —— beluga_amcl（Ekumen-OS/beluga，Apache-2.0）。
+            #   与 amcl 槽**同形态**：本 include 自己起 map_server + 定位节点 + lifecycle_manager
+            #   （node_names = ['map_server','amcl']）⇒ 「map_server 照常在跑」这条契约与 amcl 一致，
+            #   因此下面那条独立 map_server include 必须把 beluga 也排除掉（否则 /map 两个发布者）。
+            #   只发 map→odom；/scan 是 BEST_EFFORT（beluga 内部用 SensorDataQoS 订阅）。
+            #   参数文件 = 兄弟文件 nav2_params_sim_beluga.yaml（映射表见 docs/localization_slots.md §1.2）。
+            #   ⚠️ 不给 initial_pose_z：beluga 的 2D 节点没有这个键（nav2_amcl 才有）。
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'localization_beluga_launch.py')),
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('localization'), "' == 'beluga' and '",
+                    LaunchConfiguration('lio'), "' != 'cartographer'"])),
+                launch_arguments = {
+                    'use_sim_time': use_sim_time,
+                    'map': nav2_map_dir,
+                    **nav2_params_launch_args,
+                    'beluga_params_file': beluga_params_file_dir,
+                    'initial_pose_x': amcl_init_x,
+                    'initial_pose_y': amcl_init_y,
+                    'initial_pose_yaw': '0.0'}.items()
+            ),
+
             # localization:=cartographer —— 纯定位（加载 .pbstream，frozen state）
             # 与本工程契约一致：只发 map→odom（lua 里 published_frame="odom" + provide_odom_frame=false），
             # odom→base_link 仍由 LIO 提供。栅格发到 /cartographer_map，把 /map 让给 map_server 的先验图，
@@ -454,14 +485,18 @@ def generate_launch_description():
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'map_server_launch.py')),
-                # 仅 nav 模式 + icp（或未选重定位）时才单独起 map_server。
+                # 仅 nav 模式 + icp/gicp（或未选重定位）时才单独起 map_server。
+                # amcl / beluga 槽**自带** map_server（与定位节点同一个 lifecycle_manager），
+                # slam_toolbox 自己发 /map ⇒ 这三种都不能再起第二个 map_server（/map 双发布者 +
+                # 同名 lifecycle_manager_localization 冲突 ⇒ map_server 无法激活）。
                 # ⚠️ 必须带 mode=='nav'：建图模式下 localization 为空，若不判断 mode，
                 # map_server 会把【磁盘上的旧 pgm】发到 /map，与 slam_toolbox/cartographer
                 # 抢同一个话题，导致 map_saver_cli 可能存下旧图（幽灵墙就是这么留下的）。
                 condition = IfCondition(PythonExpression([
                     "'", LaunchConfiguration('mode'), "' == 'nav' and '",
                     LaunchConfiguration('localization'), "' != 'slam_toolbox' and '",
-                    LaunchConfiguration('localization'), "' != 'amcl'"])),
+                    LaunchConfiguration('localization'), "' != 'amcl' and '",
+                    LaunchConfiguration('localization'), "' != 'beluga'"])),
                 launch_arguments={
                     'use_sim_time': use_sim_time,
                     'map': nav2_map_dir,
@@ -507,8 +542,8 @@ def generate_launch_description():
 
     # T1（修正版）：帧桥只在「nav + 未选择任何重定位模块 + 启用 LIO」时启动，
     # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
-    # amcl / slam_toolbox / icp_registration / gicp_registration 都会自行发布 map→odom，
-    # 绝不能再叠加静态桥（否则 map/odom 多父边）。
+    # amcl / beluga(= beluga_amcl) / slam_toolbox / icp_registration / gicp_registration 都会自行
+    # 发布 map→odom，绝不能再叠加静态桥（否则 map/odom 多父边）。
     icp_frame_bridge_condition = IfCondition(PythonExpression([
         "'", LaunchConfiguration('mode'), "' == 'nav' and '",
         LaunchConfiguration('localization'), "' == '' and '",
@@ -542,7 +577,7 @@ def generate_launch_description():
     # ===== 场景形态（mode）三种，启动集明显不同 =====
     #   mapping  : Gazebo + LIO(+RViz) + 在线 SLAM 后端         —— 无导航栈、无地图加载、无重定位
     #   slam_nav : 上述 + 导航栈（costmap 直接吃在线 SLAM 的 /map 与 map→odom）—— 无 map_server、无重定位
-    #   nav      : Gazebo + LIO + 重定位(amcl/slam_toolbox-loc/icp) + 导航栈 —— 无在线 SLAM 后端
+    #   nav      : Gazebo + LIO + 重定位(amcl/beluga/slam_toolbox-loc/icp/gicp/cartographer) + 导航栈 —— 无在线 SLAM 后端
     mode_nav = ["'", LaunchConfiguration('mode'), "' == 'nav'"]
     mode_slam_nav = ["'", LaunchConfiguration('mode'), "' == 'slam_nav'"]
     mode_mapping = ["'", LaunchConfiguration('mode'), "' == 'mapping'"]

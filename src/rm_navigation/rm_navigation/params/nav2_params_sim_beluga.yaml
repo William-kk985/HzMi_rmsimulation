@@ -1,0 +1,125 @@
+# =============================================================================
+# Beluga AMCL 参数槽位文件（localization:=beluga 专用）
+#   ★ 2026-10-05 新增。动机/契约/参数映射见 docs/localization_slots.md §1.2。
+#
+#   谁读这份文件：**只有** beluga_amcl 的 amcl_node（节点名 = amcl，见
+#   src/rm_navigation/rm_navigation/launch/localization_beluga_launch.py）。
+#   map_server 那一段仍来自 nav2_params_sim_base.yaml（本文件**不含** map_server 段）。
+#
+#   为什么另起一份而不是复用 base 里的 amcl 段：
+#     beluga_amcl 与 nav2_amcl 的参数集**不是**超集关系（上游 2.1.1 的兼容性表，
+#     https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/docs/ros2-reference.md#compatibility-notes）：
+#       · nav2 有、beluga 没有：do_beamskip / beam_skip_distance / beam_skip_threshold /
+#         beam_skip_error_threshold / save_pose_rate / initial_pose.z
+#       · beluga 有、nav2 没有：initial_pose.covariance_* / spatial_resolution_[x,y,theta] /
+#         selective_resampling / execution_policy / model_unknown_space /
+#         only_obstacle_boundaries / point_cloud_topic / initial_pose_topic /
+#         autostart(_delay) / bond_timeout / debug
+#     ROS 2 对「参数文件里写了但节点没声明」的键是**静默忽略**（本仓库踩过的坑：
+#     docs/localization_slots.md §1.1「写了是静默失效」）⇒ 复用会同时留下无效键与缺失键
+#     （尤其 initial_pose.z：beluga 没有 z 键，写了不报错但也没有任何作用）。
+#     所以 beluga 用**兄弟文件**，两份文件各自只写「该实现真的会读」的键。
+#
+#   ★ §九 调参搬运（commit 48703e6 的 AMCL 高速跟踪修复，见 docs/algorithm_matrix.md §九）：
+#     transform_tolerance 0.3 / update_min_d 0.05 / update_min_a 0.05 /
+#     recovery_alpha_slow 0.001 / recovery_alpha_fast 0.1 —— 这 5 个键 beluga **全部同名存在**，
+#     数值原样搬过来（语义核对见 docs/localization_slots.md §1.2 映射表）。
+#     §九 里 nav2 侧被删/不存在的键（beam skip 四件套、save_pose_rate）在 beluga 里同样不存在 ⇒ 不写。
+# =============================================================================
+amcl:
+  ros__parameters:
+    # 装配级：仿真必须用 /clock（由 bringup_sim.launch.py 注入 use_sim_time 覆盖本值）
+    use_sim_time: True
+
+    # ---- 坐标系（与 amcl 槽完全一致；Nav2 侧 robot_base_frame 仍是 base_link_fake，不在这里改）----
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+
+    # ---- 里程计运动模型（全向车；beluga 认 nav2 插件名，内部换成等价的 Beluga 模型）----
+    robot_model_type: "nav2_amcl::OmniMotionModel"
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+
+    # ---- 粒子滤波 / KLD ----
+    min_particles: 500
+    max_particles: 2000
+    pf_err: 0.05
+    pf_z: 0.99
+    resample_interval: 1
+    # ★ §九 搬运：0.0 → 0.1 / 0.001（原值 0 把"跟丢后的随机重采样恢复"整个关掉）
+    recovery_alpha_fast: 0.1
+    recovery_alpha_slow: 0.001
+    # beluga 独有：KLD 重采样的空间分桶分辨率（默认 0.5 / 0.5 / 10°，此处显式写出便于调参）
+    spatial_resolution_x: 0.5
+    spatial_resolution_y: 0.5
+    spatial_resolution_theta: 0.174533  # 10° = 0.174533 rad
+    # beluga 独有：粒子执行策略 seq（单线程，A/B 基线）| par（多线程，吃 CPU 换吞吐）
+    execution_policy: "seq"
+    # beluga 独有：N_eff < N/2 时才重采样（nav2 在 ROS 2 里没有这个特性）
+    selective_resampling: False
+
+    # ★ §九 搬运：阈值触发的更新门限 0.25/0.2 → 0.05/0.05（AMCL 是离散修正器，
+    #   2 m/s × 7~10 Hz 的 /scan 每帧走 0.2~0.3 m ⇒ 阈值卡在边界会把修正确流掉）
+    update_min_d: 0.05
+    update_min_a: 0.05
+
+    # ★ §九 搬运：1.0 → 0.3。beluga 里这个键有 **两个** 用途（与 nav2 一致）：
+    #   ① map→odom 的盖章 = scan.header.stamp + transform_tolerance（"发到未来"，
+    #      上游 amcl_node.cpp:629-634 @2.1.1）；
+    #   ② /scan 的 tf2 MessageFilter 容忍度 = transform_tolerance（ros2_common.cpp / amcl_node.cpp:247,262）。
+    #   取值过大 ⇒ 位姿被外推过头（2 m/s 时 0.3 s ≈ 0.6 m 提前量）⇒ 高速下"定位滞后→猛修正→抖"。
+    transform_tolerance: 0.3
+
+    # ---- 观测模型（键名/取值与 amcl 槽逐项对齐，保证 A/B 公平）----
+    laser_model_type: "likelihood_field"
+    laser_likelihood_max_dist: 2.0
+    # beluga 语义是 **clamp** 而不是 override：min_range=max(scan.range_min, 本值)、
+    # max_range=min(scan.range_max, 本值)（beluga_ros/include/beluga_ros/laser_scan.hpp:55-61 @2.1.1）
+    # ⇒ -1.0 等价于「用 /scan 自己的 range_min」，与 nav2 对负值的处理一致；100.0 同理不设上限。
+    laser_min_range: -1.0
+    laser_max_range: 100.0
+    max_beams: 60
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    sigma_hit: 0.2
+    lambda_short: 0.1
+    # beluga 独有：未知栅格（-1）当自由空间（False = nav2 的行为；True 会建模未知区）
+    model_unknown_space: False
+    # beluga 独有：只把障碍物**边界**当障碍（内部栅格视作未知）；上游默认 True
+    only_obstacle_boundaries: True
+
+    # ---- 话题 / QoS（契约：/scan 必须 BEST_EFFORT；beluga 用 SensorDataQoS 订阅 scan，
+    #      /initialpose 用 SystemDefaultsQoS=RELIABLE；/map 用 transient_local+reliable 订阅，
+    #      与 nav2 map_server 的 latched 发布端匹配，见上游 ros2_common.cpp:475-478、amcl_node.cpp:219-221）----
+    scan_topic: scan
+    map_topic: map
+    initial_pose_topic: initialpose
+
+    # ---- 输出：**只** map→odom（不许碰 odom→base_link，那是 LIO 的活）----
+    tf_broadcast: True
+
+    # ---- 初值（map 系）。x/y/yaw 由 bringup_sim.launch.py 按 world 用 RewrittenYaml 全路径覆盖；
+    #      ⚠️ beluga **没有** initial_pose.z（2D），launch 因此不传 z（见 docs/localization_slots.md §1.2）----
+    set_initial_pose: True
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      yaw: 0.0
+      # beluga 独有（nav2 忽略协方差 ⇒ nav2 的初值等价于「零散布单点」，见
+      # docs/issues_and_findings.md #13）。这里用 beluga 的默认量级 1e-6 复刻 nav2 语义；
+      # 若"人工摆放有误差"，改成 0.25 / 0.25 / 0.0685（上游 example 的量级）会更抗初值误差。
+      covariance_x: 1.0e-6
+      covariance_y: 1.0e-6
+      covariance_yaw: 1.0e-6
+      covariance_xy: 0.0
+      covariance_xyaw: 0.0
+      covariance_yyaw: 0.0
+    # false = 收到新地图时沿用上一次已知位姿（nav2 同名同义）
+    always_reset_initial_pose: False
+    first_map_only: False

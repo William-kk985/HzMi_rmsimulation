@@ -1,7 +1,7 @@
 # 重定位槽位登记表（localization slots）
 
 > 入口：`bringup_sim.launch.py` 的 `localization` 参数（**仅 `mode:=nav` 生效**）
-> 当前 choices：`['', 'amcl', 'slam_toolbox', 'icp', 'gicp', 'cartographer']`
+> 当前 choices：`['', 'amcl', 'beluga', 'slam_toolbox', 'icp', 'gicp', 'cartographer']`
 > **统一契约**：重定位槽**只负责发布 `map→odom`**；`odom→base_link` 由 LIO（+ `lio_tf_adapter`）负责；Nav2 用 `base_link_fake`。
 > **`map→odom` 只能有一个发布者** ⇒ 重定位槽之间、以及与 `mapper:=*` 之间必须互斥。
 
@@ -10,6 +10,7 @@
 | 槽位值 | 节点 / 包 | 参数文件 | 需要的资产（现状） |
 |---|---|---|---|
 | `amcl` | `nav2_amcl` | `rm_navigation/params/nav2_params_sim_base.yaml`（已调：`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 已打开，见工单 §K） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ |
+| `beluga` | `beluga_amcl/amcl_node`（AMCL 的现代实现，**同名参数、同 lifecycle 形态**；2026-10-05 新增，见 §1.2） | `rm_navigation/params/nav2_params_sim_beluga.yaml`（`amcl` 段；`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 原样搬运） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ **+ 需装 `ros-humble-beluga-amcl`**（Humble 有官方二进制；源码路线见 §1.2） |
 | `icp` | `icp_registration/icp_registration_node`（**我们自己的包**，可改） | `icp_registration/config/icp_registration_sim.yaml`（含 `pcd_path`） | 先验点云 `rm_nav_bringup/PCD/RMUL2026.pcd` ✅（RMUL/RMUC 也有文件，但 **RMUC.pcd 是退化资产**，见 §1.1） |
 | `gicp` | `gicp_registration/gicp_registration_node`（**我们自己的包**，2026-10-05 新增） | `gicp_registration/config/gicp_registration_sim.yaml`（含 `pcd_path`、`tf_lookahead_sec`、两级 leaf `voxel_leaf_size 0.10` / `voxel_leaf_size_scan 0.05`，见 §1.1） | 先验点云 `rm_nav_bringup/PCD/<world>.pcd` ✅（RMUL2026 实测可用，0.10 m leaf 后 target ≈1.2e4 点；**必须有初值**，见 §1.1） |
 | `slam_toolbox` | `slam_toolbox/localization_slam_toolbox_node` | `slam_toolbox/config/mapper_params_localization_sim.yaml` + launch 注入 `map_file_name=map/<world>`、`map_start_pose=[0,0,0]` | **序列化位姿图 `map/RMUL2026.posegraph(+.data)` ❌ 缺**（RMUC/RMUL 有）⇒ 需先建图并 `serialize_map` |
@@ -205,14 +206,249 @@ ros2 topic echo /gicp_registration/converged         # false ⇒ 本帧未采纳
 #   ⇒ A/B 两级 leaf 时先看这一行：target 是否 ≈1.2e4、align ms 是否可接受、采纳率是否接近 1
 ```
 
+### 1.2 `beluga` 槽位细节（2026-10-05 新增；`beluga_amcl` = AMCL 的现代实现）
+
+**事实核对（均在 2.1.1 上核实，出处见括号）**
+
+- **上游 / 许可**：`Ekumen-OS/beluga`，**Apache-2.0**（GitHub API `license.spdx_id = apache-2.0`），默认分支
+  `main`，自述"C++17 的通用 MCL 实现 + ROS 1/2 封装"。包：`beluga`（算法库）/ `beluga_ros`（ROS 接口）/
+  `beluga_amcl`（AMCL 节点）/ `beluga_system_tests`（系统测试）/ `beluga_vdb` / `beluga_example` /
+  `beluga_tutorial` / `beluga_benchmark`。
+- **Humble 有官方二进制 ⇒ 不走源码构建**：`ros-humble-beluga-amcl 2.1.1-1jammy.20260908.012840`
+  （另有 `ros-humble-beluga-ros`、`ros-humble-beluga`，均 2.1.1）。本机 `apt-cache policy` 直接读到候选版本，
+  源 = `http://mirrors.aliyun.com/ros2/ubuntu jammy/main`（packages.ros.org 镜像）；`humble/distribution.yaml`
+  里该包的 release 版本也是 `2.1.1-1`（`ros2-gbp/beluga-release`）。
+- **版本↔提交**：apt 装的 2.1.1 对应上游 tag `2.1.1` = **`b06f9060ed6d38d3559b4d05368f5fbe74c6594f`**
+  （本文所有参数与行为结论都按这个 tag 的源码逐行核对；若走源码路线请 checkout 这个 commit 以保持一致）。
+- **构建要求**（源码路线才需要）：**C++17**（`beluga_amcl/CMakeLists.txt` 的
+  `target_compile_features(amcl_node_component PUBLIC cxx_std_17)`），构建类型 `ament_cmake`；
+  依赖 `beluga`/`beluga_ros`/`message_filters`/`std_srvs`/`bondcpp`/`rclcpp`/`rclcpp_components`/
+  `rclcpp_lifecycle`/`tf2_ros`（`beluga_amcl/package.xml`），beluga 本体还要
+  `libeigen3-dev / libhdf5-dev / librange-v3-dev / libtbb-dev / ros-humble-sophus`。
+  本机 GCC 11 / libstdc++6 ≥ 11 满足 deb 的 `libstdc++6 (>= 11)`；GCC 版本没有额外下限。
+- **是 lifecycle 节点**（这点决定接线形态）：`class AmclNode : public BaseAMCLNode` 且
+  `class BaseAMCLNode : public rclcpp_lifecycle::LifecycleNode`；可执行文件 `amcl_node`
+  （`rclcpp_components_register_node(... PLUGIN "beluga_amcl::AmclNode" EXECUTABLE amcl_node)`），
+  带 `bondcpp` bond（`bond_timeout` 默认 4.0）。上游 example 就是「`nav2_map_server` + `amcl` 交给同一个
+  `lifecycle_manager_localization`（`node_names: [map_server, amcl]`）」（`beluga_example/launch/utils/localization_launch.py`）
+  ⇒ 与本仓库 amcl 槽的形态**逐条同构**，所以 beluga 分支照抄 amcl 分支。
+- `beluga_amcl` 包本身**不带 launch 文件**（`beluga_amcl/` 下只有 `src`/`include`/`test`/`docs`），
+  launch 在上游的 `beluga_example` 里 ⇒ 我们自己的 launch 是必要的，不是重复造轮子。
+
+**出处（URL；本次全部用 GitHub REST `api.github.com/.../contents/<path>?ref=2.1.1` 取原文核对，
+下面给等价的人类可读链接）**
+
+| 结论 | 出处 |
+|---|---|
+| Apache-2.0 / 默认分支 `main` / 包清单 | https://github.com/Ekumen-OS/beluga 、`https://api.github.com/repos/Ekumen-OS/beluga` |
+| tag `2.1.1` = commit `b06f906…` | https://api.github.com/repos/Ekumen-OS/beluga/tags |
+| Humble release 版本 `2.1.1-1` | `https://api.github.com/repos/ros/rosdistro/contents/humble/distribution.yaml` |
+| 参数声明（59 个键的完整清单）| https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/src/ros2_common.cpp 、 https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/src/amcl_node.cpp |
+| lifecycle 基类 / bond / autostart | https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/include/beluga_amcl/ros2_common.hpp |
+| C++17 / 可执行文件名 / 组件插件名 | https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/CMakeLists.txt |
+| 依赖与许可声明 | https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/package.xml |
+| **nav2 vs beluga 参数兼容性表**（本次映射表的上游依据）| https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/docs/ros2-reference.md#compatibility-notes |
+| 话题/服务/TF 语义 | https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_amcl/README.md |
+| 官方 example 的 lifecycle_manager 形态 | https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_example/launch/utils/localization_launch.py |
+| 参考参数文件（含 beluga 独有键）| https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_example/params/default.ros2.yaml |
+| `laser_min/max_range` 的 clamp 语义 | https://github.com/Ekumen-OS/beluga/blob/2.1.1/beluga_ros/include/beluga_ros/laser_scan.hpp |
+| nav2_amcl 侧参数名（`save_pose_rate`/`initial_pose.z`/beam skip 四件套确实存在）| https://github.com/ros-navigation/navigation2/blob/humble/nav2_amcl/src/amcl_node.cpp |
+| Humble 二进制存在（本机实证）| `apt-cache policy ros-humble-beluga-amcl` → `2.1.1-1jammy.20260908.012840`，源 `http://mirrors.aliyun.com/ros2/ubuntu jammy/main` |
+
+**本仓库接线（只动 3 处，见 §3 的三步法）**
+
+| 文件 | 改了什么 |
+|---|---|
+| `bringup_sim.launch.py` | ① `localization` choices 加 `'beluga'`（**默认仍是 `''`**）；② 新分支 `localization == 'beluga' and lio != 'cartographer'`（与 amcl 分支同 `IfCondition` 形态，include 下面的 launch；传 `map`/`use_sim_time`/`params_file*`/`beluga_params_file`/`initial_pose_x,y,yaw`，**故意不传 `initial_pose_z`**）；③ 独立 `map_server` include 的条件补 `localization != 'beluga'`（amcl/beluga 槽都自带 map_server ⇒ 否则 `/map` 两个发布者 + 两个同名 lifecycle_manager 抢节点） |
+| `rm_navigation/launch/localization_beluga_launch.py`（**新**） | `localization_amcl_launch.py` 的平行实现：`nav2_map_server/map_server` + **`beluga_amcl/amcl_node`（`name=amcl`）** + `nav2_lifecycle_manager`（`node_names=['map_server','amcl']`、`autostart`、`use_sim_time`）。含**选槽预检**：没装 `beluga_amcl` 时直接抛错并打印安装命令；本文件**不在生成期**调用 `get_package_share_directory('beluga_amcl')` ⇒ 没装 beluga 也不会把 amcl/其它槽/其它 mode 的 launch 带崩 |
+| `rm_navigation/params/nav2_params_sim_beluga.yaml`（**新**） | beluga 专用参数文件（只含 `amcl` 段；`map_server` 段仍来自 `nav2_params_sim_base.yaml`）。**不复用** base 的 amcl 段，理由见下面的"为什么是兄弟文件" |
+
+**契约核对**（与 §5 的四条硬约束；上游代码位置按 2.1.1）
+
+| 契约 | beluga 的行为 | 依据 |
+|---|---|---|
+| `map→odom` **只有一个发布者** | `tf_broadcast: true` ⇒ 只发 `global_frame_id→odom_frame_id` = `map→odom`；**不碰** `odom→base_link`（那是 LIO 的）| `ros2_common.cpp` 的 TF broadcaster + `amcl_node.cpp:627-635` |
+| `map_server` 照常跑 | 本槽自带的 lifecycle_manager 把 `map_server` 与 `amcl` 一起 configure/activate，与 amcl 槽完全一致；独立 map_server include 已排除 beluga | 本文 §1.2 接线表 |
+| 有定位器时**不加静态桥** | 静态桥条件仍是 `localization == ''` ⇒ beluga 选了就不会起 | `bringup_sim.launch.py` 的 `icp_frame_bridge_condition` |
+| 传感器话题 **BEST_EFFORT** | `/scan` 用 `rclcpp::SensorDataQoS()`（= BEST_EFFORT）；`/map` 用 `KeepLast(1).transient_local().reliable()`（与 nav2 map_server 的 latched 发布端匹配）；`/initialpose` 用 `SystemDefaultsQoS()`（RELIABLE）| `amcl_node.cpp:219-267`、`ros2_common.cpp:475-478` |
+| nav2 的 `robot_base_frame` 保持 `base_link_fake` | 与本槽无关（beluga 只做 `map→odom`）；beluga 的 `base_frame_id` 与 amcl 一样是 `base_link` | 参数文件 |
+
+**为什么是"兄弟参数文件"而不是复用 base 的 amcl 段**
+
+两者参数集**不是超集关系**（上游 2.1.1 的兼容性表）：
+- nav2 有、beluga 没有：`do_beamskip` / `beam_skip_distance` / `beam_skip_threshold` /
+  `beam_skip_error_threshold` / `save_pose_rate` / `initial_pose.z`；
+- beluga 有、nav2 没有：`initial_pose.covariance_*` / `spatial_resolution_[x,y,theta]` /
+  `selective_resampling` / `execution_policy` / `model_unknown_space` / `only_obstacle_boundaries` /
+  `point_cloud_topic` / `initial_pose_topic` / `autostart` / `autostart_delay` / `bond_timeout` / `debug`。
+
+ROS 2 对「参数文件里写了但节点没声明」的键是**静默忽略**（与 §1.1 里"写了是静默失效"同一个坑）
+⇒ 复用 base 会同时留下无效键与缺失键（尤其 `initial_pose.z`：beluga 没有 z 键，写了不报错也没作用）。
+所以 beluga 用兄弟文件，两份文件各自只写"该实现真的会读"的键。
+
+**参数映射表（本仓库现用值 → beluga）**；"存在"= 同名同义，可直接搬
+
+| nav2_amcl 键（`nav2_params_sim_base.yaml` 的 `amcl` 段） | 本仓库现值 | beluga 2.1.1 | 说明 |
+|---|---|---|---|
+| `transform_tolerance` | **0.3** | ✅ 存在 | 语义与 nav2 一致：`map→odom` 盖章 = **`scan.header.stamp + transform_tolerance`**（"发到未来"，`amcl_node.cpp:629-634`）；beluga **额外**用它当 `/scan` 的 tf2 MessageFilter 容忍度（`amcl_node.cpp:247,262`）⇒ 同一个键影响两处，取值理由与 §1.1/§九 完全相同 |
+| `update_min_d` / `update_min_a` | **0.05 / 0.05** | ✅ 存在 | §九 修复值原样搬运 |
+| `recovery_alpha_slow` / `recovery_alpha_fast` | **0.001 / 0.1** | ✅ 存在 | §九 修复值原样搬运（beluga 默认也是 0.0/0.0 ⇒ 必须显式打开，否则跟丢即永久跟丢） |
+| `alpha1..alpha5` | 0.2 ×5 | ✅ 存在 | |
+| `base_frame_id` / `odom_frame_id` / `global_frame_id` | `base_link` / `odom` / `map` | ✅ 存在 | beluga 默认 `base_footprint` ⇒ **必须显式写** |
+| `robot_model_type` | `nav2_amcl::OmniMotionModel` | ✅ 存在（**接受 nav2 插件名**） | beluga 内部换成等价的 Beluga 全向模型 |
+| `scan_topic` | `scan` | ✅ 存在 | beluga 默认为空串 → 回落 `scan`；显式写更清楚 |
+| `map_topic` | （未写，默认 `map`） | ✅ 存在 | beluga 显式写 `map` |
+| `laser_model_type` | `likelihood_field` | ✅ 存在 | beluga 另有 `likelihood_field_prob` |
+| `laser_min_range` / `laser_max_range` | `-1.0` / `100.0` | ✅ 存在（**阈值语义不同**） | beluga 是 **clamp**：`min_range=max(scan.range_min, 值)`、`max_range=min(scan.range_max, 值)`（`beluga_ros/include/beluga_ros/laser_scan.hpp:55-61`）⇒ `-1.0` 等价于"用 `/scan` 的 `range_min`"，与 nav2 对负值的处理一致 |
+| `max_beams` / `max_particles` / `min_particles` | 60 / 2000 / 500 | ✅ 存在 | |
+| `pf_err` / `pf_z` | 0.05 / 0.99 | ✅ 存在 | |
+| `resample_interval` | 1 | ✅ 存在 | beluga 声明了整数范围 `[1, INT_MAX]` |
+| `sigma_hit` / `z_hit` / `z_max` / `z_rand` / `z_short` / `lambda_short` | 0.2 / 0.5 / 0.05 / 0.5 / 0.05 / 0.1 | ✅ 存在 | `z_rand` 与 `z_hit` 都是 0.5 是 nav2 的默认量级，A/B 时保持不变 |
+| `laser_likelihood_max_dist` | 2.0 | ✅ 存在 | |
+| `tf_broadcast` | true | ✅ 存在 | 契约关键键（只发 `map→odom`） |
+| `set_initial_pose` | true | ✅ 存在 | |
+| `initial_pose.x` / `.y` / `.yaw` | 0 / 0 / 0（由 launch 按 world 覆盖） | ✅ 存在 | launch 用 `RewrittenYaml` 全路径覆盖，已实测生效 |
+| `always_reset_initial_pose` | false | ✅ 存在 | |
+| `first_map_only` | （未写） | ✅ 存在 | beluga 显式写 `false` |
+| `use_sim_time` | True | ✅ 存在 | 由 launch 注入 |
+| `initial_pose.z` | 0.0 | ❌ **不存在** | beluga 是 2D 节点（`Sophus::SE2d`），没有 z 键；`localization_beluga_launch.py` 因此**不声明/不注入** `initial_pose_z`（与 amcl 那份的唯一参数差异） |
+| `save_pose_rate` | 0.5 | ❌ 不存在 | nav2 用它把最后位姿写回参数服务器；beluga 无此功能 ⇒ 不写 |
+| `do_beamskip` / `beam_skip_distance` / `beam_skip_threshold` / `beam_skip_error_threshold` | false / 0.5 / 0.3 / 0.9 | ❌ **不存在** | beluga **不支持 beam skipping**（上游兼容性表明确写"Beluga AMCL does not support beam skipping"）⇒ 4 个键全不写；`do_beamskip` 本来就是 false，**行为差异可忽略** |
+| — | — | ➕ `initial_pose.covariance_[x,y,xy,yaw,xyaw,yyaw]` | nav2 **忽略**初值协方差（本仓库 `issues_and_findings.md #13`：`/amcl_pose` 协方差≈0）⇒ nav2 初值等价于"零散布单点"。为 A/B 公平，beluga 侧用其默认量级 `1e-6` 复刻该语义；**要抗人工摆放误差就放大**（上游 example 用 `0.25/0.25/0.0685`）|
+| — | — | ➕ `initial_pose_topic` | 默认 `initialpose`（nav2 只能靠 remap）⇒ 显式写，保证 RViz `2D Pose Estimate` / `ros2 topic pub` 打到同一个话题 |
+| — | — | ➕ `spatial_resolution_[x,y,theta]` | beluga 的 KLD 空间分桶分辨率（默认 0.5 / 0.5 / 10°），显式写出便于调参 |
+| — | — | ➕ `execution_policy` | `seq`（默认，单线程）| `par`（多线程，吃 CPU 换吞吐）—— CPU 吃紧时的第一个旋钮 |
+| — | — | ➕ `selective_resampling` | 默认 `false`；`true` = `N_eff < N/2` 才重采样（ROS 2 版 nav2 没有这个特性）|
+| — | — | ➕ `model_unknown_space` | 显式 `false` = 把未知栅格当自由空间（= nav2 行为）|
+| — | — | ➕ `only_obstacle_boundaries` | 显式 `true`（上游默认）：只把障碍**边界**当障碍。这是 beluga 与 nav2 似然场构造的**潜在差异点**，见"要盯什么" |
+| — | — | ➕ `point_cloud_topic` | 不用（我们用 `/scan`，与 amcl 同源资产）；它与 `scan_topic` **互斥**，两个都非空会直接抛异常 |
+| — | — | ➕ `autostart` / `autostart_delay` | 默认 `false` ⇒ 由 lifecycle_manager 管（与 amcl 一致）；`true` 可免 manager（本仓库不用）|
+| — | — | ➕ `bond_timeout` | 默认 4.0，与 lifecycle_manager 心跳配合 |
+| — | — | ➕ `debug` | 默认 `false`；`true` 会多发 `/likelihood_field` 并降性能 |
+
+**话题/服务差异（A/B 时必须知道）**
+
+| 项 | nav2_amcl | beluga_amcl |
+|---|---|---|
+| 位姿 | `/amcl_pose`（`PoseWithCovarianceStamped`）| **`/pose`**（同上类型；节点名 `amcl`、话题名相对名 `pose`）——**不是参数**，要改只能 remap；本仓库**故意不 remap**（保持上游接口直观），A/B 时看 `/pose` |
+| 粒子云 | `/particle_cloud` | `/particle_cloud`（同）|
+| 粒子可视化 | `/particle_markers` | `/particle_markers`（同）|
+| 服务 | `reinitialize_global_localization` / `request_nomotion_update` | 同名同义 |
+| `map→odom` 发布时机 | 每次 `/scan` 回调（含"本帧没更新也重发"）| **每次 `/scan` 回调**（`amcl_node.cpp:627-635`，也含重发）⇒ **速率 ≈ `/scan` 速率**，不是固定 50 Hz |
+| `/scan` 订阅 | `SensorDataQoS`（BEST_EFFORT）| 同 |
+
+**安装路线（本仓库采用 A）**
+
+```bash
+# (A) 二进制（Humble 官方包，推荐；不需要源码构建、不需要 vendoring）
+sudo apt update && sudo apt install ros-humble-beluga-amcl      # 连带 beluga / beluga_ros
+ros2 pkg prefix beluga_amcl                                     # 自检：应打印 /opt/ros/humble
+```
+```bash
+# (B) 源码（仅当要改 beluga 本体 / 要 pin 一个更新的 commit）
+#   放到 colcon **会**构建的位置：src/rm_localization/beluga/
+#   ⚠️ third_party/ 下有 COLCON_IGNORE ⇒ 放那里 colcon 不会构建
+git -C src/rm_localization clone https://github.com/Ekumen-OS/beluga.git
+git -C src/rm_localization/beluga checkout b06f9060ed6d38d3559b4d05368f5fbe74c6594f   # = 2.1.1
+sudo apt install libeigen3-dev libhdf5-dev librange-v3-dev libtbb-dev ros-humble-sophus
+colcon build --symlink-install --packages-up-to beluga_amcl
+```
+- **本次采用的路线 = (A)**。理由：Humble 有官方二进制且版本就是我们要核对的 2.1.1
+  （= `b06f906…`），`ldd` 显示运行期依赖全部可满足，`ros2 pkg prefix` 可解析；源码构建要多装 5 个依赖、
+  且会把一个 C++ 库塞进我们的 workspace（升级/回退成本都更高）。**没有 vendor 任何代码**，因此
+  **没有新增子模块、没有 pin 到仓库里的 commit**（pin 的是 apt 版本 2.1.1 = 上游 commit `b06f906…`，
+  记录在本文）。
+- ⚠️ 本沙箱里 `sudo` 被禁（"no new privileges"），所以**没有真的装到 `/opt/ros/humble`**：
+  静态验证是用 `apt-get download` 把 3 个 deb 下下来、`dpkg -x` 解到
+  `.tmp_cache/beluga_overlay/opt/ros/humble` 再 source 该 overlay 做的（`ros2 pkg prefix beluga_amcl` 解析成功、
+  `ldd` 无缺失、launch 预检通过）。**在真机上请走上面的 `apt install`**（或同样用 overlay）。
+
+**运行 / 检查**
+
+```bash
+# 新文件必须先 build（本仓两个包；beluga 是 apt 包，colcon 会当作"workspace 外"忽略）
+colcon build --symlink-install --packages-select rm_nav_bringup rm_navigation
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio localization:=beluga nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=True
+
+# 健康三连（beluga 的"位姿话题"是 /pose，不是 /amcl_pose）
+ros2 run tf2_ros tf2_echo map odom            # 台阶式跳变？长期不更新？
+ros2 topic hz /tf                             # map→odom ≈ /scan 速率（10 Hz 量级），不是 50 Hz
+ros2 topic echo /pose --once                  # 位姿 + 真实协方差（nav2 的 /amcl_pose 协方差≈0）
+ros2 topic echo /particle_cloud --once | head -5   # 粒子云（可选）
+ros2 topic info /scan -v                      # 必须仍是 BEST_EFFORT
+# 若 30 s 内没有 map→odom：给初值（RMUL2026 map 系原点 = 出生点）
+ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+  "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0}, orientation: {w: 1.0}}}}"
+```
+
+**A/B 协议（照 §4；amcl 与 beluga 必须分两次跑）**
+
+```bash
+# ① 基线
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio localization:=amcl nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=True
+python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0
+python3 tools/scripts/diag/record_tf_monotonic.py
+# ② beluga（同上，只把 localization:=amcl 换成 localization:=beluga）
+# ③ 比：map→odom 跳变/单调性、位姿话题频率、P0 回归 PASS/到达误差/用时、CPU/RTF
+```
+注意 beluga 的**触发式更新**与 nav2 amcl 同为"阈值触发"（`update_min_d/a`），所以「车不动 ⇒ `/pose`
+不刷新」是**正常现象**（同 `docs/mapping/README.md` 里对 `/amcl_pose` 的说明）；`map→odom` 仍随每帧
+`/scan` 重发。
+
+**要盯什么**
+
+1. **`map→odom` 的速率与连续性**：beluga 只在**收到 `/scan` 时**发 TF ⇒ 期望 ~`/scan` 速率；若
+   远低于 `/scan` 速率，说明 `transform_tolerance`（MessageFilter 容忍度）把扫描丢在门外了；
+2. **`ExtrapolationException`**（nav2 消费者报"future"）：本仓库 amcl 的 `transform_tolerance 0.3`
+   已够用，beluga 盖戳公式**与 nav2 逐字相同**（`scan.stamp + tolerance`）⇒ 若仍报，先查 TF 速率是否被
+   算力拖慢（beluga 单线程 `execution_policy: seq`，2000 粒子上限）；
+3. **`only_obstacle_boundaries`（beluga 默认 true）**：似然场只认障碍**边界**，在"薄墙/单像素墙"
+   地图上可能与 nav2 amcl 表现不同 ⇒ A/B 时若 beluga 明显更差，第一件事就是把它设 `false` 再试；
+4. **CPU / `Control loop missed its desired rate`**：旋钮顺序 ① `execution_policy: par`
+   （多线程）→ ② `max_particles 2000→1000` → ③ `max_beams 60→30`；
+5. **`/initialpose` 的语义**：`set_initial_pose: true` + launch 注入初值（RMUL2026 = `(0,0,0)`）；
+   运行中 RViz `2D Pose Estimate` 仍可覆盖（同 nav2）；`initial_pose.covariance_*` 只有 beluga 读，
+   本仓库刻意用 `1e-6` 复刻 nav2 的"零散布"语义（见映射表）。
+
+**回退**
+
+- 槽位级：`localization:=` 换回 `amcl`（或留空 + LIO 当绝对定位 + 静态桥）——**beluga 分支是纯增量**，
+  不选它就完全不生效（连 `beluga_amcl` 没装都不影响，已实测 `--show-args` 与本文件之外的槽位）；
+- 代码级：`git revert <本次 commit>`（3 个文件：bringup 的 choices/分支/map_server 条件 +
+  新增 launch + 新增 params）；
+- 卸载：`sudo apt remove ros-humble-beluga-amcl`（连带 beluga/beluga_ros）。
+
+**⚠️ 未验证清单（本次只做静态验证：`py_compile` / `yaml.safe_load` / `--show-args` / colcon / 逐条
+`IfCondition` 真值表；**没有启动 Gazebo、nav2 或 beluga 节点**）**
+
+1. **整栈运行时的定位精度、收敛性、CPU**：全部未测（本机不启仿真）；
+2. **`map→odom` 实测速率/连续性**：按代码应为 `/scan` 速率，未实跑确认；
+3. **beluga 与 nav2 amcl 的 A/B 结论**：`--goal -1.0 2.0` 回归、到达误差、用时、恢复次数**均未跑**；
+4. **`autostart` 路径**：本仓库走 lifecycle_manager（`autostart: false`），beluga 自带的 `autostart: true`
+   免 manager 路径未试；
+5. **`use_composition: true` 路径**：`beluga_amcl::AmclNode` 组件与 `nav2_container` 的组合未试
+   （默认 false；amcl 槽的这条路同样没在 bringup 里接容器）；
+6. **`only_obstacle_boundaries` / `model_unknown_space` / `selective_resampling` / `execution_policy: par`
+   的实际影响**：未调、未测；
+7. **`localization:=beluga` + `lio:=cartographer` 这个非法组合**：与 amcl 一样会「两个槽都不起 + 无
+   map_server」（`lio==cartographer` 时 beluga 分支条件为假，而独立 map_server 又被排除）——**这是
+   amcl 早就有的同款行为**，本次只做"与 amcl 对齐"，未修；
+8. **apt 安装本身**：本沙箱 `sudo` 被禁，只验证了「deb 解包 + overlay source 后包可解析、依赖无缺失」，
+   没有在真机 `/opt/ros/humble` 上执行 `apt install`。
+
 ## 2. 待补入口（**已登记、未实现**）
 
 | 计划槽位值 | 用什么 | 依赖 / 资产 | 落地要点 | 估时 |
 |---|---|---|---|---|
-| `beluga` | `beluga_amcl`（AMCL 的现代化实现，接口兼容） | 需装 `beluga`/`beluga_amcl`；2D 栅格图已有 | 新增槽位值 + 参数文件（可先沿用 AMCL 参数语义做 A/B） | 0.5~1 天 |
 | `scan_context` | Scan Context **全局检索** + ICP/GICP **精配准**（两级） | 需引入 Scan Context 实现 + 用 PCD 建描述子库 | 解决"**车随便摆 / 被搬动**"（ICP 类天生初值敏感）；检索出粗位姿 → 现有精配准 | 2~3 天 |
 | `fastlio_loc` | LIO + 先验 PCD 做配准得 `map→odom`（一体化配方） | PCD 已有 | 与我们 `lio_tf_adapter` 有职责重叠 ⇒ 作为**对照实现** | 1~2 天 |
 | `teaserpp` | TEASER++ 无初值全局配准 | 需引入 TEASER++ + 特征 | 远期；开销大 | 远期 |
+
+> ✅ **`beluga` 已于 2026-10-05 落地**（`localization:=beluga`，装 `ros-humble-beluga-amcl` 2.1.1 即可，
+> 无需源码构建）⇒ 从上表移出，详见 §1.2。它**不新增算法包**、不 vendor 代码：走的正是原计划那条
+> "沿用 AMCL 参数语义做 A/B"的路（同名参数 + 兄弟参数文件），只是把"接口兼容"落实成了逐键映射表。
 
 > ✅ **`gicp` 已于 2026-10-05 落地**（独立包 `gicp_registration`，槽位值 `localization:=gicp`）⇒ 从上表移出，
 > 详见 §1.1。走的**不是**原计划"在 `icp_registration` 内换后端"那条路，而是**新包**：
@@ -230,7 +466,7 @@ ros2 topic echo /gicp_registration/converged         # false ⇒ 本帧未采纳
 - 同一次运行里**比不了**（`map→odom` 只能一个发布者）⇒ **分开跑**，保证 **同一 world / 同一目标 / 同一路线 / 同一 `nav`+`planner`**；
 - 指标：
   1. `python3 tools/scripts/diag/record_tf_monotonic.py` → `map→odom` 的**跳变次数/幅度/单调性**；
-  2. 位姿话题频率（`ros2 topic hz /amcl_pose` 或对应话题）；
+  2. 位姿话题频率（amcl/beluga 是 `/amcl_pose` / **`/pose`**，或对应话题）；
   3. **P0 回归 PASS/FAIL + 到达误差 + 用时**（`tools/scripts/regress/nav_smoke_regression.py`）；
   4. CPU / RTF。
 - 记录：`algorithm_matrix.md §四` 加一行 + 本表状态列更新。
@@ -251,6 +487,7 @@ ros2 topic echo /gicp_registration/converged         # false ⇒ 本帧未采纳
 | **先试 `icp`** | 用现成入口跑 `localization:=icp`（资产与接线已核：节点 `icp_registration_node`、参数 `icp_registration_sim.yaml`、资产 `PCD/RMUL2026.pcd`） | 与刚调优的 AMCL 直接 A/B，看 `map→odom` 跳变与到达精度 |
 | **`slam_toolbox` 暂缓** | **保留入口与代码，暂不实现/不试** | 用户判断：项目偏老、担心以后跟不上赛场。**记录一条客观补充**：它的**更新率并不低**（`transform_publish_period` 可到 0.02 s = 50 Hz），真正的短板是 ① 要长期维护一份 `.posegraph` 资产 ② **全局重定位弱**（依赖初值）③ 维护节奏慢。⇒ 若以后要"随便摆 + 高更新率"，**优先考虑 `scan_context`（全局检索）+ GICP（连续型现代实现）** 这条组合，而不是回头用 slam_toolbox |
 | **`gicp` 已落地**（2026-10-05） | 新包 `src/rm_localization/gicp_registration/` + `localization:=gicp` 槽（choices 加一项 + launch 分支，与 icp 同 `IfCondition` 形态、同资产 `PCD/<world>.pcd`） | 与"用现代实现"的取向一致；**独立包**而非改 `icp_registration` ⇒ icp 后端保持原样，形成 AMCL / ICP / GICP 三方 A/B。细节、参数核实、资产实测见 §1.1 |
+| **`beluga` 已落地**（2026-10-05） | 新槽位值 `localization:=beluga` + 新 launch `rm_navigation/launch/localization_beluga_launch.py` + 兄弟参数文件 `rm_navigation/params/nav2_params_sim_beluga.yaml`；**装 apt 包 `ros-humble-beluga-amcl` 2.1.1（= 上游 commit `b06f906…`，Apache-2.0），不 vendor 代码** | 取向是"用现代实现做 A/B"：beluga 与 nav2 amcl 同名同义参数 + 同 lifecycle 形态 ⇒ 是**最干净的一对对照**（连 §九 的 5 个调参键都同名）。参数集非超集 ⇒ 用兄弟文件而不是复用 base（静默失效键问题）。细节/映射表/未验证项见 §1.2 |
 | **goal checker 改位置-only**（2026-10-05） | 四个 controller 槽文件（`nav2_params_sim_controller_{rpp,dwb,teb,mppi}.yaml`）的 `general_goal_checker.plugin`：`SimpleGoalChecker` → **`PositionGoalChecker`**，只留 `xy_goal_tolerance: 0.25`（删掉 `yaw_goal_tolerance`），别名 `general_goal_checker` 与 `stateful: True` 不变 | 全向车（mecanum）**没有"车头"概念** ⇒ 终点只约束位置；顺带消除"位置到了但朝向过不了 → progress checker 判失败 → 反复恢复 → ABORT"这一失败模式。已核已装 nav2 **1.1.20**：`share/nav2_controller/plugins.xml` 有该类、`libposition_goal_checker.so` 导出其符号，且该插件**只声明** `xy_goal_tolerance` / `stateful`（`yaw_goal_tolerance`、`path_length_tolerance` 在 1.1.20 的该插件里不存在 ⇒ 写了是静默失效，故删除） |
 
 
