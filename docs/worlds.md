@@ -167,6 +167,65 @@ WorldType.RMUC2026: {
   **不是同一套布局**（与早先 FFT 配准"回到随机水平"的结论一致）。
 ⇒ 结论：**不复用**，2D 图与 PCD 都从本 STL 现生成（§4.1/§4.2）。
 
+### 4.4 一条命令复跑：`tools/scripts/world/stl_to_world.py`
+
+§3 / §4.1 / §4.2 的做法已整理成一个脚本（约定全部参数化，**换 STL 不用改代码**）：
+
+```bash
+# 复现已提交的 RMUC2026 资产（--map-grid 是当初手工取的整数边界，见下面的差异 ②）
+python3 tools/scripts/world/stl_to_world.py \
+    --stl .tmp_cache/stl_view/easystl.stl --world-name RMUC2026 \
+    --spawn 10.925 2.525 --map-grid -15.0 -6.9 600 341
+
+# 换一份 STL：出生点自动选（严格平台面上离障碍最远），其余全默认
+python3 tools/scripts/world/stl_to_world.py --stl /path/new_field.stl --world-name RMUL2027
+
+# 试跑/回归：写到临时树，完全不碰仓库里的资产
+python3 tools/scripts/world/stl_to_world.py --stl ... --world-name RMUC2026_TEST --out-root /tmp/world_test
+```
+
+产出四样 + 两样附带：`meshes/<NAME>_world/`（`meshes/<NAME>.stl` 逐字节拷贝 + `model.sdf` +
+`model.config`，这是 Gazebo 的 `model://` 解析根）、`world/<NAME>_world/`（`<NAME>_world.world`
++ 上面两份 + `meshes/`，镜像既有目录结构）、`map/<NAME>.pgm|yaml`、`PCD/<NAME>.pcd`，
+外加**打印摘要**（bbox / 地面高度 / 网格 / free-occupied 面积 / 出生点 + clearance / 点数）与
+**JSON manifest**（默认 `<out-root>/.tmp_cache/world/<NAME>.manifest.json`，含 STL sha256 与全部参数）。
+**launch 文件不自动改**：摘要里会打印该加的那两行（格式同 §3），照抄即可。
+`--help` 有全部开关；`--robot-radius / --clearance-margin / --band / --voxel-* / --map-pad /
+--seed` 等都有与 RMUC2026 一致的默认值。
+
+**回归证据**（`--world-name RMUC2026_TEST` 写进临时目录，比对完即删、**未提交**）：
+
+| 检查项 | 工具输出 | 已提交资产 | 结论 |
+|---|---|---|---|
+| STL 拷贝 sha256 | `cc723f31…` | `cc723f31…` | 逐字节相同 |
+| 场地 bbox | x[-14.575,14.575] y[-6.401,9.649] z[-1.841,-0.111] | 同 | 相同 |
+| 自动求出的地面 | mesh z = **-1.6413436**（202.9 m² 的最大水平面） | 抬升 1.6413436 | 相同 |
+| `map/<NAME>.pgm` | 600x341 @0.05，free **237.8** / occupied **229.4** / 外沿 **44.4** m² | 同 | **逐字节相同** |
+| `.yaml` origin | `[-25.925, -9.425, 0]` | 同 | 除 `image:` 名外相同 |
+| 出生点 | (10.925, 2.525) clearance **2.704 m** | 同（§3 表） | 相同 |
+| PCD 点数 | **26,582**（0.25 m→11,146 ＋ 0.10 m→15,436） | **26,618**（11,124 ＋ 15,494） | −36 点（−0.14%），见差异 ① |
+| PCD bbox（map 系） | x[-25.500,3.650] y[-8.926,7.124] z[-0.140,0.540] | 同 | 相同 |
+| world / model.sdf | 去注释后 251 / 67 行 | 同 | 只有 `<model name>` 与 mesh URI（含世界名）不同 |
+
+两处**已知的、刻意的**差异：
+
+① **PCD 点数 ±0.1%**：已提交那份是 `trimesh` 默认（无种子）随机采样出来的；工具默认固定
+`--seed 0` 以便逐次可复跑，于是"带内点数"（2,037,263 vs 2,036,997）与体素点数差几十个
+（体素下采样本身确定，变的是哪些体素被采到）。bbox、两档 leaf、密度口径都一致。
+② **地图网格默认值**：工具默认取"场地 bbox 外扩 `--map-pad 0.5 m` 再向外对齐整格" ⇒ **604x342**；
+已提交那张是当初**手工取的整数边界 600x341**（30.00 x 17.05 m，x 比 bbox+0.5 少 0.075 m）。
+两者的 free/occupied 面积完全一样（多出来的只是外沿一圈"占用"）；要逐字节复现旧图就显式给
+`--map-grid -15.0 -6.9 600 341`（上面第一条命令已经这么写了）。
+
+**另外：`.tmp_cache/rmuc2026/` 里现存的脚本与本次工具不一致，以工具为准**（资产两处都对得上）：
+
+* `gen_assets.py` 把地图网格、出生点、地面高度（`-1.641343627929688`）全写成常量；工具全部从
+  STL 自己算（地面 = 面积最大的水平面，本 STL 逐位等于那个常量）。
+* `build_assets.py` 的**末尾版本**把出生点距离变换做在 `free`（阈值 0.15 m）上，会给出
+  **(7.975, 2.025) / 3.200 m** —— 那**不是**已提交的出生点；能复现 §3 表与 launch 注释里那组数
+  （对称两区各 ~71.4 m²、+x 点 2.704 m / −x 点 2.706 m）的是**严格平台面（抬升 ≤ 0.05 m）**版本，
+  工具默认用的就是后者（`--plateau-threshold 0.05`）。即：**脚本漂移过，资产没漂**。
+
 ---
 
 ## 5. 无头实测（headless）
@@ -332,3 +391,6 @@ colcon build --symlink-install --packages-select hzmi_rm_simulation rm_nav_bring
 * STL 的**非水密/重复面**对 ODE 的长期影响（长时间接触、多个接触点）没有做压力测试，
   只跑了 3 次短程（< 3 min/次）。
 * 世界文件里 5 盏灯的**实际照度**没有校验（只保证与 RMUL2026 同参数、位置平移）。
+* `tools/scripts/world/stl_to_world.py` 的产物只做了**文件级回归**（pgm 逐字节、world/model 去注释逐行、
+  PCD 点数与 bbox，见 §4.4），**没有**再起一次 Gazebo 验证 `--world-name RMUC2026_TEST` 能 spawn；
+  `RMUC2026` 本身的无头实测见 §5。

@@ -3,6 +3,8 @@
 布局约定：
 - `tools/*.py`（本目录根）＝ **Python 工具脚本**（评测、数据后处理、打包导出等）
 - `tools/scripts/` ＝ **Shell 脚本**（原仓库顶层 `scripts/` 合并至此）
+- `tools/scripts/world/` ＝ 例外：**离线生成脚本**（吃文件、不依赖 ROS，故按任务域而不是语言归类）——
+  目前只有 `stl_to_world.py`（场地 STL ⇒ world + 2D 图 + PCD，见 `docs/worlds.md` §4.4）
 
 ```
 tools/
@@ -11,6 +13,7 @@ tools/
     ├── build.sh
     ├── control/        # 启动/控制（start_sentinel.sh、improved_teleop.sh 方向键遥控）
     ├── mapping/        # 建图工具（存图、存 pcd）
+    ├── world/          # 离线生成：stl_to_world.py（场地 STL → world/map/PCD）
     ├── create_config_package.sh
     └── setup_from_package.sh
 ```
@@ -28,5 +31,6 @@ tools/
 | `seg_bench_offline.cc` | **linefit 单帧耗时离线基准**（把录到的点云直接喂核心库，不经 ROS/DDS） | 用来判"感知链卡顿是算力还是交付"：实测 **1.01 ms/帧** ⇒ 不是算力（详见 `docs/issues_and_findings.md` #25） |
 | `replay_scan_grid.py` | **★ 把 bag 的 `/scan`（或 `/segmentation/obstacle` 重算的高度带、或原始 3D 点云）+ `/tf` 位姿离线重放成 cartographer 2D 概率栅格**：`--mode events` 存"每周期命中/只清不命"事件矩阵，`--mode sweep` 秒级扫参数，`--mode diag` 出"墙留住的 vs 化掉的"两组票数 | 写入顺序逐条照抄 `probability_grid_range_data_inserter_2d.cc`（命中先写、同周期先写者胜、**跨帧无保护**）。**校验**：对 ret4 同轨迹，真 `/map` 末态 40.5% ↔ 复现 43.3%、留存+10 帧 52.9% ↔ 52.8% ⇒ 相对排序可信。⚠️ **跨 bag 比"留存百分比"无意义**（ret/ret2/ret3/ret4 是四条不同路线/时长的 bag），只在同一条 bag 上比。⚠️ 位姿用 `--pose tf`（`/odom_ground_truth` 是世界坐标，与 `map` 系差一个出生点平移） |
 | `diag_wall_passes.py` | **量化"到底是谁把墙格子擦掉的"**：抽样真 `/map` 的墙格子，逐帧统计"命中 vs 被更远回波压过"，并给出"远多少"的分布 | 结论：墙格子每帧只有 ~12% 命中、~17% 被压过（净票≈0）；压过它的回波 **82% 在 50cm 以内**（同一条墙的邻格，"锯齿+掠射"）⇒ 不是"墙看不见了"。见 `docs/debug_fastlio_cartographer.md` §5.2.4 |
+| `scripts/world/stl_to_world.py` | **★ 一条命令：场地 STL ⇒ Gazebo world + 2D 栅格图 + 先验 PCD**（`meshes/`+`world/`+`map/`+`PCD/`，附打印摘要与 JSON manifest；`--help` 看全部开关） | 约定与 RMUC2026 实测同款（mm→0.001、地面落 z=0、出生点相对系、两档体素）。复现命令与回归证据见 `docs/worlds.md` §4.4；换 STL 时**先写到临时目录**（`--out-root /tmp/x`）比对再落仓库 |
 
 > 前两个是**离线**工具（吃文件），第三个需要仿真/实车在跑（吃 `/tf`）。
