@@ -89,7 +89,13 @@
     #   now+0.00/0.05/0.10/0.20 全部成功（覆盖本仓库 MPPI 的 0.1 前瞻，余量 0.2 s），
     #   而 now+0.30（正好等于 lookahead）仍可能因"最新条目比查询时刻旧 ~1~20 ms"而失败 ——
     #   这正是"要留一个发布周期"的原因（AMCL 用同样的语义，边界情形同理）。
-    tf_lookahead_sec: 0.3
+    # ★ 2026-10-05：0.3 → 0.45。依据实跑日志：extrapolation 报错全部紧挨着 "Control loop missed its
+    #   desired rate of 30 Hz"（CPU 过载 ⇒ 本节点 50 Hz 的 TF 定时器被饿死，某一瞬间最新 TF 落后于
+    #   消费者请求的 now+0.1）⇒ 0.3 的余量顶不住最坏掉帧。0.45 只是给"发布被饿死"留余量，
+    #   TF 的【值】仍是最新估计（50 Hz ⇒ 最多旧 20 ms），不是把位姿往前外推。
+    #   规则：≥ 消费端最大 transform_tolerance（costmap 0.3）+ 发布周期 + 最坏掉帧余量。
+    #   回退：改回 0.3（会重新出现零星 abort）。
+    tf_lookahead_sec: 0.45
     fitness_score_warn: 0.05             # m²；= 内点平均平方距离（RMS≈0.22 m）。超过 ⇒ ~/converged=false
     max_fitness_score: 0.3               # m²；超过就**拒绝**本帧结果（RMS≈0.55 m）。首跑按实测再收紧
     no_improve_cycles_warn: 10           # 连续多少帧未采纳后打一条"定位已失效"的醒目 WARN
