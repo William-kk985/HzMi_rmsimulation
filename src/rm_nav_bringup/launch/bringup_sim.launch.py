@@ -116,6 +116,9 @@ def generate_launch_description():
         PythonExpression(["'", LaunchConfiguration('world'), "' + '.pcd'"])])
     # 参数已回归 icp_registration 包自身 config/（R1），经 ament_auto_package INSTALL_TO_SHARE 安装
     icp_registration_params_dir = os.path.join(get_package_share_directory('icp_registration'), 'config', 'icp_registration_sim.yaml')
+    # ★ 2026-10-05：新增 localization:=gicp 槽（GICP 精配准）—— 与 icp 槽同一份资产（PCD/<world>.pcd），
+    #   参数回归 gicp_registration 包自身 config/（见 docs/localization_slots.md §1）
+    gicp_registration_params_dir = os.path.join(get_package_share_directory('gicp_registration'), 'config', 'gicp_registration_sim.yaml')
     ################################# icp_registration parameters end #################################
 
     # Declare launch options
@@ -158,9 +161,10 @@ def generate_launch_description():
     declare_localization_cmd = DeclareLaunchArgument(
         'localization',
         default_value='',
-        choices=['', 'amcl', 'slam_toolbox', 'icp', 'cartographer'],
+        choices=['', 'amcl', 'slam_toolbox', 'icp', 'gicp', 'cartographer'],
         description='仅 mode:=nav 生效。重定位模块: amcl | slam_toolbox（需 .posegraph）| '
-                    'icp（需 PCD/<world>.pcd）| cartographer（纯定位，需 map/<world>.pbstream）；'
+                    'icp（需 PCD/<world>.pcd）| gicp（GICP 精配准，需 PCD/<world>.pcd + 初值：'
+                    '/initialpose 或 initial_pose 参数）| cartographer（纯定位，需 map/<world>.pbstream）；'
                     '留空 = 回退用法，直接用 LIO 当绝对定位并由静态桥补帧')
 
     declare_LIO_cmd = DeclareLaunchArgument(
@@ -425,7 +429,26 @@ def generate_launch_description():
                                 'pcd_path': icp_pcd_dir}
                         ],
                         # arguments=['--ros-args', '--log-level', ['icp_registration:=', 'DEBUG']]
-                    )
+                    ),
+
+                    # localization:=gicp —— GICP 精配准（与 icp 槽同资产、同初值契约、同 IfCondition 形态）。
+                    # 契约：只发 map→odom；**必须有初值**（/initialpose 或 config 里的 initial_pose），
+                    # 否则节点不发 TF 并在日志里每 2 s 说明一次（不会静默发垃圾 TF）。
+                    # 健康信号：/gicp_registration/{fitness_score,converged,pose}（见 docs/localization_slots.md §1）。
+                    Node(
+                        condition=IfCondition(PythonExpression([
+                            "'", LaunchConfiguration('localization'), "' == 'gicp' and '",
+                            LaunchConfiguration('lio'), "' != 'cartographer'"])),
+                        package='gicp_registration',
+                        executable='gicp_registration_node',
+                        output='screen',
+                        parameters=[
+                            gicp_registration_params_dir,
+                            {'use_sim_time': use_sim_time,
+                                'pcd_path': icp_pcd_dir}
+                        ],
+                        # arguments=['--ros-args', '--log-level', ['gicp_registration:=', 'DEBUG']]
+                    ),
                 ]
             ),
 
@@ -484,7 +507,8 @@ def generate_launch_description():
 
     # T1（修正版）：帧桥只在「nav + 未选择任何重定位模块 + 启用 LIO」时启动，
     # 即把 LIO 当作绝对定位（map≡camera_init、odom≡body）的回退用法。
-    # amcl / slam_toolbox / icp_registration 三者都会自行发布 map→odom，绝不能再叠加静态桥（否则 map/odom 多父边）。
+    # amcl / slam_toolbox / icp_registration / gicp_registration 都会自行发布 map→odom，
+    # 绝不能再叠加静态桥（否则 map/odom 多父边）。
     icp_frame_bridge_condition = IfCondition(PythonExpression([
         "'", LaunchConfiguration('mode'), "' == 'nav' and '",
         LaunchConfiguration('localization'), "' == '' and '",

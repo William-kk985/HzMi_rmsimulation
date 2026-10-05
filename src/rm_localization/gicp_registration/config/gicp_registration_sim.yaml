@@ -1,0 +1,72 @@
+# gicp_registration —— GICP 重定位（localization:=gicp 槽）
+#
+# 契约（与 icp_registration / amcl / slam_toolbox / cartographer 一致，见 docs/localization_slots.md）：
+#   **只发布 map→odom**（TF）；`odom→base_link` 归 LIO（+ lio_tf_adapter）；Nav2 用 base_link_fake。
+#
+# 初值（**ICP 族没有初值必然不收敛**，这是 localization:=icp 之前"跑起来但不可用"的根因）：
+#   · /initialpose（RELIABLE，RViz 的 2D Pose Estimate）—— 语义 = **map 系下机器人位姿**（与 AMCL 相同）；
+#   · 或本文件 initial_pose 参数（同样语义；RMUL2026 的 map 系 = 出生点相对系 ⇒ 出生即 [0,0,0]，
+#     见 bringup_sim.launch.py 里 amcl_init_* 的注释；若换回 map/RMUL2026_world_backup.* 那种
+#     世界系栅格图，出生点应给 [4.3, 3.35, 0]）；
+#   · 两者都没有 ⇒ 本节点**不发 map→odom**，并在日志里每 2 s 说明一次（不静默发垃圾 TF）。
+#
+# 键名的核实方式（PCL 1.12.1 = 本机 libpcl-dev 1.12.1+dfsg-3build1，GICP 头文件在
+# /usr/include/pcl-1.12/pcl/registration/{gicp.h,impl/gicp.hpp}）；"setXxx" 一律落成 "xxx"：
+#   voxel_leaf_size              本节点自有（体素下采样；地图与实时点云用同一 leaf）
+#   max_correspondence_distance  → setMaxCorrespondenceDistance → corr_dist_threshold_
+#                                （impl/gicp.hpp:414 用它当距离门限；构造默认 5.0 m，本节点给 1.0）
+#   maximum_iterations           → setMaximumIterations → max_iterations_
+#                                （impl/gicp.hpp:496 的收敛判据之一；构造默认 200，本节点给 32 省 CPU）
+#   transformation_epsilon       → setTransformationEpsilon（impl/gicp.hpp:474-483 的平移部分）
+#   rotation_epsilon             → setRotationEpsilon（同上，旋转部分；GICP 特有的"两段式"收敛判据）
+#   correspondence_randomness    → setCorrespondenceRandomness → k_correspondences_
+#                                （impl/gicp.hpp:51-125 算协方差的 KNN 数；构造默认 20）
+#   maximum_optimizer_iterations → setMaximumOptimizerIterations → max_inner_iterations_
+#                                （BFGS 内层迭代上限；构造默认 20）
+#   publish_rate_hz / fitness_score_warn / max_fitness_score / no_improve_cycles_warn /
+#   stale_warn_sec / use_initial_pose —— 本节点自有（输出与健康判定）
+#
+# ⚠️ 两个候选键**已核实对本节点无效，故意不写**（写了是静默失效，与 nav2 "Jazzy 键不声明" 同一个坑）：
+#   euclidean_fitness_epsilon —— PCL 1.12.1 里只被 IterativeClosestPoint / JointIterativeClosestPoint
+#       的 convergence_criteria 消费（impl/icp.hpp:157、impl/joint_icp.hpp:140）；GICP **覆写**了
+#       computeTransformation（impl/gicp.hpp:390），收敛判据是 max_iterations_ + transformation/
+#       rotation_epsilon（impl/gicp.hpp:496）⇒ 设了也不影响收敛。
+#   use_reciprocal_correspondences（任务书里写作 set_use_reciprocal_correspondences）—— PCL 只在
+#       IterativeClosestPoint::determineCorrespondences 里读它（impl/icp.hpp:180）；GICP 自己找最近邻
+#       （impl/gicp.hpp:438 的 searchForNeighbors），从不读该标志 ⇒ 设了也不生效。
+#   若以后升级 PCL 想启用，请先重新核源码，别直接抄。
+#
+# 点类型：pcl::PointXYZ（见 include/gicp_registration/gicp_registration.hpp 顶部说明）——
+#   GICP 的协方差由 KNN 邻域自行算出（只读 x/y/z），normal/intensity 字段一律不读；
+#   我们的 PCD 资产字段不统一（RMUC.pcd 没有 intensity）⇒ PointXYZ 三种资产都能读。
+/gicp_registration:
+  ros__parameters:
+    use_sim_time: false                  # launch 注入覆盖（bringup_sim.launch.py 的 use_sim_time）
+    pcd_path: ""                         # launch 注入 <rm_nav_bringup>/PCD/<world>.pcd
+    map_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"           # 只用于把 /initialpose/initial_pose/~/pose 换算到 base；
+                                         # **绝不发布 odom→base_link**
+    laser_frame_id: "livox_frame"        # 仅当点云 header.frame_id 为空时兜底
+    pointcloud_topic: "/livox/lidar/pointcloud"   # 订阅用 SensorDataQoS(BEST_EFFORT)
+
+    # ---------- 初值 ----------
+    use_initial_pose: true               # true = 用 initial_pose 参数做启动初值（/initialpose 始终有效）
+                                         # false = 恒等 map→odom 起步（把 LIO 的 odom 当绝对位姿）
+    initial_pose: [0.0, 0.0, 0.0]        # map 系机器人位姿 [x,y,z(,roll,pitch,yaw)]；RMUL2026 出生即原点
+
+    # ---------- GICP ----------
+    voxel_leaf_size: 0.25                # 地图与实时点云各自的体素下采样 leaf（m）
+    max_correspondence_distance: 1.0     # m；PCL GICP 构造默认是 5.0（对本场地过大）
+    maximum_iterations: 32               # PCL GICP 构造默认 200；32 是 CPU 与收敛的折中（未实测调优）
+    transformation_epsilon: 5.0e-4       # = PCL GICP 构造默认
+    rotation_epsilon: 2.0e-3             # = PCL GICP 构造默认
+    correspondence_randomness: 20        # = PCL GICP 构造默认（算协方差的 KNN 数）
+    maximum_optimizer_iterations: 20     # = PCL GICP 构造默认（BFGS 内层）
+
+    # ---------- 输出与健康 ----------
+    publish_rate_hz: 50.0                # TF map→odom 的发布频率（与配准帧率无关）
+    fitness_score_warn: 0.05             # m²；= 内点平均平方距离（RMS≈0.22 m）。超过 ⇒ ~/converged=false
+    max_fitness_score: 0.3               # m²；超过就**拒绝**本帧结果（RMS≈0.55 m）。首跑按实测再收紧
+    no_improve_cycles_warn: 10           # 连续多少帧未采纳后打一条"定位已失效"的醒目 WARN
+    stale_warn_sec: 3.0                  # 多久没收到点云就 WARN（定位停止更新）
