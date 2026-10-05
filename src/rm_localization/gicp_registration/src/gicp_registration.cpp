@@ -36,21 +36,34 @@
 //      map→odom，盖成"当前/过去"会让 buffer 里最新条目比请求时间旧 ⇒ tf2 抛
 //      "Lookup would require extrapolation into the future" ⇒ follow_path 每周期 abort。
 //
-// **并发契约（2026-10-05 新增，治"align 饿死 TF 定时器"）**：两级 leaf 变细后单帧 align 实测
-//   ~350 ms（327~389 ms），而 TF 定时器原来与点云订阅挤在**单线程 executor** 的同一个默认回调组里
-//   ⇒ align 期间定时器排不上队：节点独占机器时实测 `/tf` 上的 map→odom 只剩 **~2 Hz**
-//   （TF 条数 ≈ 采纳帧数）⇒ 上面 ④ 的 tf_lookahead_sec=0.45 余量被吃满 ⇒ 整栈又见
-//   "extrapolation into the future"（"刚修好的洞在别处漏水"）。修法**不改契约、只改调度**：
+// **并发契约（2026-10-05 新增，治"align 饿死 TF 定时器"；同日二次修复治"align 饿死 /initialpose"）**：
+//   两级 leaf 变细后单帧 align 实测 ~350 ms（327~389 ms），而 TF 定时器原来与点云订阅挤在**单线程
+//   executor** 的同一个默认回调组里 ⇒ align 期间定时器排不上队：节点独占机器时实测 `/tf` 上的
+//   map→odom 只剩 **~2 Hz**（TF 条数 ≈ 采纳帧数）⇒ 上面 ④ 的 tf_lookahead_sec=0.45 余量被吃满
+//   ⇒ 整栈又见 "extrapolation into the future"（"刚修好的洞在别处漏水"）。修法**不改契约、只改调度**：
 //     · 可执行文件跑 **MultiThreadedExecutor**（CMakeLists.txt 的 `EXECUTOR MultiThreadedExecutor`；
 //       生成的 main 就是 exec.add_node(node) + exec.spin()）；
-//     · **TF/状态定时器独占 tf_cb_group_**（MutuallyExclusive），**点云订阅（重活）+ /initialpose
-//       放 align_cb_group_**（另一个 MutuallyExclusive）⇒ 两组由 MT executor 并行调度，
-//       一次 350 ms 的 align 再也阻塞不了 50 Hz 的 TF 定时器；
-//     · /initialpose **故意与点云同组**：人工初值与"align 读改写 map→odom"必须串行
-//       （否则点击会被在飞的 align 结果覆盖），组内互斥同时保证 PCL GICP 对象 / first_align_done_
-//       仍是单线程访问（PCL GICP 自身不是线程安全的，绝不允许并发 align）；
-//     · 跨两组共享的成员一律在既有 mutex_ 下读写（逐项清单见 .hpp 的"状态"块），本轮唯一补锁的
-//       是 last_tf_error_（std::string，真并发就是 UB）；三个健康话题只由 align 组发布，
+//     · **TF/状态定时器独占 tf_cb_group_**（MutuallyExclusive），**点云订阅（重活）放 align_cb_group_**
+//       （另一个 MutuallyExclusive），**/initialpose 放第三个 init_pose_cb_group_** ⇒ 三组由 MT executor
+//       并行调度，一次 350 ms 的 align 再也阻塞不了 50 Hz 的 TF 定时器；
+//     · `/initialpose` 的**调度位置**（2026-10-05 二次修复）：原来它与点云**故意同组**，理由是
+//       "人工初值的写入必须与 align 的读改写串行"；但同组 = 点击要排在在飞的 align 后面，
+//       PCL 后端 400~490 ms/帧 @10 Hz 时实测**一次点击 13.2 s 才被处理**、另一次 **14 s 内完全没被处理**
+//       （空闲时 ~15 ms；见 docs/gicp_backend_small_gicp.md §6.5 与 docs/gicp_initialpose_latency.md）。
+//       现在改成 **handoff + apply**：
+//         - initialPoseCallback（init_pose_cb_group_）= **只做交接**：在 mutex_ 下拷一份**原始**
+//           pose/covariance + header(stamp/frame) 进 pending_initial_pose_ 并置位，然后立刻返回
+//           （没有 TF 查询、没有变换、没有 reset、不发话题；唯一日志 = 一行 1 Hz 限频 INFO）；
+//         - consumePendingInitialPose()（**只在点云回调帧首调用**，仍在 align_cb_group_ 内）= 真正的
+//           "应用"：TF odom→base 查询、T_map_odom = T_map_base·T_odom_base、状态写入、
+//           no_improve_cycles_ 清零、日志、一条 ~/pose。
+//       ⇒ 串行性不但保住，而且更严格（写入与 align 的读改写现在是**同一条回调序列**，不再依赖
+//         "组内互斥 + 两个不同回调"）；PCL/small_gicp 对象 / first_align_done_ 依旧只在这条路上被碰。
+//         代价：点击的"生效"挂在**下一帧点云开头**（≈ 一个 align 周期）⇒ 点云完全不来时点击会**排队**
+//         （旧代码是当场生效）。TF 可用性的判定时刻也从"点击时刻"挪到"下一帧开头"（≤ 一个 align 周期，
+//         只会让原本会被丢弃的点击更可能被采纳）。
+//     · 跨组共享的成员一律在既有 mutex_ 下读写（逐项清单见 .hpp 的"状态"块），本轮新增的唯一共享项是
+//       交接槽 pending_initial_pose_ / pending_initial_pose_valid_；三个健康话题只由 align 组发布，
 //       故意**不**持状态锁发布 —— 一次阻塞的 DDS 写会把定时器线程一起拖住，等于把"饿死"带回来。
 
 #include "gicp_registration/gicp_registration.hpp"
@@ -77,8 +90,9 @@ namespace gicp_registration
 namespace
 {
 // TF 查询超时（秒）：两档都故意很短 —— 本节点的 TF 查询**只发生在 align 回调组里**
-// （pointcloudCallback / initialPoseCallback / publishPose），而该组是 MutuallyExclusive
-// ⇒ 一次长等待会直接推迟下一帧配准（点云 KEEP_LAST(1)，等 10 s 等于丢 10 s 的定位）。
+// （pointcloudCallback 自身 + 它帧首的 consumePendingInitialPose + publishPose），而该组是
+// MutuallyExclusive ⇒ 一次长等待会直接推迟下一帧配准（点云 KEEP_LAST(1)，等 10 s 等于丢 10 s 的定位）。
+// （2026-10-05 二次修复后，交接回调 initialPoseCallback 里**没有** TF 查询 —— 那正是它被饿死的根源之一。）
 // 注：TransformListener 自带专用线程（tf2_ros::TransformListener 构造时创建
 // MutuallyExclusive 回调组 + SingleThreadedExecutor + dedicated_listener_thread_），
 // 所以 TF 的**接收**不受本节点 executor 影响；这里短的只是"查不到就快点失败"。
@@ -378,17 +392,24 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   }
 
   // ============================ ROS 接口 ============================
-  // ---- 回调组（2026-10-05：把 50 Hz 的 TF 定时器与重配准解耦）----
-  // 为什么要两个组：单帧 align 实测 ~350 ms（327~389 ms）；原来定时器与点云订阅共用**单线程 executor 的
+  // ---- 回调组（2026-10-05：把 50 Hz 的 TF 定时器与重配准解耦；同日二次修复：把 /initialpose 摘出来）----
+  // 为什么要多组：单帧 align 实测 ~350 ms（327~389 ms）；原来定时器与点云订阅共用**单线程 executor 的
   // 默认回调组** ⇒ align 期间定时器排不上队，`/tf` 上的 map→odom 实测只剩 ~2 Hz ⇒ nav2 在
   // now+transform_tolerance 处查到的最新条目越来越旧 ⇒ "extrapolation into the future" 复发。
-  // 现在：MultiThreadedExecutor（CMakeLists.txt 的 EXECUTOR）+ 下面两个 MutuallyExclusive 组
+  // 现在：MultiThreadedExecutor（CMakeLists.txt 的 EXECUTOR）+ 下面三个 MutuallyExclusive 组
   // 并行调度 ⇒ 定时器再也不受 align 影响（契约、话题、QoS、时间戳语义全不变）。
-  //   · tf_cb_group_    ：只放 TF/状态定时器（组类型 MutuallyExclusive ⇒ 定时器回调不自我重叠）；
-  //   · align_cb_group_ ：点云订阅（GICP 重活）+ /initialpose。
-  // /initialpose 与点云同组的理由：初值写入与 align 的读改写必须串行，且 GICP 对象不是线程安全的。
+  //   · tf_cb_group_        ：只放 TF/状态定时器（组类型 MutuallyExclusive ⇒ 定时器回调不自我重叠）；
+  //   · align_cb_group_     ：点云订阅（GICP 重活）+ **初值的应用**（consumePendingInitialPose，帧首）；
+  //   · init_pose_cb_group_ ：只放 /initialpose 订阅（**纯交接**：mutex_ 下拷一份原始 msg + 置位）。
+  // /initialpose 为什么能、也必须搬出 align 组（2026-10-05 二次修复）：
+  //   原来与点云同组是为了"初值写入与 align 的读改写串行"；现在**写入本身搬进了点云回调帧首**
+  //   ⇒ 串行性由 align 组自己保证（更严格：同一条回调序列），组内排队就不再需要 ——
+  //   而正是那条排队让点击在 align 饱和时被饿死（实测 13.2 s / 14 s 内未处理，见 docs）。
+  //   为什么不塞进 tf_cb_group_：那个组的契约是"50 Hz 的 TF/状态发布绝不被拖慢"，而 /initialpose 是
+  //   人手点的话题（RViz 可能突发重发）⇒ 不该与它有调度耦合；独立组最干净（见 docs 的替代方案对比）。
   tf_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   align_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  init_pose_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
   // 点云：BEST_EFFORT（发布端 livox 用 SensorDataQoS；默认 RELIABLE 订阅会永远收不到
   // —— 这正是 icp_registration 在 f033d96 之前"跑起来但没数据"的原因）。KEEP_LAST(1)：
@@ -399,10 +420,12 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     pointcloud_topic_, rclcpp::SensorDataQoS().keep_last(1),
     std::bind(&GicpNode::pointcloudCallback, this, std::placeholders::_1),
     cloud_sub_options);
-  // /initialpose：RELIABLE（RViz 的 2D Pose Estimate 就是 RELIABLE 发的，不能共用点云 QoS）
-  // 与点云同组（见上）：人工初值必须与在飞的 align 串行，否则会被旧估计覆盖。
+  // /initialpose：**QoS 不变 = RELIABLE**（RViz 的 2D Pose Estimate 就是 RELIABLE 发的，
+  // 不能共用点云的 SensorDataQoS/BEST_EFFORT；这是契约，不是实现细节）。
+  // 变的是**回调组**：独立 init_pose_cb_group_ ⇒ 点击的"接收"不再排在在飞的 align 后面；
+  // 真正的"应用"仍在 align 组内（点云回调帧首），串行性见文件顶部与 .hpp 的并发契约。
   rclcpp::SubscriptionOptions init_pose_sub_options;
-  init_pose_sub_options.callback_group = align_cb_group_;
+  init_pose_sub_options.callback_group = init_pose_cb_group_;
   initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "/initialpose", rclcpp::QoS(rclcpp::KeepLast(10)),
     std::bind(&GicpNode::initialPoseCallback, this, std::placeholders::_1),
@@ -464,9 +487,11 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "（fitness warn=%.3f / accept=%.3f m²）\n"
     "  时间戳: TF 与 ~/pose 都用 now+%.2f s（tf_lookahead_sec，≈ AMCL transform_tolerance；"
     "点云时间戳不用来盖 TF）\n"
-    "  并发: MultiThreadedExecutor + 两个回调组 —— TF/状态定时器组（%.1f Hz）‖ 点云+/initialpose 组"
-    "（GICP align）\n"
-    "        ⇒ 单帧 align 再慢也不会饿死 TF 定时器（改前单线程：实测 /tf 只有 ~2 Hz）\n"
+    "  并发: MultiThreadedExecutor + 三个回调组 —— TF/状态定时器组（%.1f Hz）‖ 点云组（GICP align）"
+    "‖ /initialpose 交接组\n"
+    "        ⇒ 单帧 align 再慢也不会饿死 TF 定时器（改前单线程：实测 /tf 只有 ~2 Hz）；"
+    "/initialpose 只做交接（µs 级），\n"
+    "          真正的应用在**下一帧点云开头**、与 align 串行（改前与点云同组：实测被饿死 13.2 s）\n"
     "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f；"
     "状态行每 ~1 s 一条（含 align 耗时 ms 与 fitness score）\n"
     "  注：pcl 后端在首个 fitness score 之前要先做一次目标协方差预计算（target 越密越慢），"
@@ -509,14 +534,14 @@ bool GicpNode::lookupTf(
       out = transformToMatrix(tf.transform);
       return true;
     } catch (const tf2::TransformException & ex) {
-      // last_tf_error_ 是 std::string：跨回调（点云 / /initialpose / publishPose）共享，
-      // MT executor 下必须加锁写（读走 lastTfError() 的加锁快照）。
+      // last_tf_error_ 是 std::string：跨回调共享（点云 / publishPose / 初值应用 —— 三者现在都在
+      // align 组内，但定时器组的日志仍会读它），MT executor 下必须加锁写（读走 lastTfError() 快照）。
       std::lock_guard<std::mutex> lock(mutex_);
       last_tf_error_ = ex.what();
     }
   }
   try {
-    // tf2::TimePointZero = "取最新可用"（用户点 /initialpose、点云时间戳查不到时的兜底）
+    // tf2::TimePointZero = "取最新可用"（用户点 /initialpose 的初值应用、点云时间戳查不到时的兜底）
     const auto tf = tf_buffer_->lookupTransform(
       target, source, tf2::TimePointZero, tf2::durationFromSec(kTfLatestTimeoutSec));
     out = transformToMatrix(tf.transform);
@@ -557,6 +582,16 @@ Eigen::Matrix4d GicpNode::initialPoseParamToMatrix() const
 
 void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
+  // --- ⓪ 应用待处理的 /initialpose（2026-10-05：交接 → 应用的**唯一**消费点）---
+  // 放在最开头（比点云转换还早）的两个理由：
+  //   ① 点击的"生效"只等这一帧**开始**，不再等回调组空闲（旧设计要排在在飞的 align 后面，
+  //      实测被饿死 13.2 s）；也就等于"延迟 ≈ 一个 align 周期"；
+  //   ② 本帧之后可能因为点云非法/TF 查不到而提前 return，但点击**已经生效**（旧代码在点击回调里
+  //      当场生效，语义一致，不会因为一帧坏点云把人的操作吞掉）。
+  // 内部只做 TF odom→base 查询 + 组合 + 状态写入（与旧 initialPoseCallback 逐行等价），
+  // 全程在本回调线程内 ⇒ 与下面 align 的读改写是同一条回调序列（串行性比"组内互斥"更强）。
+  consumePendingInitialPose();
+
   // --- ① 转 PCL（点类型 pcl::PointXYZ：只要求 x/y/z，不碰 intensity） ---
   PointCloudT::Ptr raw(new PointCloudT);
   try {
@@ -799,11 +834,52 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
 void GicpNode::initialPoseCallback(
   const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
 {
+  // ================== 廉价交接（handoff）：只拷贝 + 置位，然后立刻返回 ==================
+  // 本回调跑在**独立**的 init_pose_cb_group_（2026-10-05 二次修复），**故意不做**任何"应用"动作：
+  //   · 没有 TF 查询（旧代码在这里查 odom→base，超时 0.05 s×2 档，且要排在在飞的 align 后面）；
+  //   · 没有变换/组合、没有 map→odom 写入、没有 no_improve 清零、不发任何话题；
+  //   · 唯一日志 = 一行 1 Hz 限频 INFO（交接是热路径：RViz 连点不该刷屏）。
+  // 存的是**原始** payload：pose/covariance 一个字段不改，header 连 stamp 一起带走 ——
+  // 应用的语义（含"点云/TF 变化"的判定时刻）留给 consumePendingInitialPose()，与旧实现逐行等价。
+  // 后到者覆盖先到者：连续点击的**终态**与旧实现一致（最后一次点击生效），只是中间那几次不再
+  // 各写一次 map→odom / 各发一条 ~/pose（旧实现每次点击都会各写一条，属实现细节而非契约）。
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_initial_pose_.pose = msg->pose;      // 原始 pose + covariance（本节点不用协方差，照样带着）
+    pending_initial_pose_.header = msg->header;  // 原始 stamp（TF 精确查询用）+ frame_id（仅记录）
+    pending_initial_pose_valid_ = true;
+  }
+  RCLCPP_INFO_THROTTLE(
+    get_logger(), *get_clock(), 1000,
+    "/initialpose 收到（handoff）：map 系机器人位姿 x=%.3f y=%.3f z=%.3f frame='%s' "
+    "⇒ 将在**下一帧点云开头**应用（TF 查询/组合/状态写入都在那一步，与 align 串行）",
+    msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z,
+    msg->header.frame_id.c_str());
+}
+
+bool GicpNode::consumePendingInitialPose()
+{
+  // ---------- ① 取出交接槽：锁内只做 POD 拷贝 + 清标志（µs 级） ----------
+  geometry_msgs::msg::PoseWithCovariance pose_raw;
+  std_msgs::msg::Header header_raw;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pending_initial_pose_valid_) {
+      return false;
+    }
+    pending_initial_pose_valid_ = false;  // 取出即消费：TF 查不到也**不再重试**（与改动前一致）
+    pose_raw = pending_initial_pose_.pose;
+    header_raw = pending_initial_pose_.header;
+  }
+
+  // ---------- ② 以下与改动前的 initialPoseCallback **逐行等价**（语义一个不改） ----------
   // /initialpose 的语义（与 AMCL 一致）= map 系下**机器人（base_frame）**的位姿
   // ⇒ T_map←odom = T_map←base · T_base←odom，其中 T_base←odom 由 TF 提供（LIO 的 odom→base）。
   // 这样 GICP 不必自己猜雷达外参，也没改变用户对 RViz 的用法。
-  const Eigen::Matrix4d T_map_base = poseToMatrix(msg->pose.pose);
-  const rclcpp::Time stamp(msg->header.stamp, get_clock()->get_clock_type());
+  // 注：`use_initial_pose` 参数**与本路径无关**（它只管 initial_pose 参数那条惰性初始化）
+  // ⇒ /initialpose 在 use_initial_pose=false 时同样有效（与改动前一致）。
+  const Eigen::Matrix4d T_map_base = poseToMatrix(pose_raw.pose);
+  const rclcpp::Time stamp(header_raw.stamp, get_clock()->get_clock_type());
   Eigen::Matrix4d T_odom_base;
   bool used_latest = false;
   // 精确时间戳查不到会自动退到"最新可用"（用户点击的语义本来就是"此刻"）
@@ -811,7 +887,7 @@ void GicpNode::initialPoseCallback(
     RCLCPP_WARN(
       get_logger(), "/initialpose 收到，但 TF %s←%s 查不到（%s）⇒ 忽略本次初值（LIO/TF 未就绪？）",
       odom_frame_id_.c_str(), base_frame_id_.c_str(), lastTfError().c_str());
-    return;
+    return false;  // 不改任何状态（estimate_valid_ 不会因此变 true ⇒ 仍然不发 map→odom）
   }
   const Eigen::Matrix4d T_map_odom = T_map_base * T_odom_base;
   {
@@ -826,7 +902,10 @@ void GicpNode::initialPoseCallback(
     poseToStr(T_map_base).c_str(), poseToStr(T_map_odom).c_str());
   // ~/pose 的戳由 publishPose 统一盖成"与 TF 相同的那条 lookahead 戳"
   // （不再用点击时刻：点击时刻是"过去"，且与 TF 不一致）。
+  // 这里**立刻**发一条（与改动前 /initialpose 的即时反馈一致；score=-1 = 本次没有 fitness score）；
+  // 本帧末尾 pointcloudCallback 还会按帧的正常路径再发一条（值可能已被本帧 align 精修）。
   publishPose(T_map_odom, -1.0 /*本次没有 fitness score*/);
+  return true;
 }
 
 // ============================ 发布 ============================
@@ -967,8 +1046,9 @@ rclcpp::Time GicpNode::publishTf(const Eigen::Matrix4d & T_map_odom)
 
 void GicpNode::publishPose(const Eigen::Matrix4d & T_map_odom, double score)
 {
-  // 运行上下文（2026-10-05）：~/pose 仍**只由 align 组**发布（pointcloudCallback 每采纳帧一次、
-  // /initialpose 一次），**没有**搬到 TF 定时器里 —— 话题语义/频率与改动前完全一致；
+  // 运行上下文（2026-10-05）：~/pose 仍**只由 align 组**发布（pointcloudCallback：每帧一次，
+  // 以及其中的 consumePendingInitialPose 在应用 /initialpose 时立刻补一条），**没有**搬到 TF 定时器里
+  // —— 话题语义/频率与改动前完全一致（交接回调 initialPoseCallback 一个话题都不发）；
   // 定时器组只负责 TF（map→odom）与状态行。last_tf_stamp_ 是"定时器组写、本组读"的跨组共享
   // 成员 ⇒ 下面的取戳在 mutex_ 下做。
   // ① 戳：与 TF **同一条**（优先复用最近一次真正发出去的 TF 戳；若还没有 TF 就用同一条公式）。
