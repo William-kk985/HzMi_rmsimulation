@@ -63,7 +63,7 @@
         imu_topic: /livox/imu                      # gazebo_ros_imu_sensor 的原始 IMU（100 Hz，无噪声）
         lidar_type: livox_custom_msg               # 四种之一：livox_custom_msg / livox_pointcloud2 / custom_mid360_driver / unilidar
         lidar_frame: livox_frame                   # 必须与 /livox/lidar 的 header.frame_id 和 URDF 帧名一致
-        save_pcd: false                            # 差异：无。**绝不要开**（见文件末尾）
+        save_pcd: true                             # ★ 2026-10-05：false → **true**（唯一为"能存 3D 图"改的键）
 
         # ===== 点云过滤 =====
         point_filter_num: 1                        # 差异：无（上游 1；试过 2，更差）
@@ -126,7 +126,23 @@
         # ===== 数据发布 =====
         publish_odometry_without_downsample: false # 差异：无（上游建议保持 false）
 
-        # ⚠️ save_pcd 一旦为 true：① 每帧点都进 pointcloud_mapping（吃 CPU/内存）；
-        #    ② map_save 服务会把 PCD 写到 **ROOT_DIR/pcd/scan.pcd**，而 ROOT_DIR 是
-        #    `@CMAKE_CURRENT_SOURCE_DIR@`（include/param_deliver.h.in）⇒ 直接写进源码树。
-        #    本仓一律 false；要存图用 fastlio 的 /map_save（落 PCD/<world>.pcd）。
+        # ===== save_pcd: true 的代价与用法（2026-10-05 改，源码级依据）=====
+        # 本槽位**有** /map_save 服务（不是"没有"）：small_point_lio_node.cpp:37-51 里
+        # `create_service<std_srvs::srv::Trigger>("map_save", ...)`，但它要求构造期
+        # save_pcd=true（否则回 success=false / "pcd save is disabled"），而 save_pcd 只在
+        # 构造函数里读一次 ⇒ **不能**用 `ros2 param set` 事后打开，必须在参数文件里开。
+        # 因此这里改成 true（本仓唯一一处为"能存 3D 图"而改的键）。
+        #
+        # 代价（已核源码，对本槽位是"可忽略"）：① 构造函数多一个 PointcloudMapping（0.02 m 体素）；
+        #   ② 每帧点云多一次哈希表插入（~3500 点 @7 Hz ≈ 2.5 万次/s）；③ /map_save 变成可用。
+        #   **对估计器完全只读**：save_pcd 只出现在节点层（node.cpp:33/37/101/190），
+        #   Point-LIO 的 ESKF/预处理一行都不读它 ⇒ 导航/建图的数值行为按构造不变。
+        #
+        # ⚠️ 落盘路径**不可配**（源码里没有任何路径参数）：`ROOT_DIR + "/pcd/scan.pcd"`，
+        #   ROOT_DIR = `@CMAKE_CURRENT_SOURCE_DIR@`（include/param_deliver.h.in）⇒ **写进源码树**
+        #   `src/rm_localization/small_point_lio/pcd/scan.pcd`（该目录本来就有 .gitkeep，
+        #   且包内 .gitignore 有 `*.pcd` ⇒ 不会污染 git）。要落到仓库资产目录，
+        #   只能在调用 /map_save 之后把文件搬走：见 tools/scripts/mapping/coverage_drive.py
+        #   的 --save-3d（它会轮询"文件出现且大小稳定"再搬，因为 write_pcd 跑在**分离线程**里，
+        #   服务先返回 success=true）。
+        # 回退：本键改回 false（一行；3D 导出能力随之关闭，不影响导航）。
