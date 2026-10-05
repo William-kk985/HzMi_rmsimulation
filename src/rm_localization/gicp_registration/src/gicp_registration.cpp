@@ -1,11 +1,19 @@
 // GICP 重定位节点（localization:=gicp 槽）—— 只发布 map→odom。
 //
 // 数据流（每帧）：
-//   实时点云(/livox/lidar/pointcloud, BEST_EFFORT) → 去 NaN → 体素下采样(source)
+//   实时点云(/livox/lidar/pointcloud, BEST_EFFORT) → 去 NaN → 体素下采样(source, leaf=voxel_leaf_size_scan_)
 //   TF: T_sensor←odom（点云时间戳）                 —— 把 LIO 的里程计增量接到配准结果上
 //   初值 guess = T_map←odom(上次) · T_odom←sensor   —— 用里程计做运动预测 ⇒ GICP 连续跟踪
 //   GICP(source → map) → T_map←sensor_est
 //   T_map←odom = T_map←sensor_est · T_sensor←odom  → 接受/拒绝 → TF / ~/pose / ~/fitness_score
+//
+// **两级下采样（two-tier leaf，2026-10-05）**：先验地图（target）用粗 leaf（voxel_leaf_size_，
+//   默认 0.10 m）——建地图点云本身密度不均、粗一点省内存/CPU 且给 GICP 稳定的平面协方差；
+//   实时点云（source）用细 leaf（voxel_leaf_size_scan_，默认 0.05 m）——单帧只有几千点，
+//   细一点才能保住几何细节与配准精度。recipe 来自 COD 2025 的 small_gicp_relocalization
+//   （global_leaf_size 0.25 / registered_leaf_size 0.05 / max_dist_sq 2.5 / num_threads 8），
+//   我们把地图侧按本仓库资产密度收到 0.10 m（0.25 m 时 RMUL2026 只剩 2438 个 target 点，
+//   实测 map→odom 在 30 s 窗口里漂 ~8 cm、settled=False）。
 //
 // 行为约定（docs/localization_slots.md §1）：
 //   ① **必须有初值**：/initialpose（RELIABLE，RViz 2D Pose Estimate，语义 = map 系下机器人位姿）
@@ -134,8 +142,23 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   initial_pose_param_ =
     declare_parameter<std::vector<double>>("initial_pose", std::vector<double>{0.0, 0.0, 0.0});
 
-  voxel_leaf_size_ = declare_parameter<double>("voxel_leaf_size", 0.25);
-  max_correspondence_distance_ = declare_parameter<double>("max_correspondence_distance", 1.0);
+  // ---- 两级体素下采样（two-tier，2026-10-05）----
+  // 键名 voxel_leaf_size **故意保留**（向后兼容既有 launch/参数覆盖），但语义收窄为
+  // "**先验地图 / GICP target** 的 leaf"：默认 0.25 → 0.10。
+  //   · 0.25 时 RMUL2026.pcd 只剩 2438 个 target 点（实测启动 banner），几何太稀疏 ⇒
+  //     GICP 的目标协方差（KNN=20）被拉平、最近邻配对噪声大 ⇒ map→odom 漂（实测 30 s ~8 cm）。
+  //   · 0.10 时 target 点数上一个量级（**实测 12450**，见下方启动 banner），代价是每帧 KNN/协方差更贵。
+  //   依据：COD 2025 relocalizer small_gicp_relocalization 的 global_leaf_size（先验 PCD 侧）。
+  voxel_leaf_size_ = declare_parameter<double>("voxel_leaf_size", 0.10);
+  // 新键：**实时点云 / GICP source** 的 leaf，默认 0.05（细一档）。
+  //   · 本节点原来用地图的 leaf 给实时点云下采样（0.25 m）——单帧被砍到几百点，配准精度被自己掐死；
+  //   · 0.05 对应 COD small_gicp_relocalization 的 registered_leaf_size: 0.05。
+  // 两级 leaf 的取值理由逐条写在 config/gicp_registration_sim.yaml 里。
+  voxel_leaf_size_scan_ = declare_parameter<double>("voxel_leaf_size_scan", 0.05);
+  // 1.0 → 1.5 m：对齐 COD 的 max_dist_sq 2.5（√2.5 ≈ 1.58 m，PCL 的对应点距离门限），
+  // 给初值（LIO 里程计递推）多留收敛余量；注意 getFitnessScore 用的球半径同步变大
+  // （1.5² = 2.25 m² vs 原来 1.0² = 1.0 m²）⇒ fitness 量级会整体上移，阈值需按实测量级重看。
+  max_correspondence_distance_ = declare_parameter<double>("max_correspondence_distance", 1.5);
   maximum_iterations_ = declare_parameter<int>("maximum_iterations", 32);
   transformation_epsilon_ = declare_parameter<double>("transformation_epsilon", 5.0e-4);
   rotation_epsilon_ = declare_parameter<double>("rotation_epsilon", 2.0e-3);
@@ -166,9 +189,27 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
       initial_pose_param_.size());
     initial_pose_param_ = {0.0, 0.0, 0.0};
   }
+  // 两个 leaf 都必须是正数（PCL VoxelGrid 的 leaf<=0 无意义）。本节点**不提供**"0 = 不下采样"档：
+  // 实时点云与地图都不下采样会让单帧点数/协方差计算量失控（本节点已知 CPU 敏感，见 config 注释），
+  // 所以 <=0 一律判非法、退回默认值并 WARN（与旧版对 voxel_leaf_size 的处理一致）。
   if (voxel_leaf_size_ <= 0.0) {
-    RCLCPP_WARN(get_logger(), "voxel_leaf_size=%.3f 非法 ⇒ 用 0.25", voxel_leaf_size_);
-    voxel_leaf_size_ = 0.25;
+    RCLCPP_WARN(
+      get_logger(), "voxel_leaf_size=%.3f 非法（必须是正数）⇒ 用 0.10（先验地图/target leaf）",
+      voxel_leaf_size_);
+    voxel_leaf_size_ = 0.10;
+  }
+  if (voxel_leaf_size_scan_ <= 0.0) {
+    RCLCPP_WARN(
+      get_logger(),
+      "voxel_leaf_size_scan=%.3f 非法（必须是正数）⇒ 用 0.05（实时点云/source leaf）",
+      voxel_leaf_size_scan_);
+    voxel_leaf_size_scan_ = 0.05;
+  }
+  if (max_correspondence_distance_ <= 0.0) {
+    RCLCPP_WARN(
+      get_logger(), "max_correspondence_distance=%.3f 非法（必须是正数）⇒ 用 1.5 m",
+      max_correspondence_distance_);
+    max_correspondence_distance_ = 1.5;
   }
   if (publish_rate_hz_ <= 0.0) {
     RCLCPP_WARN(get_logger(), "publish_rate_hz=%.3f 非法 ⇒ 用 50.0", publish_rate_hz_);
@@ -211,7 +252,7 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   pcl::Indices finite_indices;
   PointCloudT::Ptr map_finite(new PointCloudT);
   pcl::removeNaNFromPointCloud(*raw_map, *map_finite, finite_indices);
-  map_cloud_ = downsample(map_finite);
+  map_cloud_ = downsample(map_finite, voxel_leaf_size_);  // 两级 leaf 之"粗"档：先验地图/target
   const size_t n_raw = raw_map->size();
   const size_t n_finite = map_finite->size();
   const size_t n_map = map_cloud_->size();
@@ -288,26 +329,33 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     std::bind(&GicpNode::publishTimerCallback, this));
 
   // ============================ 启动摘要 ============================
+  // A/B 要看的三件事都在这里：**两个 leaf**、**target 点数**（下采样后参与 GICP 的地图点数）、
+  // 以及 max_correspondence_distance（它同时决定 getFitnessScore 的球半径 ⇒ 影响评分量级）。
   RCLCPP_INFO(
     get_logger(),
     "\n===== gicp_registration 启动 =====\n"
     "  pcd_path=%s\n"
-    "  地图点数：原始 %zu → 去 NaN %zu → 体素 %.2f m 后 %zu（= GICP target）\n"
+    "  地图点数（GICP target）：原始 %zu → 去 NaN %zu → 体素 %.3f m 后 %zu\n"
+    "  两级下采样 leaf（来源：COD 2025 small_gicp_relocalization 的 global/registered_leaf_size）："
+    "地图/target %.3f m（voxel_leaf_size）· 实时点云/source %.3f m（voxel_leaf_size_scan）\n"
     "  地图包围盒：min=(%.2f, %.2f, %.2f) max=(%.2f, %.2f, %.2f)"
     "（应覆盖机器人活动区；若小得离谱说明资产退化）\n"
     "  frames: map='%s' odom='%s' base='%s' laser(仅兜底)='%s'\n"
     "  pointcloud_topic=%s（SensorDataQoS / BEST_EFFORT）\n"
-    "  GICP: max_corr_dist=%.3f m, maximum_iterations=%d, transformation_epsilon=%.2e,\n"
+    "  GICP: max_corr_dist=%.3f m（≈COD max_dist_sq 2.5）, maximum_iterations=%d,"
+    " transformation_epsilon=%.2e,\n"
     "        rotation_epsilon=%.2e, correspondence_randomness=%d, maximum_optimizer_iterations=%d\n"
     "  初值: use_initial_pose=%s initial_pose=[%s]%s\n"
     "  输出: TF %s→%s @%.1f Hz + ~/pose + ~/fitness_score + ~/converged"
     "（fitness warn=%.3f / accept=%.3f m²）\n"
     "  时间戳: TF 与 ~/pose 都用 now+%.2f s（tf_lookahead_sec，≈ AMCL transform_tolerance；"
     "点云时间戳不用来盖 TF）\n"
-    "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f\n"
-    "  注：首个 fitness score 之前会先做一次目标协方差预计算，可能耗时数秒\n"
+    "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f；"
+    "状态行每 ~1 s 一条（含 align 耗时 ms 与 fitness score）\n"
+    "  注：首个 fitness score 之前会先做一次目标协方差预计算（target 越密越慢），可能耗时数秒\n"
     "==================================",
     pcd_path_.c_str(), n_raw, n_finite, voxel_leaf_size_, n_map,
+    voxel_leaf_size_, voxel_leaf_size_scan_,
     map_min.x, map_min.y, map_min.z, map_max.x, map_max.y, map_max.z,
     map_frame_id_.c_str(), odom_frame_id_.c_str(), base_frame_id_.c_str(), laser_frame_id_.c_str(),
     pointcloud_topic_.c_str(),
@@ -322,11 +370,11 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
 
 // ============================ 工具 ============================
 
-PointCloudT::Ptr GicpNode::downsample(const PointCloudT::Ptr & in) const
+PointCloudT::Ptr GicpNode::downsample(const PointCloudT::Ptr & in, double leaf_size) const
 {
   PointCloudT::Ptr out(new PointCloudT);
   pcl::VoxelGrid<PointT> voxel;
-  const float leaf = static_cast<float>(voxel_leaf_size_);
+  const float leaf = static_cast<float>(leaf_size);
   voxel.setLeafSize(leaf, leaf, leaf);
   voxel.setInputCloud(in);
   voxel.filter(*out);
@@ -410,11 +458,12 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     cloud_seen_ = true;
   }
 
-  // --- ② 去 NaN + 体素下采样（与地图用同一个 leaf size ⇒ 两侧点密度/协方差尺度一致） ---
+  // --- ② 去 NaN + 体素下采样（**两级 leaf 的细档**：实时点云/source 用 voxel_leaf_size_scan_，
+  //         与地图 target 的 voxel_leaf_size_ 解耦；原来是两级共用地图 leaf ⇒ 单帧被砍得过稀） ---
   pcl::Indices finite_indices;
   PointCloudT::Ptr finite(new PointCloudT);
   pcl::removeNaNFromPointCloud(*raw, *finite, finite_indices);
-  PointCloudT::Ptr source = downsample(finite);
+  PointCloudT::Ptr source = downsample(finite, voxel_leaf_size_scan_);
   const size_t min_points = static_cast<size_t>(std::max(4, correspondence_randomness_)) + 1;
   if (source->size() < min_points) {
     RCLCPP_WARN_THROTTLE(
@@ -504,6 +553,8 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   bool converged = false;
   double score = std::numeric_limits<double>::quiet_NaN();
   Eigen::Matrix4d T_map_sensor = guess;
+  // 每帧配准耗时（ms）：两级 leaf 变细后这是最直接的 CPU 指标（A/B 要能看见它）。
+  const auto align_t0 = std::chrono::steady_clock::now();
   try {
     gicp_.setInputSource(source);  // 每帧设源：GICP 会重算源协方差（地图侧协方差被复用）
     PointCloudT aligned;
@@ -519,6 +570,8 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000, "GICP align 抛异常（%s）⇒ 本帧不更新 map→odom", ex.what());
   }
+  const double align_ms =
+    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - align_t0).count();
   first_align_done_ = true;
   if (!std::isfinite(score) || score >= std::numeric_limits<double>::max()) {
     score = std::numeric_limits<double>::quiet_NaN();  // "无有效内点" → nan（~/fitness_score 可见）
@@ -526,6 +579,10 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   {
     std::lock_guard<std::mutex> lock(mutex_);
     total_cycles_++;
+    // 可观测量：供 ~1 Hz 状态行 / 未采纳 WARN 打印（align 耗时 + score + 源点数）
+    last_align_ms_ = align_ms;
+    last_score_ = score;
+    last_source_points_ = source->size();
   }
 
   // --- ⑦ 接受 / 拒绝 ---
@@ -543,8 +600,11 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       n_tot = total_cycles_;
     }
     RCLCPP_DEBUG(
-      get_logger(), "GICP OK：score=%s m², converged=true, map→odom=%s（%d/%d 帧被接受）",
-      scoreToStr(score).c_str(), poseToStr(T_map_odom_cur).c_str(), n_acc, n_tot);
+      get_logger(),
+      "GICP OK：score=%s m², converged=true, align=%.1f ms, source=%zu 点, map→odom=%s"
+      "（%d/%d 帧被接受）",
+      scoreToStr(score).c_str(), align_ms, source->size(), poseToStr(T_map_odom_cur).c_str(),
+      n_acc, n_tot);
   } else {
     int n = 0;
     {
@@ -553,9 +613,10 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     }
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 1000,
-      "GICP 本帧未被采纳（converged=%s, score=%s m², accept 阈值=%.3f）⇒ map→odom 保持上一次估计"
-      "（连续 %d 帧；TF 仍按上次估计发布）",
-      converged ? "true" : "false", scoreToStr(score).c_str(), max_fitness_score_, n);
+      "GICP 本帧未被采纳（converged=%s, score=%s m², align=%.1f ms, source=%zu 点, "
+      "accept 阈值=%.3f）⇒ map→odom 保持上一次估计（连续 %d 帧；TF 仍按上次估计发布）",
+      converged ? "true" : "false", scoreToStr(score).c_str(), align_ms, source->size(),
+      max_fitness_score_, n);
     if (n == no_improve_cycles_warn_) {
       RCLCPP_WARN(
         get_logger(),
@@ -564,9 +625,12 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         "   ① 初值：用 RViz 2D Pose Estimate 给正确位置（或 initial_pose 参数）"
         "——ICP 族没有初值必然不收敛；\n"
         "   ② 看 ~/fitness_score 的实际量级再调 max_fitness_score / fitness_score_warn"
-        "（单位 m² = 内点平均平方距离）；\n"
-        "   ③ voxel_leaf_size（点太多/太少）、max_correspondence_distance；\n"
-        "   ④ 确认 PCD 与 map/<world>.pgm 同源同系（否则先验地图本身就错位）。", n);
+        "（单位 m² = 内点平均平方距离；注意半径已随 max_correspondence_distance=%.2f m 变大，"
+        "量级会整体上移）；\n"
+        "   ③ 两个 leaf（voxel_leaf_size=%.3f 地图 / voxel_leaf_size_scan=%.3f 实时点云，"
+        "太密则 align 耗时涨、太稀则不收敛）、max_correspondence_distance；\n"
+        "   ④ 确认 PCD 与 map/<world>.pgm 同源同系（否则先验地图本身就错位）。",
+        n, max_correspondence_distance_, voxel_leaf_size_, voxel_leaf_size_scan_);
     }
   }
   publishHealth(true, score, accepted && score <= fitness_score_warn_);
@@ -653,6 +717,56 @@ void GicpNode::publishTimerCallback()
         get_logger(), *get_clock(), 5000,
         "已 %.1f s 没有收到点云（topic=%s）⇒ 定位停止更新（map→odom 仍按上次估计发布）",
         age, pointcloud_topic_.c_str());
+    }
+  }
+
+  // ---------------- ~1 Hz 状态行（2026-10-05 新增，纯可观测量） ----------------
+  // A/B 要一眼看到四件事：**采纳率**（定位是否在更新）、**align 耗时 ms**（两级 leaf 变细后的 CPU 代价）、
+  // **fitness score 量级**（半径 1.5 m 后量级会整体上移）、以及 source/target 点数与两个 leaf。
+  // 限频用 steady_clock（跑在 wall timer 上，不受 use_sim_time 跳变影响）：约 1 Hz、单行、不刷屏。
+  {
+    const auto now_tp = std::chrono::steady_clock::now();
+    bool due = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!status_log_ever_printed_ ||
+        std::chrono::duration<double>(now_tp - last_status_log_tp_).count() >= 1.0)
+      {
+        last_status_log_tp_ = now_tp;
+        status_log_ever_printed_ = true;
+        due = true;
+      }
+    }
+    if (due) {
+      int n_acc = 0;
+      int n_tot = 0;
+      double last_score = std::numeric_limits<double>::quiet_NaN();
+      double last_align_ms = 0.0;
+      size_t last_src_pts = 0;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        n_acc = accepted_cycles_;
+        n_tot = total_cycles_;
+        last_score = last_score_;
+        last_align_ms = last_align_ms_;
+        last_src_pts = last_source_points_;
+      }
+      if (n_tot == 0) {
+        // 还没跑过任何一帧 align ⇒ 只报状态，避免打出误导性的 0 ms / nan
+        RCLCPP_INFO(
+          get_logger(), "[status] 尚无配准帧：%s | target=%zu 点（地图 leaf %.3f m）",
+          valid ? "等点云 / 等 TF" :
+          "**无初值 ⇒ 不发 map→odom**（等 /initialpose 或 initial_pose + TF odom→base）",
+          map_cloud_->size(), voxel_leaf_size_);
+      } else {
+        RCLCPP_INFO(
+          get_logger(),
+          "[status] 采纳 %d/%d 帧 | 最近 score=%s m² | align=%.1f ms | "
+          "source=%zu 点（leaf %.3f）→ target=%zu 点（leaf %.3f）| map→odom %s",
+          n_acc, n_tot, scoreToStr(last_score).c_str(), last_align_ms,
+          last_src_pts, voxel_leaf_size_scan_, map_cloud_->size(), voxel_leaf_size_,
+          poseToStr(T_map_odom).c_str());
+      }
     }
   }
 }

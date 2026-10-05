@@ -12,9 +12,13 @@
 #
 # 键名的核实方式（PCL 1.12.1 = 本机 libpcl-dev 1.12.1+dfsg-3build1，GICP 头文件在
 # /usr/include/pcl-1.12/pcl/registration/{gicp.h,impl/gicp.hpp}）；"setXxx" 一律落成 "xxx"：
-#   voxel_leaf_size              本节点自有（体素下采样；地图与实时点云用同一 leaf）
+#   voxel_leaf_size              本节点自有（**先验地图 / GICP target** 的体素下采样 leaf；
+#                                键名保持不变以兼容既有 launch/覆盖，2026-10-05 起只作用于地图侧：0.25→0.10）
+#   voxel_leaf_size_scan         本节点自有（**实时点云 / GICP source** 的体素下采样 leaf；2026-10-05 新增，
+#                                默认 0.05 —— 与 voxel_leaf_size 构成"两级下采样"，recipe 来自 COD 2025
+#                                small_gicp_relocalization 的 global_leaf_size / registered_leaf_size）
 #   max_correspondence_distance  → setMaxCorrespondenceDistance → corr_dist_threshold_
-#                                （impl/gicp.hpp:414 用它当距离门限；构造默认 5.0 m，本节点给 1.0）
+#                                （impl/gicp.hpp:414 用它当距离门限；构造默认 5.0 m，本节点 1.0→1.5）
 #   maximum_iterations           → setMaximumIterations → max_iterations_
 #                                （impl/gicp.hpp:496 的收敛判据之一；构造默认 200，本节点给 32 省 CPU）
 #   transformation_epsilon       → setTransformationEpsilon（impl/gicp.hpp:474-483 的平移部分）
@@ -57,8 +61,37 @@
     initial_pose: [0.0, 0.0, 0.0]        # map 系机器人位姿 [x,y,z(,roll,pitch,yaw)]；RMUL2026 出生即原点
 
     # ---------- GICP ----------
-    voxel_leaf_size: 0.25                # 地图与实时点云各自的体素下采样 leaf（m）
-    max_correspondence_distance: 1.0     # m；PCL GICP 构造默认是 5.0（对本场地过大）
+    # ★★ 两级下采样 leaf（two-tier；2026-10-05 按 COD 2025 relocalizer 的 recipe 改）——
+    #   对照实现：COD 的 `small_gicp_relocalization`，其参数为
+    #     num_threads 8（本节点是单线程 PCL，无此键）
+    #     global_leaf_size 0.25      = **先验 PCD** 的下采样 leaf（粗）
+    #     registered_leaf_size 0.05  = **实时点云** 的下采样 leaf（细）
+    #     max_dist_sq 2.5            = 对应点距离门限的**平方**（√2.5 ≈ 1.58 m）
+    #   为什么必须分两级 + 为什么我们地图侧取 0.10 而不是照抄 0.25：
+    #     · 地图（target）侧：0.25 m 时 RMUL2026.pcd 只剩 **2438** 个 target 点（实测启动 banner）。
+    #       GICP 的目标协方差用 KNN=20 估计，2438 点在约 12×8 m 的场地里平均间距 ~0.4 m ⇒ 邻域退化成
+    #       一条线/一个面，"平面假设"失真，配准残差对单个点极敏感 ⇒ 实测 map→odom 在 30 s 窗口里漂
+    #       ~8 cm（regression 判 settled=False）。收到 0.10 m 后 target 点数量级上升到 **12450**（banner
+    #       实测值，×5.1），几何细节回来。COD 能直接用 0.25 是因为它的先验 PCD 密度比我们这份高一个量级。
+    #     · 实时点云（source）侧：**原实现复用地图的 leaf（0.25 m）**给实时点云下采样 ⇒ 单帧被砍到
+    #       几百点，等于自己把配准精度掐死。改成 0.05 m（= COD registered_leaf_size）保住单帧几何。
+    #     · 代价（本机**单节点实测**，target 12450 + source 3701 点）：首个 align 2296 ms（含目标协方差
+    #       预计算），其后每帧 **≈330~570 ms**。align 跑在单线程 executor 里 ⇒ 50 Hz 的 TF 定时器会被它
+    #       阻塞（同一次实测里 `/tf` 的 map→odom 实际只有 ~2 Hz）⇒ 若整栈出现
+    #       "extrapolation into the future" 或 "Control loop missed its desired rate"，**回退顺序**：
+    #       ① `voxel_leaf_size_scan` 0.05→0.10（先牺牲实时点云精度，保住地图侧的精度收益）
+    #       ② `maximum_iterations` 32→16 ③ 最后才把 `voxel_leaf_size` 回到 0.25。
+    #       （COD 的对策是 small_gicp 的 `num_threads: 8` 多线程；本节点是单线程 PCL GICP，无此档。）
+    #       align 耗时（ms）与两个 leaf、两侧点数都每 ~1 s 打在 [status] 行，先看那一行再调。
+    #     · 两个 leaf 都必须 > 0（<=0 判非法并退回默认值；本节点**不提供**"0 = 不下采样"档：不采样会
+    #       让单帧点数/协方差计算量失控）。
+    #   回退：本键 0.10 → 0.25、voxel_leaf_size_scan 删除（或 = voxel_leaf_size）、
+    #        max_correspondence_distance 1.5 → 1.0，即恢复到本次改动之前。
+    voxel_leaf_size: 0.10                # m；**先验地图 / GICP target** 的体素 leaf（键名兼容旧配置；0.25→0.10）
+    voxel_leaf_size_scan: 0.05           # m；**实时点云 / GICP source** 的体素 leaf（新增，= COD registered_leaf_size 0.05）
+    max_correspondence_distance: 1.5     # m；1.0→1.5，对齐 COD max_dist_sq 2.5（√2.5≈1.58 m），给初值更多收敛余量。
+                                         #    注意 getFitnessScore 的球半径同步从 1.0 m 变成 1.5 m（2.25 m² 门限）
+                                         #    ⇒ 下面两个 fitness 阈值要按**实测量级**重看，别直接沿用旧经验值
     maximum_iterations: 32               # PCL GICP 构造默认 200；32 是 CPU 与收敛的折中（未实测调优）
     transformation_epsilon: 5.0e-4       # = PCL GICP 构造默认
     rotation_epsilon: 2.0e-3             # = PCL GICP 构造默认
@@ -97,6 +130,10 @@
     #   回退：改回 0.3（会重新出现零星 abort）。
     tf_lookahead_sec: 0.45
     fitness_score_warn: 0.05             # m²；= 内点平均平方距离（RMS≈0.22 m）。超过 ⇒ ~/converged=false
+                                         # ★ 2026-10-05：max_correspondence_distance 1.0→1.5 后，评分球半径从
+                                         #   1.0 m 变成 1.5 m（门限 1.0→2.25 m²）⇒ 同一场景的 score 会整体上移，
+                                         #   本键与 max_fitness_score **未随本次改动调整**（保持可 A/B），
+                                         #   实跑后按 `ros2 topic echo /gicp_registration/fitness_score` 的量级重定
     max_fitness_score: 0.3               # m²；超过就**拒绝**本帧结果（RMS≈0.55 m）。首跑按实测再收紧
     no_improve_cycles_warn: 10           # 连续多少帧未采纳后打一条"定位已失效"的醒目 WARN
     stale_warn_sec: 3.0                  # 多久没收到点云就 WARN（定位停止更新）

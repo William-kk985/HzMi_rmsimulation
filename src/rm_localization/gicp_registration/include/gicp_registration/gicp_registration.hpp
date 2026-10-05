@@ -18,6 +18,7 @@
 //      并整帧失败。实时点云同理（不依赖 intensity）。
 
 #include <chrono>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -58,7 +59,9 @@ private:
   void publishTimerCallback();
 
   // ---- 工具 ----
-  PointCloudT::Ptr downsample(const PointCloudT::Ptr & in) const;
+  // 体素下采样：leaf_size 由调用方给（**两级 leaf**：地图 target 用 voxel_leaf_size_，
+  // 实时点云 source 用 voxel_leaf_size_scan_）。两个 leaf 均为正数（构造时已校验）。
+  PointCloudT::Ptr downsample(const PointCloudT::Ptr & in, double leaf_size) const;
   bool lookupTf(
     const std::string & target, const std::string & source, const rclcpp::Time & stamp,
     bool try_exact_stamp, Eigen::Matrix4d & out, bool & used_latest);
@@ -77,7 +80,13 @@ private:
   std::string pointcloud_topic_;
   bool use_initial_pose_;
   std::vector<double> initial_pose_param_;
+  // 两级下采样（2026-10-05 起，recipe 来自 COD 2025 small_gicp_relocalization 的
+  // global_leaf_size / registered_leaf_size）：
+  //   voxel_leaf_size_      = **先验地图 / GICP target** 的 leaf（默认 0.10 m）；
+  //   voxel_leaf_size_scan_ = **实时点云 / GICP source** 的 leaf（默认 0.05 m，细一档）。
+  // 键名 voxel_leaf_size 保持不变（向后兼容），语义收窄为"仅地图侧"。
   double voxel_leaf_size_;
+  double voxel_leaf_size_scan_;
   double max_correspondence_distance_;
   int maximum_iterations_;
   double transformation_epsilon_, rotation_epsilon_;
@@ -111,6 +120,13 @@ private:
   int total_cycles_ = 0;
   bool first_align_done_ = false;
   std::string last_tf_error_ = "n/a";
+
+  // ---- 可观测量（~1 Hz 状态行用）：A/B 时要看**每帧配准耗时**与**评分量级** ----
+  double last_align_ms_ = 0.0;                                    // 最近一帧 gicp_.align() 墙钟耗时
+  double last_score_ = std::numeric_limits<double>::quiet_NaN();  // 最近一帧 fitness score（m²）
+  size_t last_source_points_ = 0;                                 // 最近一帧下采样后的源点数
+  std::chrono::steady_clock::time_point last_status_log_tp_{};    // 状态行限频（~1 Hz）
+  bool status_log_ever_printed_ = false;
 
   // ---- ROS 接口 ----
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
