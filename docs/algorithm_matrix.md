@@ -396,3 +396,152 @@ python3 tools/scripts/regress/compare_regress_snapshots.py --markdown
 - 三次都用同一条 `--goal -1.0 2.0`，`spin_speed` 固定 0.0，`--settle` 用默认值（工具语义 = 人在 RViz 里等定位稳了再点目标）；
 - `icp` 那次若"启动就不动"，先看它有没有初值：**局部配准 + 初值差 = 静默局部极小**，这本身就是对比结论的一条，不要当成工具故障；
 - 把工具输出的表贴回本节（或 `§四` 加一行），并写清每次的 `result/用时/recoveries`。
+
+### 9.2 新构建口径下的五路对照（2026-10-05）
+
+> 口径：**Release 构建**（`6ae2ada` 的 `colcon_defaults.yaml`）+ gicp `backend` 开关（`d60c21e`）
+> + `/initialpose` 延迟修复（`c7bcd6d`）之后，第一次把五路定位放在**同一条命令、同一个目标**下
+> 并排跑完。全程 **headless**（`nav_rviz:=False`，无 gzclient / 无 RViz 窗口）。
+>
+> **一句话结论：五路全 PASS**（5/5 `SUCCEEDED`、`recoveries=0`、`d_min=0.000 m`）；
+> `Control loop missed its desired rate` **5 次全 0**（§9 遗留第 2 条"总算力不足"在本口径下**没复现**）；
+> gicp 两个后端**精度同级**（fitness 0.00226 / 0.00230 m²）、**small_gicp 的 align 快 5.4×**
+> （中位数 15.7 → 2.9 ms）。
+
+#### 9.2.1 口径与可比性前提
+
+| 项 | 值 / 证据 |
+|---|---|
+| 构建口径 | `build/gicp_registration/cmake_args.last` = `['-DCMAKE_BUILD_TYPE=Release', '-DAMENT_CMAKE_SYMLINK_INSTALL=1']`；`build/gicp_registration/CMakeCache.txt`：`CMAKE_BUILD_TYPE=Release`、`CMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG` |
+| 「Release 真生效」的独立佐证 | gicp `[status]` 的 `align=` **13~17 ms**（PCL 后端）—— 同数据 `-O0` 时代是 370~480 ms（`docs/build_optimization.md` §2.2 台架值 369.9 → 11.3 ms） |
+| launch 参数（5 次逐字一致） | `world:=RMUL2026 mode:=nav lio:=fastlio nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=False localization:=<五选一>` |
+| 回归命令（5 次逐字一致） | `python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization <NAME>`（工具默认 `--settle 3.0`、`--yaw auto` ⇒ 与 §9.1 协议一致） |
+| launch 文件版本（5 次同一份） | `src/rm_nav_bringup/launch/bringup_sim.launch.py` 的 mtime = 13:52:54，**早于**首次起栈 13:55:34，且窗口内未再改动 ⇒ 5 次用的是同一版本（该份已含并行 agent 新增的 `lio:=small_point_lio` 槽**选项**；本测量一律走 `lio:=fastlio`，不受影响） |
+| 串行纪律 | 5 次**各自重启整个栈**；逐份 launch 日志核对：每次只启动**一个**定位进程（gicp 两次 = `gicp_registration_node`，amcl = `amcl`，beluga = `amcl_node`，icp = `icp_registration_node`）⇒ 同一时刻只有一个 `map→odom` 发布者 |
+| 收尾 | 每次向 launch 的**进程组**发 SIGINT → 等 20 s → SIGKILL 兜底 → `pgrep -af 'gzserver\|gzclient\|ros2 launch\|nav2\|fastlio'` 复查**无残留**；每次 SIGINT 的时刻都落在该次回归结束**之后 ≤1 s**（见 9.2.4），即所有进程退出/重启都发生在测量窗口之外 |
+| 机器负载 | loadavg(1min) 2.57~4.64（28 核）；5 次期间**没有任何 colcon 编译**（`log/latest_build/events.log` 全程未被写：阶段 0 记录的"未写秒数"从 123 s 单调增到 405 s） |
+
+⚠️ **一个只属于本次沙箱的适配（用户本机正常跑不需要）**：本次是在 `$HOME` **只读**的沙箱里跑的，
+而 `gzserver` 启动时必定 `create_directory($HOME/.gazebo/server-<port>)` ⇒ 抛
+`boost::filesystem::filesystem_error` 并 **SIGABRT**（症状是连 `/clock` 都没有、整个栈像没起来）。
+实测 Gazebo 读的是 **`$HOME` 环境变量**（不是 `getpwuid`）⇒ 把 `HOME` 指到可写的
+`/tmp/gzhome-<tag>` 后一切正常。另外 `ROS_DOMAIN_ID=77`（隔离另一个 agent 的栈）、
+`GAZEBO_MASTER_URI=http://127.0.0.1:11399`（避开默认 11345 端口）、`unset DISPLAY`（让 gzclient
+直接退出 = 无 GUI）也是本次测量用的隔离手段。
+
+#### 9.2.2 五路并排表（`compare_regress_snapshots.py --last 5 --markdown` 原样输出）
+
+方法列**不再需要 `--label` 人工标注**：`nav_smoke_regression.py` 现在把 `--localization` 写进快照
+（工具脚注自动报「方法来源：字段 localization」）。两个 gicp 的槽位名相同（都是 `gicp`），
+区分靠 `backend`（见下条），故本表用 `--label` 把方法列显式写成 `gicp (pcl)` / `gicp (small_gicp)`
+（**只改表头显示，快照原始内容未改**）：
+
+| 时间戳/文件 | 方法 | goal | pass | result/exit | status | 用时(s) | d_min(m) | rec | nav\|v\|,\|w\| | smooth | chassis | poseΔ(m) | 真值twist | settle(settled/xy/yaw) | map | yaw源 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 10-05 13:56 regress_1791179769.json | gicp (pcl) | (-1.00,2.00) | ✅ | pass/0 | SUCCEEDED | 3.3 | 0.000 | 0 | (1.46,0.87) | (1.46,0.87) | (1.46,0.87) | 2.802 | 1.456 | ✅ 0.0077/0.0032 | free | tf |
+| 10-05 13:57 regress_1791179865.json | gicp (small_gicp) | (-1.00,2.00) | ✅ | pass/0 | SUCCEEDED | 3.4 | 0.000 | 0 | (1.42,0.82) | (1.41,0.71) | (1.41,0.71) | 2.782 | 1.395 | ✅ 0.0062/0.0025 | free | tf |
+| 10-05 13:58 regress_1791179928.json | amcl | (-1.00,2.00) | ✅ | pass/0 | SUCCEEDED | 3.2 | 0.000 | 0 | (1.45,0.83) | (1.45,0.83) | (1.45,0.83) | 2.730 | 1.449 | ✅ 0.0000/0.0000 | free | tf |
+| 10-05 13:59 regress_1791179989.json | beluga | (-1.00,2.00) | ✅ | pass/0 | SUCCEEDED | 3.3 | 0.000 | 0 | (1.40,0.80) | (1.40,0.74) | (1.40,0.74) | 2.767 | 1.400 | ✅ 0.0000/0.0000 | free | tf |
+| 10-05 14:00 regress_1791180051.json | icp | (-1.00,2.00) | ✅ | pass/0 | SUCCEEDED | 3.2 | 0.000 | 0 | (1.45,0.91) | (1.45,0.91) | (1.45,0.91) | 2.657 | 1.450 | ✅ 0.0000/0.0000 | free | tf |
+
+（不外挂 `--label` 时，头两行的方法列都是 `gicp`；其余三行同上。`共 5 个快照：PASS 5 / FAIL 0`。）
+
+#### 9.2.3 工具表里没有、但本次同口径采到的量
+
+`RTF`、`missed` 由工具与 launch 日志给出，`align`/`采纳` 由 gicp 的 `[status]` 行给出：
+
+| 配置 | RTF | `Control loop missed its desired rate` 条数 | gicp align 中位数（min~max） | gicp `采纳 N/M`（末帧） | fitness（末帧） | `map→odom`（末次 `[status]`） |
+|---|---|---|---|---|---|---|
+| `localization:=gicp`，`backend: pcl` | **0.760** | **0** | **15.7 ms**（11.8~25.4） | **165/165（100%）** | 0.00226 m² | x=0.001 y=0.016 z=-0.046 yaw=-0.06° |
+| `localization:=gicp`，`backend: small_gicp` | **0.776** | **0** | **2.9 ms**（2.6~4.0） | **167/167（100%）** | 0.00230 m² | x=0.011 y=0.008 z=-0.015 yaw=-0.00° |
+| `localization:=amcl` | **0.780** | **0** | —（该槽无 `[status]`） | — | — | — |
+| `localization:=beluga` | **0.769** | **0** | — | — | — | — |
+| `localization:=icp` | **0.776** | **0** | — | — | — | — |
+
+补充量（同一批快照）：
+
+| 配置 | hz pcloud/imu/scan/odom | fp 戳数 | tf_age(s) | 目标落格 | 载入目标 PCD |
+|---|---|---|---|---|---|
+| gicp (pcl) | 7.7 / 79.0 / 8.0 / 7.7 | 110 | 0.10 | free (23,102) | 12450 点（leaf 0.100） |
+| gicp (small_gicp) | 8.0 / 77.7 / 8.0 / 7.7 | — | 0.10 | free | 12450 点 |
+| amcl | 7.7 / 78.7 / 8.0 / 8.0 | — | 0.10 | free | — |
+| beluga | 8.0 / 77.3 / 8.0 / 7.7 | — | 0.10 | free | — |
+| icp | 8.0 / 79.3 / 8.0 / 7.7 | — | 0.10 | free | — |
+
+#### 9.2.4 逐路备注
+
+1. **gicp / `backend: pcl`（13:55:34 起栈，13:56:09 回归 PASS）** —— `settle` 3.0 s、窗口漂移
+   0.0077 m / 0.0032 rad（阈值 0.02 m / 0.01 rad，**过**）；`nav=smooth=chassis=(1.46,0.87)`
+   四跳一致 ⇒ `spin_speed=0.0` 直通；真值位移 2.802 m；missed **0**；align 中位数 **15.7 ms**。
+   与 `docs/build_optimization.md` §2.2 台架的 11.3 ms 同量级（节点里还有下采样/评分/日志开销）。
+2. **gicp / `backend: small_gicp`（13:57:11 起栈，13:57:45 PASS）** —— 唯一差别是把
+   `src/rm_localization/gicp_registration/config/gicp_registration_sim.yaml` 的 `backend: "pcl"`
+   临时改成 `"small_gicp"`（`--symlink-install` ⇒ 免编译即生效），**跑完在同一调用里 `git checkout`
+   还原**（还原后 `git status` 干净、配置行回到 `pcl`）。accuracy 同级（0.00230 vs 0.00226 m²）、
+   align 中位数 **15.7 → 2.9 ms（5.4×）**，与台架的 11.3 → 2.3 ms（4.9×）一致 ⇒ **两者互相印证**。
+   注意 `smooth/chassis` 的 |v|,|w| 是 (1.41,0.71) 而 `nav` 是 (1.42,0.82)：**速度平滑器限幅**，
+   不是命令链断（四跳仍逐级贯通，真值 twist 1.395 / 位移 2.782 m）。
+3. **amcl（13:58:15 起栈，13:58:48 PASS）** —— `settle` 漂移 **0.0000 / 0.0000**（静止时
+   AMCL 的 `map→odom` 是分段常量，本来就不抖）；`nav=smooth=chassis=(1.45,0.83)` 四跳完全一致；
+   `recoveries=0`、用时 3.2 s。
+4. **beluga（13:59:16 起栈，13:59:49 PASS）** —— 同 AMCL：漂移 0.0000 / 0.0000、用时 3.3 s。
+   `beluga_amcl` 的 `amcl_node` 在**收尾 SIGINT 时 SIGABRT(-6)**（退出期崩溃，测量窗口内一直正常 ——
+   它的 `map→odom`、目标执行、真值位移都成立）。这条记下来是为了下次看到别误判为"启动即崩"
+   （`c655d77` 修的那个是**启动**崩溃，症状完全不同）。
+5. **icp（14:00:16 起栈，14:00:51 PASS）—— 本次没复现 §9 记录的失败**：`recoveries=0`、
+   用时 3.2 s、真值位移 2.657 m。原因是**初值口径**：`RMUL2026` 的 `map` 系 = 出生点相对系，
+   ICP 槽默认 `initial_pose [0,0,0]` 恰好是真值 ⇒ 局部配准站在"初值正确"的有利面上。
+   §9 里"icp 静默收敛到局部极小/被搬动或初值差"的结论**没有被本次证伪**，只是本次没踩到；
+   要复现那条结论，必须用**差的初值**（RViz 里乱点 `/initialpose` 或改 `initial_pose`）再跑一次。
+
+**所有 5 次的共同点**：`yaw_source=tf`（目标朝向 = 车当前朝向，人工 RViz 语义）、目标落格
+`free`、`d_min=0.000 m`、`recoveries=0`、`tf_age=0.10 s`、`/clock` RTF 0.76~0.78。
+
+#### 9.2.5 与 §9「遗留 / 待办」的对照（本次更新了哪几条）
+
+| §9 遗留条目 | 本次结果 |
+|---|---|
+| 5. 三方对比（amcl/icp/gicp）待做 | ✅ 本次做完，并扩成**五路**（gicp 两个 backend + amcl + beluga + icp），见 9.2.2/9.2.3 |
+| 2. `Control loop missed its desired rate of 30 Hz` = 总算力不足 | ⚠️ **本口径下未复现**：5 次全 0。与 Release 构建（PCL align 370→13 ms）、headless（无 gzclient/RViz 渲染）、无并发编译三者一致；**不等于**"总算力永远够"——把 GUI、RViz、并发编译加回来仍可能复现 |
+| 1. 工具 settle 阈值偏严（GICP 静止漂 3.4 cm / 0.0139 rad） | ⚠️ 本次 gicp 两次都**过**（0.0077 / 0.0032 与 0.0062 / 0.0025），未触发该阈值 ⇒ 阈值暂不用放宽 |
+| 6. 候选路线：small_gicp | ✅ 已可用且实测更快（9.2.3），默认仍是 `pcl`（保持既有 fitness 阈值标定） |
+| 3. `RMUC.pcd` 退化资产 ⇒ icp/gicp 启动即报错 | 未测（本次只用 `world:=RMUL2026`） |
+| 4. `RMUL2026.pcd` 仅 53164 点 | 未变（两次 gicp 都是 target 12450 点 @ leaf 0.10） |
+
+#### 9.2.6 复现命令（copy-paste）
+
+```bash
+# 0) 构建口径：必须在**仓库根**执行（colcon 只从当前目录读 colcon_defaults.yaml）
+cd /home/weicheng/HzMi_rmsimulation
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select gicp_registration
+cat build/gicp_registration/cmake_args.last     # 必须含 -DCMAKE_BUILD_TYPE=Release
+
+# 1) 逐路跑（每一路都：起栈 → 回归 → 收尾，再起下一路；5 路只换 localization:= 和 backend）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+  lio:=fastlio nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=False localization:=gicp
+python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization gicp
+
+# ① → ② gicp 换后端：改这一行（--symlink-install 免编译），跑完记得 git checkout 还原
+#     src/rm_localization/gicp_registration/config/gicp_registration_sim.yaml: backend: "pcl" → "small_gicp"
+# ③ amcl / ④ beluga / ⑤ icp：只把 localization:= 换成 amcl / beluga / icp（此时对应槽位不需要第①步的改动）
+
+# 2) 出表（--localization 已进快照 ⇒ 方法列自动填；两个 gicp 用 --label 显示区分 backend）
+python3 tools/scripts/regress/compare_regress_snapshots.py --last 5 --markdown \
+  --label regress_1791179769='gicp (pcl)' --label regress_1791179865='gicp (small_gicp)'
+python3 tools/scripts/regress/compare_regress_snapshots.py --last 5 --markdown   # 不标注也能出表（头两行都显 gicp）
+```
+
+#### 9.2.7 回滚 / 清理
+
+- **本节的代码改动只有一处**（独立提交）：`nav_smoke_regression.py` 新增 `--localization`
+  —— 回滚 = `git revert <该提交>`；不传该参数时行为与旧版**逐字节相同**（快照不写
+  `localization` 键）。
+- **测量用的临时脚本/日志**都在 `.tmp_cache/five_way/`（未跟踪）：`run_one.sh`（单次测量驱动）、
+  `collect_one.sh`（只重算汇总）、`<tag>.log` / `<tag>.regress.log` / `<tag>.metrics.json`、
+  `compare_last5*.txt`；`probe.log` / `probe2.sh` 是 headless 可行性探针（`$HOME` 只读导致
+  gzserver SIGABRT 的现场记录）。
+- **配置没有被永久改动**：`backend` 临时改成 `small_gicp` 后已在同一次调用里 `git checkout` 还原
+  （`git status` 干净）；快照写入的是既有的 `.tmp_bags/`（未跟踪）。
+- **进程**：每次测量结束都 SIGINT→20 s→SIGKILL 进程组并 `pgrep` 复查无残留；
+  沙箱本身用独立 PID namespace（调用一结束，该次的所有进程由内核清掉）⇒ 不会留下 gzserver/nav2。
