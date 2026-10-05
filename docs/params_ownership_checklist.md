@@ -69,3 +69,16 @@ nav2_params = os.path.join(get_package_share_directory('rm_nav_bringup') 或 var
 - [x] #7 nav2 参数拆分（**2026-09 完成**）：nav2 本体**不源码化**（30+ 包过大），完整源码放 `third_party/nav2` 参考；参数归自研 `rm_navigation/params/`
 - [x] #8 cartographer lua（**2026-09 完成**）：换用 **ros2-gbp humble 官方 ament 源码**（非 catkin 版），vendored 进 src 并 colcon 编译覆盖 apt；lua 随 `cartographer_ros/configuration_files/` 安装，wrapper launch 默认即可用
 - [ ] 回归后跑通 bringup_sim 验证（mapping/nav × fastlio/pointlio × 各 localization）
+  - **2026-10-05 记录：`lio:=pointlio` 这一格仍然没勾，且现状比"还没验证"更具体**（证据工具 =
+    `tools/lio_node_alone_check.py`，**节点级重放**：不启 Gazebo/nav2，只起 LIO 节点 + 重放已录 bag）。
+    一次全新复核的三条事实：
+    1. **从未在全栈（`bringup_sim.launch.py`）里验证过** —— 本清单这个勾一直是空的，含义就是它；
+       这不是新槽位带来的问题（新增的 `lio:=small_point_lio` 只是把同一格的空白显式化了）；
+    2. **同一份 bag 上"没跟住"**：与坐标原点无关的轨迹长度 **25.3 m**，而同一窗口的 `fast_lio`
+       参照是 **6.22 m**（真值 `odom_ground_truth` 5.51 m）⇒ 是发散量级，不是"差一点"；
+    3. 那次重放里它在**第 ~100 帧被自己的 `pcd_save` 打死**（进程退出）⇒ 第 2 条结论只在
+       "前 ~100 帧"这个窗口内成立。
+  - **引用边界（别过度解读）**：这是**节点级离线重放**的结论，**不是全栈结论**，也**不等于**
+    "`pointlio` 不可用/该弃用"——它只说明两点：① 这个勾**不能靠"参数搬回包里了"就算过**；
+    ② 这条链路的"喂法/时间戳/QoS"与算法收敛性都要在全栈口径下再验一次。口径与原始数字见
+    `docs/lio_slots.md` §5（节点级验证；同节也记着 `small_point_lio` 在同一 bag 上的 36.6 m）。

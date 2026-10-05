@@ -22,7 +22,7 @@
 | 槽位 | 参数 | 现有实现 | 对应包 / 节点 | 生效条件 |
 |---|---|---|---|---|
 | **场景形态** | `mode` | `mapping` 纯建图 / `slam_nav` 边建边导 / `nav` 先建后导 | — | 必填 |
-| **里程计** | `lio` | `fastlio` / `pointlio` / **`small_point_lio`**（2026-10-05 新增）/ `none` / **`cartographer`（全包）** | `src/rm_localization/FAST_LIO`、`point_lio`、**`small_point_lio`**（vendored `Yancey2023/small_point_lio`@`688d75c`，MIT）；`none` 需外部提供 odom/TF；`cartographer` = 同一个 cartographer 兼任里程计源（`mapper`/`localization` 槽被跳过，lua `cartographer_lio*.lua`）。**`small_point_lio` 自己直发 `odom→base_link` ⇒ 不起 `lio_tf_adapter`**；契约、实测与回退见 `docs/lio_slots.md` | 全形态 |
+| **里程计** | `lio` | `fastlio` / `pointlio` / **`small_point_lio`**（2026-10-05 新增）/ `none` / **`cartographer`（全包）** | `src/rm_localization/FAST_LIO`、`point_lio`、**`small_point_lio`**（vendored `Yancey2023/small_point_lio`@`688d75c`，MIT）；`none` 需外部提供 odom/TF；`cartographer` = 同一个 cartographer 兼任里程计源（`mapper`/`localization` 槽被跳过，lua `cartographer_lio*.lua`）。**`small_point_lio` 自己直发 `odom→base_link` ⇒ 不起 `lio_tf_adapter`**；契约、实测与回退见 `docs/lio_slots.md` | 全形态。<br>⚠️ **`small_point_lio` 状态（2026-10-05，别读成"已完成"）**：**可跑通、契约合规**（节点级 40 s 稳定、零 ERROR/WARN、`/Odometry`+TF 有数），但**精度未达标** —— 同一 bag、同一喂法的重放轨迹 **36.6 m** vs `fast_lio` 参照 **6.2 m**（真值 5.51 m）；**整栈（Gazebo+nav2）尚未验证**；调参由另一任务进行中（工具 `tools/lio_node_alone_check.py`；详见 `docs/lio_slots.md` §5）|
 | **在线建图** | `mapper` | `slam_toolbox` / `cartographer` | `src/rm_localization/slam_toolbox`（async）、`cartographer_ros`（+ `cartographer_occupancy_grid_node`） | `mapping` / `slam_nav` |
 | **重定位** | `localization` | `amcl` / `slam_toolbox`(纯定位) / `icp` | `nav2_amcl`(+`map_server`)、`slam_toolbox`(localization)、`src/rm_localization/icp_registration` | 仅 `nav` |
 | **局部规划器** | `nav` | `rpp` / `dwb` / `teb` | `nav2_regulated_pure_pursuit_controller` / `nav2_dwb_controller` / `teb_local_planner`（+ `costmap_converter`） | `nav` / `slam_nav` |
@@ -176,7 +176,9 @@
 | `nav` + `slam_toolbox` 纯定位 | ❌ 未跑 | 需 `.posegraph`（RMUC/RMUL 有） |
 | `nav` + cartographer 纯定位 | ❌ 未跑 | **缺 pbstream** |
 | `mapping mapper:=cartographer` | ❌ 未跑 | — |
+| `nav + lio:=small_point_lio`（新槽，2026-10-05 起） | ⚠️ **不可算通过**：节点级**可跑通/契约合规**，但**精度未达标**、整栈未跑 | 节点级重放（`tools/lio_node_alone_check.py`，不启 Gazebo/nav2）：`/Odometry`+TF 有数、40 s 不掉线、零 ERROR/WARN；但轨迹 **36.6 m** vs `fast_lio` 参照 **6.2 m**（真值 5.51 m）= 发散。**整栈（Gazebo+nav2）一次都没跑过**；调参进行中（另一任务）⇒ 见 `docs/lio_slots.md` §5 |
 | `nav:=dwb` / `nav:=teb` | ❌ 未跑 | 参数文件已就绪 |
+| `nav + lio:=pointlio`（任一 localization） | ❌ 未跑（**从建仓起从未全栈验证**） | 节点级重放同一 bag：轨迹 **25.3 m**（参照 6.22 m）且第 ~100 帧被自身 `pcd_save` 打死 ⇒ `docs/params_ownership_checklist.md` §4、`docs/lio_slots.md` §5.4 |
 
 ## 五、已知阻塞项（先解决这几个，组合才能真跑）
 
@@ -315,6 +317,7 @@ CustomMsg QoS 背压、`use_sim_time` 键名漏引号、上游 nav2 丢弃 `tran
 | 2026-09-21 | 修 **全包形态静止漂移**：给 `lio:=cartographer` 接一路底盘里程计（lua `use_odometry=true` + `cartographer_sim.launch.py` 新增 `odom_topic` 参数，bringup 传 `/odom_ground_truth`）。实测不加时 `odom→base_link` 漂 ≈4 cm/s、13°/min（`map→odom` 恒定 → 非回环问题）；cartographer 只用 odom 增量，故世界系绝对位姿可直接喂 |
 | 2026-09-21 | `tools/scripts/control/improved_teleop.sh` 键位改为**方向键**（↑↓ 前进后退 / ←→ 左右转 / `<` `>` 线速度 / `,` `.` 角速度 / 空格停 / q 退出，支持 `TELEOP_TOPIC` 覆盖话题）；键位表写进 runbook §1 |
 | 2026-09-21 | 修**静默失效**：所有障碍源加 `expected_update_rate: 0.5`（原默认 0=不检查）→ 源停即 WARN + 拒绝算速度 + `velocity_timeout` 1s 停车；另修 `p2l` 的 `range_min: 0.45 → 0.2`（45cm 盲区会被反向清成 free）、`scan_time: 0.3333 → 0.1` |
+| 2026-10-05 | §一 里程计行 + §四：登记新槽 `lio:=small_point_lio`（vendored `Yancey2023/small_point_lio@688d75c`，MIT）的**真实状态** —— **可跑通、契约合规，但精度未达标**（节点级重放轨迹 36.6 m vs `fast_lio` 参照 6.2 m）、**整栈未验证**、调参由另一任务进行中；同批记录 `lio:=pointlio` **从未全栈验证** + 同一 bag 上 25.3 m 未跟住（证据工具 `tools/lio_node_alone_check.py`；详见 `docs/lio_slots.md` §5、`docs/params_ownership_checklist.md` §4）|
 
 ---
 
