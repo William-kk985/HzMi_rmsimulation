@@ -281,7 +281,8 @@ ROS_DOMAIN_ID=87 python3 tools/lio_node_alone_check.py --duration 40
 # 单组（命令行给覆盖）：
 python3 tools/lio_param_sweep.py --label t1 --param imu_meas_omg_cov:=0.6 --duration 40
 # 一组配置（JSON 列表，可带 params_file / node / duration / start_offset）：
-python3 tools/lio_param_sweep.py --configs .tmp_sweep/b12.json --jobs 4 --duration 40
+python3 tools/lio_param_sweep.py --configs tools/lio_sweep_configs/three_windows_base_vs_tuned.json \
+    --jobs 3 --duration 30
 # 注意：每组都要 source /opt/ros/humble/setup.bash && source install/setup.bash；ROS_LOG_DIR 必须可写
 ```
 
@@ -496,7 +497,8 @@ ros2 run tf2_ros tf2_echo odom base_link
 #     同一条路线分别用 lio:=fastlio 与 lio:=small_point_lio 跑一遍，比 end-to-end 到达误差/漂移；
 #     或先用离线重放做 A/B（不需要 Gazebo、一轮 = duration 秒）：
 python3 tools/lio_node_alone_check.py --duration 40          # 看"轨迹长度 / 末位置 / 参照"那几行
-python3 tools/lio_param_sweep.py --configs .tmp_sweep/b15.json --jobs 3 --duration 30   # 想再扫参时
+# 想再扫参时（配置已随仓库提交，见 tools/lio_sweep_configs/）：
+python3 tools/lio_param_sweep.py --configs tools/lio_sweep_configs/single_knob_window0.json --jobs 4 --duration 40
 
 # (4) 帧树：主链应是 map→odom→base_link→base_link_fake→…，且**没有多父边/闭环**
 ros2 run tf2_tools view_frames            # 本槽位不应出现 camera_init→body 那条孤岛（见 docs/tf_interface_contract.md §P1）
