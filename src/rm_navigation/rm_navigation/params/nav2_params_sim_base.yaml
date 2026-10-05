@@ -145,10 +145,17 @@ local_costmap:
       #     + 限速 / 碰撞监控承担。
       #   回退：改回 0.40。
       robot_radius: 0.22
-      # 局部障碍来源 = 两个可切换图层（bench 槽位，launch 用 local_obstacle 参数切 enabled）：
-      #   obstacle_layer       = /scan（几何 2D；链路单点，且 p2l 有 45cm 盲区）
+      # 局部障碍来源 = 三个可切换图层（bench 槽位，launch 用 local_obstacle 参数切 enabled；
+      # 槽位值 ↔ 图层开关的**唯一真值表**在 launch/navigation_launch.py 的
+      # LOCAL_OBSTACLE_LAYER_TABLE，静态校验脚本 tools/scripts/regress/local_obstacle_truth_table.py）：
+      #   obstacle_layer       = /scan（几何 2D；链路单点）
       #   obstacle_cloud_layer = /segmentation/obstacle 点云直投（不经 p2l；默认关，A/B 用）
-      plugins: ["obstacle_layer", "obstacle_cloud_layer", "inflation_layer"]
+      #   stvl_layer           = /segmentation/obstacle → 3D 体素（带时间维/衰减；默认关，
+      #                          local_obstacle:=stvl|stvl_both 才开；见 docs/stvl_local_costmap.md）
+      # 三层都写在 plugins 里、只用 enabled 切（nav2 只允许 enabled=false 的图层挂而不跑）——
+      # 这是本仓库既有机制（global 的 stvl/obstacle 就是这么切的），RewrittenYaml 只能替换
+      # **已存在的叶子键**、且不能把字符串变成 YAML 列表 ⇒ plugins 列表本身无法按槽位重写。
+      plugins: ["obstacle_layer", "obstacle_cloud_layer", "stvl_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -196,6 +203,71 @@ local_costmap:
           expected_update_rate: 0.0   # ★ 2026-09-24：0.5 会让"观测源缺一帧"变成 costmap 永久 isCurrent()==false，
                               #   而 planner_server 的 waitForCostmap() 是无超时死等 ⇒ 规划器永久卡死（栈已证实）。
                               #   0.0 = 上游语义（不判 stale）⇒ 规划器能返回；缺数据的风险交给传感器层解决。
+      # ★ 2026-10-05：第三路 = STVL 3D 体素层（`local_obstacle:=stvl` / `stvl_both` 才开，默认关）。
+      #   动机（COD 2026 双图同款）：COD 的 local 与 global **两个** costmap 都跑
+      #   SpatioTemporalVoxelLayer（third_party/cod_nav_2026/src/cod_bringup/params/singlenav2_params.yaml
+      #   局部段 200-262 与全局段 290-352，**两段数值逐键相同**）；我们的 local 只有 2D 源
+      #   （/scan 或点云直投），**没有时间维**（残影只能靠 raytrace 清）。
+      #   ⇒ 这里整块**镜像本文件 global_costmap 的 stvl_layer**（同源 /segmentation/obstacle、同高度带），
+      #     目的是让两张图对"什么算障碍"口径一致；只在与局部相关处偏离，逐条标注：
+      #     · publish_voxel_map: false —— 偏离我们的 global(true)，**取 COD 的值**（S:214 / S:304 两处都 false）：
+      #       局部 5×5 m @10Hz 发体素图纯属开销（RViz 看体素用 global 那张即可）。
+      #     · 其余全部沿用本文件 global 段（voxel_decay 0.5 / decay_model 0 / voxel_size 0.05 /
+      #       mark_threshold 0 / observation_persistence 0.0 / combination_method 1 / origin_z 0.0 /
+      #       transform_tolerance 0.2 / max_obstacle_height 2.0 —— 与 COD S:203-217、S:293-307 同值，
+      #       **唯一例外是 min_obstacle_height 0.0**：COD 是 0.15（S:229/319），我们 2026-09-24 为
+      #       RMUL2026 的 0.4 m 矮内墙改成 0.0（见下方 global 段的论证）——local 若用 0.15 会出现
+      #       "global 看得见、local 看不见"的分裂，故跟 global 保持一致。
+      #     · 观测源同样拆 mark / clear 两路（本仓库 global 的写法）：COD 是**单源** marking+clearing
+      #       （S:313-314），我们拆开是为了让 clearing 走垂直 FOV 更宽的 frustum。
+      #   回退：`local_obstacle:=scan`（本层 enabled=false，等价于今天）。
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: false                      # 默认关（launch 按 local_obstacle 覆盖）
+        voxel_decay:              0.5       # COD S:203 线性衰减 0.5 s
+        decay_model:              0         # COD S:204：0=线性，1=指数，2=持久
+        voxel_size:               0.05      # COD S:205；⚠️ 比局部栅格 0.02 **粗 2.5 倍** ⇒
+                                            # 一个体素只落到一个局部格 ⇒ 墙在局部图上呈
+                                            # **周期 0.05 m 的点状线**（实测见
+                                            # docs/stvl_local_costmap.md §3.3）；要连续线就把
+                                            # 它降到 0.02（未实测）
+        track_unknown_space:      true      # 镜像 global 段
+        mark_threshold:           0         # COD S:209
+        update_footprint_enabled: true      # COD S:210
+        combination_method:       1         # COD S:211：1=max
+        origin_z:                 0.0
+        publish_voxel_map:        false     # ★ 偏离我们的 global(true)：取 COD S:214/304（省 CPU）
+        transform_tolerance:      0.2       # COD S:215
+        mapping_mode:             false
+        map_save_duration:        60.0
+        observation_sources:      livox_mark livox_clear
+        livox_mark:
+          data_type: PointCloud2
+          topic: /segmentation/obstacle
+          marking: true
+          clearing: false
+          obstacle_range: 3.0
+          min_obstacle_height: 0.0          # ★ 偏离 COD(0.15, S:229)：跟我们的 global(0.0) 一致，保 0.4 m 矮墙
+          max_obstacle_height: 2.0          # COD 是 1.0(S:230)；我们跟 global(2.0)
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: "voxel"
+          voxel_min_points: 0
+          clear_after_reading: true
+        livox_clear:
+          enabled: true
+          data_type: PointCloud2
+          topic: /segmentation/obstacle
+          marking: false
+          clearing: true
+          max_z: 8.0
+          min_z: 1.0
+          vertical_fov_angle: 1.029
+          vertical_fov_padding: 0.05
+          horizontal_fov_angle: 6.29
+          decay_acceleration: 5.0
+          model_type: 1
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0

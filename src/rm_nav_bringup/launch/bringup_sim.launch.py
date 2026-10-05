@@ -352,10 +352,16 @@ def generate_launch_description():
     declare_local_obstacle_cmd = DeclareLaunchArgument(
         'local_obstacle',
         default_value='scan',
+        choices=['scan', 'cloud', 'both', 'stvl', 'stvl_both'],
         description='局部代价地图障碍来源（bench 可切换槽位）: '
-                    'scan = 只吃 /scan（默认，原行为；链路单点 + p2l 有 45cm 盲区） | '
-                    'cloud = 只吃 /segmentation/obstacle 点云直投（不经 p2l，无盲区） | '
-                    'both = 双源冗余（任一路挂掉仍能避障）')
+                    'scan = 只吃 /scan（默认，原行为；链路单点） | '
+                    'cloud = 只吃 /segmentation/obstacle 点云直投（不经 p2l，无近距盲区） | '
+                    'both = 双源冗余（scan + cloud，任一路挂掉仍能避障） | '
+                    'stvl = 3D 体素层（SpatioTemporalVoxelLayer，吃 /segmentation/obstacle，'
+                    '带 0.5s 时间衰减，与 global_obstacle:=stvl 同款 = COD 2026 的双图做法） | '
+                    'stvl_both = stvl + scan + cloud（冗余最多、CPU 最贵；未做 bench 实测）。'
+                    '开关表 = rm_navigation/launch/navigation_launch.py 的 LOCAL_OBSTACLE_LAYER_TABLE；'
+                    '实测见 docs/stvl_local_costmap.md')
 
     declare_mapper_cmd = DeclareLaunchArgument(
         'mapper',

@@ -125,7 +125,11 @@ def generate_launch_description():
     declare_local_obstacle_cmd = DeclareLaunchArgument(
         'local_obstacle',
         default_value='scan',
-        description='局部代价地图障碍来源: scan（默认，原行为）| cloud（3D 点云直投）| both（双源冗余）'
+        choices=['scan', 'cloud', 'both', 'stvl', 'stvl_both'],
+        description='局部代价地图障碍来源: scan（默认，原行为）| cloud（3D 点云直投）| '
+                    'both（scan+cloud 双源冗余）| stvl（3D 体素层，带时间衰减）| '
+                    'stvl_both（stvl+scan+cloud）—— 透传给 navigation_launch，'
+                    '开关表见 navigation_launch.py 的 LOCAL_OBSTACLE_LAYER_TABLE'
     )
 
     declare_nav_rviz_cmd = DeclareLaunchArgument(
