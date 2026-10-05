@@ -95,8 +95,12 @@ IcpNode::IcpNode(const rclcpp::NodeOptions &options)
   RCLCPP_INFO(this->get_logger(), "pointcloud_topic: %s",
               pointcloud_topic.c_str());
   auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
+  // ★ 2026-10-05：点云发布者（livox 插件）是 SensorDataQoS(BEST_EFFORT)，本节点原用默认 RELIABLE 订阅
+  //   ⇒ DDS 判定不兼容、永远收不到点云 ⇒ 不发 map→odom ⇒ global_costmap 卡在 "Invalid frame ID map"。
+  //   注意：/initialpose 仍用上面的 qos(RELIABLE)——RViz 的 2D Pose Estimate 是 RELIABLE 发的，不能共用。
+  auto cloud_qos = rclcpp::SensorDataQoS();
   pointcloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      pointcloud_topic, qos,
+      pointcloud_topic, cloud_qos,
       std::bind(&IcpNode::pointcloudCallback, this, std::placeholders::_1));
   // Set up the initial pose subscriber
   initial_pose_sub_ =
