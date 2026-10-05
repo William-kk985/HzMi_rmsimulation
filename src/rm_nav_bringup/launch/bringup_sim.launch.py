@@ -2,13 +2,101 @@ import os
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import PackageNotFoundError
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, TimerAction
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo, TimerAction
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
 from launch.conditions import LaunchConfigurationEquals, LaunchConfigurationNotEquals, IfCondition
+from launch.substitution import Substitution
+
+
+# =============================================================================
+# get_package_share_directory() 的「描述构建期」陷阱（2026-10-05 实测踩到后修复）
+# -----------------------------------------------------------------------------
+# ❌ 老写法（本文件里三个新槽位原来都这么写）：
+#       params = os.path.join(get_package_share_directory('pkg'), 'config', 'x.yaml')
+#    这一行在 generate_launch_description() 里 = **描述构建期无条件执行**。
+#    于是只要本机没装 'pkg'（没构建过，或构建完**没有重新 source install/setup.bash**），
+#    **任何** ros2 launch 组合都会在「解析 launch 文件」这一步直接炸掉 —— 哪怕你选的是
+#    `lio:=fastlio localization:=amcl`，跟那个槽位毫无关系：
+#        ament_index_python.packages.PackageNotFoundError: "package 'small_point_lio' not found, searching: [...]"
+#        launch.invalid_launch_file_error.InvalidLaunchFileError: Caught multiple exceptions ...
+#    （`ros2 launch ... --show-args` 同样炸 —— 它也必须先构建 LaunchDescription。）
+#    ⚠️ 用户 2026-10-05 就是被这条挡住的：新包还没编进 install/，整个 bringup 一个都起不来。
+#
+# ✅ 现在：把「查包」推迟到 **真正要用这个路径的那一刻**（= 对应节点被启动时）。
+#    `_PackageShareFile` 是一个 launch Substitution，只有 Node.execute() 才会 perform：
+#      · 没选该槽位 ⇒ 永不 perform ⇒ 该包不存在也**完全无影响**（--show-args 同理）；
+#      · 选了但包/文件不在 ⇒ 抛一条**可操作**的 RuntimeError；launch 会把它打成
+#          [ERROR] [launch]: Caught exception in launch (see debug for traceback): <这条消息>
+#        （**不是** Python traceback，launch 正常收尾、退出码 1），消息里直接给出
+#        `colcon build --symlink-install --packages-select <包名>` 与可替代的槽位值。
+#    覆盖的槽位：lio:=small_point_lio、localization:=icp、localization:=gicp | small_gicp
+#    （后两者共用 gicp_registration 包）。另外核对了任务点名的两处：
+#      · beluga —— 没有任何 get_package_share_directory 调用，只是 IncludeLaunchDescription
+#        （在 IfCondition 里 ⇒ 本来就惰性）；参数文件是 rm_navigation 包内的兄弟 YAML。✔ 无需改
+#      · small_gicp —— 只是一个字符串 backend 值（库 vendored 在 gicp_registration 内）。✔ 无需改
+#    ⚠️ 仍未改的老槽位（fast_lio / point_lio / slam_toolbox / 那批常开节点）**仍是构建期查包**：
+#       它们属「基础安装集」，且多处路径要被 os.path.join / PathJoinSubstitution 在构建期拼接，
+#       改动面更大 ⇒ 本次不动，登记为已知项（见 docs/lio_slots.md §4 的说明）。
+# =============================================================================
+
+# 槽位被选中但包不在时的「替代槽位值」（只进报错消息，不影响任何逻辑）
+_SLOT_ALTERNATIVES = {
+    'small_point_lio': 'lio:=fastlio（默认值）或 lio:=pointlio',
+    'icp_registration': 'localization:=amcl（默认 2D 栅格图路线）或 localization:=gicp',
+    'gicp_registration': 'localization:=amcl（默认 2D 栅格图路线）或 localization:=icp',
+}
+
+
+class _PackageShareFile(Substitution):
+    """惰性解析「某个包 share 目录下的文件」；缺包/缺文件时给出可操作的报错。
+
+    为什么不用 get_package_share_directory() 直接在构建期拼路径：见上方那段说明。
+    它的 perform() 只在「用到这个路径的节点真的被执行」时才会跑 ⇒ 不选这个槽位就零成本。
+    """
+
+    def __init__(self, package_name, *relative_path, alternatives=''):
+        super().__init__()
+        self.__package_name = package_name
+        self.__relative_path = relative_path
+        self.__alternatives = alternatives or _SLOT_ALTERNATIVES.get(package_name, '')
+
+    def perform(self, context):
+        try:
+            share_dir = get_package_share_directory(self.__package_name)
+        except PackageNotFoundError:
+            raise RuntimeError(self.__message(
+                '当前 AMENT_PREFIX_PATH 里找不到这个包'
+                '（= 没构建过，或构建之后没有重新 source install/setup.bash）'))
+        path = os.path.join(share_dir, *self.__relative_path)
+        if not os.path.isfile(path):
+            raise RuntimeError(self.__message(
+                '包在，但里面的文件不在（多半是"加了这个文件之后没重新构建这个包"）：缺失 %s' % path))
+        return path
+
+    def __message(self, why):
+        alt = ''
+        if self.__alternatives:
+            alt = '\n  · 或者换一个槽位值：%s' % self.__alternatives
+        return (
+            "[launch] 缺少本次 launch 需要的 ROS 包 '%(pkg)s'：%(why)s\n"
+            '  本次命令**选中了需要这个包的槽位** ⇒ 二选一：\n'
+            '  · 构建它并重新 source（推荐）：\n'
+            '      cd <你的工作空间> && source /opt/ros/humble/setup.bash\n'
+            '      colcon build --symlink-install --packages-select %(pkg)s\n'
+            '      source install/setup.bash%(alt)s\n'
+            '  （本文件里每个槽位需要的包都是**单独惰性解析**的：缺一个包不会再连带挡住别的组合，'
+            '`--show-args` 也不再受影响。）'
+            % {'pkg': self.__package_name, 'why': why, 'alt': alt})
+
+    def describe(self):
+        return '%s(package=%s, path=%s)' % (
+            type(self).__name__, self.__package_name, os.path.join(*self.__relative_path))
+
 
 def generate_launch_description():
     # Get the launch directory
@@ -58,8 +146,12 @@ def generate_launch_description():
     #   acceleration_cov=50），同一份 bag 上降到 **6.9 m、形状误差 ATE 0.42 m**（FAST-LIO 参照
     #   7.06 m / ATE 0.59 m）。逐键理由、完整 A/B 表与"能不能用"的诚实结论见 docs/lio_slots.md §5.5~§5.8。
     #   回退：把下面这行的文件名换回 'mid360_sim.yaml'（一行改动）。
-    small_point_lio_params = os.path.join(
-        get_package_share_directory('small_point_lio'), 'config', 'mid360_sim_tuned.yaml')
+    # ★ 2026-10-05 修复：路径改为 **惰性解析**（_PackageShareFile）—— 见文件顶部那段说明。
+    #   以前这里是无条件 get_package_share_directory('small_point_lio')，机器上没装这个包时
+    #   连 `lio:=fastlio localization:=amcl` 都起不来（用户实测 PackageNotFoundError）。
+    #   现在只有真选 lio:=small_point_lio 时才会去查包。
+    small_point_lio_params = _PackageShareFile(
+        'small_point_lio', 'config', 'mid360_sim_tuned.yaml')
     # RViz 直接复用 pointlio 的配置（Fixed Frame = odom，含 TF/Odometry/Path/CloudRegistered 四类显示）
     # —— 本槽位的话题名与点云语义都相同，不值得为它多维护一份 .rviz。
     small_point_lio_rviz_cfg_dir = os.path.join(rm_nav_bringup_dir, 'rviz', 'pointlio.rviz')
@@ -138,7 +230,9 @@ def generate_launch_description():
         rm_nav_bringup_dir, 'PCD',
         PythonExpression(["'", LaunchConfiguration('world'), "' + '.pcd'"])])
     # 参数已回归 icp_registration 包自身 config/（R1），经 ament_auto_package INSTALL_TO_SHARE 安装
-    icp_registration_params_dir = os.path.join(get_package_share_directory('icp_registration'), 'config', 'icp_registration_sim.yaml')
+    # ★ 2026-10-05：与 small_point_lio 同一类修复 —— 惰性解析，缺包不再挡住别的组合（见文件顶部）
+    icp_registration_params_dir = _PackageShareFile(
+        'icp_registration', 'config', 'icp_registration_sim.yaml')
     # ★ 2026-10-05：新增 localization:=gicp 槽（GICP 精配准）—— 与 icp 槽同一份资产（PCD/<world>.pcd），
     #   参数回归 gicp_registration 包自身 config/（见 docs/localization_slots.md §1）
     # ★ 2026-10-05 同日：新增 localization:=small_gicp 槽 —— **与 gicp 槽共用这一份参数文件**，
@@ -146,7 +240,9 @@ def generate_launch_description():
     #   ⇒ 两个槽位各自一行、互不干扰；文件里那个 backend 默认值**不代表推荐哪一个**，
     #     而是"单独跑本节点 / 不经验收的用法"时的保守默认（依据见
     #     docs/gicp_backend_small_gicp.md：两个后端是**对等**取舍）。
-    gicp_registration_params_dir = os.path.join(get_package_share_directory('gicp_registration'), 'config', 'gicp_registration_sim.yaml')
+    # ★ 2026-10-05：同一类修复 —— 惰性解析，缺包只挡住 localization:=gicp / small_gicp 这两个槽位
+    gicp_registration_params_dir = _PackageShareFile(
+        'gicp_registration', 'config', 'gicp_registration_sim.yaml')
     ################################# icp_registration parameters end #################################
 
     # Declare launch options
@@ -391,6 +487,9 @@ def generate_launch_description():
         GroupAction(
             condition = LaunchConfigurationEquals('lio', 'small_point_lio'),
             actions=[
+            # 把**实际加载的参数文件**打进日志（惰性解析 ⇒ 正好在这里才求值）：
+            # 用户不必去猜"launch 到底给我读了 mid360_sim.yaml 还是 tuned 版"，日志里直接有。
+            LogInfo(msg=['lio:=small_point_lio 使用的参数文件 = ', small_point_lio_params]),
             Node(
                 package='small_point_lio',
                 executable='small_point_lio_node',
