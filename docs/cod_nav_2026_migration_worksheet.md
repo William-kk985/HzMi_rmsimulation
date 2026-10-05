@@ -433,3 +433,31 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav local
 3. 两处都不需要动 base、不需要动别的槽位、不需要动消费者 launch。
 4. ⚠️ 加完必须 `colcon build --symlink-install --packages-select rm_navigation`（新文件才会被装到 `install/`），
    否则 launch 会报 `..._<新名>.yaml` 不存在。
+
+---
+
+## K. AMCL 高速跟踪参数修正（2026-10-05，`nav:=mppi` 实测反馈："定位不稳/跟不上"）
+
+**反馈**：MPPI（2.0 m/s）跑起来感觉**重定位不稳、有跟不上的情况**。查 base 文件实测值后定位到三处配置：
+
+| 键 | 原值 | 新值 | 原因 |
+|---|---|---|---|
+| `transform_tolerance` | **1.0** | **0.3** | `map→odom` 被**外推到未来 1 秒**；2 m/s 时≈外推 2 m ⇒ "滞后→猛修正→抖"。原值 1.0 是当初为掩盖 TF 时序问题设的 |
+| `update_min_d` | 0.25 | **0.05** | AMCL 是**阈值触发**的离散修正器；2 m/s × 7~10 Hz `/scan` 每帧已走 0.2~0.3 m ⇒ 阈值卡边界、更新被节流 |
+| `update_min_a` | 0.2 | **0.05** | 同上（转向阈值） |
+| `recovery_alpha_slow` | **0.0** | **0.001** | 原值 0 关闭了 AMCL 的**随机重采样恢复** ⇒ **跟丢即永久跟丢** |
+| `recovery_alpha_fast` | **0.0** | **0.1** | 同上 |
+
+**改动位置**：只改了 `nav2_params_sim_base.yaml`（**分层重构后的收益**：公共参数只改一处；旧 8 份 full copy 已废弃、未同步）。
+**回退**：逐键改回原值，或 `git revert <本提交>`。若体感变差，**优先回退 `transform_tolerance`**（它影响最大）。
+
+**为什么 AMCL 天生"不跟手"**：它是阈值触发的离散修正器；而 **slam_toolbox 定位（`transform_publish_period` 可 0.02 s = 50 Hz）** 与 **GICP/NDT（每帧点云都匹配）** 是**连续型**匹配器 ⇒ 高速全向车普遍不用 AMCL。
+
+**判据（看数据）**：
+```bash
+ros2 run tf2_ros tf2_echo map odom                    # 是否仍有"台阶式"跳变
+ros2 topic hz /amcl_pose                              # AMCL 实际更新率
+python3 tools/scripts/diag/record_tf_monotonic.py     # map→odom 单调性/跳变
+```
+**后续可选**：`max_beams 60 → 90/120`（更多束参与匹配，代价 CPU）；或直接换连续型（`localization:=slam_toolbox` 需先补 `RMUL2026.posegraph`；`icp` 槽换 small_gicp）。
+
