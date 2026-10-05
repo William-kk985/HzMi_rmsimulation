@@ -29,6 +29,7 @@
 | `src/rm_perception/imu_complementary_filter` | ccny-ros-pkg/imu_tools（© DFKI 2021 / CUNY 2015 / Willow Garage 2012 等） | **BSD-3-Clause**（LICENSE 已补，见 §四-4） | 本仓直接管理 | 参数外置 |
 | `src/rm_simulation/hzmi_rm_simulation` | 本项目（场地/机器人模型改编自 PB 与 RM 公开场地资源） | 随本仓（见 §四-5） | 本仓直接管理 | 更名、2026 场地、参数外置 |
 | `src/rm_navigation/fake_vel_transform`、`src/rm_localization/icp_registration`、`src/rm_localization/lio_tf_adapter`、`src/rm_navigation/rm_navigation`、`src/rm_nav_bringup` | 本项目（思路参考 CSU-RM-Sentry 等） | 随本仓（MIT） | 本仓直接管理 | 编排、参数回归、接口适配、TF 契约适配 |
+| `src/rm_localization/small_point_lio`（**参与编译**：`lio:=small_point_lio` 槽位） | Yancey2023/small_point_lio（© 2025 Yingjie Huang，东莞理工学院 ACE 战队；Point-LIO 的 2~3× 加速变体） | **MIT**（`LICENSE.txt`："The MIT License (MIT) / Copyright (c) 2025 Yingjie Huang"；GitHub API `license.spdx_id = MIT`，`package.xml` 亦声明 MIT） | 官方源码 vendored（去 `.git`），**pinned commit `688d75cfa780049ae532e5100ca64f46ad8b1a93`**（分支 `ros2`，2026-08-31「fix bugs」，上游无 tag ⇒ 只能 pin commit） | ① 新增 `config/mid360_sim.yaml`（仿真外参/单位/话题）；② `src/lidar_adapter/livox_custom_msg.h` **本地补丁**：`timebase == 0` 时退回 `header.stamp`（我们的仿真插件不填 timebase，不补丁则一条 odom 都不发 —— 3 行改动，已在该文件内注明 `[HzMi 本地补丁]`）；**无其它源码改动**。clone 命令、契约表与回退见 `docs/lio_slots.md` |
 | `third_party/fast_lio` | hku-mars/FAST_LIO | GPL-2.0 | 原版参考（不编译） | — |
 | `third_party/point_lio` | hku-mars/Point-LIO | BSD-3-Clause | 原版参考（不编译） | — |
 | `third_party/cartographer` | cartographer-project/cartographer | Apache-2.0 | 原版参考（不编译） | — |
