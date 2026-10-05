@@ -1,0 +1,132 @@
+# ============================================================================
+# mid360_sim_tuned.yaml —— HzMi_rmsimulation 的**仿真调参版**参数（2026-10-05 新增）
+#
+# 与同目录另两份的关系（**不是覆盖上游**）：
+#   · config/mid360.yaml            = 上游真机参数（Mid360 + livox_ros_driver2）——**没动过**
+#   · config/mid360_sim.yaml        = 本仓"仿真契约版"：只改输入契约/单位口径（acc_norm、
+#                                     satu_acc、extrinsic_T），滤波器参数原样照抄上游 —— **也没动过**
+#   · config/mid360_sim_tuned.yaml  = 本文件：在 mid360_sim.yaml 的基础上，只改 4 个
+#                                     **滤波器/点云**参数，让它在**我们的仿真数据上真的跟得住**
+#
+# 为什么需要它（一句话）：用 mid360_sim.yaml（= 上游默认滤波器参数）离线重放同一份 bag，
+# 轨迹长度 30.2 m，而同窗口真值 5.51 m、FAST-LIO 参照 6.22 m ⇒ 不是"精度差一点"而是**发散**。
+# 逐参数 A/B 的完整表格、机理分析与诚实结论见 **docs/lio_slots.md §5.5~§5.8**。
+#
+# 这 4 个改动各自的物理理由（都是"我们的数据与真机数据不同"造成的，不是随手调参）：
+#
+#   ① space_downsample: false   —— 最有效的一个（30.2 m → 7.4 m）
+#      mid360_sim.yaml 里 0.2 m 体素降采样后**每帧只剩 ~620 点**参与逐点更新（原始 6393 点，
+#      min_distance>0.5 后 ~3500 点）。点太少 ⇒ 每帧点-面残差对姿态/位置的约束欠定，
+#      5 点拟合出的平面噪声大，且 Livox 非重复扫描使"每个体素留哪个点"逐帧变化 ⇒
+#      位姿估计出现 ~5 cm/帧 的抖动（正是那多出来的 20 多米"轨迹"）。
+#      关掉降采样后每帧 ~3500 点，约束变稠密，抖动降到 ~2 cm/帧，且**重复性也变好**
+#      （同一配置两次重放差 2 cm，而不是 5~16 m）。
+#      ⚠️ 代价 = CPU（每帧点数 ×5.6）。实测仍能跟上 7.1~7.3 Hz 出数（见 lio_slots.md §5.8）。
+#
+#   ② imu_meas_omg_cov: 0.01 → 0.2
+#      这个参数是"陀螺仪测量"在 ESKF 里的**测量方差**。仿真陀螺**无噪声**，直觉上应该调更小，
+#      但实测反过来：0.01（上游默认）→ 30~46 m 发散；0.2 → 7.4 m；1.5 → 6.8 m（同量级）。
+#      原因：本算法把 IMU 当**量测**（h_imu），`omg` 是状态；R 越小 ⇒ (omg,bg) 的后验协方差被
+#      压得越小 ⇒ 每帧那 ~3500 个点更新通过交叉协方差 P(omg,·) 给角速度的"踢腿"被 100% 当真，
+#      形成「姿态误差 → 点-面残差 → 角速度修正 → 姿态误差」的逐帧正反馈。
+#      我们的帧内**所有点共用一个时间戳**（插件 offset_time≡0，一帧跨 126 ms 的运动没被补偿），
+#      残差里本来就带着一个与姿态强相关的系统性成分 ⇒ 正反馈被放大成发散。
+#      R 调到 0.2 ⇒ 角速度状态的时间常数 ≈ 0.1 s ≈ **一个雷达帧长（0.126 s）**：
+#      上一帧的"踢腿"在下一帧到来前基本衰减掉，而真实角速度（变化尺度 0.1~1 s）仍然跟得上。
+#      两端都不行：R=0.01 太硬（发散），`omg_cov` 调到 1.0（角速度状态几乎冻住，τ≈0.8 s）→ 40 m。
+#
+#   ③ velocity_cov: 20.0 → 0.3
+#      速度状态的过程噪声。上游 20.0 对**地面机器人**是荒谬地松（≈4.4 (m/s)/√s 的随机游走），
+#      位置因此每帧被"允许"抖 5 cm。我们这条路线最大速度 0.36 m/s、最大偏航角速度 0.24 rad/s，
+#      13 ms 内速度变化 ≤0.03 m/s ⇒ 0.3 才对应真实动力学。
+#      ⚠️ 只影响**抖动量**（轨迹长度 7.4 → 6.9 m），**不影响形状**（ATE 0.41→0.42 m 不变）——
+#      也就是"把噪声调小"，不能拿来把跟丢的轨迹"调短"，这一点在 lio_slots.md 里专门写了。
+#
+#   ④ acceleration_cov: 500.0 → 50.0
+#      同上，加速度状态的过程噪声。500 允许 13 ms 内加速度随机跳 0.29 m/s²；仿真的加速度计
+#      无噪声、真值平滑 ⇒ 收紧到 50（轨迹 7.4 → 7.2 m，形状不变）。收得更紧（10/20）无进一步收益。
+#
+# 用法（由 bringup_sim.launch.py 的 lio:=small_point_lio 分支加载，一般不要手工传）：
+#   ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
+#     lio:=small_point_lio localization:=amcl
+# 手工单跑节点（离线 A/B 复现）：
+#   ros2 run small_point_lio small_point_lio_node --ros-args \
+#     --params-file install/small_point_lio/share/small_point_lio/config/mid360_sim_tuned.yaml \
+#     -p use_sim_time:=false -p save_pcd:=false
+# 回退到"上游默认滤波器参数"：把 bringup_sim.launch.py 里的 small_point_lio_params 换回
+#   config/mid360_sim.yaml（两行，见 docs/lio_slots.md §8）。
+# ============================================================================
+/**:
+    ros__parameters:
+        # ===== 输入契约（与 mid360_sim.yaml 完全相同；我们的仿真就是照着它造的）=====
+        lidar_topic: /livox/lidar                  # CustomMsg；仿真插件 libros2_livox.so 发的话题
+        imu_topic: /livox/imu                      # gazebo_ros_imu_sensor 的原始 IMU（100 Hz，无噪声）
+        lidar_type: livox_custom_msg               # 四种之一：livox_custom_msg / livox_pointcloud2 / custom_mid360_driver / unilidar
+        lidar_frame: livox_frame                   # 必须与 /livox/lidar 的 header.frame_id 和 URDF 帧名一致
+        save_pcd: false                            # 差异：无。**绝不要开**（见文件末尾）
+
+        # ===== 点云过滤 =====
+        point_filter_num: 1                        # 差异：无（上游 1；试过 2，更差）
+        min_distance: 0.5                          # 差异：无（对齐 fastlio/pointlio 的 blind: 0.5；试过 0.3，无收益）
+        max_distance: 1000.0                       # 差异：无
+        # ★【调参 ①】上游/契约版 true + leaf 0.2 ⇒ 每帧只剩 ~620 点，抖动大、且开始发散
+        #   （0.2→7.4 m，0.3→20.1 m，0.5→79.7 m；越粗越差 ⇒ 这条链路上"点越多越好"）
+        space_downsample: false
+        space_downsample_leaf_size: 0.2            # 保留（本行为 false 时该键不生效；若改回 true 仍用上游值）
+
+        # ===== IMU 处理 =====
+        gravity: [0.0, 0.0, -9.810]                # 差异：无。Gazebo Classic 默认重力 9.8，差 0.1%（实测关掉 fix_gravity_direction 更差，故保留）
+        fix_gravity_direction: true                # 差异：无。代价 = 起步需要 200 帧 IMU（@100 Hz ≈ 2 s）才初始化
+        check_satu: true                           # 差异：无（上游 true；我们的加速度最大只有几 m/s²，永不触发）
+        # ★差异（沿用 mid360_sim.yaml）：上游 3.0 是按"加速度单位 = g"写的（其 acc_norm=1.0），
+        #   而 Gazebo 的 IMU 是 m/s²（实测 |a|≈9.80）⇒ 用 3.0 会让 z 轴**每一帧**被判饱和、
+        #   该轴残差被清零。换算成 3 g ≈ 29.4，取 30.0。
+        satu_acc: 30.0
+        satu_gyro: 35.0                            # 差异：无（rad/s，与单位无关；实测最大 0.96 rad/s）
+        # ★差异（沿用 mid360_sim.yaml）：上游 1.0（= IMU 输出单位是 g）。Gazebo IMU 是 m/s² ⇒ 必须 9.81，
+        #   使 imu_acceleration_scale = |gravity| / acc_norm = 1.0（estimator.cpp:113）。
+        acc_norm: 9.81
+
+        # ===== 地图 =====
+        map_resolution: 0.2                        # 差异：无。★这是 iVox 的**体素边长**，不是"越细越好"：
+                                                   #   0.1 → 24.5 m、0.15 → 12.7 m、0.2 → 7.4 m、0.5(配 leaf0.5) → 47 m
+                                                   #   ⇒ 点云稀疏时体素太细会让平面拟合退化，0.2 是这条链路的甜点
+        init_map_size: 10                          # 差异：无
+
+        # ===== 雷达与 IMU 相对位姿（Lidar_T_wrt_IMU：雷达原点在 IMU 系下的位置）=====
+        extrinsic_est_en: false                    # 差异：无
+        # ★差异（沿用 mid360_sim.yaml）：上游 [-0.011, -0.02329, 0.04412]（真机 Mid360 内参）。
+        #   本仓 URDF：livox_frame = base_link+(0.12, 0, 0.175)、imu_link = base_link+(0.12, 0, 0.125)、
+        #   两者 rpy 均为 0 ⇒ 雷达比 IMU 高 0.05 m ⇒ (0, 0, +0.05)。
+        extrinsic_T: [0.0, 0.0, 0.05]
+        extrinsic_R: [1.0, 0.0, 0.0,              # 差异：无（仿真里雷达与 IMU 同姿态）
+                      0.0, 1.0, 0.0,
+                      0.0, 0.0, 1.0]
+
+        # ===== 滤波器参数 =====
+        # ★【调参 ②~④】（其余保持上游值，理由见文件头）：
+        #   imu_meas_omg_cov 0.01 → 0.2   ：陀螺"量测"方差；0.01 会让逐帧点更新把角速度带跑（发散），
+        #                                   0.2 ≈ 让角速度状态的时间常数对齐一个雷达帧长（0.126 s）
+        #   velocity_cov     20.0 → 0.3   ：地面机器人速度不可能有 4.4 (m/s)/√s 的随机游走
+        #   acceleration_cov 500.0 → 50.0 ：同理收紧（再无噪声、真值平滑）
+        #   ⚠️ 没动的两个也很有信息量：
+        #     · imu_meas_acc_cov 保持 0.01（加速度计无噪声 ⇒ 本来就该信它；调到 0.6 反而变差 10.5 m）
+        #     · imu_meas_omg_cov 与 omg_cov 是**一对**：只把 R 调大或只把 Q 调小都会坏（见文件头②）
+        laser_point_cov: 0.01
+        imu_meas_acc_cov: 0.01
+        imu_meas_omg_cov: 0.2
+        velocity_cov: 0.3
+        acceleration_cov: 50.0
+        omg_cov: 1000.0
+        ba_cov: 0.0001
+        bg_cov: 0.0001
+        plane_threshold: 0.1                       # 差异：无（试过 0.05/0.2/0.3，都更差或持平）
+        match_sqaured: 81.0                        # 差异：无（拼写就是上游的；试过 9，持平）
+
+        # ===== 数据发布 =====
+        publish_odometry_without_downsample: false # 差异：无（上游建议保持 false）
+
+        # ⚠️ save_pcd 一旦为 true：① 每帧点都进 pointcloud_mapping（吃 CPU/内存）；
+        #    ② map_save 服务会把 PCD 写到 **ROOT_DIR/pcd/scan.pcd**，而 ROOT_DIR 是
+        #    `@CMAKE_CURRENT_SOURCE_DIR@`（include/param_deliver.h.in）⇒ 直接写进源码树。
+        #    本仓一律 false；要存图用 fastlio 的 /map_save（落 PCD/<world>.pcd）。

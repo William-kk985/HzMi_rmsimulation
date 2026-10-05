@@ -51,8 +51,15 @@ def generate_launch_description():
 
     ################################# SMALL_POINT_LIO parameters start ###############################
     # 参数放在 vendored 包自身 config/（与 fastlio/pointlio 同一口径：算法参数随包走）
+    # ★ 2026-10-05：本槽位改读 **mid360_sim_tuned.yaml**（不是 mid360_sim.yaml）。
+    #   原因：mid360_sim.yaml = "仿真输入契约 + 上游默认滤波器参数"，离线重放实测**跟不住**
+    #   （40 s 窗口轨迹 30.2 m，同窗口真值 5.51 m / FAST-LIO 参照 6.22 m）；tuned 版只改 4 个
+    #   滤波器/点云键（space_downsample=false、imu_meas_omg_cov=0.2、velocity_cov=0.3、
+    #   acceleration_cov=50），同一份 bag 上降到 **6.9 m、形状误差 ATE 0.42 m**（FAST-LIO 参照
+    #   7.06 m / ATE 0.59 m）。逐键理由、完整 A/B 表与"能不能用"的诚实结论见 docs/lio_slots.md §5.5~§5.8。
+    #   回退：把下面这行的文件名换回 'mid360_sim.yaml'（一行改动）。
     small_point_lio_params = os.path.join(
-        get_package_share_directory('small_point_lio'), 'config', 'mid360_sim.yaml')
+        get_package_share_directory('small_point_lio'), 'config', 'mid360_sim_tuned.yaml')
     # RViz 直接复用 pointlio 的配置（Fixed Frame = odom，含 TF/Odometry/Path/CloudRegistered 四类显示）
     # —— 本槽位的话题名与点云语义都相同，不值得为它多维护一份 .rviz。
     small_point_lio_rviz_cfg_dir = os.path.join(rm_nav_bringup_dir, 'rviz', 'pointlio.rviz')
