@@ -12,7 +12,7 @@
 | `amcl` | `nav2_amcl` | `rm_navigation/params/nav2_params_sim_base.yaml`（已调：`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 已打开，见工单 §K） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ |
 | `beluga` | `beluga_amcl/amcl_node`（AMCL 的现代实现，**同名参数、同 lifecycle 形态**；2026-10-05 新增，见 §1.2） | `rm_navigation/params/nav2_params_sim_beluga.yaml`（`amcl` 段；`transform_tolerance 0.3` / `update_min_d,a 0.05` / `recovery_alpha_*` 原样搬运） | 2D 栅格图 `rm_nav_bringup/map/RMUL2026.pgm|.yaml` ✅ **+ 需装 `ros-humble-beluga-amcl`**（Humble 有官方二进制；源码路线见 §1.2） |
 | `icp` | `icp_registration/icp_registration_node`（**我们自己的包**，可改） | `icp_registration/config/icp_registration_sim.yaml`（含 `pcd_path`） | 先验点云 `rm_nav_bringup/PCD/RMUL2026.pcd` ✅（RMUL/RMUC 也有文件，但 **RMUC.pcd 是退化资产**，见 §1.1） |
-| `gicp` | `gicp_registration/gicp_registration_node`（**我们自己的包**，2026-10-05 新增） | `gicp_registration/config/gicp_registration_sim.yaml`（含 `pcd_path`、`tf_lookahead_sec`、两级 leaf `voxel_leaf_size 0.10` / `voxel_leaf_size_scan 0.05`，见 §1.1） | 先验点云 `rm_nav_bringup/PCD/<world>.pcd` ✅（RMUL2026 实测可用，0.10 m leaf 后 target ≈1.2e4 点；**必须有初值**，见 §1.1） |
+| `gicp` | `gicp_registration/gicp_registration_node`（**我们自己的包**，2026-10-05 新增）；配准后端 `backend: pcl \| small_gicp` = **两个对等可选实现**（默认 `pcl` 是**选择**，不是因为另一个更差） | `gicp_registration/config/gicp_registration_sim.yaml`（含 `pcd_path`、`backend`、`tf_lookahead_sec`、两级 leaf `voxel_leaf_size 0.10` / `voxel_leaf_size_scan 0.05`，见 §1.1） | 先验点云 `rm_nav_bringup/PCD/<world>.pcd` ✅（RMUL2026 实测可用，0.10 m leaf 后 target ≈1.2e4 点；**必须有初值**，见 §1.1）。**两个后端都已过整栈 P0 回归**（Release 口径：align **15.7 vs 2.9 ms**、fitness **0.00226 vs 0.00230 m²**、采纳 **165/165 vs 167/167**；详见 `docs/gicp_backend_small_gicp.md` §4.5 与 `algorithm_matrix.md` §9.2.3） |
 | `slam_toolbox` | `slam_toolbox/localization_slam_toolbox_node` | `slam_toolbox/config/mapper_params_localization_sim.yaml` + launch 注入 `map_file_name=map/<world>`、`map_start_pose=[0,0,0]` | **序列化位姿图 `map/RMUL2026.posegraph(+.data)` ❌ 缺**（RMUC/RMUL 有）⇒ 需先建图并 `serialize_map` |
 | `cartographer` | `cartographer_node`（纯定位） | cartographer 配置 | `map/RMUL2026.pbstream` ✅ |
 | `''`（留空） | 无重定位：LIO 当绝对定位 + 静态桥补帧 | — | — |
@@ -26,7 +26,13 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav \
 ### 1.1 `gicp` 槽位细节（2026-10-05 新增；与 `icp` 同资产、同初值契约）
 
 - **节点**：`gicp_registration/gicp_registration_node`（`ament_cmake` + `rclcpp_components`）；
-  算法 = PCL `pcl::GeneralizedIterativeClosestPoint`，点类型 = **`pcl::PointXYZ`**。
+  **两个对等配准后端**（`backend: pcl | small_gicp`，**默认 `pcl`**）：
+  `pcl` = PCL `pcl::GeneralizedIterativeClosestPoint`（单线程，BFGS 内层迭代），
+  `small_gicp` = vendored `koide3/small_gicp` @ `v1.0.1`（MIT，OpenMP 多线程，LM 优化器）。
+  两者**契约、话题、参数键、健康指标、点类型完全同一套**，切换只改 `backend` 一行；
+  并列的实测取舍（align / fitness / 采纳率 / `~/converged`）与回退见
+  **`docs/gicp_backend_small_gicp.md`**——那是"两个平等选项"的对照表，**没有主次**。
+  点类型 = **`pcl::PointXYZ`**（两个后端共用）。
   为什么不用 `PointNormal/PointXYZINormal`：PCL 1.12.1 的 GICP 用 KNN 邻域**自己算协方差**
   （`pcl/registration/impl/gicp.hpp:51-125`，只读 x/y/z），normal/intensity 一律不读；而我们的
   PCD 资产字段并不统一（`RMUC.pcd` 连 intensity 都没有）⇒ `PointXYZ` 三种资产都能读，
@@ -357,10 +363,91 @@ beluga 侧另有症状不同的旧 issue：[beluga#67 "amcl_node doesn't termina
 
 **本次决定**：**保持 A（不动 bond 配置）**——理由是 ① 与 `localization:=amcl` 槽行为对齐（bond 是
 lifecycle_manager 的安全网）；② 这个 abort 只发生在**进程收尾**（Ctrl-C 时整栈本来就在退），
-**不影响启动/激活/发 TF/定位**；③ 我们 launch 里 `use_respawn` 默认 `False`，不会因此触发重启循环。
+**不影响启动/激活/发 TF/定位**；③ 下面 §1.2.1 的 respawn 审计（2026-10-05 补做）把"beluga 节点会不会
+因为这次 abort 被反复拉起"逐节点核实过：**beluga 节点在这条路上 `respawn=False`，不会被重启**；
+真实 Ctrl-C 下 launch 自己的 shutdown 门闩还会再挡一层 ⇒ **不构成重启循环**。
 若用户不接受 Ctrl-C 时那条 `terminate called ...`/`exit code -6` 日志，按 **E** 改两处即可
 （参数文件加 `bond_timeout: 0.0` + `localization_beluga_launch.py` 的 manager 参数加 `bond_timeout: 0.0`），
 代价是失去 bond 看门狗——**这是一个需要用户拍板的取舍，本次没有替用户改**。
+
+#### 1.2.1 ★ 2026-10-05 补做：`respawn` 审计（结论 = **不改代码**）
+
+**为什么要补**：初版只写了"我们 launch 里 `use_respawn` 默认 `False`"，但审计发现
+`bringup_rm_navigation.py:112` 的 `use_respawn` 默认是 **`True`** 且会透传给 Nav2 节点（`:164`）
+⇒ "这条路上没人开 respawn"这句话必须**逐节点**核实，不能靠默认值推断。
+
+**逐节点审计（`localization:=beluga` 路径 = `bringup_sim.launch.py` 起的全部进程）**：
+
+> 行号口径：`localization_beluga_launch.py` / `bringup_rm_navigation.py` / `navigation_launch.py`
+> 按本仓库 HEAD（`0a2e74d`，这三个文件当前无人并行改动）；`bringup_sim.launch.py` 的行号也按 HEAD，
+> 但**该文件正被另一条任务并行改动**（同日新增 `localization:=small_gicp` 槽）⇒ 若行号对不上，
+> 按括号里的 `include`/节点名 / `LaunchConfiguration` 名定位。
+
+| 进程 / include | respawn 取值 | 出处（file:line） |
+|---|---|---|
+| Gazebo / 感知 / 桥接等（`start_rm_simulation`、imu 互补滤波、地面分割、p2l、LIO+adapter、`fake_vel_transform`、建图 RViz） | **不设**（= 无 respawn） | `src/rm_simulation/hzmi_rm_simulation/launch/rm_simulation.launch.py`（全文件无 `respawn`）、`bringup_sim.launch.py:271-300`、`:600-690` |
+| `localization_beluga_launch.py`（include 本体） | 父层**没传** `use_respawn`（`launch_arguments` 里没有该键） | `bringup_sim.launch.py:446-458` |
+| ↳ `map_server` | `respawn=False` | `localization_beluga_launch.py:199`（`respawn=use_respawn`）+ `:168`（本 launch 自带默认 `False`） |
+| ↳ **`amcl_node`（beluga）** | **`respawn=False`** ← 关键 | `localization_beluga_launch.py:212` + `:168` |
+| ↳ `lifecycle_manager_localization` | 不设（= 无 respawn） | `localization_beluga_launch.py:217-225` |
+| `start_navigation2` → `bringup_rm_navigation.py` | `use_respawn` 默认 **`True`**；`use_composition` 声明默认 `True` | `bringup_rm_navigation.py:111-113`、`:107-109` |
+| ↳ `nav2_container`（组合容器） | 不设（= 无 respawn） | `bringup_rm_navigation.py:142-150` |
+| ↳ **7 个 Nav2 节点**（controller / smoother / planner / behavior / bt_navigator / waypoint_follower / velocity_smoother） | **`respawn=True`**（本次实测**确实生效**） | `bringup_rm_navigation.py:164` → `navigation_launch.py:177/187/197/207/217/227/237` |
+| ↳ `lifecycle_manager_navigation`、`rviz_launch.py` | 不设（= 无 respawn） | `navigation_launch.py:243-251`、`bringup_rm_navigation.py:167-170` |
+
+**两条容易搞错的机制**（源码 + 实测都核过）：
+
+> 下面出现的 `launch/actions/*.py`、`launch/utilities/*.py`、`launch/launch_service.py` 都指
+> **ROS 2 Humble 安装里的 `launch` 包**（本机 `/opt/ros/humble/lib/python3.10/site-packages/launch/`），
+> **不是本仓文件**；带 `:行号` 的引用按 0.19.14（`launch_ros` 0.19.14）核过。
+
+1. **`use_composition` 被"泄漏"成 `False`**，所以上面那 7 个 Nav2 节点是**独立进程**
+   （`respawn=True` 才真有落点）：`bringup_sim.launch.py:265` 给 *Gazebo 的* include 传了
+   `'use_composition': 'False'`，而 `IncludeLaunchDescription` 的 `launch_arguments` 是**全局**
+   `SetLaunchConfiguration`（`launch/actions/include_launch_description.py` 的 `execute()` 返回
+   `[SetLaunchConfiguration(...), <子 ld>]`，**不还原**），后到的 `DeclareLaunchArgument` 只在
+   "键还没被设置"时才采用默认值（`launch/actions/declare_launch_argument.py` 的 `execute()`：
+   `if self.name not in context.launch_configurations:`）⇒ 10 s 后 `bringup_rm_navigation.py:108`
+   的默认 `True` **输给**了 0 s 泄漏进来的 `False`。（旁证：五次整栈日志里 Nav2 节点全是独立进程，
+   没有 `nav2_container`。）
+   ⇒ 副作用提醒：**任何**在 `start_rm_simulation` 之后才 include 的 launch，其同名
+   `DeclareLaunchArgument` 默认值都可能被这次泄漏顶掉（beluga 分支自身不受影响：它要的 `use_respawn`
+   在 4 s 那次 include 里解析，此时上下文里还没有这个键）。
+2. **真实 Ctrl-C 不会重启任何进程**：`launch/actions/execute_local.py:583` 的重启条件是
+   `if not context.is_shutdown and not self.__shutdown_future.done() and self.__respawn:`
+   —— SIGINT 一进 launch 就会 `_shutdown()` ⇒ `context.is_shutdown=True` ⇒ respawn 被门闩挡住
+   （`respawn_delay` 那条分支同样先等 `__shutdown_future`）。本次用一个**不含任何 ROS 节点**的最小
+   launch（两个 `sleep`，一个 `respawn=True` 一个 `respawn=False`）实测：以 SIGINT **默认处置**起
+   `ros2 launch` 再对整组发 SIGINT ⇒ launch 打印 `user interrupted with ctrl-c (SIGINT)`、自身
+   退出码 0、`respawn=True` 的那个 `sleep` **没有被重启**（若是 SIGINT 被忽略的场景则会重启，见下条）。
+
+**"headless 五路测试里 SIGINT 之后节点被重新拉起"——本次解释清楚了：那是测试驱动的假象**，
+不是用户 Ctrl-C 的行为。`run_one.sh` 用 `setsid ros2 launch ... &`（**非交互 shell 的后台作业
+SIGINT 处置 = `SIG_IGN`**）；launch 的 `AsyncSafeSignalManager` 只调用 `signal.set_wakeup_fd`、
+**不调用 `signal.signal`**（`launch/utilities/signal_management.py` 的 `__install_signal_writers`）
+⇒ launch 进程**根本没收到**这次 SIGINT（五份日志里 `user interrupted with ctrl-c` **0 行**），
+而子进程里的 rclcpp **自己装了 SIGINT handler** ⇒ 节点全死、launch 还活着 ⇒ 那 7 个 `respawn=True`
+的 Nav2 节点按 `respawn_delay=2.0` 被重新拉起。证据（`.tmp_cache/five_way/`）：
+
+| 证据 | 值 |
+|---|---|
+| 五份日志的 `process started with pid` 行数 | 每份 **29** = 初始 22 + SIGINT 后重启 7（模式完全一致） |
+| 定位节点启动次数 | `gicp`/`amcl`/`beluga`/`icp` 每次运行**都只有 1 次** |
+| beluga 的 `amcl_node-13` | `beluga.log:58` 启动（pid 484）→ `:334` 收到 SIGINT → `:431` `exit code -6` 死亡；**再无第二次启动** |
+| 重启的 7 个 | `beluga.log:473/479/485/486/491/503/514`（新 pid 3102…3174，SIGINT 后 ≈2~3 s） |
+
+⇒ ① **beluga 的 abort 既不是重启的原因，也没有被重启**（`respawn=False`，日志里只有"一次启动 +
+一次 `exit code -6`"）；② 若哪天要修"测试收尾后栈还活着/节点被拉起"，要改的是**测试发 SIGINT 的方式**
+（用 SIGINT 默认处置，例如 `python3` + `os.killpg`；或在 `setsid` 之外再对 launch 单独补一发）
+或 `bringup_sim.launch.py` / `bringup_rm_navigation.py` 的 `use_respawn` 透传，
+**都不在 beluga 这一槽**（本次按规定只审计 + 记录，未改任何代码/launch）。
+
+**§1.2.1 结论**：abort 只发生在本进程**自己的收尾路径**上，而 ① beluga 节点这条路 `respawn=False`
+（不可能被重启）；② 即便有人显式 `use_respawn:=True` 打开它，一次 SIGINT 也只会换来**一次**重启
+（新起的进程不会自己再 abort ⇒ **不成循环**）；③ 真实 Ctrl-C 下 launch 的 shutdown 门闩直接禁掉重启。
+⇒ **本次不改代码**（bond 配置保持 **A** = `bond_timeout` 不写，即 4.0）。
+变体 **E**（节点 + manager 都 `bond_timeout: 0.0`，实测退出码 0）仍然只是"用户想要干净退出码"时的
+**可选项**，为防重启而改它是**没有依据**的。
 
 **事实核对（均在 2.1.1 上核实，出处见括号）**
 
@@ -608,8 +695,10 @@ python3 tools/scripts/diag/record_tf_monotonic.py
    map_server」（`lio==cartographer` 时 beluga 分支条件为假，而独立 map_server 又被排除）——**这是
    amcl 早就有的同款行为**，本次只做"与 amcl 对齐"，未修；
 9. **SIGINT 收尾 abort（§1.2.0）**：根因已定位（bondcpp `~Bond` 在 `rcl_shutdown()` 之后建 timer），
-   但**没有修**（属上游 + 只在收尾）⇒ 整栈 Ctrl-C 时 beluga 进程会以 **exit code 134 / -6** 收场，
-   整栈层面的观感（launch 日志、`use_respawn:=true` 时会不会触发重启）**未实测**；
+   但**没有修**（属上游 + 只在收尾）⇒ 整栈 Ctrl-C 时 beluga 进程会以 **exit code 134 / -6** 收场。
+   ✅ **"会不会触发重启"这一问已销案**（2026-10-05 §1.2.1：节点 `respawn=False` + 五路整栈日志实证
+   `amcl_node` 只启动一次；真实 Ctrl-C 下 launch 还有 `execute_local.py:583` 的 shutdown 门闩）；
+   仍未实测的只剩"**用户在场**时那条 `terminate called ...` 日志的观感"与变体 E 的实际取舍；
 10. **apt 安装**：已完成（`/opt/ros/humble`，2.1.1-1jammy.20260908.012840），**此项销案**。
 
 ## 2. 待补入口（**已登记、未实现**）
@@ -627,7 +716,8 @@ python3 tools/scripts/diag/record_tf_monotonic.py
 > ✅ **`gicp` 已于 2026-10-05 落地**（独立包 `gicp_registration`，槽位值 `localization:=gicp`）⇒ 从上表移出，
 > 详见 §1.1。走的**不是**原计划"在 `icp_registration` 内换后端"那条路，而是**新包**：
 > 理由是 icp 槽要保留 ICP 原样做三方 A/B（AMCL / ICP / GICP），两套后端各占一个槽位互不干扰。
-> 若以后要引入 small_gicp/fast_gicp（更快），换的只是 `gicp_registration` 内部的配准后端。
+> `small_gicp` **已于同日作为对等后端落地**（`backend` 参数，默认仍 `pcl`；见 §1.1 与
+> `docs/gicp_backend_small_gicp.md`）；`fast_gicp` 仍未引入。
 
 ## 3. 新增一个重定位槽的**标准三步**（与 planner/controller 槽同构）
 

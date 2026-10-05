@@ -1,7 +1,9 @@
-# gicp_registration 的可切换配准后端：`pcl`（默认） vs `small_gicp`
+# gicp_registration 的两个配准后端：`pcl` 与 `small_gicp`（**对等支持**，默认 `pcl`）
 
 > 2026-10-05 · 对应改动：`gicp_registration` 新增 `backend` 参数 + vendored `third_party/small_gicp`
 > 本文只讲这一个包（`src/rm_localization/gicp_registration/`）。
+> **两个后端是对等的两个选项**：同一套契约、同一套参数键、同一套健康话题，切换只改 `backend` 一行。
+> **默认值是 `pcl`——这是团队的选择，不是因为 `small_gicp` 更差**（实测它快 ~5×，精度同级）。
 > 契约（只发 `map→odom`、`tf_lookahead_sec` 盖戳、健康话题、"无初值不发 TF"、两级 leaf 0.10/0.05、
 > `max_correspondence_distance` 1.5 m、`pcl::PointXYZ`）**一个字都没改**，见 `docs/localization_slots.md`。
 
@@ -9,19 +11,36 @@
 
 ## 0. 一句话结论（先看这个）
 
-1. **`small_gicp` 后端可用，且更快**：在**同一批帧、同一份参数、同一个构建配置**下，
-   仓库当前默认构建（`CMAKE_BUILD_TYPE` 为空 = 无 `-O`）里
-   `pcl` 稳态 **386.7 ms/帧**（median）→ `small_gicp`（4 线程）**205.5 ms/帧**，≈ **1.9×**；
-   打开 `-O3` 后 `pcl` 12.5 ms → `small_gicp` **2.9 ms**，≈ **4.3×**。
-2. **但真正的大头不是换后端，而是"这个包一直在无优化编译"**：`colcon`/`ament` 默认**不设置**
+1. **两个后端都能用，且都已经过整栈验证**：同一批帧、同一份参数、同一个构建配置下，
+   `small_gicp`（4 线程）比 `pcl` 快约 **4~5×**（Release 整栈实测：align 中位数 **15.7 → 2.9 ms**），
+   精度同级（fitness **0.00226 vs 0.00230 m²**），且**都跑通了整栈 P0 回归**
+   （`localization:=gicp` 两次都 `PASS / SUCCEEDED / recoveries=0`），见 §4.5。
+2. **选哪个只看你要什么**（并列取舍，不是"新旧/实验 vs 正式"）：
+
+   | 维度 | `pcl`（默认） | `small_gicp` |
+   |---|---|---|
+   | 整栈 align 中位数（Release） | 15.7 ms（11.8~25.4） | **2.9 ms**（2.6~4.0） |
+   | 整栈 fitness（末帧） | 0.00226 m² | 0.00230 m² |
+   | 整栈采纳率（末帧 `[status]`） | 165/165 = **100%** | 167/167 = **100%** |
+   | `~/converged` | **100%** | **89~92%**（LM 在极小点提前 break；**位姿不受影响**，见 §6.2） |
+   | 依赖 / 构建 | 系统 PCL（已有） | vendored `small_gicp@v1.0.1`（MIT，header-only，随本仓提交） |
+   | 线程模型 | 单线程（BFGS 内层迭代） | OpenMP 多线程（`small_gicp_num_threads`，默认 4） |
+   | 退化资产行为 | 特征值钳制后求逆（`diag(1e-3,1,1)`） | 原始协方差直接求逆（本仓资产实测无差异，§6.1） |
+   | 切换成本 | — | **改一行** `backend: "small_gicp"`（可运行时 `-p backend:=small_gicp` 覆盖） |
+
+   `~/converged` 那 8~11% 的 false 只让**该帧不更新**（`map→odom` 沿用上一次估计），
+   不会把位姿带偏；想消除它有一个**已实测的一行改法**（把优化器换成 `GaussNewtonOptimizer`），
+   见 §6.2 —— 我们**故意保留上游默认 LM**（重定位场景阻尼更稳健），不是没能力修。
+3. **真正的大头其实不是"换后端"，而是"这个包曾经一直在无优化编译"**：`colcon`/`ament` 默认**不设置**
    `CMAKE_BUILD_TYPE` ⇒ 编译命令里**没有任何 `-O`**。用**未改动的 HEAD 代码**只加
    `--cmake-args -DCMAKE_BUILD_TYPE=Release`，同一台机器同一条合成扫描：
    **`pcl` 后端 395 ms → 13 ms（≈30 倍）**，fitness（0.00123 m²）与 `map→odom` 数值完全一致。
-   ⇒ 详见 §5，建议团队优先评估这一条（它比换后端便宜得多，且不需要引入任何新依赖）。
-3. `~/fitness_score` 的语义**没有**被偷偷改：两个后端都发"**内点平均平方距离（m²）**"；
+   ⇒ 详见 §5。**该口径已落地**（`colcon_defaults.yaml`，commit `6ae2ada`），所以现在两个后端都在
+   `-O3` 下跑；上面第 1/2 条的 15.7 vs 2.9 ms 就是**该口径下的整栈实测**。
+4. 语义上没有"偷改指标"：两个后端都发"**内点平均平方距离（m²）**"；
    `small_gicp` 的原生 `RegistrationResult::error`（Mahalanobis 加权、无量纲）另发在
    **新话题** `~/small_gicp_error`，且**只在 `backend: small_gicp` 时存在**。
-4. 回退：`backend: "pcl"`（默认值本来就是它），或整体 `git revert` 引入本次改动的那个 commit。
+5. 回退：`backend: "pcl"`（**默认值本来就是它**），或整体 `git revert` 引入本次改动的那个 commit。
 
 ---
 
@@ -88,7 +107,7 @@
 ```yaml
 /gicp_registration:
   ros__parameters:
-    backend: "pcl"                # pcl | small_gicp；默认 pcl = 改动前的已验证路径
+    backend: "pcl"                # pcl | small_gicp —— 两个对等选项；默认 pcl 是团队选择，不代表另一个更差
     small_gicp_num_threads: 4     # 仅 backend=small_gicp 生效（OpenMP 线程数）
 ```
 
@@ -116,6 +135,9 @@ ros2 run gicp_registration gicp_registration_node --ros-args \
 ```
 
 **非法取值不会静默换路**：`backend: "foo"` ⇒ 一条 WARN + 退回 `pcl` 并把参数原值打进 banner。
+
+> ⚠️ banner 里 `pcl ...（单线程，已验证路径）` 的"已验证路径"是**历史措辞**（PCL 是改动前就存在的路径）。
+> 截至 2026-10-05，**两个后端都已在整栈跑过 P0 回归**（§4.5），所以别把 banner 那句话读成"另一个没验证"。
 
 ### 2.1 CMake 怎么消费它（含 `COLCON_IGNORE` 的澄清）
 
@@ -254,9 +276,31 @@ rm -rf .git                                                             # vendor
 | 构建 `0 error / 0 warning`（`-Wall -Wextra -Wpedantic`） | ✅ | ✅ | 全量重编日志 `grep -ciE "warning|error"` = 0 |
 | `yaml.safe_load` 配置 | ✅ 25 个参数键解析通过 | ✅ 同 | `python3 -c "import yaml; …"` |
 
+### 4.5 整栈实测（Release 口径；2026-10-05 五路对照里的两次 `gicp` 运行）
+
+§4.1~§4.4 都是**单节点**测量；下面这张表是**整栈**（Gazebo + LIO + nav2 + gicp）同一条命令、
+同一个目标 `--goal -1.0 2.0`、`world:=RMUL2026 mode:=nav lio:=fastlio nav:=mppi planner:=smac2d
+spin_speed:=0.0 nav_rviz:=False`，只差 `backend` 的两次运行（Release 构建，`6ae2ada` 口径）：
+
+| 指标 | `backend: pcl` | `backend: small_gicp` | 出处 |
+|---|---|---|---|
+| P0 回归 | ✅ `PASS / SUCCEEDED`，3.3 s，`recoveries=0`，`d_min=0.000 m` | ✅ `PASS / SUCCEEDED`，3.4 s，`recoveries=0`，`d_min=0.000 m` | `.tmp_bags/regress_1791179769.json` / `regress_1791179865.json` |
+| align 中位数（min~max） | **15.7 ms**（11.8~25.4） | **2.9 ms**（2.6~4.0） | `.tmp_cache/five_way/{gicp-pcl,gicp-small_gicp}.metrics.json` |
+| fitness（末次 `[status]`） | **0.00226 m²** | **0.00230 m²** | 同上（`[status]` 行） |
+| 采纳帧数（末次 `[status]`） | **165/165（100%）** | **167/167（100%）** | 同上 |
+| `~/converged` true 比例 | **100%**（20/20、24/24、25/25、127/127 均有记录） | **89~92%**（113/127、117/127；小样本另有 92~96%：55/57、49/53） | `.tmp_cache/gicp_ab/*/probe.log`；机理与"位姿不受影响"见 §6.2 |
+| `Control loop missed its desired rate` | **0** | **0** | 两份 launch 日志 grep |
+| `map→odom` | 50 Hz 名义、`tf_age=0.10 s` | 同 | 回归快照 |
+| RTF | 0.760 | 0.776 | 快照 |
+
+⇒ **两个后端在同一口径下都"能跑、能定位、能导航"**：`small_gicp` 的收益是 align 快 **5.4×**
+（与 §4.2 台架的 4.3× 互相印证），代价只是 `~/converged` 掉 8~11%（那几帧不更新、
+`map→odom` 沿用上一次估计 ⇒ **位姿不受影响**，只是更新频率略降）。
+口径、原始日志与并排表见 `docs/algorithm_matrix.md` §9.2/§9.2.3。
+
 ---
 
-## 5. ★ 顺带发现：这个包一直在**无优化**编译（比换后端更值钱）
+## 5. ★ 顺带发现：这个包曾经一直在**无优化**编译（比换后端更值钱）
 
 * `colcon`/`ament_cmake` **不会**替你设置 `CMAKE_BUILD_TYPE`（实测 `CMakeCache.txt: CMAKE_BUILD_TYPE:STRING=`），
   `flags.make` 里就是 `-fPIC -Wall -Wextra -Wpedantic -std=gnu++17` —— **没有 `-O2/-O3`**。
@@ -276,6 +320,10 @@ rm -rf .git                                                             # vendor
 * **建议**：把"是否给 gicp_registration 开 `-O3`"作为一个独立议题评估（收益 30× 且零代码改动、
   零新依赖；风险是数值路径/断言行为变化，需要重跑一次 `nav_smoke_regression.py`）。
   在开之前，本文 A 表就是"当前口径"的基准。
+  > **后续（2026-10-05，已落地）**：这件事**已经做了** —— 仓库根新增 `colcon_defaults.yaml`
+  > 把 `CMAKE_BUILD_TYPE=Release` 作为默认构建口径（commit `6ae2ada`），并重跑了整栈五路对照
+  > （`docs/algorithm_matrix.md` §9.2）：`pcl` align 降到 **15.7 ms**、`small_gicp` **2.9 ms**，
+  > 5 次回归全 PASS、`Control loop missed its desired rate` 全 0（§4.5 即该口径下的整栈数据）。
 
 ---
 
@@ -376,7 +424,8 @@ python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0
 
 | 想要的效果 | 操作 |
 |---|---|
-| 立刻回到已验证的 PCL 路径 | `backend: "pcl"`（**默认值就是它**），或运行时 `-p backend:=pcl` |
+| 切回默认后端 `pcl`（例如要沿用既有 fitness 阈值标定） | `backend: "pcl"`（**默认值就是它**），或运行时 `-p backend:=pcl` |
+| 换成 `small_gicp`（要更低的 align 开销 / Release 下 5.4×） | `backend: "small_gicp"`（+ 可选 `small_gicp_num_threads`）——**这是对等选项，不是实验开关** |
 | 整包回退到本次改动之前 | `git revert <本次 commit>`（`third_party/small_gicp/` 会一并移除；`docs/` 与 `THIRD_PARTY_NOTICES.md` 的登记行也一起回退） |
 | 只想去掉 vendored 依赖但保留 `backend` 参数 | 不可行：`small_gicp` 路径需要 `third_party/small_gicp`（`find_package` 需要系统安装；`add_subdirectory` 需要源码） |
 
@@ -384,12 +433,16 @@ python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0
 
 ## 9. 本次**没能**验证的事（诚实清单）
 
-1. **整栈（Gazebo + nav2 + LIO + gicp）下的端到端表现**：本文所有数字都是**单节点**测量；
-   `backend: small_gicp` 还没跑过 `nav_smoke_regression.py`、没跑过比赛场次。**首跑必须看**：
-   `~/converged` 的 false 比例（§6.2）、`[status]` 的采纳率、`ros2 topic hz /tf`、
-   `Control loop missed its desired rate` 是否消失。
-2. **`-O3` 那条 30× 的结论只验证了"单帧 align + fitness 不变"**；没有在 `-O3` 下跑整栈回归，
-   也没评估 `-DNDEBUG`（关 assert）的副作用。
+1. ~~**整栈（Gazebo + nav2 + LIO + gicp）下的端到端表现**：本文所有数字都是**单节点**测量；
+   `backend: small_gicp` 还没跑过 `nav_smoke_regression.py`、没跑过比赛场次。~~ ⇒
+   **2026-10-05 已补测（§4.5）**：两个后端都跑通整栈 P0 回归（PASS/SUCCEEDED/recoveries=0），
+   并拿到 align / fitness / 采纳 / `~/converged` 的整栈数字。
+   **仍未做**的只剩：① 比赛场次/长距离压力跑；② 两个后端在同一场次里的**多次重复**统计
+   （目前各 1 次）；③ `~/converged` 的 false 帧在**高速/急转**下是否变多（本次是短回归）。
+2. ~~**`-O3` 那条 30× 的结论只验证了"单帧 align + fitness 不变"**；没有在 `-O3` 下跑整栈回归，
+   也没评估 `-DNDEBUG`（关 assert）的副作用。~~ ⇒ **2026-10-05 已补测/已落地**：
+   Release 已成默认构建口径（`colcon_defaults.yaml`，commit `6ae2ada`），五路整栈对照全 PASS（§4.5）。
+   **仍未评估**：`-DNDEBUG`（关 assert）在新数值路径上的副作用（目前没有观察到异常，但也没专项验证）。
 3. **`~/converged` 抖动的根因**只定位到"LM 在极小点提前 break"这一层（源码 + 实测一致），
    没有逐帧插桩确认每一帧的退出分支。
 4. **§6.5 的 `/initialpose` 饥饿**只做了现象观测（2 次实验），没有根因定位；
