@@ -47,6 +47,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sqlite3
@@ -186,7 +187,7 @@ class Checker(Node):
         self.args = args
         self.odom_topics = [t.strip() for t in args.odom_topics.split(",") if t.strip()]
         self.odom_stats = {t: {"n": 0, "first": None, "last": None, "child": None, "frame": None,
-                               "path": 0.0, "prev": None} for t in self.odom_topics}
+                               "path": 0.0, "prev": None, "traj": []} for t in self.odom_topics}
         self.tf_edges = Counter()
         self.tf_odom_base = {"n": 0, "first": None, "last": None, "t_last": None}
         self.cloud_registered = {"n": 0, "pts": 0}
@@ -236,6 +237,7 @@ class Checker(Node):
             s["path"] += math.dist(p, s["prev"])
         s["prev"] = p
         s["last"] = p
+        s["traj"].append((m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, p[0], p[1], p[2]))
 
     def _on_tf(self, m: TFMessage):
         for t in m.transforms:
@@ -339,6 +341,11 @@ def main():
                     help="bag 内用于**对照轨迹长度**的话题（逗号分隔）。"
                          "`/odom_ground_truth` = 仿真真值；`/odom` = 那次跑的时候录下来的 FAST-LIO 输出 —— "
                          "后者是同一段数据上的现成基线，用来判「是喂法不对」还是「这个 LIO 真的跟丢了」")
+    # ---- 2026-10-05：给 A/B 扫参用的机器可读输出（**可选**，不传时行为与旧版完全一致）
+    ap.add_argument("--json-out", default=None,
+                    help="把判读结果写成 JSON（供 tools/lio_param_sweep.py 扫参驱动解析；不传则不写）")
+    ap.add_argument("--traj-out", default=None,
+                    help="把「本节点里程计 + bag 参照」的逐帧轨迹 (t,x,y,z) 写成 JSON（诊断用；不传则不写）")
     args = ap.parse_args()
 
     db3 = pick_db3(args.bag)
@@ -358,7 +365,7 @@ def main():
         if _msg_type_of(db3, t):
             try:
                 ref_streams[t] = BagStream(db3, t)
-                ref_stats[t] = {"n": 0, "path": 0.0, "prev": None, "first": None, "last": None}
+                ref_stats[t] = {"n": 0, "path": 0.0, "prev": None, "first": None, "last": None, "traj": []}
             except KeyError:
                 pass
 
@@ -442,6 +449,7 @@ def main():
                 if s["first"] is None:
                     s["first"] = p
                 s["last"] = p
+                s["traj"].append((m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, p[0], p[1], 0.0))
         # 每 5 s 复述一次 /tf_static（模拟 robot_state_publisher 的重复发布），并做一次 TF 查询
         if time.time() - last_static > 5.0:
             last_static = time.time()
@@ -530,6 +538,56 @@ def main():
         print("   3) gravity 初始化：fix_gravity_direction=true 需要 ≥200 帧 IMU（@100 Hz ≈ 2 s）才开始")
     else:
         print("❌ FAIL：连输入都没发出去（bag 话题名/类型不对？）")
+
+    # ---------------- 机器可读输出（--json-out / --traj-out，可选）----------------
+    if args.traj_out:
+        traj = {
+            "node": {t: s["traj"] for t, s in node.odom_stats.items() if s["n"]},
+            "ref": {t: s["traj"] for t, s in ref_stats.items() if s["n"]},
+        }
+        with open(args.traj_out, "w") as fh:
+            json.dump(traj, fh)
+        print(f"[json] 轨迹已写入 {args.traj_out}")
+
+    if args.json_out:
+        best_topic, best = None, None
+        for t, s in node.odom_stats.items():
+            if s["n"] and (best is None or s["n"] > best["n"]):
+                best_topic, best = t, s
+        ref_best = None
+        for t in ("/odom_ground_truth", "/odom"):
+            if ref_stats.get(t, {}).get("n", 0) > 1:
+                ref_best = ref_stats[t]
+                break
+        if ref_best is None:
+            for t, s in ref_stats.items():
+                if s["n"] > 1:
+                    ref_best = s
+                    break
+
+        def _slim(s):
+            return {"n": s["n"], "frame": s.get("frame"), "child": s.get("child"),
+                    "path": s["path"], "first": s["first"], "last": s["last"],
+                    "displacement": (math.dist(s["first"], s["last"])
+                                     if s["first"] and s["last"] else None)}
+
+        payload = {
+            "bag": db3, "duration": args.duration, "speed": args.speed,
+            "inputs": {"imu": n_imu, "lidar": n_lidar, "points": n_pts},
+            "odom": {t: _slim(s) for t, s in node.odom_stats.items()},
+            "tf_odom_base": {"n": node.tf_odom_base["n"], "last": node.tf_odom_base["t_last"]},
+            "cloud_registered": dict(node.cloud_registered),
+            "refs": {t: _slim(s) for t, s in ref_stats.items()},
+            "best_topic": best_topic,
+            "best": _slim(best) if best else None,
+            "ref_topic": next((t for t, s in ref_stats.items() if s is ref_best), None),
+            "ref": _slim(ref_best) if ref_best else None,
+            "ratio_vs_ref": ((best["path"] / ref_best["path"])
+                             if (best and ref_best and ref_best["path"] > 1e-9) else None),
+        }
+        with open(args.json_out, "w") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1)
+        print(f"[json] 判读结果已写入 {args.json_out}")
 
     imu_stream.close()
     lidar_stream.close()

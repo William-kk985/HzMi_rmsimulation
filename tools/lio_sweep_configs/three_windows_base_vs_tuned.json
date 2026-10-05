@@ -1,0 +1,59 @@
+[
+ {
+  "label": "tuned_off0",
+  "params_file": "install/small_point_lio/share/small_point_lio/config/mid360_sim_tuned.yaml",
+  "duration": 30,
+  "start_offset": 0
+ },
+ {
+  "label": "base_off0",
+  "params_file": "install/small_point_lio/share/small_point_lio/config/mid360_sim.yaml",
+  "duration": 30,
+  "start_offset": 0
+ },
+ {
+  "label": "fastlio_off0",
+  "node": "fast_lio",
+  "params": {},
+  "duration": 30,
+  "start_offset": 0
+ },
+ {
+  "label": "tuned_off40",
+  "params_file": "install/small_point_lio/share/small_point_lio/config/mid360_sim_tuned.yaml",
+  "duration": 30,
+  "start_offset": 40
+ },
+ {
+  "label": "base_off40",
+  "params_file": "install/small_point_lio/share/small_point_lio/config/mid360_sim.yaml",
+  "duration": 30,
+  "start_offset": 40
+ },
+ {
+  "label": "fastlio_off40",
+  "node": "fast_lio",
+  "params": {},
+  "duration": 30,
+  "start_offset": 40
+ },
+ {
+  "label": "tuned_off90",
+  "params_file": "install/small_point_lio/share/small_point_lio/config/mid360_sim_tuned.yaml",
+  "duration": 30,
+  "start_offset": 90
+ },
+ {
+  "label": "base_off90",
+  "params_file": "install/small_point_lio/share/small_point_lio/config/mid360_sim.yaml",
+  "duration": 30,
+  "start_offset": 90
+ },
+ {
+  "label": "fastlio_off90",
+  "node": "fast_lio",
+  "params": {},
+  "duration": 30,
+  "start_offset": 90
+ }
+]

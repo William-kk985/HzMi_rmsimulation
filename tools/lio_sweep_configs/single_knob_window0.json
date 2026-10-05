@@ -1,0 +1,105 @@
+[
+ {
+  "label": "baseline_upstream_defaults",
+  "params": {},
+  "duration": 40
+ },
+ {
+  "label": "K_imu_meas_acc_cov_0.6",
+  "params": {
+   "imu_meas_acc_cov": 0.6
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_imu_meas_omg_cov_0.6",
+  "params": {
+   "imu_meas_omg_cov": 0.6
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_imu_meas_omg_cov_0.05",
+  "params": {
+   "imu_meas_omg_cov": 0.05
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_point_filter_num_2",
+  "params": {
+   "point_filter_num": 2
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_fix_gravity_direction_false",
+  "params": {
+   "fix_gravity_direction": false
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_min_distance_0.3",
+  "params": {
+   "min_distance": 0.3
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_leaf_0.5",
+  "params": {
+   "space_downsample_leaf_size": 0.5
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_plane_threshold_0.3",
+  "params": {
+   "plane_threshold": 0.3
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_map_resolution_0.1",
+  "params": {
+   "imu_meas_omg_cov": 0.6,
+   "map_resolution": 0.1
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_omg_cov_1.0_R0.01",
+  "params": {
+   "omg_cov": 1.0
+  },
+  "duration": 40
+ },
+ {
+  "label": "K_omg_cov_100_R0.6",
+  "params": {
+   "imu_meas_omg_cov": 0.6,
+   "omg_cov": 100.0
+  },
+  "duration": 40
+ },
+ {
+  "label": "C_omg0.6_vel1_accQ50",
+  "params": {
+   "imu_meas_omg_cov": 0.6,
+   "velocity_cov": 1.0,
+   "acceleration_cov": 50.0
+  },
+  "duration": 40
+ },
+ {
+  "label": "C_plus_nodownsample",
+  "params": {
+   "imu_meas_omg_cov": 0.2,
+   "velocity_cov": 0.3,
+   "acceleration_cov": 50.0,
+   "space_downsample": false
+  },
+  "duration": 40
+ }
+]
