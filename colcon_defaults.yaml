@@ -1,0 +1,39 @@
+# ============================================================================
+# colcon 工作区默认参数（本文件由 colcon-defaults 插件自动读取）
+# ----------------------------------------------------------------------------
+# 为什么需要这个文件：colcon / ament_cmake **不会**替你设 CMAKE_BUILD_TYPE。
+#   · colcon-cmake 只把你给的 `--cmake-args` 原样转给 cmake，自己不设 build type
+#     （`/usr/lib/python3/dist-packages/colcon_cmake/task/cmake/build.py:144-146`）；
+#   · ament_cmake 的任何 cmake 宏里也没有 `CMAKE_BUILD_TYPE` 默认值
+#     （`grep -rn CMAKE_BUILD_TYPE /opt/ros/humble/share/ament_cmake*/cmake/` 无输出）。
+#   ⇒ 不写这个文件时，`CMakeCache.txt` 里就是 `CMAKE_BUILD_TYPE:STRING=`（空），
+#     编译命令里**一个 -O 都没有** = 全程 -O0。
+# 实测代价（未改动的 gicp_registration，同机同数据）：
+#     PCL GICP 单帧 align = 370~480 ms（-O0）→ 13~18 ms（Release）≈ **30 倍**，
+#     fitness / 发出的 TF 完全一致（详见 docs/build_optimization.md）。
+#
+# 读取规则（源码可查：/usr/lib/python3/dist-packages/colcon_defaults/argument_parser/defaults.py）：
+#   1. 全局文件 = `$COLCON_DEFAULTS_FILE`，未设则 `$COLCON_HOME/defaults.yaml`（≈ ~/.colcon/defaults.yaml）——第 78-80 行；
+#   2. 工作区文件 = 当前目录下的 `colcon_defaults.yaml`——第 34、144 行；
+#   3. 两者深度合并，**工作区文件覆盖全局文件**——第 141-146 行。
+#   ⚠ 第 144 行是相对路径 `Path('colcon_defaults.yaml')` ⇒ **必须在仓库根目录执行 colcon build**
+#     才会读到本文件（在子目录里 build 读不到，会静默退回 -O0）。
+#   ⚠ 命令行显式给的 `--cmake-args ...` 会**整体替换**这里的默认值（argparse 语义）
+#     ⇒ 如果确实要加别的 -D，请自己把 `-DCMAKE_BUILD_TYPE=Release` 一起写上。
+#   ✅ 反过来 `--symlink-install` 是**追加**（colcon_ros/task/ament_cmake/build.py:50-53
+#      `args.cmake_args.append('-DAMENT_CMAKE_SYMLINK_INSTALL=1')`）⇒ 本仓库文档里惯用的
+#      `colcon build --symlink-install` 依然能吃到这里的 Release。
+#
+# 想临时用别的口径（例如要 gdb 调试符号）：直接覆盖命令行即可，不要改本文件：
+#     colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+# 完全绕开本文件（回到 -O0 的旧口径）：
+#     COLCON_DEFAULTS_FILE=/dev/null colcon build --symlink-install \
+#       --packages-select <pkg> --cmake-args -DCMAKE_BUILD_TYPE=
+# ============================================================================
+build:
+  cmake-args:
+    # CMake 对 GNU 的 Release 默认旗标 = `-O3 -DNDEBUG`
+    # （可核对 build/cartographer/CMakeCache.txt 的 CMAKE_CXX_FLAGS_RELEASE）
+    # ⚠ -DNDEBUG = 关掉 assert()：本仓库会受影响的包已逐个查过 assert 用量，
+    #   见 docs/build_optimization.md 的「-DNDEBUG 副作用」一节。
+    - -DCMAKE_BUILD_TYPE=Release
