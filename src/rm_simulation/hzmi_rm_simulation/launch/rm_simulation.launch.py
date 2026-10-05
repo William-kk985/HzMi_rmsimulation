@@ -19,6 +19,7 @@ class WorldType:
     RMUC = 'RMUC'
     RMUL = 'RMUL'
     RMUL2026 = 'RMUL2026'
+    RMUC2026 = 'RMUC2026'
 
 def get_world_config(world_type):
     world_configs = {
@@ -45,6 +46,24 @@ def get_world_config(world_type):
             'z': '0.2',
             'yaw': '0.0',
             'world_path': 'RMUL2026_world/RMUL2026_world.world'
+        },
+        # ★ 2026-10-05 新增：RMUC2026（附件 easystl.stl 生成的 29.15 x 16.05 m 全场，见 docs/worlds.md）
+        # 出生点推导（全部脚本与原始栅格在 .tmp_cache/rmuc2026/，结论见 docs/worlds.md §3）：
+        #   ① 0.02 m 高度栅格（.tmp_cache/stl_view/heightmap.npz）-> 0.05 m 占用栅格：
+        #      底板顶面 z=-1.6413436 m（== world z 0）为唯一可行驶层，0.20/0.30 m 台阶全部算障碍；
+        #   ② 在"严格平台面"（相对底板抬升 ≤0.05 m）上算到最近障碍的距离变换，
+        #      要求 clearance ≥ robot_radius(0.22) + margin(0.08) = 0.30 m；
+        #   ③ 左右两个对称大区各 ~71.4 m²，取 +x 半场里距障碍最远的点 = (10.925, 2.525)，
+        #      实测 clearance 2.704 m（左半场镜像点 (-10.925, 0.775) clearance 2.706 m，等价）；
+        #      该点 ±0.55 m 邻域内高度起伏 ≤0.004 m（真平）。
+        #   z=0.2 与 RMUL2026 同口径：轮半径 0.06 -> 静止时 base_link 在 0.06，留 0.14 m 余量，
+        #   既不悬空太久（LIO 会在坠落中做重力初始化）也不会插进地面。
+        WorldType.RMUC2026: {
+            'x': '10.925',
+            'y': '2.525',
+            'z': '0.2',
+            'yaw': '0.0',
+            'world_path': 'RMUC2026_world/RMUC2026_world.world'
         }
     }
     return world_configs.get(world_type, None)
@@ -78,7 +97,7 @@ def generate_launch_description():
     declare_world_cmd = DeclareLaunchArgument(
         'world',
         default_value=WorldType.RMUC,
-        description='Choose <RMUC>, <RMUL> or <RMUL2026>'
+        description='Choose <RMUC>, <RMUL>, <RMUL2026> or <RMUC2026>'
     )
 
     declare_rviz_config_file_cmd = DeclareLaunchArgument(
@@ -161,6 +180,7 @@ def generate_launch_description():
     bringup_RMUC_cmd_group = create_gazebo_launch_group(WorldType.RMUC)
     bringup_RMUL_cmd_group = create_gazebo_launch_group(WorldType.RMUL)
     bringup_RMUL2026_cmd_group = create_gazebo_launch_group(WorldType.RMUL2026)
+    bringup_RMUC2026_cmd_group = create_gazebo_launch_group(WorldType.RMUC2026)
 
     # Create the launch description and populate
     ld = LaunchDescription()
@@ -178,6 +198,7 @@ def generate_launch_description():
     ld.add_action(bringup_RMUL_cmd_group) # type: ignore
     ld.add_action(bringup_RMUC_cmd_group) # type: ignore
     ld.add_action(bringup_RMUL2026_cmd_group) # type: ignore
+    ld.add_action(bringup_RMUC2026_cmd_group) # type: ignore
 
     # Uncomment this line if you want to start RViz
     ld.add_action(start_rviz_cmd)

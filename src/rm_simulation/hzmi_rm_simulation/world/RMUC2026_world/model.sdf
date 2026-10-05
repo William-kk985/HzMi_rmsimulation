@@ -1,0 +1,78 @@
+<?xml version='1.0'?>
+<sdf version='1.7'>
+  <!-- RMUC2026 场地模型（独立 model 入口，供 model://RMUC2026_world 直接 include；
+       与 world/RMUC2026_world/RMUC2026_world.world 里内联的那份等价）。
+       结构镜像 RMUL2026_world/model.sdf，差异只有三处（依据见 docs/worlds.md）：
+         1. mesh 单位是毫米 ⇒ scale 0.001（RMUL2026 那份写 0.01 是因为它的 mesh 是厘米、
+            且 world 里内联的那份才是实际生效的；这里两处都写 0.001）
+         2. mesh 是 Z 轴朝上 ⇒ 不需要 1.5708 的 X 轴旋转
+         3. 底板顶面在 mesh 局部 z=-1.6413436 ⇒ pose 抬 +1.6413436 m，使地面落在 z=0 -->
+  <model name='RMUC2026_world'>
+    <static>true</static>
+    <allow_auto_disable>true</allow_auto_disable>
+
+    <link name='base_link'>
+      <inertial>
+        <mass>1000.0</mass>
+        <inertia>
+          <ixx>100.0</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>100.0</iyy>
+          <iyz>0.0</iyz>
+          <izz>100.0</izz>
+        </inertia>
+        <pose>0 0 0 0 0 0</pose>
+      </inertial>
+
+      <pose>0 0 0 0 0 0</pose>
+      <gravity>true</gravity>
+      <self_collide>false</self_collide>
+      <kinematic>false</kinematic>
+      <enable_wind>false</enable_wind>
+
+      <visual name='visual'>
+        <pose>0 0 1.6413436 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://RMUC2026_world/meshes/RMUC2026.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <lighting>true</lighting>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.01 0.01 0.01 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>true</cast_shadows>
+      </visual>
+
+      <collision name='collision'>
+        <laser_retro>0</laser_retro>
+        <max_contacts>10</max_contacts>
+        <pose>0 0 1.6413436 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://RMUC2026_world/meshes/RMUC2026.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+  </model>
+</sdf>

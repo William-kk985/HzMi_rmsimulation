@@ -212,11 +212,14 @@ def generate_launch_description():
     #   "本次落盘记录"）。cartographer 的 map 系 = **出生点相对系**（新 yaml origin ≈[-2.2,-3.15]，
     #   与旧世界系图差 ≈(4.3,3.35)）⇒ 新图下出生点在 map 里的坐标就是 (0,0,0)。
     #   ⚠️ 若把旧图放回（map/RMUL2026_world_backup.*），这两个值要改回 4.3 / 3.35。
+    # ★ 2026-10-05 新增 world:=RMUC2026：它的 map/PCD 是**按出生点相对系**生成的
+    #   （pgm origin = [场地左下角 - 出生点] = [-25.925, -9.425]，出生点在 map 里就是原点）
+    #   ⇒ 与 RMUL2026 同一口径：0.0 / 0.0。依据见 docs/worlds.md §3~§4。
     amcl_init_x = PythonExpression([
-        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0}['",
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0, 'RMUC2026': 0.0}['",
         LaunchConfiguration('world'), "']"])
     amcl_init_y = PythonExpression([
-        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0}['",
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0, 'RMUC2026': 0.0}['",
         LaunchConfiguration('world'), "']"])
     ################################### navigation2 parameters end ####################################
 

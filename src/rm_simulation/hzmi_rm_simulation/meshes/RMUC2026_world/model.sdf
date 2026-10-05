@@ -1,0 +1,74 @@
+<?xml version='1.0'?>
+<sdf version='1.7'>
+  <!-- 与 world/RMUC2026_world/model.sdf 等价（同一份资产的两个入口，镜像 RMUL2026 的目录结构）。
+       这里是 Gazebo 实际解析的那一份：GAZEBO_MODEL_PATH = <share>/hzmi_rm_simulation/meshes，
+       world 文件里的 model://RMUC2026_world/meshes/RMUC2026.stl 落到本目录下的 meshes/。 -->
+  <model name='RMUC2026_world'>
+    <static>true</static>
+    <allow_auto_disable>true</allow_auto_disable>
+
+    <link name='base_link'>
+      <inertial>
+        <mass>1000.0</mass>
+        <inertia>
+          <ixx>100.0</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>100.0</iyy>
+          <iyz>0.0</iyz>
+          <izz>100.0</izz>
+        </inertia>
+        <pose>0 0 0 0 0 0</pose>
+      </inertial>
+
+      <pose>0 0 0 0 0 0</pose>
+      <gravity>true</gravity>
+      <self_collide>false</self_collide>
+      <kinematic>false</kinematic>
+      <enable_wind>false</enable_wind>
+
+      <visual name='visual'>
+        <pose>0 0 1.6413436 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://RMUC2026_world/meshes/RMUC2026.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <lighting>true</lighting>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.01 0.01 0.01 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>true</cast_shadows>
+      </visual>
+
+      <collision name='collision'>
+        <laser_retro>0</laser_retro>
+        <max_contacts>10</max_contacts>
+        <pose>0 0 1.6413436 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://RMUC2026_world/meshes/RMUC2026.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+  </model>
+</sdf>
