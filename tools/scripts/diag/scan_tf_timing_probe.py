@@ -22,6 +22,10 @@
      `publishPose()` 只在 `addScan` 成功（`processed==true`）时调用一次
      ⇒ 不需要改 slam_toolbox 源码，就能拿到"**哪些 `/scan` 真的被拿去匹配了**"（stamp 与该帧 `header.stamp` 相同）
   6. **`/map` 每次发布的格子数**（建图增长曲线：occupied / free / unknown）
+  7. ★ 2026-10-06 新增：**逐纳秒 Δ = TF戳 − /scan戳**（整数域，不用 double）。
+     `Δ=−1 ns` 大量出现就是"float64 秒 → 纳秒用截断"的指纹（见
+     docs/timestamp_construction_audit.md）；同口径的离线复算器（读本探针的 npz）：
+     `tools/scripts/diag/stamp_delta_ns_report.py`
 
 输出：`--out <prefix>.json`（汇总数字）+ `<prefix>.npz`（原始序列，供离线复算）。
 
@@ -82,6 +86,14 @@ class ScanTfTimingProbe(Node):
         self.maps = []          # (sim, occ, free, unk, w, h, res)
         self.clocks = []        # (sim, wall) from /clock
         self.tf_frames = {}     # 「父→子」计数
+        # ---- 整数纳秒序列（★ 2026-10-06 新增：量 1 ns 级戳差专用）----
+        #   为什么另存一份整数：`stamp = sec + nanosec*1e-9` 这个 double 在 ~1e3 s 处
+        #   分辨率只有 ~0.1 ns，虽然够用，但"截断 bug"的指纹恰好就是 1 ns；
+        #   直接从消息的 sec/nanosec 整数域取，彻底不引入浮点。
+        #   与 self.scan / self.tf_ob 一一对应（只 append，顺序一致）。
+        #   离线复算器：tools/scripts/diag/stamp_delta_ns_report.py
+        self.scan_ns = []       # /scan header.stamp 的整数纳秒
+        self.tf_ob_ns = []      # odom->base_link 的整数纳秒
 
         cb = ReentrantCallbackGroup()
         self.create_subscription(LaserScan, '/scan', self.on_scan,
@@ -114,6 +126,7 @@ class ScanTfTimingProbe(Node):
 
     def on_scan(self, msg):
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        stamp_ns = int(msg.header.stamp.sec) * 10**9 + int(msg.header.stamp.nanosec)
         w = time.monotonic()
         s = self.sim_now()
         frame = msg.header.frame_id.lstrip('/')
@@ -121,6 +134,7 @@ class ScanTfTimingProbe(Node):
         with self.lock:
             idx = len(self.scan)
             self.scan.append((stamp, w, s, 1 if ok else 0))
+            self.scan_ns.append(stamp_ns)
             if not ok:
                 self.pending[stamp] = dict(t_wall=w, t_sim=s, idx=idx, frame=frame)
         if self.args.verbose:
@@ -143,9 +157,11 @@ class ScanTfTimingProbe(Node):
                 key = f'{tr.header.frame_id.lstrip("/")}->{tr.child_frame_id.lstrip("/")}'
                 self.tf_frames[key] = self.tf_frames.get(key, 0) + 1
                 st = tr.header.stamp.sec + tr.header.stamp.nanosec * 1e-9
+                st_ns = int(tr.header.stamp.sec) * 10**9 + int(tr.header.stamp.nanosec)
                 if tr.child_frame_id.lstrip('/') == self.args.base_frame and \
                         tr.header.frame_id.lstrip('/') == self.args.odom_frame:
                     self.tf_ob.append((st, w, s))
+                    self.tf_ob_ns.append(st_ns)
                 if tr.child_frame_id.lstrip('/') == self.args.odom_frame and \
                         tr.header.frame_id.lstrip('/') == self.args.map_frame:
                     self.tf_mo.append((st, w, s))
@@ -292,6 +308,30 @@ class ScanTfTimingProbe(Node):
                 'stamp_period_sim': self._stats(np.diff(tmo[:, 0])),
                 'arrival_lag_sim': self._stats(tmo[:, 2] - tmo[:, 0])}
 
+        # ---- (4b) ★ 2026-10-06 新增：逐纳秒 Δ = TF戳 − /scan戳（截断 bug 的指纹）----
+        #   整数域比较（sec/nanosec 直接拼），不用 double。口径与离线复算器
+        #   tools/scripts/diag/stamp_delta_ns_report.py 完全一致（同窗口、同"最近样本"规则）。
+        #   读法：Δ=−1 ns 大量出现 = float64→ns 用**截断**的指纹；Δ=0 高 = 同纳秒有 TF 样本。
+        with self.lock:
+            s_ns = np.asarray(self.scan_ns, dtype=np.int64)
+            t_ns = np.asarray(self.tf_ob_ns, dtype=np.int64)
+        if s_ns.size and t_ns.size:
+            t_sorted = np.sort(t_ns)
+            j = np.clip(np.searchsorted(t_sorted, s_ns), 0, t_sorted.size - 1)
+            cand = np.vstack([t_sorted[j] - s_ns,
+                              t_sorted[np.clip(j - 1, 0, t_sorted.size - 1)] - s_ns])
+            delta = np.where(np.abs(cand[0]) <= np.abs(cand[1]), cand[0], cand[1])
+            near = np.abs(delta) <= int(5e6)      # 同帧窗口 ±5 ms
+            d = delta[near]
+            if d.size:
+                vals, cnts = np.unique(d[np.abs(d) <= 10], return_counts=True)
+                out['stamp_delta_ns_tf_minus_scan'] = {
+                    'n_matched': int(d.size),
+                    'exact_0ns_pct': round(100.0 * float((d == 0).sum()) / d.size, 3),
+                    'minus_1ns_pct': round(100.0 * float((d == -1).sum()) / d.size, 3),
+                    'lt_0_pct': round(100.0 * float((d < 0).sum()) / d.size, 3),
+                    'hist_abs_le_10ns': {str(int(v)): int(c) for v, c in zip(vals, cnts)}}
+
         # ---- (5) 被真正处理的扫描 ----
         if len(pose):
             p = np.array(pose)
@@ -327,7 +367,12 @@ class ScanTfTimingProbe(Node):
                            tf_ok=tf_ok, wait_sim=wait_sim, wait_wall=wait_wall,
                            tf_ob=(np.array(tf_ob) if len(tf_ob) else np.zeros((0, 3))),
                            pose=(np.array(pose) if len(pose) else np.zeros((0, 3))),
-                           clocks=cl, maps=np.array(maps) if maps else np.zeros((0, 7)))
+                           clocks=cl, maps=np.array(maps) if maps else np.zeros((0, 7)),
+                           # ★ 整数纳秒（1 ns 级戳差专用；离线复算器优先用这两条）
+                           scan_ns=(np.asarray(self.scan_ns, dtype=np.int64)
+                                    if self.scan_ns else np.zeros(0, np.int64)),
+                           tf_ob_ns=(np.asarray(self.tf_ob_ns, dtype=np.int64)
+                                     if self.tf_ob_ns else np.zeros(0, np.int64)))
         return out
 
     @staticmethod
