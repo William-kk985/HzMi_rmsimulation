@@ -37,6 +37,9 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 #   这也是 linefit 包自己能编过的原因（它的 ament_auto 从 pcl_ros 继承到同一批 include dirs）。
 find_package(PCL QUIET REQUIRED COMPONENTS common visualization)
 find_package(pcl_conversions REQUIRED)
+# ★ 2026-10-07：地面分割之后的坡度/台阶判定（header-only；阈值真源
+#   src/rm_nav_bringup/config/traversability_criteria.yaml）
+find_package(rm_ground_traversability REQUIRED)
 
 # ---- ① vendored Patchwork++（静态库，目标名 patchworkpp_ground_seg） ----
 add_subdirectory(thirdparty/patchwork-plusplus ${CMAKE_CURRENT_BINARY_DIR}/patchwork-plusplus)
@@ -55,7 +58,8 @@ ament_target_dependencies(patchwork_ground_segmentation_node
   std_msgs
   tf2
   tf2_ros
-  pcl_conversions)
+  pcl_conversions
+  rm_ground_traversability)
 
 # 本包自己的 TU 吃全量告警（vendored 库的告警在它自己的 CMakeLists 里 PRIVATE 关掉）
 target_compile_options(patchwork_ground_segmentation_node PRIVATE
@@ -120,6 +124,8 @@ if(linefit_ground_segmentation_FOUND AND LINEFIT_GROUND_SEGMENTATION_LIB)
       patchworkpp_ground_seg
       ${LINEFIT_GROUND_SEGMENTATION_LIB}
       ${VTK_LIBRARIES})
+    # ★ 2026-10-07：台架要跑"判据开关"的对照 ⇒ 需要 rm_ground_traversability 的 include。
+    ament_target_dependencies(ground_seg_ab rm_ground_traversability)
     target_compile_options(ground_seg_ab PRIVATE -Wall -Wextra -Wpedantic)
     install(TARGETS ground_seg_ab DESTINATION lib/${PROJECT_NAME})
   endif()

@@ -55,6 +55,12 @@
 //   不要把它扩散到别的头文件（见 thirdparty/patchwork-plusplus/VENDORING.md §5）。
 #include "patchwork/patchworkpp.h"
 
+// ★ 2026-10-07（缺陷 ③）：地面分割之后的**坡度/台阶判定**（与 linefit 槽位、与离线
+//   tools/scripts/mapping/pcd_to_nav2_map.py 共用同一份阈值文件）。判据/阈值/为什么见
+//   src/rm_nav_bringup/config/traversability_criteria.yaml 与
+//   docs/ground_segmentation_slots.md §10。
+#include "rm_ground_traversability/traversability_ros.hpp"
+
 namespace patchwork_ground_segmentation
 {
 
@@ -185,6 +191,9 @@ public:
       timing_pub_ = create_publisher<std_msgs::msg::Float64>("~/segmentation_time_ms", 10);
     }
 
+    // ★ 2026-10-07：坡度/台阶判定（参数在 traversability_criteria.yaml；参数不合法会直接抛）
+    traversability_ = std::make_unique<rm_ground_traversability::TraversabilityRos>(this);
+
     if (!gravity_aligned_frame_.empty()) {
       tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
       tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -214,7 +223,10 @@ private:
 
     // 重力对齐（只在 gravity_aligned_frame 非空时；与 linefit 相同：**只旋转、不平移**，
     // 且输出仍然用**原始点**（labels 与原始云同序）。
+    // ⚠ 判据必须跑在**同一朵（可能已对齐的）云**上：本类假定 z 轴向上。
     std::vector<uint8_t> is_ground(n, 0);
+    pcl::PointCloud<pcl::PointXYZ> cloud_transformed;
+    const pcl::PointCloud<pcl::PointXYZ> * cloud_proc = &cloud;
     if (!gravity_aligned_frame_.empty() && tf_buffer_) {
       try {
         geometry_msgs::msg::TransformStamped tf_stamped = tf_buffer_->lookupTransform(
@@ -226,17 +238,21 @@ private:
         tf.rotate(Eigen::Quaterniond(
           tf_stamped.transform.rotation.w, tf_stamped.transform.rotation.x,
           tf_stamped.transform.rotation.y, tf_stamped.transform.rotation.z));
-        pcl::PointCloud<pcl::PointXYZ> cloud_transformed;
         pcl::transformPointCloud(cloud, cloud_transformed, tf);
-        segment(cloud_transformed, /*labels_out=*/&is_ground);
+        cloud_proc = &cloud_transformed;
       } catch (const tf2::TransformException & ex) {
         RCLCPP_WARN(
           get_logger(), "Failed to transform point cloud into gravity frame: %s", ex.what());
-        segment(cloud, &is_ground);
+        cloud_proc = &cloud;
       }
-    } else {
-      segment(cloud, &is_ground);
     }
+    segment(*cloud_proc, /*labels_out=*/&is_ground);
+
+    // ★ 2026-10-07（缺陷 ③）：**地面分割之后**再判一次"坡度/台阶"。
+    //   语义：只把判成 ground 的点按判据**降级**成 obstacle（永不升级）⇒ 坡脚/台阶进
+    //   `/segmentation/obstacle` ⇒ 进而进 `/scan` 与代价图。可行驶的坡面（≤25°）按
+    //   "相对局部地面的高差"判定 ⇒ 保持 free。详见 traversability_ros.hpp 头注。
+    traversability_->applyFrame(*cloud_proc, &is_ground);
 
     // 拆两朵云（与 linefit 完全相同的写法：逐一按 label 归拢，保持原始顺序）
     pcl::PointCloud<pcl::PointXYZ> ground_cloud;
@@ -265,6 +281,9 @@ private:
     obstacle_msg->header = msg->header;
     ground_pub_->publish(*ground_msg);
     obstacle_pub_->publish(*obstacle_msg);
+    // 诊断：判据命中的点（`/segmentation/obstacle` 的子集）+ 每帧统计（私有话题）
+    traversability_->publishStepEdge(cloud, msg->header);
+    traversability_->publishStats();
 
     if (timing_pub_) {
       std_msgs::msg::Float64 t;
@@ -325,6 +344,7 @@ private:
 
   patchwork::Params params_;
   std::unique_ptr<patchwork::PatchWorkpp> segmenter_;
+  std::unique_ptr<rm_ground_traversability::TraversabilityRos> traversability_;
   std::string gravity_aligned_frame_;
   bool publish_timing_{true};
   bool index_warned_{false};

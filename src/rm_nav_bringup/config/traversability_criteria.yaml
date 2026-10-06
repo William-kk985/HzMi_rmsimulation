@@ -1,0 +1,57 @@
+# =============================================================================
+# 可通行性判据（坡度 / 台阶）—— **单一真源**
+# -----------------------------------------------------------------------------
+# 谁读这份文件：
+#   ① bringup_sim.launch.py 把它当**参数文件**喂给地面分割节点
+#      （ground:=linefit 的 linefit_ground_segmentation_ros 与 ground:=patchwork 的
+#        patchwork_ground_segmentation，两者都叫 ground_segmentation ⇒ 用 `/**:` 段通吃）；
+#   ② tools/scripts/mapping/pcd_to_nav2_map.py（离线出先验图）读**同一份文件**当默认值
+#      （`--criteria-file`，键名到 CLI 的映射见该脚本的 load_criteria()）。
+#   ⇒ **实时链路的代价图**与**离线先验图**用的是同一套阈值。改这里 = 两边一起改。
+#
+# 实现（两处共用同一套判据，代码在 rm_ground_traversability/low_terrain_classifier.hpp）：
+#     局部地面 g(x,y) = 该点所在 ground_cell 粗格内、各 fine cell 细格"最低点"的 p05
+#     可行驶 ⟺ z − g ≤ step_height_threshold
+#               且 不是（地面坡度 > drivable_slope_deg 且 z − g > slope_min_height）
+#     step_edge（台阶/边沿）= 判据命中的点；它**必然进 obstacle**（见节点实现）。
+#   为什么"坡度判据"还要带一个高度闸 slope_min_height：只看坡度会把**坡道本身**判成障碍
+#   （坡道 24° 就超阈值），加高度闸后"24° 的坡每 0.20 m 只升 0.09 m"不会被误判，
+#   而"0.05 m 内升 0.15 m"的台阶沿会被判中 —— 与 pcd_to_nav2_map.py 的注释同源。
+#
+# 校验：python3 tools/scripts/regress/check_traversability_criteria.py
+#       （断言本文件 == C++ Criteria 默认值 == pcd_to_nav2_map.py 生效值）
+# 回退：traversability_enable: false ⇒ 两个地面分割节点完全旁路本判据，
+#       行为回到"只有 linefit/patchwork 自己判"的旧链路（pcd_to_nav2_map.py 仍可用 --height-threshold 等 CLI 覆盖）。
+#
+# 各键的取值理由（**不是拍的**）：
+#   step_height_threshold 0.15  = pcd_to_nav2_map.py 的 --height-threshold 默认值，也是
+#        docs/traversability_plan.md §1.2 表里"0.2/0.3 m 台阶必须占用"那条验收用的闸；
+#        与 STL 管线的口径一致（docs/mapping_2d_from_cloud.md §5.1）。
+#        下界论证：0.20 m 粗格内，最陡的可行驶坡（25°）只升 0.20·tan25° = 0.093 m < 0.15
+#        ⇒ **可行驶坡面永远不会因为这条闸被误判**（docs/traversability_plan.md §1.1 A 行）。
+#   drivable_slope_deg 25       = pcd_to_nav2_map.py 的 --slope-limit；本车实测能爬 23°，
+#        25° 是"留 2° 余量"的上限（docs/traversability_plan.md §1.1）。
+#   slope_min_height 0.05       = 同 --slope-min-height。
+#   ground_cell_m 0.20 / fine_cell_m 0.05 / ground_percentile 5 / ground_min_points 2
+#        = 同 --ground-cell / --resolution / --ground-percentile / --ground-min-points。
+# =============================================================================
+/**:
+  ros__parameters:
+    # 总开关：false = 两个地面分割节点都不做坡度/台阶判定（回退档）
+    traversability_enable: true
+    # 高度台阶：z − 局部地面 > 它 ⇒ 台阶/边沿（m）
+    step_height_threshold: 0.15
+    # 可行驶坡度上限（deg）：超过它**且**高差 > slope_min_height ⇒ 障碍
+    drivable_slope_deg: 25.0
+    # 坡度判据的高度闸（m）：低于它不因坡度判障碍（保住 24° 坡道本身）
+    slope_min_height: 0.05
+    # 估计"局部地面"的粗格边长（m）/ 细格边长（m）；前者必须是后者的整数倍
+    ground_cell_m: 0.20
+    fine_cell_m: 0.05
+    # 粗格内取"最低点"的哪个分位当局部地面 / 粗格至少几个点才算能估出地面
+    ground_percentile: 5.0
+    ground_min_points: 2
+    # 诊断话题：发 `segmentation/step_edge`（判据命中的点；obstacle 的子集，下游可选消费）
+    publish_step_edge: true
+    # 诊断话题：发 `~/traversability_stats`（每帧 JSON 文本；私有命名空间，不参与 /segmentation/* 契约）
+    publish_traversability_stats: true

@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm_ground_traversability</name>
+  <version>0.1.0</version>
+  <description>
+    地面分割之后的「坡度 / 台阶」判定（header-only，无 ROS 依赖）：
+    把每帧点云的点分成 可行驶(ground) / 障碍(obstacle) / 台阶-边沿(step_edge)，
+    判据（局部地面高差 + 可行驶坡度上限）与离线工具 tools/scripts/mapping/pcd_to_nav2_map.py
+    共用同一份阈值文件 src/rm_nav_bringup/config/traversability_criteria.yaml。
+    由 linefit_ground_segmentation_ros 与 patchwork_ground_segmentation 两个槽位共同 include，
+    保证「实时代价图」与「先验图」用的是同一套口径。
+  </description>
+  <maintainer email="dev@example.com">RM simulation maintainers</maintainer>
+  <license>BSD-2-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>pcl_conversions</depend>
+  <depend>eigen</depend>
+  <depend>libpcl-all-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

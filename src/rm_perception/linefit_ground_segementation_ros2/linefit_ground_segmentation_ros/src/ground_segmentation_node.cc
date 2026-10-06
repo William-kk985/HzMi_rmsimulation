@@ -13,6 +13,13 @@
 
 #include "ground_segmentation/ground_segmentation.h"
 
+// ★ 2026-10-07（缺陷 ③）：地面分割之后的**坡度/台阶判定**。与 ground:=patchwork 槽位、
+//   以及离线出先验图的 tools/scripts/mapping/pcd_to_nav2_map.py 共用同一份阈值文件
+//   src/rm_nav_bringup/config/traversability_criteria.yaml（由 launch 作为参数文件喂进来）。
+//   动机/判据/阈值来源：docs/ground_segmentation_slots.md §10、
+//   docs/path_clearance_and_contact.md §7。回退：traversability_enable:=false。
+#include "rm_ground_traversability/traversability_ros.hpp"
+
 class SegmentationNode : public rclcpp::Node {
 public:
   SegmentationNode(const rclcpp::NodeOptions &node_options);
@@ -26,6 +33,7 @@ public:
   GroundSegmentationParams params_;
   std::shared_ptr<GroundSegmentation> segmenter_;
   std::string gravity_aligned_frame_;
+  std::unique_ptr<rm_ground_traversability::TraversabilityRos> traversability_;
 };
 
 SegmentationNode::SegmentationNode(const rclcpp::NodeOptions &node_options)
@@ -87,6 +95,10 @@ cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       obstacle_topic, rclcpp::SensorDataQoS());
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+  // ★ 2026-10-07：坡度/台阶判定（参数在 traversability_criteria.yaml，由 launch 传入；
+  //   参数不合法时构造函数直接抛 ⇒ 启动失败而不是"静默不生效"）。
+  traversability_ =
+      std::make_unique<rm_ground_traversability::TraversabilityRos>(this);
   RCLCPP_INFO(this->get_logger(), "Segmentation node initialized");
 }
 
@@ -129,6 +141,21 @@ void SegmentationNode::scanCallback(
       is_original_pc ? cloud : cloud_transformed;
 
   segmenter_->segment(cloud_proc, &labels);
+
+  // ★ 2026-10-07（缺陷 ③）：linefit 把 ≤22° 的坡面/低矮台面整片判成地面删掉 ⇒ 这里再判一次
+  //   "相对局部地面的高差 + 可行驶坡度"。只降级不升级；可行驶坡面保持 free。
+  //   标签是 std::vector<int>（1=ground），与判据的 uint8 掩码互转一次。
+  {
+    std::vector<uint8_t> is_ground(cloud.size(), 0);
+    for (size_t i = 0; i < labels.size() && i < cloud.size(); ++i) {
+      is_ground[i] = (labels[i] == 1) ? 1u : 0u;
+    }
+    traversability_->applyFrame(cloud_proc, &is_ground);
+    for (size_t i = 0; i < labels.size() && i < is_ground.size(); ++i) {
+      labels[i] = (is_ground[i] != 0u) ? 1 : 0;
+    }
+  }
+
   pcl::PointCloud<pcl::PointXYZ> ground_cloud, obstacle_cloud;
   for (size_t i = 0; i < cloud.size(); ++i) {
     if (labels[i] == 1)
@@ -144,6 +171,10 @@ void SegmentationNode::scanCallback(
   obstacle_msg->header = msg->header;
   ground_pub_->publish(*ground_msg);
   obstacle_pub_->publish(*obstacle_msg);
+  // 诊断：判据命中的点（obstacle 的子集）+ 每帧统计（私有话题，不参与 /segmentation/* 契约）
+  // 注意：点用**原始点**（与 ground/obstacle 两朵云同源、同序），header 才是 msg 的 header。
+  traversability_->publishStepEdge(cloud, msg->header);
+  traversability_->publishStats();
 }
 
 int main(int argc, char **argv) {

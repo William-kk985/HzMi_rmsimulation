@@ -30,6 +30,7 @@ endif()
 #     详见 scripts/map_asset_guard.py 的 resolve_session() 与 docs/continue_mapping.md §11。
 ament_auto_package(
   INSTALL_TO_SHARE
+  config        # ★ 2026-10-07：traversability_criteria.yaml（坡度/台阶判据的单一真源）
   launch
   map
   PCD

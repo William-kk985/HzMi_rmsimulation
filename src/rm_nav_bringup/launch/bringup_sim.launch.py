@@ -54,6 +54,8 @@ _SLOT_ALTERNATIVES = {
     'icp_registration': 'localization:=amcl（默认 2D 栅格图路线）或 localization:=gicp',
     'gicp_registration': 'localization:=amcl（默认 2D 栅格图路线）或 localization:=icp',
     'patchwork_ground_segmentation': 'ground:=linefit（默认值，现有已验证路径）',
+    'rm_ground_traversability': '无替代槽位：它是两个地面分割节点的**编译期依赖**（header-only 判据库），'
+                                '不构建它两个节点都编不过 —— 见 docs/ground_segmentation_slots.md §10',
 }
 
 
@@ -289,6 +291,25 @@ def generate_launch_description():
     segmentation_params = os.path.join(get_package_share_directory('linefit_ground_segmentation_ros'), 'config', 'segmentation_sim.yaml')
     ########################## linefit_ground_segementation parameters end ############################
 
+    ########################## 可通行性判据（坡度/台阶）parameters start #############################
+    # ★ 2026-10-07：**单一真源**的阈值文件。它同时被：
+    #   ① 两个地面分割槽位（ground:=linefit / patchwork）当 ROS 参数文件读；
+    #   ② 离线出先验图的 tools/scripts/mapping/pcd_to_nav2_map.py 读（--criteria-file）。
+    #   ⇒ 实时代价图与先验图用同一套"局部地面高差 + 可行驶坡度"判据（缺陷 ③ 的修法）。
+    #   放在 rm_nav_bringup 自己的 share 下（不依赖任何新包的构建），所以任何槽位组合都能启动。
+    traversability_params = os.path.join(rm_nav_bringup_dir, 'config', 'traversability_criteria.yaml')
+    # 容错：若 install/ 里还没有这份文件（只改了源码没重建 rm_nav_bringup），**不要**让整条 launch 挂掉
+    # —— 节点的 C++ 兜底默认值与文件逐键相同（由 tools/scripts/regress/check_traversability_criteria.py
+    # 断言），但会少一层"单一真源"。所以这里打印一条可操作的告警并继续。
+    if os.path.isfile(traversability_params):
+        traversability_params_list = [traversability_params]
+    else:
+        print('[bringup_sim] ⚠ 找不到 %s ⇒ 地面分割节点用内置默认判据（同值）。'
+              '请 `colcon build --symlink-install --packages-select rm_nav_bringup` 后重试。'
+              % traversability_params)
+        traversability_params_list = []
+    ########################## 可通行性判据（坡度/台阶）parameters end #################################
+
     #################################### FAST_LIO parameters start ####################################
     # 参数已回归 fast_lio 包自身 config/（R1）
     fastlio_mid360_params = os.path.join(get_package_share_directory('fast_lio'), 'config', 'fastlio_mid360_sim.yaml')
@@ -329,7 +350,20 @@ def generate_launch_description():
     ################################### slam_toolbox parameters end ###################################
 
     ################################### navigation2 parameters start ##################################
-    nav2_map_dir = PathJoinSubstitution([rm_nav_bringup_dir, 'map', world]), ".yaml"
+    # ★ 2026-10-07：nav2 的 2D 先验图**可显式指定**（`map_yaml:=/abs/path.yaml`）。
+    #   动机：重跑建图之后要先在**新先验图**上验一遍（缺陷 ③ 的验收要求"旧图 vs 重跑图"对照），
+    #   而 nav2 的默认路径是 map/<world>.yaml —— 没有这个参数就只能去覆盖那一份用户资产，
+    #   既危险又不可对照。默认值与原来**逐字节相同**（map/<world>.yaml）⇒ 不传时行为不变。
+    #   ⚠ 只有 2D 先验图（map_server 的 yaml）走这里；3D 点云/PCD 不经过 launch。
+    declare_map_yaml_cmd = DeclareLaunchArgument(
+        'map_yaml',
+        default_value=PathJoinSubstitution([
+            rm_nav_bringup_dir, 'map',
+            PythonExpression(["'", LaunchConfiguration('world'), "' + '.yaml'"])]),
+        description='nav2 用的 2D 先验图 yaml（绝对路径）。留空/不给 = <rm_nav_bringup share>/'
+                    'map/<world>.yaml（= 现有行为）。用途：重跑建图后先用新图验一遍，'
+                    '对照跑法 `map_yaml:=/abs/new.yaml`，不用覆盖 map/<world>.yaml')
+    nav2_map_dir = LaunchConfiguration('map_yaml')
     empty_map_dir = os.path.join(rm_nav_bringup_dir, 'map', 'empty_map.yaml')
     # nav2 参数已回归自研 rm_navigation 包 params/（R1）。
     # ★ 2026-10-05 params 分层重构（动机/等价性证明见 docs/cod_nav_2026_migration_worksheet.md §J）：
@@ -700,7 +734,7 @@ def generate_launch_description():
         # ★ 2026-09-23 修复：原来漏了 use_sim_time ⇒ 这个节点跑在**墙钟**上，而全链路（plugin/scan/
         #   costmap/AMCL/tf）都是仿真钟。它的输出戳虽然抄自输入（所以看起来还好），但任何依赖
         #   "本节点时钟"的逻辑（tf2 Buffer 的缓存窗口、超时判定）都会用错时间轴。
-        parameters=[segmentation_params, {'use_sim_time': use_sim_time}],
+        parameters=[segmentation_params, *traversability_params_list, {'use_sim_time': use_sim_time}],
         # ★ 2026-10-06：地面分割槽位 ground（默认 linefit ⇒ 本节点照旧启动，行为不变）。
         condition=LaunchConfigurationEquals('ground', 'linefit'),
     )
@@ -717,6 +751,7 @@ def generate_launch_description():
         parameters=[
             _PackageShareFile('patchwork_ground_segmentation', 'config',
                               'ground_segmentation_sim.yaml'),
+            *traversability_params_list,
             {'use_sim_time': use_sim_time}],
         condition=LaunchConfigurationEquals('ground', 'patchwork'),
     )
@@ -1431,6 +1466,7 @@ def generate_launch_description():
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
     # ★ 2026-10-06：「续建 + 场地隔离」相关（默认值下现有行为不变，详见各自的 description）
+    ld.add_action(declare_map_yaml_cmd)
     ld.add_action(declare_map_name_cmd)
     ld.add_action(declare_map_autocontinue_cmd)
     ld.add_action(declare_map_start_pose_cmd)
