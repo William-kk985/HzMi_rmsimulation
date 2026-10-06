@@ -1,0 +1,42 @@
+{
+ "frame": "map (spawn-relative)",
+ "note": "冷/暖地图 A/B：**同一段扫频、同一个地点、只改'地图有多成熟'**。用来定位首跑里那个'刚起步猛转就把 LIO 一次带坏 46°'的边界条件。三段扫频完全相同（rates=[0.6,1.2,2.4] × 4 仿真秒），分别发生在 LIO 启动后 ~15 s（出生点，最冷）/ ~60 s（西端）/ ~300 s（西端，已走 34 m）。中间用 4 段 8.5 m 直线 + 180° 换向把地图'养大'。",
+ "legs": [
+  {"kind": "spin_sweep", "label": "S0", "rates": [0.6, 1.2, 2.4], "dur": 4.0,
+   "group": "sweep_cold",
+   "desc": "① 最冷：出生点 (0,0)、LIO 启动后 ~15 仿真秒"},
+
+  {"kind": "goto", "label": "prep1", "wps": [[-5.5, 1.5]], "speed": 0.30,
+   "group": "prep", "desc": "就位到西端 (-5.5, 1.5)"},
+  {"kind": "spin", "label": "Tp", "rate": 0.60, "target_rad": null,
+   "align_yaw": 0.0, "group": "align", "desc": "对齐到东向"},
+
+  {"kind": "spin_sweep", "label": "S1", "rates": [0.6, 1.2, 2.4], "dur": 4.0,
+   "group": "sweep_warm1",
+   "desc": "② 半冷：西端 (-5.5,1.5)、只走过 6 m、`/map` 还小"},
+
+  {"kind": "spin", "label": "Te1", "rate": 0.60, "target_rad": null,
+   "align_yaw": 0.0, "group": "align", "desc": "对齐到东向"},
+
+  {"kind": "goto", "label": "R1", "wps": [[3.0, 1.5]], "speed": 0.30,
+   "group": "grow", "desc": "养地图 1：向东 8.5 m"},
+  {"kind": "spin", "label": "Tr1", "rate": 0.60, "target_rad": 3.141592653589793,
+   "group": "turn180", "desc": "180° 换向"},
+  {"kind": "goto", "label": "R2", "wps": [[-5.5, 1.5]], "speed": 0.30,
+   "group": "grow", "desc": "养地图 2：沿同一条线返回 8.5 m"},
+  {"kind": "spin", "label": "Tr2", "rate": 0.60, "target_rad": 3.141592653589793,
+   "group": "turn180", "desc": "180° 换向"},
+  {"kind": "goto", "label": "R3", "wps": [[3.0, 1.5]], "speed": 0.30,
+   "group": "grow", "desc": "养地图 3：再向东 8.5 m"},
+  {"kind": "spin", "label": "Tr3", "rate": 0.60, "target_rad": 3.141592653589793,
+   "group": "turn180", "desc": "180° 换向"},
+  {"kind": "goto", "label": "R4", "wps": [[-5.5, 1.5]], "speed": 0.30,
+   "group": "grow", "desc": "养地图 4：再返回 8.5 m（累计 34 m）"},
+  {"kind": "spin", "label": "Tr4", "rate": 0.60, "target_rad": 3.141592653589793,
+   "group": "turn180", "desc": "180° 换向"},
+
+  {"kind": "spin_sweep", "label": "S2", "rates": [0.6, 1.2, 2.4], "dur": 4.0,
+   "group": "sweep_warm2",
+   "desc": "③ 暖：同一个西端 (-5.5,1.5)、已走 34 m、`/map` 已长起来"}
+ ]
+}
