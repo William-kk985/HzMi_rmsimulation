@@ -56,7 +56,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 #   然后**接着走没走过的区域**，再 save —— 同名覆盖（写前已备份），两张图是同一张。
 ```
 
-### 0.1 新增的 10 个启动参数（`bringup_sim.launch.py`，默认值 = 现有行为；前 5 个 = 续建/隔离，后 5 个 = 续建后一致性检查 §8）
+### 0.1 新增的 11 个启动参数（`bringup_sim.launch.py`，默认值 = 现有行为；前 5 个 = 续建/隔离，中 5 个 = 续建后一致性检查 §8，最后 1 个 = 会话播报器 §11）
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -70,6 +70,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 | `map_resume_check_strict` | `False` | `True` = 检查不通过时**直接收栈**（检查节点退出码 1 ⇒ launch 收掉所有节点）；`False` = 只打响亮 WARNING |
 | `map_resume_check_pos_tol` | `0.5` | 位置偏差阈值（m）：健康续建实测在**厘米级**（0.000~0.03 m），0.5 m 留足余量；当天事故的 ATE max 是 1.15 m ⇒ 抓得住 |
 | `map_resume_check_yaw_tol_deg` | `10.0` | 偏航偏差阈值（度），同口径 |
+| `map_session_announce` | `True` | **会话播报器**（§11）：只发布的 `map_session` 节点，在 latched 话题 `/map_session/info` + 服务 `/map_session/query` 上广播"本次 launch 用了哪个 `map_name`/`world`/存档基名/出生点/`session_id`"，并自检"图上只有一个 `/slam_toolbox` 且它有 `/slam_toolbox/serialize_map`"。`map_archive.sh save` 先问它 ⇒ 名字来自**活栈自己**。`False` = 不起（save 退到活进程/文件证据，仍不猜） |
 
 为什么 `cloud_accumulator` 默认 **关**：它是本仓库新增的一条路径（只读消费者，不发 `/map`、
 不发 TF、不发 `/segmentation`，所以对既有契约零影响），但还没有长跑验收 ⇒ 默认不改变任何现有启动集；
@@ -303,8 +304,13 @@ tools/scripts/mapping/map_archive.sh dirs
 ```
 
 另外 launch 会把"本次会话用了什么名字/哪个 world/存档目录"写到 `<map_dir>/.session.yaml`
-（git 忽略），`map_archive.sh save` 默认读它 ⇒ **不用手工重复名字**。
-写失败只警告，不影响建图（那时 save 需要显式 `--name`）。
+（git 忽略）。⚠️ **2026-10-06 事故后这个文件的地位变了**（详见 §11）：它会被**任何后启动的
+launch 覆盖**，所以 `map_archive.sh save` **不再**"读它就当名字"，而是：
+① 显式 `--name` ＞ ② ROS 图上的**活会话播报器**（`/map_session/info` / `/map_session/query`）＞
+③ 活着的 `bringup_sim.launch.py` 进程命令行（看不到进程时退到 ③b：活映射器自报的存档基名）＞
+④ `.session.yaml` + 把它钉在活栈上的证明 ＞
+⑤ **拒绝**（列出查了什么、给 `--name` 等出路，退出码 3）。
+写 `.session.yaml` 失败只警告、不影响建图（那种情况下 save 会走 ②/③，都不可用就必须 `--name`）。
 
 ---
 
@@ -424,10 +430,15 @@ SIGINT 关栈退出码 **0**。
 
 ```bash
 map_archive.sh save [--name X] [--world W] [--no-cloud] [--allow-world-mismatch]
-#   ① 守卫先查（拒绝 ⇒ 退出码 3，**不写任何文件**）
+#   ⓪ **名字先严格解析**（§11）：--name ＞ 活会话播报器 ＞ 活 launch 进程 ＞ .session.yaml+活性证明
+#      ＞ 拒绝（退出码 3，列出证据链与出路；**不写任何文件**）。多会话（两套栈）一律拒绝
+#   ① 守卫先查（场地不一致 ⇒ 退出码 3，**不写任何文件**）
 #   ② /slam_toolbox/serialize_map 写 map/<名字>.{posegraph,data}（同名覆盖）
 #   ③ 等两个文件都出现（默认最多 60 s）后刷新 sidecar
 #   ④ 3D 累加器在跑 ⇒ 顺带 save PCD
+map_archive.sh save --check            # 只打印"会用哪个名字 + ①~⑤ 证据链 + 会做什么"，**不写盘**
+map_archive.sh save --name X --allow-cross-session
+#   X ≠ 活栈会话名时默认**拒绝**（跨会话写盘 = 另起一份）；这条 = 明确要"另存一份"
 map_archive.sh info [--name X]      # sidecar + 每个文件的大小/时间戳（2D 与 3D 都打）
 map_archive.sh list                 # map/ 与 PCD/ 下所有存档 + world 摘要（旧版会标"无 sidecar"）
 map_archive.sh adopt --name X --world W   # 给旧版存档补 sidecar（人工担保）
@@ -440,7 +451,13 @@ map_archive.sh restore --name X [--from <时间戳|*.prev-* 路径>] [--dry-run]
 #   回滚：位姿图侧与 PCD 侧各取本组最新一代；回滚前把当前文件也留一代 ⇒ 可逆
 ```
 
-退出码：`0` 成功；`2` 用法/环境问题（比如没有 `/slam_toolbox/serialize_map`）；`3` **守卫拒绝**；`4` 落盘超时；`5` `restore`/`backups` 找不到可用的备份代。
+> `info`/`backups`/`backup`/`restore` **不写存档**，而且常常在栈关掉之后跑 ⇒ 它们走"宽松取名"
+> （`--name` ＞ `$MAP_NAME` ＞ `.session.yaml`（会打"这文件可能过期"的警告）＞ 活节点参数）。
+> 只有 `save` 走严格解析 —— 严格解析需要活栈，`restore` 时需要栈已经死了。
+
+退出码：`0` 成功；`2` 用法/环境问题（比如没有 `/slam_toolbox/serialize_map`）；
+`3` **拒绝**（场地不一致，或会话名无法确认 / 多会话 / 跨会话）；`4` 落盘超时；
+`5` `restore`/`backups` 找不到可用的备份代。
 
 ---
 
@@ -627,8 +644,171 @@ ros2 launch … map_resume_check_yaw_tol_deg:=20.0   # 偏航阈值放宽（默�
    长跑（十几分钟、多回环）会长到几十 MB，**别顺手 `git add`**（`RMUC.posegraph` 13 MB /
    `RMUC.data` 8.5 MB 就是历史教训）。存档是否入库由你决定，本仓库的 `.gitignore` **没有**忽略
    `map/*.posegraph`。
-7. **多机/多栈同名**：`.session.yaml` 只记"最近一次 launch"。同时在两个终端起两套不同
-   `map_name` 的栈，`map_archive.sh save`（不带 `--name`）只会认最后写会话的那一套 ⇒ 多栈请显式 `--name`。
+7. ~~**多机/多栈同名**：`.session.yaml` 只记"最近一次 launch" ⇒ 多栈请显式 `--name`。~~
+   **2026-10-06 已改**（§11）：`save` 现在**不再**从 `.session.yaml` 直接取名字；它先问图上的
+   活会话播报器（`/map_session/info`），并且**检测到两套栈就直接拒绝并列出**（带 `--name` 也拒绝 ——
+   同一 ROS 域里两个同名 `/slam_toolbox`，服务 `/slam_toolbox/serialize_map` 无法指定目标）。
+   两套栈要同时存在 ⇒ 用不同 `ROS_DOMAIN_ID`。
 8. **`adopt` 是人工担保**，脚本无法验证真伪；写错 sidecar ⇒ 以后续建就歪。
 9. **没做**：`map_allow_world_mismatch` 的"只警告不拦"中间档；同名存档的**完整版本历史**
    （现在只有覆盖前自动留的 3 代 `*.prev-*`，见 §3.2）；`restore` 的"恢复后自动跑一次守卫验收"。
+10. **会话播报器只在 `mapper:=slam_toolbox` 的 mapping/slam_nav 分支里起**（它和 `.session.yaml`
+    是同一处写的）。`mapper:=cartographer` 或 `bringup_real.launch.py` 那条路径**没有**播报器
+    ⇒ `save` 会退到"活 launch 进程命令行 / `.session.yaml`+活性证明"，两条都不成立就必须 `--name`
+    （这两条路径本来也没有 `/slam_toolbox/serialize_map`，`save` 对它们本来就不适用）。
+11. **另一个 PID namespace 里的进程看不见**：`save` 的"活 launch 进程命令行"这条证据靠读 `/proc`，
+    而本仓库的沙箱 bash（`bwrap --unshare-pid`）每条命令一个 PID namespace。用户自己的终端里
+    （同一 namespace）没这个问题；万一遇到，`save` 会**拒绝**（不会猜）——那时用 `--name` 或靠播报器。
+
+---
+
+## 11. 事故复盘 ②：2026-10-06「save 把 31.89 MB 位姿图写到了**别人那套会话**的名字上」
+
+> 与 §9 是**两次不同的事故**（§9 = 图本身被 LIO 退化污染；本节 = 名字来源不可信）。
+> 本节 = 这次修复的完整口径：解析顺序、拒绝文案、`--name` 纪律、多会话规则、验收证据。
+
+### 11.1 事件顺序（用户实际遇到的）
+
+| # | 发生了什么 | 证据 |
+|---|---|---|
+| 1 | 18:08 用户起自己的建图栈：`map_name:=RMUC2026_v2`（launch 把会话写进 `map/.session.yaml`） | 用户操作记录 + `map/RMUC2026_v2.*`（18:00 那份存档被续建） |
+| 2 | 18:34~19:09 并发的**自动化测试**连续起了多套栈（`run_dropab*.sh` → `setsid ros2 launch … map_name:=RMUC2026_dropab_ab_*`），每起一套都**覆盖**同一份 `map/.session.yaml` | `tools/scripts/mapping/sltune/run_dropab.sh:135`；`map/RMUC2026_dropab_ab_*.posegraph` 时间戳 18:34/18:55/19:00/19:14 |
+| 3 | 19:09:40 最后那次测试会话写下的状态是 `map_name: RMUC2026_dropab_ab_g_long / session_pid: 23936`；它跑完就退了（pid 23936 不在） | 当时 `.session.yaml` 的内容；`RMUC2026_dropab_ab_g_long.posegraph` = 33,440,928 B = **31.89 MiB**（19:14） |
+| 4 | 用户（自己的栈还活着）跑 `map_archive.sh save`：旧代码**直接**读 `.session.yaml` 取名字，唯一的活性检查是 `kill -0 23936` ⇒ 只打了一句 `⚠️ 会话状态里的 launch pid=23936 已经不在了 ⇒ 下面这个名字可能来自上一次会话` 就**继续写盘** | 旧版 `map_archive.sh:86-103`（本仓库历史版本） |
+| 5 | `/slam_toolbox/serialize_map` 把**用户自己那套栈**的活图写进了 `map/RMUC2026_dropab_ab_g_long.*` —— 名字错了，但图是真的 | 该文件 33,440,928 B；用户随后把它另存/改名为 `RMUC2026_good.*`（同尺寸） |
+
+**两个根因**（都被这次修复直接针对）：
+- **(a) 名字来自一个"谁后启动谁覆盖"的可变文件**，且没有任何"它属于**活栈**"的验证；
+- **(b) 唯一的活性检查是 pid**：`kill -0` 既能**假阳性**（pid 回收 ⇒ 早已结束的会话"看起来还活着"），
+  又能**假阴性**（记录的常是**包装进程** —— `setsid ros2 launch … &` 的 `$!`、`timeout`、外层脚本；
+  或 launch 主进程先走而子节点还活着。§5.2 已记过 `setsid`/`$!` 这个坑）。
+
+### 11.2 新的名字解析顺序（`map_asset_guard.py::resolve_session()`；`save` 走的就是它）
+
+| 优先级 | 证据 | 说明 |
+|---|---|---|
+| ① | `--name X` | 人担保；打印为"显式"。若 `X` ≠ 活栈会话名 ⇒ **仍然拒绝**（除非 `--allow-cross-session`） |
+| ② | **ROS 图上的活会话播报器** | launch 起的 `map_session` 节点：latched（transient_local）话题 `/map_session/info` + 服务 `/map_session/query`，负载（JSON，`schema=rm_nav_bringup/map_session@1`）含 `map_name` / `world` / `archive_base` / `map_start_pose` / `resumed` / `started_at` / **`session_id`** / `launch_pid` / `mapper_nodes` / `serialize_present` / **`verified`**。它随本次 launch 生、随本次 launch 死 ⇒ **谁也覆盖不了**。`verified=True` 的条件（广播那一刻实时核对）：图上 `/slam_toolbox` **恰好 1 个** 且 它提供 `/slam_toolbox/serialize_map`，且只看到 1 个 `map_session` |
+| ③ | 活着的 `bringup_sim.launch.py` 进程命令行 | 读 `/proc/<pid>/cmdline` 取 `map_name:=` / `world:=`（`mode:=mapping|slam_nav` 才算建图栈；要求恰好 1 个，且图上映射器唯一、有 serialize 服务） |
+| ③b | **活映射器自己报的存档基名** | 看不到 launch 进程时（组合 launch / 进程在另一个 PID namespace）退一步：`slam_toolbox` 的 `map_file_name` 基名 —— 那是**它正在续的那份存档**，同样钉在活栈上（从零建图的会话没有这个值 ⇒ 这条自然失效） |
+| ④ | `.session.yaml` **+ 把它钉在活栈上的证明** | 三条证明**至少一条**：〔a〕活 launch 进程自己的 `map_name` 就是它；〔b〕`slam_toolbox` 的 `map_file_name` 基名就是它；〔c〕记录的 `session_pid` 活着 **且** `/proc/<pid>/cmdline` 与记录里的 `launch_cmdline` 一致 **且** 进程起始时刻与 `started_at` 一致（pid 单独**不算**证据） |
+| ⑤ | 都不成立 | **拒绝**（退出码 3），打印 ①~⑤ 五行证据链 + 三条出路；**不写任何文件** |
+
+**交叉核对（要求 2）**：无论名字从哪来，只要 `slam_toolbox` 的 `map_file_name` 有值（= 本次是续建），
+它的**基名必须等于解析出来的名字**，否则拒绝 —— 那意味着"会话状态"和"实际加载的图"不是一次启动的产物。
+
+**多会话规则（要求 5）**：出现下列任一情况 ⇒ 拒绝并列出（**`--name` 也不例外**）：
+两个同名 `/slam_toolbox` 节点、两个 `/map_session` 播报器、两份 `session_id` 不同的播报、
+两个 mapping/slam_nav 形态的 `bringup_sim.launch.py` 进程。出路写在拒绝文案里：
+关掉多余的那套 / 两套栈各用各的 `ROS_DOMAIN_ID` / 先关一套再 `--name X`。
+
+### 11.3 拒绝文案（原文，`save` 与 `save --check` 都会打；完整版见 `.tmp_mapfix/logs/`）
+
+```text
+[map_archive] ❌ 拒绝存档：检测到**多于一套**在跑的建图栈 —— 现在写盘可能写到你没在看的那一套上。
+[map_archive]    · 同名映射器 /slam_toolbox 有 2 个（ROS 图里同名节点，服务 /slam_toolbox/serialize_map 也无法指定目标；param get 同样二义）
+[map_archive]    · 活会话播报器 /map_session 有 2 个（= 同时起了两套会写 .session.yaml 的栈）
+[map_archive]    · 收到 2 份不同的会话播报（session_id 不同）
+[map_archive]    · 活会话：map_name=… session_id=… / map_name=… session_id=…
+[map_archive]   ⇒ 绝不替你猜。三条出路：
+[map_archive]      ① 只留一套栈（关掉多余的那套）后重跑 save；
+[map_archive]      ② 两套栈各用各的 ROS_DOMAIN_ID（各自的 save 只看得到自己那一套）：
+[map_archive]           ROS_DOMAIN_ID=<n> tools/scripts/mapping/map_archive.sh save
+[map_archive]      ③ 明确知道在写谁：先关掉一套，再 save --name X。
+```
+
+```text
+[map_archive] ❌ 拒绝存档：**没有活着的建图栈**（拿不到任何活性证明），.session.yaml 里的名字无法证明属于谁 ⇒ 不写任何文件。
+[map_archive]    查了什么（都不是"活"的）：
+[map_archive]      ① /map_session 播报器（/map_session/info / /map_session/query）: 没有
+[map_archive]      ② 活着的 bringup_sim.launch.py 进程        : 0 个
+[map_archive]      ③ /slam_toolbox 唯一且提供服务 /slam_toolbox/serialize_map: /slam_toolbox ×0，服务 不在
+[map_archive]      ④ .session.yaml         : map_name=RMUC2026_dropab_ab_g_long session_pid=23936 started_at=…（session_pid=23936 不在 /proc（进程已退出，或它只是包装进程的 pid，或它在一个看不到的 PID namespace 里））
+[map_archive]   ⇒ 这就是 2026-10-06 事故的形态（文件是上一次/别人那次会话留下的）。
+[map_archive]      请：① 起栈后重跑 save（推荐）；或 ② 显式 save --name X（你担保这个名字）
+```
+
+```text
+[map_archive] ❌ 拒绝存档：**没法把 .session.yaml 钉在活栈上** —— 它可能是被更晚的 launch 覆盖过的（2026-10-06 事故就是这一条）。
+[map_archive]    · .session.yaml      : map_name=… session_pid=… started_at=…
+[map_archive]    · 活着的 launch 进程 : …
+[map_archive]    · slam_toolbox      : map_file_name=…
+[map_archive]    · 证明失败的原因    :
+[map_archive]        - …
+[map_archive]   ⇒ 没有写任何文件。三条出路：① save --name <活栈的 map_name>；② 重启栈；③ 删掉 .session.yaml 后重启 launch
+```
+
+```text
+[map_archive] ❌ 拒绝存档：**--name 指定的名字 ≠ 正在跑的那套栈的会话名**（跨会话写盘 = 另起一份，而不是"覆盖同一个名字"）。
+[map_archive]    · --name            : X
+[map_archive]    · 活栈会话名         : Y（来源=live-helper，session_id=…）
+[map_archive]    · 活栈的 map_name 参数: …
+[map_archive]   ⇒ 没有写任何文件。两条出路：① --name Y；② 确实要另存一份 ⇒ 加 --allow-cross-session
+```
+
+另外，当名字**成功**来自活证据、而 `.session.yaml` 与它不一致时（= 事故形态），每次都打：
+
+```text
+[map_archive]   ⚠️⚠️ .session.yaml 说 map_name=RMUC2026_dropab_ab_g_long（session_pid=23936，started_at=…），
+                与活栈（来源=live-helper）的 RMUC2026_v2 **不一致** ⇒ 这份文件已被更晚的 launch 覆盖过，已忽略它（2026-10-06 事故就是这个形态）
+```
+
+### 11.4 `--name` 纪律 与 日常用法
+
+- **默认什么都不用给**：`map_archive.sh save` —— 名字来自活栈自己（②/③），并会打印证据链。
+- **想先看一眼再写**：`map_archive.sh save --check`（等价 `--dry-run`）：打印证据链 +
+  "会用哪个名字 + 会做什么"，**一个字节都不写**（连备份都不做）。
+- **显式名字**：`save --name X`。它**始终优先**（打印 `session_source=explicit`），但：
+  · `X` ≠ 活栈会话名 ⇒ 拒绝（跨会话），除非加 `--allow-cross-session`；
+  · 那代表"另存一份"而不是"覆盖同一个名字" ⇒ 下次续建要用 `map_name:=X` 才会读它。
+- `$MAP_NAME` 仍可用（等同 `--name`，会打一行说明）。
+- `info` / `backups` / `backup` / `restore` 走**宽松取名**（`--name` ＞ `$MAP_NAME` ＞ `.session.yaml`（带
+  "这文件可能被覆盖"的警告）＞ 活节点参数）—— 因为它们不写存档，而且常常在**栈关掉之后**跑
+  （`restore` 时栈必须已经死了，严格解析在那种场景下必然失败）。
+
+### 11.5 会话播报器是什么、放在哪、为什么放在那
+
+| 项 | 值 |
+|---|---|
+| 文件 | `src/rm_nav_bringup/scripts/map_session_announcer.py`（装到 `lib/rm_nav_bringup/`，`install(PROGRAMS …)`） |
+| 节点名 | `map_session` |
+| 话题 | `/map_session/info`（`std_msgs/String`，JSON 负载，QoS = RELIABLE + TRANSIENT_LOCAL(depth 1) ⇒ latched，晚来的 `save` 立刻能收到） |
+| 服务 | `/map_session/query`（`std_srvs/Trigger`，`message` = 同一份 JSON；`success` = `verified`） |
+| 起它的地方 | `bringup_sim.launch.py` 的 `_launch_slam_toolbox_mapping()`（与 slam_toolbox 同一个 `OpaqueFunction`，`map_session_announce:=True` 默认开） |
+| 为什么不会影响建图 | 它是**只发布**节点：不发 `/map`、不发 TF、不订阅任何话题、不写任何文件、不改既有节点集/时序（slam_toolbox 仍在 `TimerAction(4.0)` 之后起，一行没动） |
+| 拿不到它会怎样 | `save` 退到 ③/④（活 launch 进程 / `.session.yaml`+证明），都不成立 ⇒ **拒绝**（不会静默写） |
+| 手工看一眼 | `ros2 topic echo /map_session/info --once` 或 `ros2 service call /map_session/query std_srvs/srv/Trigger {}` |
+
+### 11.6 这次的验收（无头；脚本与原始输出在 `.tmp_mapfix/`，未入库）
+
+| 场景 | 结果 |
+|---|---|
+| **一次活栈**（假 `slam_toolbox` + 播报器 = `ZZTEST_mapfix_a`；同时把 `.session.yaml` 造成**事故形态**：`RMUC2026_dropab_ab_g_long` / pid 23936 已不在） | `save --check` 退出码 0，证据链打印 `②活会话播报 … map_name=ZZTEST_mapfix_a`、`session_source=live-helper`，并**大声提示**"`.session.yaml` 与活栈不一致 ⇒ 已忽略（事故形态）"；`--check` **一个文件都没写**；真 `save` 把图写到 `ZZTEST_mapfix_a.*`（sidecar `world: RMUC2026`），**没有**创建文件里那个名字 |
+| **同名覆盖 + 写前备份 + restore 回归** | 第二次 `save` 生成 `ZZTEST_mapfix_a.posegraph.prev-<ts>`，其 sha256 = 第 1 代；当前文件确实变了；`restore --name ZZTEST_mapfix_a` 后 sha256 回到第 1 代 |
+| **守卫/隔离回归** | `check --world RMUC2026` ⇒ 0（可续建）；`check --world RMUL2026` ⇒ 3（拒绝） |
+| **两套栈（同一 `ROS_DOMAIN_ID`）** | `save` ⇒ 退出码 3，文案"检测到**多于一套**在跑的建图栈"，列出两套会话、给出 `ROS_DOMAIN_ID` 出路；`save --name ZZTEST_mapfix_a` ⇒ **仍退出码 3**（同名服务无法指定目标） |
+| **两套栈（不同 `ROS_DOMAIN_ID`）** | 域 A 的 `save --check` ⇒ `session_name=ZZTEST_mapfix_a`；域 B ⇒ `session_name=ZZTEST_mapfix_c`（各自只看得到自己那一套） |
+| **只有陈旧的 `.session.yaml`**（没有活栈） | `save` / `save --check` ⇒ 退出码 3，文案"**没有活着的建图栈**"+四条检查+`--name` 出路；**文件列表前后完全一致**（没写任何东西）；`save --name X` ⇒ 退出码 2（没有 `/slam_toolbox/serialize_map`，也没写出文件） |
+| **没有播报器、只有活 launch 进程** | 用同名 argv 的桩进程模拟 `bringup_sim.launch.py`：`save --check` ⇒ `session_source=live-launch`、`session_name=ZZTEST_mapfix_e`；`--name ZZTEST_mapfix_f`（≠ 活栈）⇒ 跨会话拒绝 |
+| **`--name` 显式 + 跨会话** | `--name <活栈名>` ⇒ `session_source=explicit`；`--name <别的>` ⇒ 退出码 3（跨会话拒绝）；加 `--allow-cross-session` ⇒ 放行并打警告 |
+| **离线判定单测**（注入假 probe/procs/state，`python3 .tmp_mapfix/test_resolve_offline.py`） | 22 条断言全过：播报器 verified/未 verified、活 launch、活映射器自报基名（③b）、pid 三重证明、pid 回收（cmdline 不符）、pid 不在、`map_file_name` 对上/对不上、多会话三种、无证据、事故现场（文件说 `g_long`、映射器说 `v2` ⇒ 取 `v2` 并大声警告）… |
+| **launch 参数无回归** | `ros2 launch rm_nav_bringup bringup_sim.launch.py --show-args` ⇒ 退出码 0，参数表里能看到 `map_session_announce`；`DeclareLaunchArgument` **24 → 25**（只增不减；§5.1/§5.2 里"70 个参数"是**当时**的实测值） |
+| **真栈（无头 Gazebo + small_point_lio + slam_toolbox + 真 launch）** | 全过（30 条断言），逐条见下 |
+
+**真栈验收（`.tmp_mapfix/real_launch_case.sh`，`ROS_DOMAIN_ID=66`、独立 `GAZEBO_MASTER_URI`、`unset DISPLAY`）**：
+
+| 检查 | 实测 |
+|---|---|
+| 播报器是**真 launch** 起的 | 起栈约 8 s 后 `ros2 node list` 同时有 `/slam_toolbox` 与 `/map_session`；`ros2 service call /map_session/query std_srvs/srv/Trigger {}` ⇒ `success=True`（自检通过），负载 `"map_name": "ZZTEST_mapfix_live"` |
+| latched 话题（`save` 真正走的那条路） | `ros2 topic echo /map_session/info --once --qos-durability transient_local --reliability reliable --full-length` ⇒ 立刻拿到负载，含 `map_name` / `session_id` |
+| `save --check` | 退出码 0；`session_source=live-helper`、`session_name=ZZTEST_mapfix_live`；证据链里写着 `map_file_name=（未设置/取不到 ⇒ 本次是"从零建图"）`（本次 `map_autocontinue:=False`）；**没写任何文件** |
+| `.session.yaml` 新增字段 | `map_name=ZZTEST_mapfix_live` + `session_id=<uuid12>` + `launch_cmdline=['/opt/ros/humble/bin/ros2','launch','rm_nav_bringup','bringup_sim.launch.py',…]` |
+| 真 `save` | 退出码 0，`会话来源: live-helper`；写出 `ZZTEST_mapfix_live.{posegraph,data,meta.yaml}`（5,006,281 B / 50,130 B；sidecar `world: RMUC2026`） |
+| 同名覆盖 + 写前备份（真栈） | 第二次 `save` ⇒ 生成 `ZZTEST_mapfix_live.posegraph.prev-20261006-194011`（内容 = 第二次写之前那一代），当前文件 mtime 前进。**注意**：真 slam_toolbox 对"没有新观测的同一张图"写出的位姿图是**逐字节相同**的（这也是个有用的观察），所以这里用"备份存在 + mtime 前进"判覆盖，不用 sha256 变化 |
+| 身份随栈消失 | SIGINT 关栈后 `ros2 node list` 里**没有** `/map_session`（播报器与栈同生共死 ⇒ 名字不可被后人伪造） |
+| 数据安全 | 全程只用 `ZZTEST_mapfix_live*`；跑完删除；`.session.yaml` 跑前备份、跑后**还原**；`protect_before` 里 23 个用户资产（`RMUC2026_good.*` / `RMUC2026_v2.*` / `RMUC2026.pgm|yaml` / `.synth.bak` / `RMUC2026_cont.*` / `PCD/RMUC2026*.pcd*` / `good_map_preview.png`）**逐个指纹核对未变** |
+
+**测试用的都是 `ZZTEST_mapfix_*` 名字，脚本末尾已经删干净**；用户的
+`map/RMUC2026_good.*`、`map/RMUC2026_v2.*`、`map/RMUC2026.pgm|yaml`（+ `.synth.bak`）、
+`map/RMUC2026_cont.*`、`PCD/RMUC2026*.pcd*`、`good_map_preview.png` 全程**只读**
+（验收脚本只 `stat` 它们、从不写）。
