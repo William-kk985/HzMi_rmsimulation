@@ -15,6 +15,12 @@
 > **B 点云→2D 工具与其 A/B**。相关背景：`docs/mapping_small_point_lio.md`（建图链审计）、
 > `docs/worlds.md`（场地资产）、`docs/tf_interface_contract.md`（`map→odom` 单发布者契约）。
 
+> 🔗 相关（2026-10-06）：`docs/path_clearance_and_contact.md` —— 本文头注②（"坡道在 3D 点云里清楚、
+> 在 2D 栅格图上基本看不见"）的**导航侧后果**：用 `RMUC2026.stl` 逐格还原场地高度后实测
+> 「静态图判自由、而场地高度 >0.10 m」的格 **88 576 个（占自由区 51.6%）**；
+> 车在坡脚（map `(-3.6, 3.1)`，图上是自由、`/scan` 也不报）以 1.7 m/s 上坡时 IMU 冲到
+> **79~90 m/s²**，`linefit` 的 `max_slope ±0.4` 正是"坡道面被当地面删掉"的参数依据。
+
 ## 0. 一句话结论
 
 | # | 问题 | 结论 |
