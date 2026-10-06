@@ -12,10 +12,23 @@
 #   adopt --name X --world W   给**旧版**（没有 sidecar 的）存档补一份 sidecar —— 等于人工担保它属于 W。
 #   dirs              打印"launch 与脚本实际读写的那两个目录"（绕开 install/share 的软链陷阱）。
 #
+# ★ 2026-10-06（事故当天追加）：**覆盖前备份** + **恢复**
+#   save 一直是"同名覆盖"。当天 3D 先验被一段 LIO 退化（ATE max 1.15 m）污染后，
+#   一次 save 就把好存档换成了坏存档（见 docs/continue_mapping.md §9 事故复盘）。
+#   现在 save 在写之前，把**既有**的 map/<name>.{posegraph,data,meta.yaml} 各复制一份
+#   `<文件>.prev-<YYYYmmdd-HHMMSS>`（同代同时间戳，默认留最新 3 代，更老的自动删）；
+#   PCD 那一侧由 cloud_accumulator 的 ~/save 自己备份（谁写谁备份，避免双重备份/两套命名）。
+#   backup --name X [--kind posegraph|pcd|all]   手工备份一代（save 内部调的是同一条 guard 命令）
+#   backups --name X            看这份存档现存的备份代
+#   restore --name X [--from T] 回滚（T = 时间戳 或 某个 *.prev-* 路径；默认最新一代）；
+#                               回滚前会把"当前文件"也留一代 ⇒ restore 本身可逆（退出码 5 = 没有这一代）
+#
 # 为什么必须有 sidecar + 守卫：本工程 `map` 系 = **出生点相对系**，换 world 就是换原点。
 #   把 A 场地的位姿图/点云加载到 B 场地 = 两场比赛的地图叠在一起（假墙/回环错配/定位全废）。
 #   判定与报错文本与 launch / cloud_accumulator 共用同一份：
 #       src/rm_nav_bringup/scripts/map_asset_guard.py
+#   ⚠️ 注意：守卫只管"world/spawn **对不对**"，管不了"图**本身歪了**"（当天事故就是后者）
+#      ⇒ 续建后另有一次一致性检查（launch 参数 map_resume_check*，见 docs/continue_mapping.md §8）。
 #
 # 名字从哪来（按优先级）：
 #   ① --name X       ② 环境变量 $MAP_NAME
@@ -29,16 +42,20 @@
 #   tools/scripts/mapping/map_archive.sh save --name RMUC2026_home
 #   tools/scripts/mapping/map_archive.sh info --name RMUC2026_home
 #   tools/scripts/mapping/map_archive.sh list
+#   tools/scripts/mapping/map_archive.sh backups --name RMUC2026_home      # 看有几代备份
+#   tools/scripts/mapping/map_archive.sh restore --name RMUC2026_home      # 回滚到最新一代
 #
-# 退出码：0 成功；2 用法/环境问题；3 **守卫拒绝**（场地不一致，见打印出来的四条出路）；4 落盘超时。
+# 退出码：0 成功；2 用法/环境问题；3 **守卫拒绝**（场地不一致，见打印出来的四条出路）；
+#         4 落盘超时；5 restore/backups 找不到可用的备份代。
 # =============================================================================
 set -u
 
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GUARD="$WS/src/rm_nav_bringup/scripts/map_asset_guard.py"
 NAME=""; WORLD=""; TIMEOUT=60; ALLOW=0; WITH_CLOUD=1; RESOLUTION=""
+FROM=""; DRY_RUN=0; KEEP=3; LIST_JSON=0; KIND="all"
 
-usage() { sed -n '2,45p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,51p' "${BASH_SOURCE[0]}"; }
 
 py_guard() { python3 "$GUARD" "$@"; }
 
@@ -121,6 +138,14 @@ wait_for_files() {   # wait_for_files <base> <timeout>
 
 human() { python3 -c "import os,sys;p=sys.argv[1];print('%.2f MB'%(os.path.getsize(p)/1048576.0) if os.path.isfile(p) else '缺失')" "$1"; }
 
+# ---- 3D 先验体检：**独立于节点**再量一次 PCD 的 bbox/z 跨度（写完之后）
+#      为什么还要在 shell 里量一次：`~/save` 的体检在累加器节点的日志里，而 map_archive.sh 是在
+#      **另一个终端**跑的；这里再打一遍数字，保证"存档这一步"的输出里就有证据。
+#      判定/文案在 tools/scripts/mapping/pcd_bbox_health.py（可单独跑、可测；退出码 3 = 不合理）。
+pcd_health() {   # pcd_health <pcd> <z_span_warn>
+  python3 "$WS/tools/scripts/mapping/pcd_bbox_health.py" "$1" --z-span-warn "${2:-3.0}" || true
+}
+
 # ============================================================ save
 cmd_save() {
   resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X（或 --name / \$MAP_NAME；也可给 launch 传 map_name:=X）" >&2; exit 2; }
@@ -157,6 +182,13 @@ cmd_save() {
   pre_pg="$(stat -c '%s %Y' "$base.posegraph" 2>/dev/null || echo "none")"
   pre_data="$(stat -c '%s %Y' "$base.data" 2>/dev/null || echo "none")"
 
+  # ---- ★ 覆盖前备份（2026-10-06 事故后新增）：写坏了一代就能回退
+  #      谁写谁备份：本脚本写 posegraph/data/sidecar ⇒ 备份这三个；
+  #      PCD 由 cloud_accumulator 的 ~/save 自己备份（它写那个文件）—— 避免双重备份/两套命名。
+  echo "[map_archive] 覆盖前备份（keep=$KEEP 代；命名 <文件>.prev-<时间戳>）"
+  py_guard backup --name "$NAME" --kind posegraph --keep "$KEEP" || {
+    echo "[map_archive] ⚠️ 备份失败（不挡落盘，但请自己确认既有存档可回退）" >&2; }
+
   echo "[map_archive] 调 /slam_toolbox/serialize_map → $base"
   set +e
   timeout 120 ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph \
@@ -185,26 +217,34 @@ cmd_save() {
       --resolution "$RESOLUTION" "${spawn_args[@]}" || {
         echo "[map_archive] ❌ sidecar 写入失败" >&2; exit 4; }
 
-  # ---- 3D 先验（累加器在跑就顺带存；它自己也会过守卫）
+  # ---- 3D 先验（累加器在跑就顺带存；它自己也会过守卫 + 写前体检 + 写前备份）
   local cloud_note="（没有 /cloud_accumulator —— 本次未存 3D 先验；要它请加 cloud_accumulator:=True）"
+  local cloud_pcd=""
   if [ "$WITH_CLOUD" = 1 ] && timeout 10 ros2 service list 2>/dev/null | grep -qx '/cloud_accumulator/save'; then
-    echo "[map_archive] 顺带存 3D 先验：/cloud_accumulator/save"
+    echo "[map_archive] 顺带存 3D 先验：/cloud_accumulator/save（覆盖前备份由累加器自己打印）"
     if timeout 300 ros2 service call /cloud_accumulator/save std_srvs/srv/Trigger 2>&1 | tee /tmp/map_archive_cloud.$$.log | tail -3; then :; fi
     if grep -q 'success=True' /tmp/map_archive_cloud.$$.log 2>/dev/null; then
       cloud_note="✅ PCD/$NAME.pcd 已更新"
+      cloud_pcd="$PCD_DIR/$NAME.pcd"
     else
       cloud_note="⚠️ /cloud_accumulator/save 未成功（见上面的 message；守卫拒绝时会明确说明）"
     fi
+    grep -q '健康告警' /tmp/map_archive_cloud.$$.log 2>/dev/null && \
+      cloud_note="$cloud_note ⚠️（累加器报了健康告警：看上面 message 与节点日志）"
   fi
 
   echo
-  echo "[map_archive] ✅ 存档完成（同名覆盖）"
+  echo "[map_archive] ✅ 存档完成（同名覆盖；写前已备份，回滚：map_archive.sh restore --name $NAME）"
   echo "  位姿图 : $base.posegraph  $(human "$base.posegraph")"
   echo "  数据集 : $base.data       $(human "$base.data")"
   echo "  sidecar: $base.meta.yaml  $(human "$base.meta.yaml")"
   echo "  3D 先验: $cloud_note"
   echo "  写前指纹: posegraph=$pre_pg data=$pre_data"
   echo "  写后指纹: posegraph=$(stat -c '%s %Y' "$base.posegraph") data=$(stat -c '%s %Y' "$base.data")"
+  echo "  备份代（位姿图侧，最新在前）："
+  py_guard backups --name "$NAME" --kind posegraph 2>/dev/null | sed 's/^/    /' || true
+  # 3D 先验独立体检（z 跨度不合理 ⇒ 响亮 WARNING；仍然已经写出去了）
+  [ -n "$cloud_pcd" ] && pcd_health "$cloud_pcd" "${CLOUD_WARN_Z_SPAN:-3.0}"
   echo "  下次续建（同一个命令就行，launch 会自动反序列化并接着建）："
   echo "      ros2 launch rm_nav_bringup bringup_sim.launch.py world:=$WORLD mode:=mapping \\"
   echo "          lio:=fastlio mapper:=slam_toolbox map_name:=$NAME"
@@ -224,6 +264,8 @@ cmd_info() {
   echo
   py_guard show --kind pcd --name "$NAME"
   echo
+  py_guard backups --name "$NAME" 2>/dev/null || true
+  echo
   echo "[map_archive] 若上面 world 与你要跑的 world 不一致 ⇒ 续建会被**拒绝**（这是设计）："
   echo "    换名字 / 删改名 / map_autocontinue:=False / 显式 map_allow_world_mismatch:=True"
 }
@@ -242,6 +284,39 @@ cmd_adopt() {
 
 cmd_dirs() { py_guard dirs; [ -f "$SESSION" ] && { echo "session=$SESSION"; sed 's/^/  /' "$SESSION"; }; }
 
+# ============================================================ backups / restore
+# （2026-10-06 事故后新增：save 是同名覆盖，一次坏 save 就能把好存档换掉）
+cmd_backups() {
+  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  py_guard backups --name "$NAME" --kind "$KIND" ${LIST_JSON:+--json}
+}
+
+cmd_backup() {
+  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  echo "[map_archive] 手工备份一代：name=$NAME kind=$KIND keep=$KEEP"
+  py_guard backup --name "$NAME" --kind "$KIND" --keep "$KEEP"
+}
+
+cmd_restore() {
+  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  local args=(restore --name "$NAME" --kind "$KIND" --keep "$KEEP")
+  [ -n "$FROM" ] && args+=(--from "$FROM")
+  [ "$DRY_RUN" = 1 ] && args+=(--dry-run)
+  echo "[map_archive] 回滚存档 $NAME（map/ 与 PCD/ 两侧；keep=$KEEP）"
+  py_guard "${args[@]}"
+  local rc=$?
+  if [ "$rc" = 0 ] && [ "$DRY_RUN" = 0 ]; then
+    echo
+    echo "[map_archive] 恢复后核对（文件大小/时间戳）："
+    py_guard show --kind posegraph --name "$NAME" 2>/dev/null | sed -n '/文件:/,$p' | sed 's/^/  /'
+    py_guard show --kind pcd --name "$NAME" 2>/dev/null | sed -n '/文件:/,$p' | sed 's/^/  /'
+    echo "  ⚠️ 恢复的是**上一代**存档：它当时的 world/spawn 由同代 sidecar 一起恢复 ⇒ 守卫看到的是一套自洽的。"
+    echo "     真要继续建图：ros2 launch rm_nav_bringup bringup_sim.launch.py world:=<sidecar 里的 world> \\"
+    echo "         mode:=mapping mapper:=slam_toolbox map_name:=$NAME"
+  fi
+  exit $rc
+}
+
 CMD="${1:-}"
 [ $# -gt 0 ] && shift
 while [ $# -gt 0 ]; do
@@ -252,6 +327,10 @@ while [ $# -gt 0 ]; do
     --allow-world-mismatch) ALLOW=1; shift;;
     --no-cloud) WITH_CLOUD=0; shift;;
     --json) LIST_JSON=1; shift;;
+    --kind) KIND="$2"; shift 2;;
+    --from) FROM="$2"; shift 2;;
+    --keep) KEEP="$2"; shift 2;;
+    --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "[map_archive] 未知参数：$1" >&2; usage; exit 2;;
   esac
@@ -263,6 +342,9 @@ case "$CMD" in
   list) cmd_list ${LIST_JSON:+--json};;
   adopt) cmd_adopt;;
   dirs) cmd_dirs;;
+  backup) cmd_backup;;
+  backups) cmd_backups;;
+  restore) cmd_restore;;
   ''|-h|--help|help) usage; exit 0;;
   *) echo "[map_archive] 未知子命令：$CMD" >&2; usage; exit 2;;
 esac

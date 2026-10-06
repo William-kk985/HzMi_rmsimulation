@@ -491,6 +491,259 @@ def check_spawn_table_sync(launch_py=None):
     return (not diffs), diffs, found
 
 
+# ============================================================ 覆盖前备份 / 恢复
+# 2026-10-06 事故后新增：`save` 一直是**同名覆盖**，而 3D 先验被 LIO 退化段污染后
+# 一次 save 就把好存档换成了坏存档（见 docs/continue_mapping.md §9 事故复盘）。
+# 现在**写之前**先把既有产物复制一份带时间戳的备份，写坏了能一条命令回到上一代。
+#
+# 命名：`<存档基名>.<ext>.prev-<YYYYmmdd-HHMMSS>`（例 `RMUC2026.posegraph.prev-20261006-161530`）
+#   · 为什么带时间戳而不是固定 `.bak`：`save` 会被反复调用；固定 `.bak` 只有一代，
+#     连续两次坏 save 就把好存档挤掉了。时间戳可以留**多代**，代价只是磁盘（见 keep）。
+#   · 为什么 keep 默认 3：一份 ~64 s 的存档 = 5.4 MB posegraph + 0.6 MB data,
+#     3 代 ≈ 18 MB；PCD 侧一份 3~18 MB，3 代 ≈ 9~54 MB。既可回溯又不会无界增长。
+#     （时间戳排序取**最新 keep 代**，更老的自动删；删除只针对本函数自己生成的名字。）
+# 备份的是「一整套」：posegraph 侧 = .posegraph + .data + .meta.yaml，
+#   PCD 侧 = .pcd + .meta.yaml —— 单独恢复 `*.data` 而不恢复 `*.posegraph` 没有意义。
+BACKUP_MARK = '.prev-'
+BACKUP_TS_FMT = '%Y%m%d-%H%M%S'
+BACKUP_KEEP = 3
+_BACKUP_RE = None
+
+
+def _backup_re():
+    global _BACKUP_RE
+    if _BACKUP_RE is None:
+        import re
+        _BACKUP_RE = re.compile(r'^(.+)\.prev-(\d{8}-\d{6})$')
+    return _BACKUP_RE
+
+
+def backup_stamp(when=None):
+    return (when or datetime.datetime.now()).strftime(BACKUP_TS_FMT)
+
+
+def backup_path(path, ts):
+    return '%s%s%s' % (path, BACKUP_MARK, ts)
+
+
+def backup_ts_of(path):
+    """从一个备份文件名里取回时间戳；不是备份文件 ⇒ None。"""
+    m = _backup_re().match(os.path.basename(path))
+    return m.group(2) if m else None
+
+
+def artifact_paths(base, kind):
+    """一份存档"一整套"包含哪些文件（备份/恢复/展示共用）。"""
+    if kind == KIND_POSEGRAPH:
+        return [base + '.posegraph', base + '.data', manifest_path(base)]
+    if kind == KIND_PCD:
+        return [base + '.pcd', manifest_path(base)]
+    if kind == 'all':
+        return artifact_paths(base, KIND_POSEGRAPH) + [base + '.pcd']
+    raise ValueError('kind 只能是 %s/%s/all，收到 %r' % (KIND_POSEGRAPH, KIND_PCD, kind))
+
+
+def _artifact_sets(name, kind, directory=None):
+    """返回 [(path, 人类可读标签)]：把 `--kind all` 展开成 map/ 与 PCD/ 两侧。"""
+    out = []
+    for k in ([KIND_POSEGRAPH, KIND_PCD] if kind == 'all' else [kind]):
+        if directory:
+            d = directory
+        else:
+            d = map_dir() if k == KIND_POSEGRAPH else pcd_dir()
+        for p in artifact_paths(os.path.join(d, name), k):
+            out.append((p, k))
+    return out
+
+
+def list_backups(path):
+    """某文件的所有备份：[(ts, 备份路径)]，**新的在前**。"""
+    d = os.path.dirname(path) or '.'
+    pre = os.path.basename(path) + BACKUP_MARK
+    out = []
+    try:
+        for fn in os.listdir(d):
+            if not fn.startswith(pre):
+                continue
+            ts = fn[len(pre):]
+            if not _backup_re().match(fn):
+                continue
+            out.append((ts, os.path.join(d, fn)))
+    except OSError:
+        return []
+    return sorted(out, key=lambda t: t[0], reverse=True)
+
+
+def sha256_12(path, limit=None):
+    """取前 12 位十六进制 sha256（人读的指纹；limit = 只算前 N 字节，用于大文件快速比对）。"""
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, 'rb') as f:
+            while True:
+                b = f.read(1 << 20)
+                if not b:
+                    break
+                h.update(b)
+                if limit and f.tell() >= limit:
+                    break
+    except OSError:
+        return None
+    return h.hexdigest()[:12]
+
+
+def _unique_backup_ts(path, ts):
+    """同一秒内重复备份（save 后马上 restore）不能互相覆盖 ⇒ 秒数往后挪到空位。"""
+    t = datetime.datetime.strptime(ts, BACKUP_TS_FMT)
+    while os.path.exists(backup_path(path, ts)):
+        t += datetime.timedelta(seconds=1)
+        ts = t.strftime(BACKUP_TS_FMT)
+    return ts
+
+
+def backup_files(paths, keep=BACKUP_KEEP, ts=None, dry_run=False, log=print):
+    """把 `paths` 里**存在**的文件各复制一份 `<path>.prev-<ts>`，并按 keep 轮转。返回记录列表。
+
+    每个文件用**同一个时间戳**（同一代），这样 restore 能按代整体回滚。
+    返回 [{'src','dst','ts','size','sha256','skipped'}]。
+    """
+    ts = ts or backup_stamp()
+    recs = []
+    for p in paths:
+        if not os.path.isfile(p):
+            recs.append({'src': p, 'dst': None, 'ts': None, 'size': None,
+                         'sha256': None, 'skipped': '不存在'})
+            continue
+        my_ts = _unique_backup_ts(p, ts)
+        dst = backup_path(p, my_ts)
+        if dry_run:
+            recs.append({'src': p, 'dst': dst, 'ts': my_ts,
+                         'size': os.path.getsize(p), 'sha256': None, 'skipped': 'dry-run'})
+            continue
+        tmp = dst + '.part'
+        import shutil
+        shutil.copy2(p, tmp)
+        os.replace(tmp, dst)
+        recs.append({'src': p, 'dst': dst, 'ts': my_ts, 'size': os.path.getsize(dst),
+                     'sha256': sha256_12(dst), 'skipped': None})
+        if log:
+            log('  [备份] %s → %s（%.2f MB sha256:%s）'
+                % (os.path.basename(p), os.path.basename(dst),
+                   os.path.getsize(dst) / 1048576.0, recs[-1]['sha256']))
+        _prune_backups(p, keep, log=log)
+    return recs
+
+
+def _prune_backups(path, keep, log=print):
+    """只保留最新 keep 代（删除的目标**必须**匹配 `<path>.prev-<ts>` 这个模式）。"""
+    if keep is None or keep <= 0:
+        return []
+    gens = list_backups(path)
+    removed = []
+    for ts, p in gens[int(keep):]:
+        if backup_path(path, ts) != p:        # 双保险：删之前再核一次"这个名字是我生成的"
+            continue
+        try:
+            os.unlink(p)
+            removed.append(p)
+            if log:
+                log('  [轮转] 删掉过老备份 %s（keep=%d）' % (os.path.basename(p), keep))
+        except OSError:
+            pass
+    return removed
+
+
+def generations(name, kind='all', directory=None):
+    """列出这份存档现存的备份代：{ts: [(live_path, backup_path, size)]}，ts 新的在前（dict 保序）。"""
+    out = {}
+    for p, _k in _artifact_sets(name, kind, directory):
+        for ts, b in list_backups(p):
+            if not os.path.isfile(b):
+                continue
+            out.setdefault(ts, []).append((p, b, os.path.getsize(b)))
+    return {ts: out[ts] for ts in sorted(out, key=lambda t: t, reverse=True)}
+
+
+def _group_paths(name, k, directory=None):
+    """一套存档里"同一时刻一起备份"的那组文件：位姿图侧 3 个 / PCD 侧 2 个。"""
+    d = directory or (map_dir() if k == KIND_POSEGRAPH else pcd_dir())
+    return artifact_paths(os.path.join(d, name), k)
+
+
+def restore_files(name, kind='all', from_ts=None, keep=BACKUP_KEEP, dry_run=False,
+                  directory=None, log=print):
+    """把一份存档回滚到备份。`from_ts` 可以是时间戳，也可以是某个备份文件路径。
+
+    语义（有意如此）：
+      · 不给 `--from` ⇒ **按组各取最新一代**：位姿图侧（posegraph+data+sidecar）取该组最新，
+        PCD 侧（pcd+sidecar）取该组最新。为什么按组而不是"全局最新一个时间戳"：
+        两侧是**两个不同的写者**在不同时刻备份的（位姿图由 map_archive.sh 写、PCD 由累加器写）
+        ⇒ 时间戳天然不同；2026-10-06 实测按"全局最新"回滚只会恢复 PCD 侧、把位姿图漏掉
+        （见 .tmp_hygiene/out/real1/run.txt 的 ❌）。组内文件永远同刻同代，所以按组对齐是对的。
+      · 给了 `--from T` ⇒ 只回滚**在 T 这一代真的备份过**的文件（其余不动）。
+      · 回滚前先把**当前**（要坏的）文件也备份一代 ⇒ restore 本身可逆；
+      · 只回滚备份过的文件，不会因为 restore 删掉任何东西。
+    返回 (ok, ts, recs, message)；ts 给 `--from` 时是那个时间戳，否则是 None（多代）。
+    """
+    groups = [KIND_POSEGRAPH, KIND_PCD] if kind == 'all' else [kind]
+    ts_arg = None
+    if from_ts:
+        ts_arg = backup_ts_of(from_ts) or str(from_ts)
+        if not ts_arg:
+            return False, None, [], '看不懂 --from=%r（要时间戳 20261006-161530 或某个 .prev-* 文件路径）' % (from_ts,)
+    plans = []            # [(ts, live, backup)]
+    for k in groups:
+        paths = _group_paths(name, k, directory)
+        if ts_arg:
+            for live in paths:
+                bak = backup_path(live, ts_arg)
+                if os.path.isfile(bak):
+                    plans.append((ts_arg, live, bak))
+        else:
+            by_ts = {}
+            for live in paths:
+                for ts, bak in list_backups(live):
+                    by_ts.setdefault(ts, []).append((live, bak))
+            if not by_ts:
+                continue
+            newest = max(by_ts)
+            for live, bak in by_ts[newest]:
+                plans.append((newest, live, bak))
+    if not plans:
+        avail = []
+        for k in groups:
+            for live in _group_paths(name, k, directory):
+                avail += [t for t, _b in list_backups(live)]
+        return False, ts_arg, [], ('没有找到可用的备份代（%s%s）；现存代：%s'
+                                   % (name, '' if kind == 'all' else '/%s' % kind,
+                                      ', '.join(sorted(set(avail), reverse=True)) or '（一个都没有）'))
+    recs = []
+    for ts, live, bak in plans:
+        cur = _file_info(live)
+        rec = {'live': live, 'from': bak, 'ts': ts, 'bak_size': os.path.getsize(bak),
+               'bak_sha256': sha256_12(bak), 'before': cur,
+               'before_sha256': sha256_12(live) if cur else None}
+        if not dry_run:
+            if cur:                                  # 当前文件先留一代（restore 可逆）
+                backup_files([live], keep=keep, log=log)
+            import shutil
+            tmp = live + '.restore-part'
+            shutil.copy2(bak, tmp)
+            os.replace(tmp, live)
+            rec['after'] = _file_info(live)
+            rec['after_sha256'] = sha256_12(live)
+        recs.append(rec)
+        if log:
+            log('  [恢复] %-34s ← %-40s %s B sha256:%s%s'
+                % (os.path.basename(live), os.path.basename(bak), rec['bak_size'], rec['bak_sha256'],
+                   '  [dry-run]' if dry_run else ' → 现 %s B sha256:%s'
+                   % (rec.get('after', {}).get('size'), rec.get('after_sha256'))))
+    used = sorted({r['ts'] for r in recs})
+    return True, (used[0] if len(used) == 1 else None), recs, \
+        ('已恢复 %d 个文件（代：%s；位姿图侧与 PCD 侧各取自己那一组的最新一代）'
+         % (len(recs), ', '.join(used)))
+
+
 # ============================================================ CLI
 def _cmd_check(a):
     if a.dir:
@@ -616,6 +869,63 @@ def _cmd_spawn_table(a):
     return 0
 
 
+def _kind_label(kind):
+    return {'all': '2D 位姿图 + 3D 点云', KIND_POSEGRAPH: '2D 位姿图', KIND_PCD: '3D 点云'}[kind]
+
+
+def _cmd_backup(a):
+    """把现有存档整套备份一代（写之前调；也可手工调）。"""
+    files = [p for p, _k in _artifact_sets(a.name, a.kind, a.dir)]
+    exist = [p for p in files if os.path.isfile(p)]
+    if not exist:
+        print('[map_archive] 没有可备份的文件（%s 这套存档一个都不在）：' % _kind_label(a.kind))
+        for p in files:
+            print('    %s（不存在）' % p)
+        return 0
+    print('[map_archive] 备份 %s（%d 个文件，keep=%d）' % (_kind_label(a.kind), len(exist), a.keep))
+    recs = backup_files(files, keep=a.keep, dry_run=a.dry_run)
+    if a.json:
+        print(json.dumps(recs, ensure_ascii=False, indent=2))
+    n = sum(1 for r in recs if r['dst'])
+    print('[map_archive] ✅ 备份完成：%d 个文件 → `*.prev-<ts>`（keep=%d）' % (n, a.keep))
+    return 0
+
+
+def _cmd_backups(a):
+    gens = generations(a.name, a.kind, a.dir)
+    print('[map_archive] 备份代（%s，%s）：%s' % (a.name, _kind_label(a.kind),
+                                                 '无' if not gens else '%d 代' % len(gens)))
+    for ts, items in gens.items():
+        print('  · %s（%d 个文件，共 %.2f MB）' % (ts, len(items),
+                                                 sum(i[2] for i in items) / 1048576.0))
+        for live, bak, size in items:
+            print('      %-38s %8.2f MB  %s' % (os.path.basename(bak), size / 1048576.0,
+                                                '（当前文件在）' if os.path.isfile(live) else '（当前文件缺失）'))
+    if a.json:
+        print(json.dumps({ts: [{'live': l, 'backup': b, 'size': s} for l, b, s in items]
+                          for ts, items in gens.items()}, ensure_ascii=False, indent=2))
+    return 0 if gens else 5
+
+
+def _cmd_restore(a):
+    ok, ts, recs, msg = restore_files(a.name, a.kind, from_ts=a.from_,
+                                      keep=a.keep, dry_run=a.dry_run, directory=a.dir)
+    if not ok:
+        print('[map_archive] ❌ %s' % msg, file=sys.stderr)
+        return 5
+    print('[map_archive] %s %s' % ('（dry-run）' if a.dry_run else '✅', msg))
+    for r in recs:
+        print('  · %-34s ← %-40s %s' % (os.path.basename(r['live']), os.path.basename(r['from']),
+                                        '%d B sha256:%s → %s B sha256:%s'
+                                        % ((r['before']['size'] if r['before'] else -1),
+                                           r['before_sha256'] or '—',
+                                           (r.get('after') or {}).get('size', -1),
+                                           r.get('after_sha256') or '—')))
+    print('  提示：restore 只回滚**备份过的**文件；当前文件也已被留了一代 ⇒ restore 本身可逆。')
+    print('  续建用的 sidecar（.meta.yaml）与位姿图/点云同代恢复 ⇒ 守卫看到的仍是自洽的一套。')
+    return 0
+
+
 def _parse_pose3(text):
     if text is None:
         return None
@@ -671,6 +981,31 @@ def build_parser():
     p = sub.add_parser('dirs', help='打印规范存档目录（launch 与脚本实际读写的那两个）')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=_cmd_dirs)
+
+    def add_backup_common(p):
+        p.add_argument('--name', required=True, help='存档基名（不含扩展名）')
+        p.add_argument('--kind', choices=[KIND_POSEGRAPH, KIND_PCD, 'all'], default='all',
+                       help='all = 2D 位姿图 + 3D 点云两侧都算（默认）')
+        p.add_argument('--dir', help='覆盖目录（只给单侧 kind 时有意义；测试用）')
+
+    p = sub.add_parser('backup', help='把现有存档整套备份一代（`<文件>.prev-<ts>`，默认留 3 代）')
+    add_backup_common(p)
+    p.add_argument('--keep', type=int, default=BACKUP_KEEP, help='每侧保留几代（默认 %d）' % BACKUP_KEEP)
+    p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=_cmd_backup)
+
+    p = sub.add_parser('backups', help='列出现存的备份代（新的在前）；没有备份 ⇒ 退出码 5')
+    add_backup_common(p)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=_cmd_backups)
+
+    p = sub.add_parser('restore', help='把存档回滚到某一代备份（默认最新一代；退出码 5 = 没有这一代）')
+    add_backup_common(p)
+    p.add_argument('--from', dest='from_', help='时间戳（20261006-161530）或某个 `*.prev-*` 文件路径')
+    p.add_argument('--keep', type=int, default=BACKUP_KEEP)
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=_cmd_restore)
 
     p = sub.add_parser('spawn-table', help='打印/核对场地出生点表（本文件 = 单一事实来源）')
     p.add_argument('--check', action='store_true', help='与 hzmi_rm_simulation 的 spawn 值逐项核对')
