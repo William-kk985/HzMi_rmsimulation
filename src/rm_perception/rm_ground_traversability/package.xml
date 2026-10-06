@@ -19,6 +19,9 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <!-- ★ 2026-10-07：前瞻限速只用到 nav2_msgs/msg/SpeedLimit 这一个消息类型 -->
+  <depend>nav2_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>pcl_conversions</depend>
   <depend>eigen</depend>
   <depend>libpcl-all-dev</depend>

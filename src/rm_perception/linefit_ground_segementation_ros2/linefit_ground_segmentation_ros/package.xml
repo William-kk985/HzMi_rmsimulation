@@ -17,6 +17,10 @@
   <depend>linefit_ground_segmentation</depend>
   <!-- ★ 2026-10-07：地面分割之后的坡度/台阶判定（header-only，无节点） -->
   <depend>rm_ground_traversability</depend>
+  <!-- ★ 2026-10-07：前瞻限速发的 nav2_msgs/msg/SpeedLimit（消息包；本节点仍不发 /cmd_vel） -->
+  <depend>nav2_msgs</depend>
+  <!-- ★ 2026-10-07：前瞻限速只订阅 /odom 的速度符号（判运动方向），不发任何东西 -->
+  <depend>nav_msgs</depend>
   
   <export>
     <build_type>ament_cmake</build_type>

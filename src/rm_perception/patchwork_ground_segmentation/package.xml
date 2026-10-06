@@ -24,6 +24,9 @@
   <depend>tf2_ros</depend>
   <depend>eigen</depend>
   <depend>pcl_conversions</depend>
+  <!-- ★ 2026-10-07：前瞻限速发的 nav2_msgs/msg/SpeedLimit（消息包；本节点仍不发 /cmd_vel） -->
+  <depend>nav2_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>pcl_ros</depend>
   <!-- bench 目标（ground_seg_ab）额外需要 linefit 库做同帧对照 -->
   <depend>linefit_ground_segmentation</depend>

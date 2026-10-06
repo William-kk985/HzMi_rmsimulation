@@ -126,6 +126,60 @@ struct Criteria
   }
 };
 
+/// 前瞻走廊查询参数（**只描述"往哪看、看多远"，不含任何速度映射** —— 速度那一步在
+/// slope_speed_limit.hpp 里，见该文件头注）。
+///
+/// 为什么是"朝向走廊"而不是"贴着规划路径"：本类跑在**传感器帧**里（livox 安装 `rpy 0 0 0`
+/// ⇒ 帧的 +x 就是车头方向），而地面分割节点**不订阅 /plan、不查 TF**（那是它零故障面的前提）。
+/// 要用规划路径做前瞻就得把点云/路径互转到同一帧 ⇒ 给感知节点加一条 TF + 话题依赖。
+/// 代价/收益：路径前瞻只比朝向走廊"省"掉转向时走廊扫过的不相关几何（表现为偶尔多限一点速度），
+/// 而朝向走廊零依赖、零时序问题 ⇒ 选朝向走廊，并把走廊半宽 + 张角做成参数（转弯时靠张角覆盖）。
+struct CorridorQuery
+{
+  bool reverse{false};            ///< true = 车正在**倒车** ⇒ 主窗口朝 −x（见 speed_limit_direction_topic）
+  double lookahead_m{3.0};        ///< 主窗口（运动方向）前瞻距离（m）
+  /// **反方向窗口**（m）。>0 时同时看运动方向的背面 —— 这是"倒车撞车尾后面的坡脚"这个坑的**默认修法**：
+  ///   只朝一个方向看的走廊会完全漏掉背面的几何，而"运动方向"这个信息本身要么拿不到（话题没起）、
+  ///   要么语义要看里程计约定（实测用 /odom 的 `twist.linear.x` 符号**没有**触发，见 docs §5/§7）。
+  ///   取 1.2 m（比正向短）：倒车速度实测 ~1.0~1.4 m/s，需要的预警距离更短；同时把"过了特征还要慢多久"
+  ///   限制在 1.2 m 以内（时间代价可控）。
+  double rear_lookahead_m{1.2};
+  double half_width_m{0.28};      ///< 走廊固定半宽（m）：车体半宽 0.155 + 余量
+  double spread_deg{8.0};         ///< 走廊随距离张开的半角（deg）：覆盖转弯时的扫掠
+  double slope_baseline_m{0.40};  ///< 坡度描述子的基线（m）= 2 个粗格（只用于文档/自检）
+};
+
+/// 一个走廊格（= 一个 0.20 m 粗格）的**连续量**（这就是"坡度/台阶连续量"的载体）。
+struct CorridorCell
+{
+  double x{0.0};          ///< 传感器系 x（前向，m）
+  double y{0.0};          ///< 传感器系 y（m）
+  double d{0.0};          ///< 到车体前缘的距离（沿运动方向；取格子**近边**，保守，m）
+  bool ahead{true};       ///< true = 在运动方向那一侧（false = 反方向窗口里的格）
+  double ground_z{0.0};   ///< 该格局部地面高度（m）
+  double slope_deg{0.0};  ///< 该格局部地面坡度（deg，复用 slopeOf() ⇒ 与判据同源）
+  double dtan_deg{0.0};   ///< **坡度变化**（deg）：相对"脚下附近"参考坡度的等效角，atan|Δtanθ|
+  double step_m{0.0};     ///< **台阶残差**（m）：格内最高点 − 局部地面 − 该格坡度能解释的抬升
+  double cell_span_m{0.0};///< 该格边长（m），用于把残差折算成等效坡度
+};
+
+/// 一帧的前瞻走廊剖面（连续量的集合 + 极值）。
+struct CorridorProfile
+{
+  std::vector<CorridorCell> cells;
+  std::size_t cells_total{0};      ///< 落在走廊几何内的粗格数（含无地面的）
+  double max_slope_deg{0.0};       ///< 走廊内最大局部坡度（deg）
+  double max_slope_d{0.0};         ///< 它到车体的距离（m）
+  double max_dtan_deg{0.0};        ///< 走廊内最大**坡度变化**（deg）
+  double max_dtan_d{0.0};          ///< 它到车体的距离（m）
+  double max_step_m{0.0};          ///< 走廊内最大台阶残差（m）
+  double max_step_d{0.0};          ///< 它到车体的距离（m）
+  double near_slope_deg{0.0};      ///< "脚下附近"参考坡度（deg）= 最近 0.40 m 内各格坡度的均值
+  double data_min_d{-1.0};         ///< 有数据的最近/最远距离（m）；-1 = 没有数据
+  double data_max_d{-1.0};
+  bool valid{false};               ///< 至少有一个可用格
+};
+
 /// 单帧统计（节点把它打进日志 / 供离线核对）。
 struct FrameStats
 {
@@ -141,6 +195,10 @@ struct FrameStats
   std::size_t coarse_cells{0};     ///< 有点的粗格数
   std::size_t coarse_cells_no_ground{0};
   double classify_ms{0.0};
+  // ---- 前瞻走廊（describeCorridor() 填；不在 apply() 里算，见节点调用顺序） ----
+  std::size_t corridor_cells{0};           ///< 走廊内可用粗格数
+  double corridor_max_slope_deg{0.0};      ///< 走廊内最大局部坡度
+  double corridor_max_step_m{0.0};         ///< 走廊内最大台阶残差
 };
 
 /// 坡度/台阶判定器（无 ROS、无 I/O；每帧调用 apply()，内部容器复用 ⇒ 无每帧分配尖峰）。
@@ -195,10 +253,156 @@ public:
     stats_.coarse_cells = ground_cache_.size();
     stats_.coarse_cells_no_ground = 0;
     for (const auto & kv : ground_cache_) {
-      if (!std::isfinite(kv.second)) {
+      if (!std::isfinite(kv.second.ground)) {
         ++stats_.coarse_cells_no_ground;
       }
     }
+  }
+
+  /// 前瞻走廊剖面（**连续量的出口**）：在 apply() 之后调用。
+  ///
+  /// 只做"测量 + 描述"，不做任何判断/限速（判据在 apply() 里，速度映射在 slope_speed_limit.hpp）
+  /// ⇒ 三个消费者（代价图 / 诊断 / 限速）看的是**同一份**坡度与台阶数。
+  ///
+  /// 每个走廊粗格给三个连续量（前两个是"跳跃"，第三个是"绝对坡度"）：
+  ///   · dtan_deg  = **坡度变化**（相对"脚下附近" 0.40 m 内的参考坡度，atan|Δtanθ|）
+  ///     —— 撞击的物理量就来自**坡度变化**（a ≈ v·Δtanθ/Δt），而不是坡度本身：
+  ///        在**恒定**坡面上行驶没有垂向速度突变 ⇒ 不该因为"我在坡上"而限速；
+  ///        坡脚/坡顶/倒角起的那个格才是要减速的地方。
+  ///   · step_m    = 格内最高点 − 局部地面 − 该格坡度在格内能解释的抬升（**残差**）
+  ///     —— **窄尺度**：整格内完成的尖台阶（它的抬升不改变邻格地面 ⇒ 坡度描述子看不见）。
+  ///     减去"坡度能解释的抬升"是为了去掉与 dtan 的重复计数：坡面上 max_rise ≈ 格边长·tanθ。
+  ///   · slope_deg = 局部地面坡度的**绝对**值（坡道本体；诊断 + 限速器的兜底规则用）
+  ///     —— 兜底场景：坡脚落在雷达盲区里（下视 −7.22° ⇒ 平地最近只看得见 1.78 m），
+  ///        此时走廊里**全是坡面**、dtan≈0，只有"绝对坡度"能提示"我正在往坡上开"。
+  ///
+  /// 坐标系：与 apply() 同一朵云（传感器帧，+x = 车头）。d 取格子**近边**（保守）。
+  void describeCorridor(const CorridorQuery & q, CorridorProfile * out)
+  {
+    if (out == nullptr) {
+      return;
+    }
+    out->cells.clear();
+    out->cells_total = 0;
+    out->max_slope_deg = 0.0;
+    out->max_dtan_deg = 0.0;
+    out->max_step_m = 0.0;
+    out->max_slope_d = 0.0;
+    out->max_dtan_d = 0.0;
+    out->max_step_d = 0.0;
+    out->near_slope_deg = 0.0;
+    out->data_min_d = -1.0;
+    out->data_max_d = -1.0;
+    out->valid = false;
+    if (!criteria_.enable || !criteria_.valid()) {
+      return;
+    }
+    const double cell = criteria_.ground_cell_m;
+    const double half_w = std::max(0.0, q.half_width_m);
+    const double tan_spread = std::tan(std::max(0.0, q.spread_deg) * kPi / 180.0);
+    const double look = std::max(0.0, q.lookahead_m);
+    const double rear = std::max(0.0, q.rear_lookahead_m);
+
+    // ① 先挑出几何上落在走廊里的粗格（**不要**在遍历 unordered_map 时调 slopeOf：
+    //    它会往 ground_cache_ 里插新键 ⇒ 迭代器失效）。
+    keys_.clear();
+    for (const auto & kv : ground_cache_) {
+      if (!std::isfinite(kv.second.ground)) {
+        continue;
+      }
+      int64_t cx = 0, cy = 0;
+      decodeKey(kv.first, &cx, &cy);
+      const double x = (static_cast<double>(cx) + 0.5) * cell;
+      const double y = (static_cast<double>(cy) + 0.5) * cell;
+      const double xs = q.reverse ? -x : x;   // 运动方向坐标（倒车 ⇒ 往 −x 看）
+      const double xr = -xs;                  // 反方向坐标
+      const bool ahead = xs > 0.0 && xs <= look + 0.5 * cell;
+      const bool behind = rear > 0.0 && xr > 0.0 && xr <= rear + 0.5 * cell;
+      if (!ahead && !behind) {
+        continue;   // 两个窗口之外（+半格容差：格心稍远但格边在窗口内）
+      }
+      const double dist = ahead ? xs : xr;
+      if (std::abs(y) > half_w + dist * tan_spread) {
+        continue;   // 走廊外（转弯时走廊随距离张开）
+      }
+      ++out->cells_total;
+      keys_.push_back(kv.first);
+    }
+
+    // ② 逐格取连续量（这里才可能插缓存，安全：不再迭代 ground_cache_）
+    double dmin = std::numeric_limits<double>::infinity(), dmax = -1.0;
+    for (const int64_t key : keys_) {
+      int64_t cx = 0, cy = 0;
+      decodeKey(key, &cx, &cy);
+      const CoarseCell & c = cellOf(cx, cy);
+      if (!std::isfinite(c.ground)) {
+        continue;
+      }
+      CorridorCell cc;
+      cc.x = (static_cast<double>(cx) + 0.5) * cell;
+      cc.y = (static_cast<double>(cy) + 0.5) * cell;
+      const double xs = q.reverse ? -cc.x : cc.x;
+      cc.ahead = xs > 0.0;
+      // d = 沿**该格所属窗口**的距离（运动方向那一侧 = x；反方向 = −x）
+      cc.d = std::max(0.0, (cc.ahead ? xs : -xs) - 0.5 * cell);
+      cc.ground_z = c.ground;
+      cc.slope_deg = slopeOf(cx, cy);
+      const double explained = cell * std::tan(cc.slope_deg * kPi / 180.0);
+      cc.step_m = std::max(0.0, static_cast<double>(c.max_rise) - explained);
+      cc.cell_span_m = cell;
+      if (cc.slope_deg > out->max_slope_deg) {
+        out->max_slope_deg = cc.slope_deg;
+        out->max_slope_d = cc.d;
+      }
+      if (cc.step_m > out->max_step_m) {
+        out->max_step_m = cc.step_m;
+        out->max_step_d = cc.d;
+      }
+      if (cc.ahead) {
+        dmin = std::min(dmin, cc.d);
+      }
+      dmax = std::max(dmax, cc.d);
+      out->cells.push_back(cc);
+    }
+    if (!out->cells.empty()) {
+      out->valid = true;
+      out->data_min_d = dmin;
+      out->data_max_d = dmax;
+      // ③ "脚下附近"参考坡度：**最近那一列**格（d ≤ dmin + 半个粗格）的坡度均值。
+      //    不可见的地面在车下（盲区）拿不到 ⇒ 用最近的可见格当代理（在坡面上两者同坡）。
+      //    为什么不是"最近 0.40 m 内全部格"：坡脚附近那一窗口会**同时**含平格与坡格 ⇒
+      //    参考坡度取成中间值 ⇒ 平格与坡格都出现 2~3° 的假"坡度变化"（离线扫掠里表现为
+      //    对同一片坡反复承诺、限速值上下跳）。取"最近一列"则参考始终是"我正要开上去的那块"。
+      const double ref_win = 0.5 * criteria_.ground_cell_m;
+      double sum = 0.0;
+      int n = 0;
+      // 参考坡度**优先只取"运动方向那一侧"的最近格**：前后两个窗口混在一起算参考坡度，
+      // 会让"前方坡脚 vs 后方坡面"这种组合产生假的坡度变化。
+      for (int pass = 0; pass < 2 && n == 0; ++pass) {
+        for (const CorridorCell & c : out->cells) {
+          if ((pass == 0) != c.ahead) {
+            continue;   // pass 0 只看 ahead；pass 1 只看反方向
+          }
+          if (c.d <= dmin + ref_win) {
+            sum += c.slope_deg;
+            ++n;
+          }
+        }
+      }
+      out->near_slope_deg = (n > 0) ? (sum / n) : 0.0;
+      const double tan_near = std::tan(out->near_slope_deg * kPi / 180.0);
+      for (CorridorCell & c : out->cells) {
+        const double tan_c = std::tan(c.slope_deg * kPi / 180.0);
+        c.dtan_deg = std::atan(std::abs(tan_c - tan_near)) * 180.0 / kPi;
+        if (c.dtan_deg > out->max_dtan_deg) {
+          out->max_dtan_deg = c.dtan_deg;
+          out->max_dtan_d = c.d;
+        }
+      }
+    }
+    stats_.corridor_cells = out->cells.size();
+    stats_.corridor_max_slope_deg = out->max_slope_deg;
+    stats_.corridor_max_step_m = out->max_step_m;
   }
 
 private:
@@ -207,7 +411,20 @@ private:
   {
     float lo1{std::numeric_limits<float>::infinity()};   ///< 最低点
     float lo2{std::numeric_limits<float>::infinity()};   ///< 次低点（只为观测；地面取 lo1）
+    float hi{-std::numeric_limits<float>::infinity()};   ///< 最高点（"这一细格里最高能踩到多高"）
     int n{0};
+  };
+
+  /// 一个 0.20 m 粗格的两种连续量（**判据与前瞻共用同一份缓存**）：
+  ///   · ground  = 局部地面高度（= 格内各细格"最低点"的 p05，与 pcd_to_nav2_map.py 同秩公式）
+  ///   · max_rise= 格内最高点 − 局部地面（连续"台阶/抬升"量；判据只看它 > step_height_threshold）
+  struct CoarseCell
+  {
+    float ground{std::numeric_limits<float>::infinity()};   ///< +inf = 没有可用地面
+    /// 台阶/抬升的连续量（m）。取格内各细格"最高点"的 **p90**（不是全局 max）：
+    /// 真实点云里总有个别离群点（远处稀疏、擦边、垂向拖影），用 max 会被一个点带偏
+    /// （实测：单帧走廊内 max 台阶残差噪声可达 0.15 m ⇒ 台阶规则被噪声反复触发、一路爬行）。
+    float max_rise{0.0f};
   };
 
   static int64_t keyOf(int64_t ix, int64_t iy)
@@ -215,6 +432,13 @@ private:
     // ix/iy 各自 32 位足够（±0.05 m × 2^31 ≈ ±1e8 m）；负数用低 32 位截断后拼装。
     return (static_cast<int64_t>(static_cast<int32_t>(ix)) << 32) |
            static_cast<int64_t>(static_cast<uint32_t>(static_cast<int32_t>(iy)));
+  }
+
+  /// keyOf() 的逆（describeCorridor 要从 key 还原格号）。
+  static void decodeKey(int64_t key, int64_t * ix, int64_t * iy)
+  {
+    *ix = static_cast<int32_t>(static_cast<uint64_t>(key) >> 32);
+    *iy = static_cast<int32_t>(key & 0xffffffffLL);
   }
 
   void buildGrid(const pcl::PointCloud<pcl::PointXYZ> & cloud)
@@ -238,12 +462,15 @@ private:
       } else if (z < cell.lo2) {
         cell.lo2 = z;
       }
+      if (z > cell.hi) {
+        cell.hi = z;
+      }
       ++cell.n;
     }
   }
 
-  /// 该点的粗格地面高度（m）；无穷大 = 没有可用地面。
-  float groundOf(int64_t cx, int64_t cy)
+  /// 该粗格的两种连续量；没有可用地面时 ground = +inf（缓存，重复调用零成本）。
+  const CoarseCell & cellOf(int64_t cx, int64_t cy)
   {
     const int64_t key = keyOf(cx, cy);
     const auto it = ground_cache_.find(key);
@@ -252,7 +479,9 @@ private:
     }
     const int k = std::min(criteria_.cell_ratio(), 8);   // 上限 8×8 = 64 次查表，防病态参数
     std::vector<float> lows;
+    std::vector<float> his;
     lows.reserve(static_cast<std::size_t>(k * k));
+    his.reserve(static_cast<std::size_t>(k * k));
     int points = 0;
     for (int a = 0; a < k; ++a) {
       for (int b = 0; b < k; ++b) {
@@ -262,9 +491,12 @@ private:
         }
         lows.push_back(fit->second.lo1);
         points += fit->second.n;
+        if (std::isfinite(fit->second.hi)) {
+          his.push_back(fit->second.hi);
+        }
       }
     }
-    float g = std::numeric_limits<float>::infinity();
+    CoarseCell out;
     if (!lows.empty() && points >= std::max(1, criteria_.ground_min_points)) {
       std::sort(lows.begin(), lows.end());
       // 与 pcd_to_nav2_map.py 的 _per_cell_percentile 同一条取秩公式：
@@ -273,10 +505,26 @@ private:
       const std::size_t target = static_cast<std::size_t>(
         std::floor(criteria_.ground_percentile / 100.0 *
         static_cast<double>(cnt > 0 ? cnt - 1 : 0)));
-      g = lows[std::min(target, cnt - 1)];
+      out.ground = lows[std::min(target, cnt - 1)];
+      if (!his.empty()) {
+        std::sort(his.begin(), his.end());
+        // p90（与 p05 同一条取秩公式）：一个离群点抬不动它
+        const std::size_t hn = his.size();
+        const std::size_t htarget = static_cast<std::size_t>(
+          std::floor(90.0 / 100.0 * static_cast<double>(hn > 0 ? hn - 1 : 0)));
+        const float hi_p90 = his[std::min(htarget, hn - 1)];
+        if (hi_p90 > out.ground) {
+          out.max_rise = hi_p90 - out.ground;
+        }
+      }
     }
-    ground_cache_[key] = g;
-    return g;
+    return ground_cache_.emplace(key, out).first->second;
+  }
+
+  /// 该点的粗格地面高度（m）；无穷大 = 没有可用地面。
+  float groundOf(int64_t cx, int64_t cy)
+  {
+    return cellOf(cx, cy).ground;
   }
 
   /// 粗格地面坡度（deg）。用中心差分；邻居没有地面时退化为单侧差分；都没有 ⇒ 0。
@@ -369,8 +617,9 @@ private:
   Criteria criteria_;
   FrameStats stats_;
   std::unordered_map<int64_t, FineCell> fine_;
-  std::unordered_map<int64_t, float> ground_cache_;
+  std::unordered_map<int64_t, CoarseCell> ground_cache_;   ///< 判据与前瞻**共用**的粗格缓存
   std::unordered_map<int64_t, float> slope_cache_;
+  std::vector<int64_t> keys_;                              ///< describeCorridor 的键缓冲（复用，免每帧分配）
 };
 
 }  // namespace rm_ground_traversability

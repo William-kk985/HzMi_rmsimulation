@@ -284,6 +284,9 @@ private:
     // 诊断：判据命中的点（`/segmentation/obstacle` 的子集）+ 每帧统计（私有话题）
     traversability_->publishStepEdge(cloud, msg->header);
     traversability_->publishStats();
+    // ★ 2026-10-07：前瞻限速（缺陷 ③ 后半段）。**必须在 applyFrame() 之后**：它复用同一帧的
+    //   粗格缓存（局部地面 / 台阶连续量），不重算判据。只发 nav2 SpeedLimit，不产生 /cmd_vel。
+    traversability_->updateSpeedLimit(msg->header);
 
     if (timing_pub_) {
       std_msgs::msg::Float64 t;

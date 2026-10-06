@@ -175,6 +175,9 @@ void SegmentationNode::scanCallback(
   // 注意：点用**原始点**（与 ground/obstacle 两朵云同源、同序），header 才是 msg 的 header。
   traversability_->publishStepEdge(cloud, msg->header);
   traversability_->publishStats();
+  // ★ 2026-10-07：前瞻限速（缺陷 ③ 后半段）。**必须在 applyFrame() 之后**：它复用同一帧的
+  //   粗格缓存（局部地面 / 台阶连续量），不重算判据。只发 nav2 SpeedLimit，不产生 /cmd_vel。
+  traversability_->updateSpeedLimit(msg->header);
 }
 
 int main(int argc, char **argv) {

@@ -19,6 +19,9 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+# ★ 2026-10-07 前瞻限速：只发 nav2_msgs/msg/SpeedLimit（消息包，不带任何 nav2 运行时依赖）
+find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 # 只需要 pcl_common（pcl::PointCloud / pcl::PointXYZ）；不链任何 PCL 库（纯头文件模板）。
 find_package(PCL QUIET REQUIRED COMPONENTS common)
@@ -31,13 +34,13 @@ target_link_libraries(${PROJECT_NAME} INTERFACE Eigen3::Eigen)
 target_include_directories(${PROJECT_NAME} SYSTEM INTERFACE ${PCL_INCLUDE_DIRS})
 target_compile_features(${PROJECT_NAME} INTERFACE cxx_std_17)
 ament_target_dependencies(${PROJECT_NAME} INTERFACE
-  rclcpp sensor_msgs std_msgs pcl_conversions)
+  rclcpp sensor_msgs std_msgs nav2_msgs nav_msgs pcl_conversions)
 
 install(TARGETS ${PROJECT_NAME} EXPORT export_${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
 ament_export_targets(export_${PROJECT_NAME})
 ament_export_include_directories(include)
-ament_export_dependencies(Eigen3 rclcpp sensor_msgs std_msgs pcl_conversions)
+ament_export_dependencies(Eigen3 rclcpp sensor_msgs std_msgs nav2_msgs nav_msgs pcl_conversions)
 
 ament_package()

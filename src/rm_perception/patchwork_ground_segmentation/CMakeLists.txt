@@ -24,6 +24,8 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(Eigen3 REQUIRED NO_MODULE)
 # 只需要 pcl_common：pcl::fromROSMsg/toROSMsg（pcl_conversions，头文件）、pcl::transformPointCloud、
@@ -58,6 +60,8 @@ ament_target_dependencies(patchwork_ground_segmentation_node
   std_msgs
   tf2
   tf2_ros
+  nav2_msgs
+  nav_msgs
   pcl_conversions
   rm_ground_traversability)
 
