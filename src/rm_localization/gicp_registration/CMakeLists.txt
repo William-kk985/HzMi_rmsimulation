@@ -125,6 +125,13 @@ rclcpp_components_register_node(${PROJECT_NAME}
 ament_auto_add_executable(gicp_backend_bench bench/gicp_backend_bench.cpp)
 set_target_properties(gicp_backend_bench PROPERTIES INSTALL_RPATH "$ORIGIN;$ORIGIN/..")
 
+# bench/gicp_selfsim_probe：**场地自相似性**探针 —— "初值偏了 δ，GICP 是把估计拉回真值，还是把 δ 留下？"
+#   这是 map→odom 自传播发散（docs/gicp_divergence_and_jitter.md §2）的机制证据来源：
+#   留下 ⇒ 该方向是一片连续极小 ⇒ 节点里"初值 = 上次结果 + 里程计增量"的递推就是一个正反馈回路。
+#   同一份代码路径（RegistrationBackend + voxelDownsample）；--scan 可喂**真实点云**（--dump-clouds 落盘的那种）。
+ament_auto_add_executable(gicp_selfsim_probe bench/gicp_selfsim_probe.cpp)
+set_target_properties(gicp_selfsim_probe PROPERTIES INSTALL_RPATH "$ORIGIN;$ORIGIN/..")
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights

@@ -85,6 +85,22 @@ private:
   // 读改写天然串行（同一 MutuallyExclusive 组、同一条回调序列），PCL/small_gicp 对象照旧只在这条路上被碰。
   // 返回 true = 本帧开头成功应用了一次初值；TF odom→base 查不到时**丢弃**本次初值并 WARN（与改动前一致）。
   bool consumePendingInitialPose();
+  // ---- 运动一致性门限 / 合理性检查 / 平滑（2026-10-06 新增）----
+  // 本帧的"创新"= 配准结果相对**它自己的初值**（= 上次采纳的 map→odom ∘ 本帧里程计增量，
+  // 也就是"里程计预测位姿"）挪动了多少。返回 (平移 m, yaw deg)。
+  static void innovationOf(
+    const Eigen::Matrix4d & guess, const Eigen::Matrix4d & T_map_sensor, double & dxy, double & dyaw_deg);
+  // 门限值 = clamp(rate·dt, min, max)（dt<=0 时按 min 处理）。两条都算出来给日志/状态行用。
+  void gateThresholds(double dt, double & allow_xy, double & allow_yaw_deg) const;
+  // 合理性：结果蕴含的 map→base_link（= T_map_odom_new ∘ T_odom_base）是否还在地图定义域里。
+  // 返回 false 时 why 里给一句人话（哪个界、差多少）。
+  bool plausibleMapBase(const Eigen::Matrix4d & T_map_base, std::string & why) const;
+  // 输出平滑的一步推进（在 mutex_ 下调用）：把**发布用的** T_map_odom_ 朝最近采纳的测量推进
+  // 1-exp(-dt/tau)。dt 用 steady_clock 自上次推进的差（定时器 50 Hz 与 align 帧都会调它）
+  // ⇒ 无论调用点在哪，发布出去的都是同一条连续轨迹。
+  void advanceSmoothedLocked();
+  // 采纳一帧：写测量链 + 清零拒绝计数 + （首次/人工初值后）把发布值直接对齐（不留平滑滞后）。
+  void acceptMeasurementLocked(const Eigen::Matrix4d & T_map_odom_meas, const rclcpp::Time & stamp);
   // 体素下采样：**已移到 registration_backend.hpp 的 voxelDownsample()**（两个后端共用同一实现，
   // leaf_size 仍由调用方给：地图 target 用 voxel_leaf_size_，实时点云 source 用 voxel_leaf_size_scan_）。
   bool lookupTf(
@@ -131,6 +147,34 @@ private:
   double publish_rate_hz_;
   double fitness_score_warn_, max_fitness_score_, stale_warn_sec_;
   int no_improve_cycles_warn_;
+
+  // ---- 运动一致性门限 / 合理性检查 / 平滑（2026-10-06 新增；治"map→odom 自传播发散 + 抖动"）----
+  // 背景（用户实跑 world:=RMUC2026 mode:=nav localization:=gicp nav:=mppi planner:=smac2d）：
+  //   车开到目标点后 map→odom 单调跑掉（y: 0.47 → 5.45 → 21.8 → 62.1，z 到 8.28），
+  //   而 **~/fitness_score 一直是 0.002~0.005 m²（"很好"）**、~/converged 一直 true
+  //   ⇒ 失败对既有健康判据**完全不可见**。机制、证据与阈值来历见
+  //   docs/gicp_divergence_and_jitter.md（§2 机制 / §3 参数）。
+  // 三道新判据（**只作用于"这一帧的配准结果要不要采纳"**，不改 GICP 数学、不改 TF 契约）：
+  //   ① 创新/运动一致性门限：|本帧结果 - 本帧初值|（初值 = 上次采纳值 + 里程计增量，
+  //      即"里程计预测位姿"）超过门限 ⇒ 判为发散 ⇒ **拒绝**，沿用上一次采纳的 map→odom；
+  //   ② 合理性/定义域：结果蕴含的 map→base_link 必须落在地图点云包围盒 + 余量内、z 在预期带内；
+  //   ③ 连续拒绝 N 帧 ⇒ 进入"定位失效"：**停发 map→odom**（沿用"没有初值就不发"的语义），
+  //      大声说明，等 /initialpose —— 绝不编造位姿。
+  bool gate_enable_;
+  // 每帧允许的**修正量变化速率**（m/s、deg/s）：门限 = clamp(rate·dt, step_min, step_max)。
+  // dt = 本帧与上次**采纳帧**的点云时间戳差（查不到时用 align 的墙钟差）。
+  // 为什么用"速率 + 硬上限"而不是固定值：8 Hz 采纳率下 dt≈0.125 s，固定值要么在掉帧时误拒、
+  // 要么在满速时放过（见 docs §3 的实测标定）。
+  double gate_trans_rate_, gate_trans_step_max_, gate_trans_step_min_;
+  double gate_yaw_rate_deg_, gate_yaw_step_max_deg_, gate_yaw_step_min_deg_;
+  // 合理性检查：地图点云 XY 包围盒外扩多少算"还在地图里"；map→base_link 的 z 带（map 系，绝对）。
+  double plausible_margin_xy_, plausible_z_min_, plausible_z_max_;
+  // 连续拒绝多少帧后判"定位失效"（停发 TF，等 /initialpose）。<=0 = 永不放弃（只沿用旧值，不入失效态）。
+  int lost_after_rejections_;
+  // 输出平滑：**只让修正量慢变**，高频运动继续由里程计提供（odom→base_link 不被本节点碰）。
+  // 一阶低通：published ← slerp/lerp(published, 最近采纳的测量, 1-exp(-dt/tau))，按 50 Hz 定时器推进。
+  bool smoothing_enable_;
+  double smoothing_tau_;
   // TF map→odom（以及 ~/pose）的时间戳前瞻量（秒）= AMCL transform_tolerance 语义：
   // 把 map→odom 盖成**未来**时间戳，nav2 消费者在 now+margin 处才查得到（否则 tf2 抛
   // "Lookup would require extrapolation into the future"）。详见 config 与本文件 publishTf 注释。
@@ -141,6 +185,10 @@ private:
 
   // ---- 地图 / 配准器 ----
   PointCloudT::Ptr map_cloud_;  // 已体素下采样、已去 NaN（后端 target）
+  // 地图（体素下采样后）在 map 系的包围盒 —— 合理性检查的**定义域**来源（不是硬编码常量：
+  // 换 world/PCD 资产时自动跟着变）。启动 banner 里也会打印，便于核对。
+  Eigen::Vector3d map_min_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d map_max_ = Eigen::Vector3d::Zero();
   // 可切换配准后端（backend 参数）：pcl = pcl::GeneralizedIterativeClosestPoint（默认，行为与改动前一致）；
   // small_gicp = koide3/small_gicp 的 Registration<GICPFactor, ParallelReductionOMP>。
   // **非线程安全** ⇒ 与原来的 gicp_ 成员一样，只在 align_cb_group_ 内被触碰（组内互斥保证不并发 align）。
@@ -172,11 +220,37 @@ private:
   //   同理 tf_broadcaster_->sendTransform 只在定时器组里调用（它不与 align 组共享 publisher）。
   //   2026-10-05 新增的 ~/small_gicp_error 也是 align 组独占（且只在 backend=small_gicp 时创建）。
   mutable std::mutex mutex_;
+  // **发布用的** map→odom（= 平滑后的值；50 Hz 定时器读它发 TF）。它就是"修正量"的慢变部分：
+  // 高频运动由 odom→base_link 提供，本节点只负责让修正量慢慢走（治"抖动"）。
   Eigen::Matrix4d T_map_odom_ = Eigen::Matrix4d::Identity();
+  // **最近一次被采纳的配准结果**（未平滑）= 平滑的**目标**。发布值 T_map_odom_ 朝它推进。
+  // ★ 关键设计（2026-10-06 实测后定）：**滤波必须在环路里** —— 下一帧 GICP 的初值取自
+  //   T_map_odom_（发布值/滤波值），而不是"上一帧测量值"。理由是实测到两条：
+  //     ① 本场地是"地板 + 规则重复墙体"，配准的答案在一小片**连续极小**里跳（实测：初值偏
+  //        ±0.25~0.5 m 时，结果落在离真值 0.07~0.5 m 的另一个极小，fitness 仍 0.002~0.01 m²）；
+  //     ② 于是"每帧把测量当新位姿"= 把这份跳变**积分**进去 ⇒ 静止不动时 map→odom 也会
+  //        随机游走（实测 120 s 漂 40 cm）、逐帧跳十几 cm（用户抱怨的"四处抖动"）。
+  //   低增益滤波放在环路里 ⇒ 噪声每帧只注入 α 倍 ⇒ 抖动 ~1/α 倍、随机游走 ~√α 倍；
+  //   而 LIO 的慢漂移（实测 1~3 cm/s）在 tau=1 s 下只滞后 ~1~3 cm，跟踪几乎无损。
+  Eigen::Matrix4d T_map_odom_target_ = Eigen::Matrix4d::Identity();
   bool estimate_valid_ = false;
   bool param_init_pending_ = false;
   bool cloud_seen_ = false;
   rclcpp::Time last_cloud_stamp_;
+  // 门限/合理性/失效态的可观测量与状态（~1 Hz 状态行 + 罕见 WARN 用）
+  rclcpp::Time last_meas_stamp_;          // 最近一次**采纳**帧的点云戳（门限的 dt 来源）
+  bool last_meas_stamp_valid_ = false;
+  int gate_reject_streak_ = 0;            // 当前连续拒绝帧数（任何一次采纳都清零）
+  int gate_rejects_ = 0;                  // 累计：被创新门限拒绝
+  int bound_rejects_ = 0;                 // 累计：被合理性检查拒绝
+  int lost_after_streak_ = 0;             // 进入"定位失效"时的连续拒绝数（=0 表示从未失效）
+  bool localization_lost_ = false;        // true = 已判失效：**停发 map→odom**，等 /initialpose
+  double last_innov_xy_ = 0.0;            // 最近一帧的创新（平移 m）
+  double last_innov_yaw_deg_ = 0.0;       // 最近一帧的创新（yaw deg）
+  double last_allow_xy_ = 0.0;            // 最近一帧算出的门限（给状态行看"差多少"）
+  double last_allow_yaw_deg_ = 0.0;
+  std::chrono::steady_clock::time_point last_smooth_tp_{};  // 平滑推进的墙钟基准
+  bool last_smooth_tp_valid_ = false;
   // 最近一次真正发出去的 TF map→odom 的戳（= now+tf_lookahead_sec_）。~/pose 复用它，
   // 保证 "pose 的戳 == TF 的戳"（消费端拿 pose 的戳去查 TF 时不会落在最新条目之外）。
   rclcpp::Time last_tf_stamp_;

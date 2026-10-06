@@ -249,6 +249,67 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   max_fitness_score_ = declare_parameter<double>("max_fitness_score", 0.3);
   no_improve_cycles_warn_ = declare_parameter<int>("no_improve_cycles_warn", 10);
   stale_warn_sec_ = declare_parameter<double>("stale_warn_sec", 3.0);
+
+  // ---- 运动一致性门限 / 合理性检查 / 输出平滑（2026-10-06 新增）----
+  // 来龙去脉、实测标定与取舍逐条写在 config/gicp_registration_sim.yaml 的对应键下面，
+  // 以及 docs/gicp_divergence_and_jitter.md §3。这里只重复"默认值是哪来的"：
+  //   · 健康跑（world:=RMUC2026 + small_point_lio + PCL GICP，8.0 Hz 采纳率）实测
+  //     map→odom 逐帧更新步长：p50≈1~2 mm、p95≈1 cm、p99≈2 cm、max≈6 cm（平移），
+  //     yaw p95≈0.4°、p99≈1.2° ⇒ 门限取"健康 p99 的若干倍"且**远低于**发散时的步长
+  //     （用户那次跑：单帧修正 0.5~16 m，速率 ~1 m/s）。
+  //   · 速率上限与机器人能力挂钩（MPPI vx_max=2.5 m/s / wz_max=2.5 rad/s，见
+  //     nav2_params_sim_controller_mppi.yaml）：门限 0.35 m/s ≈ v_max/7、12°/s ≈ 0.21 rad/s
+  //     —— 直觉是"里程计负责运动，GICP 只负责慢修正"；只要 LIO 的 odom 没坏，
+  //     修正速率就该比车慢一个量级。
+  gate_enable_ = declare_parameter<bool>("gate_enable", true);
+  gate_trans_rate_ = declare_parameter<double>("gate_trans_rate", 3.0);
+  gate_trans_step_max_ = declare_parameter<double>("gate_trans_step_max", 0.6);
+  gate_trans_step_min_ = declare_parameter<double>("gate_trans_step_min", 0.10);
+  gate_yaw_rate_deg_ = declare_parameter<double>("gate_yaw_rate_deg", 60.0);
+  gate_yaw_step_max_deg_ = declare_parameter<double>("gate_yaw_step_max_deg", 15.0);
+  gate_yaw_step_min_deg_ = declare_parameter<double>("gate_yaw_step_min_deg", 3.0);
+  plausible_margin_xy_ = declare_parameter<double>("plausible_margin_xy", 1.0);
+  plausible_z_min_ = declare_parameter<double>("plausible_z_min", -0.9);
+  plausible_z_max_ = declare_parameter<double>("plausible_z_max", 0.7);
+  lost_after_rejections_ = declare_parameter<int>("lost_after_rejections", 25);
+  smoothing_enable_ = declare_parameter<bool>("smoothing_enable", true);
+  smoothing_tau_ = declare_parameter<double>("smoothing_tau", 1.0);
+  // 非法值的处理原则与既有参数一致：**WARN + 退回默认**，绝不静默启用一个没标定过的数。
+  if (gate_trans_step_max_ <= 0.0 || gate_trans_step_min_ <= 0.0 || gate_trans_rate_ < 0.0) {
+    RCLCPP_WARN(
+      get_logger(), "gate_trans_*（rate=%.3f step_min=%.3f step_max=%.3f）非法 ⇒ 退回 "
+      "3.0 m/s | 0.10 m | 0.6 m", gate_trans_rate_, gate_trans_step_min_, gate_trans_step_max_);
+    gate_trans_rate_ = 3.0; gate_trans_step_min_ = 0.10; gate_trans_step_max_ = 0.6;
+  }
+  if (gate_trans_step_min_ > gate_trans_step_max_) {
+    RCLCPP_WARN(
+      get_logger(), "gate_trans_step_min(%.3f) > gate_trans_step_max(%.3f) ⇒ 都取 max",
+      gate_trans_step_min_, gate_trans_step_max_);
+    gate_trans_step_min_ = gate_trans_step_max_;
+  }
+  if (gate_yaw_step_max_deg_ <= 0.0 || gate_yaw_step_min_deg_ <= 0.0 || gate_yaw_rate_deg_ < 0.0) {
+    RCLCPP_WARN(
+      get_logger(), "gate_yaw_*（rate=%.2f step_min=%.2f step_max=%.2f）非法 ⇒ 退回 "
+      "60°/s | 3° | 15°", gate_yaw_rate_deg_, gate_yaw_step_min_deg_, gate_yaw_step_max_deg_);
+    gate_yaw_rate_deg_ = 60.0; gate_yaw_step_min_deg_ = 3.0; gate_yaw_step_max_deg_ = 15.0;
+  }
+  if (gate_yaw_step_min_deg_ > gate_yaw_step_max_deg_) {
+    gate_yaw_step_min_deg_ = gate_yaw_step_max_deg_;
+  }
+  if (plausible_margin_xy_ < 0.0) {
+    RCLCPP_WARN(get_logger(), "plausible_margin_xy=%.3f 非法 ⇒ 用 0.0", plausible_margin_xy_);
+    plausible_margin_xy_ = 0.0;
+  }
+  if (plausible_z_min_ >= plausible_z_max_) {
+    RCLCPP_WARN(
+      get_logger(), "plausible_z_min(%.3f) >= plausible_z_max(%.3f) ⇒ 退回 [-0.9, 0.7]",
+      plausible_z_min_, plausible_z_max_);
+    plausible_z_min_ = -0.9; plausible_z_max_ = 0.7;
+  }
+  if (smoothing_tau_ < 0.0) {
+    RCLCPP_WARN(get_logger(), "smoothing_tau=%.3f 非法（必须 >=0）⇒ 用 1.0 s", smoothing_tau_);
+    smoothing_tau_ = 1.0;
+  }
   // 注：euclidean_fitness_epsilon 与 use_reciprocal_correspondences **故意不声明**：
   //     PCL 1.12.1 的 GICP 覆写了 computeTransformation（impl/gicp.hpp:390），既不读
   //     euclidean_fitness_epsilon_（只有 ICP/JointICP 的 convergence_criteria 用，impl/icp.hpp:157），
@@ -338,6 +399,9 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   PointT map_min;
   PointT map_max;
   pcl::getMinMax3D(*map_cloud_, map_min, map_max);
+  // 存成成员：合理性检查（"结果还在不在图里"）的定义域来源 —— 换资产自动跟着变，不硬编码。
+  map_min_ = Eigen::Vector3d(map_min.x, map_min.y, map_min.z);
+  map_max_ = Eigen::Vector3d(map_max.x, map_max.y, map_max.z);
   if (n_map <= static_cast<size_t>(std::max(4, correspondence_randomness_))) {
     // PCL 的 computeCovariances 在 k_correspondences_ > cloud->size() 时只打一条 PCL_ERROR
     // 就返回（impl/gicp.hpp:57-60），协方差数组是空的 → 之后按 index 访问会越界。
@@ -494,6 +558,19 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "          真正的应用在**下一帧点云开头**、与 align 串行（改前与点云同组：实测被饿死 13.2 s）\n"
     "  阈值: no_improve_cycles_warn=%d, stale_warn_sec=%.1f；"
     "状态行每 ~1 s 一条（含 align 耗时 ms 与 fitness score）\n"
+    "  ★ 运动一致性门限（2026-10-06）：enable=%s, 平移 rate=%.2f m/s（下限 %.3f / 上限 %.3f m）,"
+    " yaw rate=%.1f°/s（下限 %.2f / 上限 %.2f°）\n"
+    "     · 判据 = 本帧结果相对**里程计预测位姿**（= 上次采纳 map→odom ∘ 本帧里程计增量）的偏离"
+    "（「创新」）；超门限 ⇒ 拒绝，沿用上次采纳值\n"
+    "     · 门限 = clamp(rate·dt, 下限, 上限)，dt = 与上次采纳帧的点云戳差\n"
+    "  ★ 合理性/定义域：map→base_link 必须落在 PCD 包围盒 x[%.2f, %.2f] y[%.2f, %.2f]+余量 %.2f m，"
+    "且 z ∈ [%.2f, %.2f]\n"
+    "  ★ 失效策略：连续 %d 帧被拒 ⇒ **停发 map→odom**（不再配准），等 /initialpose"
+    "（lost_after_rejections<=0 表示永不放弃）\n"
+    "  ★ 输出平滑：enable=%s tau=%.2f s（发布值朝最近采纳的测量做一阶低通；高频运动由里程计提供）\n"
+    "  ★ 场地自相似性提醒（为什么必须有上面这些判据）：本场地是**重复墙体 + 大片地板**，"
+    "地板在任意 (x,y) 都自洽 ⇒ 单靠 fitness 分不出对错（实测偏 62 m 时 score 仍 0.005 m²）；"
+    "机制与实测见 docs/gicp_divergence_and_jitter.md\n"
     "  注：pcl 后端在首个 fitness score 之前要先做一次目标协方差预计算（target 越密越慢），"
     "可能耗时数秒；\n"
     "      small_gicp 后端的目标协方差已在启动时算完（见上面「目标侧一次性预处理」），首帧不额外慢。\n"
@@ -517,7 +594,14 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     " + ~/small_gicp_error（small_gicp 原生 error，**非 m²**）" : "",
     fitness_score_warn_, max_fitness_score_, tf_lookahead_sec_,
     publish_rate_hz_,
-    no_improve_cycles_warn_, stale_warn_sec_);
+    no_improve_cycles_warn_, stale_warn_sec_,
+    gate_enable_ ? "true" : "false", gate_trans_rate_, gate_trans_step_min_, gate_trans_step_max_,
+    gate_yaw_rate_deg_, gate_yaw_step_min_deg_, gate_yaw_step_max_deg_,
+    map_min.x - plausible_margin_xy_, map_max.x + plausible_margin_xy_,
+    map_min.y - plausible_margin_xy_, map_max.y + plausible_margin_xy_, plausible_margin_xy_,
+    plausible_z_min_, plausible_z_max_,
+    lost_after_rejections_,
+    smoothing_enable_ ? "true" : "false", smoothing_tau_);
 }
 
 // ============================ 工具 ============================
@@ -560,6 +644,128 @@ std::string GicpNode::lastTfError() const
   std::lock_guard<std::mutex> lock(mutex_);
   return last_tf_error_;
 }
+
+// ============================ 运动一致性门限 / 合理性 / 平滑 ============================
+// 这一组函数是 2026-10-06 "map→odom 自传播发散 + 抖动"修复的核心，机制与阈值标定见
+// docs/gicp_divergence_and_jitter.md（§2/§3）与 config/gicp_registration_sim.yaml。
+
+void GicpNode::innovationOf(
+  const Eigen::Matrix4d & guess, const Eigen::Matrix4d & T_map_sensor, double & dxy, double & dyaw_deg)
+{
+  // 创新 = 结果 ∘ 初值⁻¹ 的**模长**。初值 guess = 上次采纳的 map→odom ∘ 本帧里程计增量，
+  // 也就是"只信里程计、GICP 一点都不改"时的位姿 ⇒ 这个量就是**GICP 本帧想施加的修正量**。
+  //   · 平移模长：刚体变换的平移模长与参考系无关（只看 dxy 就够）；
+  //   · yaw：取相对旋转的等效 yaw（本场景 roll/pitch≈0，用 atan2(R10,R00) 与别的度量等价）。
+  const Eigen::Matrix4d d = guess.inverse() * T_map_sensor;
+  dxy = std::hypot(d(0, 3), d(1, 3));
+  dyaw_deg = std::abs(std::atan2(d(1, 0), d(0, 0)) * 180.0 / M_PI);
+}
+
+void GicpNode::gateThresholds(double dt, double & allow_xy, double & allow_yaw_deg) const
+{
+  // 门限 = clamp(速率·dt, 单帧下限, 单帧硬上限)。
+  //   速率项：把"门限"定义成一个**速率**（m/s、deg/s），掉帧（dt 变大）时按比例放宽，
+  //           否则一帧掉到 0.5 s 就会把合法修正误判成发散；
+  //   下限  ：dt 极小时（同戳/高频帧）不至于把量测噪声当发散；
+  //   上限  ：无论多久没采纳过，都不允许**一次**跳这么远（否则等于没有门限）。
+  const double d = (dt > 0.0 && std::isfinite(dt)) ? dt : 0.0;
+  allow_xy = std::min(gate_trans_step_max_, std::max(gate_trans_step_min_, gate_trans_rate_ * d));
+  allow_yaw_deg = std::min(
+    gate_yaw_step_max_deg_, std::max(gate_yaw_step_min_deg_, gate_yaw_rate_deg_ * d));
+}
+
+bool GicpNode::plausibleMapBase(const Eigen::Matrix4d & T_map_base, std::string & why) const
+{
+  // 定义域判据（**结果蕴含的 map→base_link**，不是 map→odom）：
+  //   ① XY：必须落在地图点云包围盒 + plausible_margin_xy 之内。
+  //      依据：map→base 就是"车在图里的位置"，任何合法位姿都在先验地图覆盖范围内；
+  //      余量给"车头/车尾探出包围盒边缘"（RMUC2026 的 PCD bbox = 30.2 × 18.4 m，
+  //      2D 可行驶区 28.4 × 15.9 m ⇒ 1.0 m 余量既容得下车体，又能抓住"跑到 60 m 外"这种发散）。
+  //   ② z：必须在 [plausible_z_min, plausible_z_max] 内（**map 系绝对值**）。
+  //      依据：车是地面机器人，base_link 的 z 在地上一个常数附近（本场地实测 -0.30 m；
+  //      PCD 的 z 范围 [-0.59, 1.82] ⇒ 地面在 -0.36 一带）。发散时 z 会一路涨到 +8 m
+  //      （用户那次跑 map→odom z: -0.15 → +8.28）⇒ 这条判据几乎零成本地把"整体被拉飞"抓住。
+  //      带比"地面 ±0.2"宽得多（[-0.9, +0.7]）：允许上下台阶/坡道时的姿态变化与地图 z 系差异。
+  const double x = T_map_base(0, 3), y = T_map_base(1, 3), z = T_map_base(2, 3);
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+    why = "map→base_link 含非有限值";
+    return false;
+  }
+  const double x_lo = map_min_.x() - plausible_margin_xy_, x_hi = map_max_.x() + plausible_margin_xy_;
+  const double y_lo = map_min_.y() - plausible_margin_xy_, y_hi = map_max_.y() + plausible_margin_xy_;
+  if (x < x_lo || x > x_hi || y < y_lo || y > y_hi) {
+    char buf[192];
+    std::snprintf(
+      buf, sizeof(buf),
+      "map→base_link xy=(%.2f, %.2f) 超出地图范围 x[%.2f, %.2f] y[%.2f, %.2f]（PCD 包围盒 "
+      "%+.2f..%+.2f / %+.2f..%+.2f，余量 %.2f m）",
+      x, y, x_lo, x_hi, y_lo, y_hi, map_min_.x(), map_max_.x(), map_min_.y(), map_max_.y(),
+      plausible_margin_xy_);
+    why = buf;
+    return false;
+  }
+  if (z < plausible_z_min_ || z > plausible_z_max_) {
+    char buf[160];
+    std::snprintf(
+      buf, sizeof(buf), "map→base_link z=%.2f m 不在预期带 [%.2f, %.2f]（地面机器人；"
+      "地图 z 范围 %+.2f..%+.2f）", z, plausible_z_min_, plausible_z_max_, map_min_.z(), map_max_.z());
+    why = buf;
+    return false;
+  }
+  return true;
+}
+
+void GicpNode::acceptMeasurementLocked(const Eigen::Matrix4d & T_map_odom_meas, const rclcpp::Time & stamp)
+{
+  // 采纳一帧（调用方已持锁）：把"平滑目标"换成这一帧的测量，清拒绝计数、清失效态。
+  // ⚠️ 发布值 T_map_odom_ 不在这里直接改写（除了首帧对齐）：它由 advanceSmoothedLocked()
+  //    按 1-exp(-dt/tau) 朝目标推进 —— 这就是"修正量慢变、高频运动由里程计提供"的实现。
+  T_map_odom_target_ = T_map_odom_meas;
+  if (!last_meas_stamp_valid_) {
+    // **第一帧**（或人工初值后的第一帧）：发布值直接对齐测量值，不留平滑滞后 —— 否则
+    // 操作员在 RViz 里点的初值会被"平滑"成一秒后才到位的慢动作。
+    T_map_odom_ = T_map_odom_meas;
+    last_smooth_tp_valid_ = false;
+  }
+  last_meas_stamp_ = stamp;
+  last_meas_stamp_valid_ = true;
+  gate_reject_streak_ = 0;
+  localization_lost_ = false;
+}
+
+void GicpNode::advanceSmoothedLocked()
+{
+  // 发布值朝测量值推进：一阶低通（指数趋近），alpha = 1 - exp(-dt/tau)。
+  //   · dt 用 **steady_clock**（本函数被 50 Hz 定时器与 align 回调共同调用；两者都在同一台机上，
+  //     用墙钟差最稳，不受 use_sim_time 跳变影响）；
+  //   · 平移线性插值、旋转四元数 slerp（两者都在小量范围内，不引入非刚体误差）；
+  //   · tau<=0 或 smoothing_enable=false ⇒ 直接对齐（等价于改动前的行为，便于 A/B 单变量）。
+  const auto now_tp = std::chrono::steady_clock::now();
+  const double dt = last_smooth_tp_valid_ ?
+    std::chrono::duration<double>(now_tp - last_smooth_tp_).count() : 0.0;
+  last_smooth_tp_ = now_tp;
+  last_smooth_tp_valid_ = true;
+  if (!estimate_valid_) {
+    return;
+  }
+  if (!smoothing_enable_ || smoothing_tau_ <= 0.0) {
+    // 不平滑 = 直接跟随测量（等价改动前：每采纳一帧跳一次；A/B 的单变量开关）
+    T_map_odom_ = T_map_odom_target_;
+    return;
+  }
+  double alpha = 1.0 - std::exp(-std::max(0.0, dt) / smoothing_tau_);
+  alpha = std::min(1.0, std::max(0.0, alpha));
+  // 平移
+  for (int i = 0; i < 3; ++i) {
+    T_map_odom_(i, 3) += alpha * (T_map_odom_target_(i, 3) - T_map_odom_(i, 3));
+  }
+  // 旋转：slerp（归一化后再插值；两个旋转都接近单位阵，四元数符号一致性由 Eigen 的 slerp 处理）
+  const Eigen::Quaterniond qa(T_map_odom_.block<3, 3>(0, 0));
+  const Eigen::Quaterniond qb(T_map_odom_target_.block<3, 3>(0, 0));
+  const Eigen::Quaterniond qs = qa.slerp(alpha, qb);
+  T_map_odom_.block<3, 3>(0, 0) = qs.normalized().toRotationMatrix();
+}
+
 
 Eigen::Matrix4d GicpNode::initialPoseParamToMatrix() const
 {
@@ -655,15 +861,41 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       sensor_frame.c_str(), odom_frame_id_.c_str());
   }
 
-  // --- ④ 当前估计 ---
+  // --- ④ 当前估计（初值 = **发布值/滤波值** T_map_odom_）---
+  // "滤波必须在环路里"（见 .hpp 里 T_map_odom_target_ 的注释）：初值取发布值 ⇒
+  //   ① 门限的"创新"就是"这一帧相对**里程计预测位姿**（= 发布值 ∘ 本帧里程计增量）的偏离"，
+  //      正是"运动一致性"的定义；
+  //   ② 上一帧的测量跳变不会原样变成下一帧的初值 ⇒ 跳变被低增益 α 吃掉，
+  //      不会像"增益 1"那样被逐帧积分成随机游走。
   Eigen::Matrix4d T_map_odom_cur;
   bool valid_cur = false;
   bool init_pending = false;
+  bool lost_cur = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     valid_cur = estimate_valid_;
     T_map_odom_cur = T_map_odom_;
     init_pending = param_init_pending_;
+    lost_cur = localization_lost_;
+  }
+  // 判过"定位失效"之后：本节点**不再配准、不再发 TF**，只在日志里说明，等 /initialpose
+  // （语义与"没有初值就不发 TF"完全一致；这是 2026-10-06 新增的第三条：连续拒绝 N 帧 ⇒ 失效）。
+  if (lost_cur) {
+    static thread_local int lost_log_n = 0;
+    if (++lost_log_n % 25 == 1) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "★★ 定位已判失效（连续 %d 帧被拒）：**本节点不再发布 map→odom / ~/pose**，"
+        "也不再跑 GICP —— 绝不用编造的位姿喂 nav2。恢复方式（人工，二选一）：\n"
+        "   ① RViz 的 2D Pose Estimate（= /initialpose）给一个**大致正确**的 map 系位姿"
+        "（车头方向要对，误差 <1 m 最好）；\n"
+        "   ② 重启导航栈。\n"
+        "   在此之前 map 系位姿是**没有发布者**的（global_costmap 会报 Invalid frame ID \"map\"，"
+        "这是预期行为，不是新 bug）。",
+        lost_after_streak_);
+    }
+    publishHealth(false, 0.0, false);
+    return;
   }
 
   // ④b 首次：用 initial_pose 参数惰性初始化（需要 TF odom→base 已可用；失败则下一帧重试）
@@ -675,10 +907,15 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       T_map_odom_cur = T_map_base_init * T_odom_base;
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        // 参数初值也是"人工给的初值"：测量链与发布值都直接对齐它（无平滑滞后）。
         T_map_odom_ = T_map_odom_cur;
+        T_map_odom_target_ = T_map_odom_cur;
         estimate_valid_ = true;
         param_init_pending_ = false;
         no_improve_cycles_ = 0;
+        last_meas_stamp_valid_ = false;  // 下一帧采纳时重新对齐一次（门限的 dt 也从那时起算）
+        gate_reject_streak_ = 0;
+        localization_lost_ = false;
       }
       valid_cur = true;
       RCLCPP_INFO(
@@ -761,15 +998,64 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     last_source_points_ = source->size();
   }
 
-  // --- ⑦ 接受 / 拒绝 ---
-  const bool accepted = converged && std::isfinite(score) && score <= max_fitness_score_;
+  // --- ⑦ 接受 / 拒绝（三道判据；2026-10-06 起新增后两道）---
+  //   ① 既有：converged && score ≤ max_fitness_score（**只说明"配准自洽"，不说明"位姿对"**：
+  //      用户那次跑里 map→odom 偏了 62 m，score 仍是 0.0053 m² —— 场地地板/重复墙体自相似，
+  //      错误位姿一样能配得很"好"）；
+  //   ② 运动一致性门限（创新）：结果相对**自己的初值**（= 上次采纳的 map→odom ∘ 本帧里程计增量）
+  //      挪了多少；超过 clamp(rate·dt, min, max) ⇒ 判为发散 ⇒ 拒绝；
+  //   ③ 合理性：结果蕴含的 map→base_link 必须还在地图定义域内（XY 包围盒 + 余量、z 带）。
+  // 任一条不过 ⇒ **沿用上一次采纳的 map→odom**（不传播跳变）、计数、连续 N 帧后判失效。
+  const bool score_ok = converged && std::isfinite(score) && score <= max_fitness_score_;
+  double innov_xy = 0.0, innov_yaw_deg = 0.0, allow_xy = 0.0, allow_yaw_deg = 0.0;
+  innovationOf(guess, T_map_sensor, innov_xy, innov_yaw_deg);
+  // dt：本帧与**上次采纳帧**的点云时间戳差（查不到/首帧 ⇒ 0 ⇒ 用单帧下限）。
+  // 为什么用点云戳而不是墙钟：点云戳是"这一帧数据属于哪个时刻"，与修正量的物理含义一致；
+  // 墙钟在 CPU 过载时会被拉长，反而会把非法的大跳变"合法化"。
+  double gate_dt = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (last_meas_stamp_valid_) {
+      gate_dt = (stamp - last_meas_stamp_).seconds();
+      if (!(gate_dt > 0.0) || !std::isfinite(gate_dt)) {
+        gate_dt = 0.0;
+      }
+    }
+  }
+  gateThresholds(gate_dt, allow_xy, allow_yaw_deg);
+  const bool innov_ok = !gate_enable_ || (innov_xy <= allow_xy && innov_yaw_deg <= allow_yaw_deg);
+  // 合理性检查要的是 **map→base_link**（不是 map→sensor）：用最新可用的 odom→base 组合。
+  // TF 查不到时**不因此拒绝**（这是本节点自身的健康判据，不该被 TF 抖动带偏），只打限频 WARN。
+  bool plaus_ok = true;
+  std::string plaus_why;
+  {
+    Eigen::Matrix4d T_odom_base;
+    bool used_latest = false;
+    if (lookupTf(odom_frame_id_, base_frame_id_, stamp, false, T_odom_base, used_latest)) {
+      const Eigen::Matrix4d T_map_base_implied = (T_map_sensor * T_sensor_odom) * T_odom_base;
+      plaus_ok = plausibleMapBase(T_map_base_implied, plaus_why);
+    } else {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "合理性检查跳过本帧：TF %s←%s 查不到（%s）", odom_frame_id_.c_str(), base_frame_id_.c_str(),
+        lastTfError().c_str());
+    }
+  }
+  const bool accepted = score_ok && innov_ok && plaus_ok;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_innov_xy_ = innov_xy;
+    last_innov_yaw_deg_ = innov_yaw_deg;
+    last_allow_xy_ = allow_xy;
+    last_allow_yaw_deg_ = allow_yaw_deg;
+  }
   if (accepted) {
     T_map_odom_cur = T_map_sensor * T_sensor_odom;
     int n_acc = 0;
     int n_tot = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      T_map_odom_ = T_map_odom_cur;
+      acceptMeasurementLocked(T_map_odom_cur, stamp);
       estimate_valid_ = true;
       no_improve_cycles_ = 0;
       n_acc = ++accepted_cycles_;
@@ -778,22 +1064,58 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     RCLCPP_DEBUG(
       get_logger(),
       "GICP OK：score=%s m², converged=true, align=%.1f ms, source=%zu 点, map→odom=%s"
-      "（%d/%d 帧被接受）",
+      "（%d/%d 帧被接受；创新 %.4f m / %.3f°，门限 %.4f m / %.3f°）",
       scoreToStr(score).c_str(), align_ms, source->size(), poseToStr(T_map_odom_cur).c_str(),
-      n_acc, n_tot);
+      n_acc, n_tot, innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg);
   } else {
     int n = 0;
+    int n_gate = 0, n_bound = 0;
+    bool went_lost = false;
+    int lost_streak = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       n = ++no_improve_cycles_;
+      if (!innov_ok) {++gate_rejects_;}
+      if (!plaus_ok) {++bound_rejects_;}
+      n_gate = gate_rejects_;
+      n_bound = bound_rejects_;
+      // 连续拒绝计数：**只统计"配准本身自洽（score_ok）但被新判据拦下"的帧**也算进去，
+      // 因为那正是"看不见的发散"的形状；score 就不合格的帧（既有路径）同样计入。
+      ++gate_reject_streak_;
+      if (lost_after_rejections_ > 0 && gate_reject_streak_ >= lost_after_rejections_) {
+        // —— 第三条判据：连续 N 帧拒绝 ⇒ 判"定位失效" ⇒ **停发 map→odom**，等 /initialpose ——
+        localization_lost_ = true;
+        estimate_valid_ = false;  // 复用"没有初值就不发 TF"的语义（不是新造一条通路）
+        lost_after_streak_ = gate_reject_streak_;
+        went_lost = true;
+        lost_streak = gate_reject_streak_;
+      }
     }
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 1000,
-      "GICP 本帧未被采纳（converged=%s, score=%s m², align=%.1f ms, source=%zu 点, "
-      "accept 阈值=%.3f）⇒ map→odom 保持上一次估计（连续 %d 帧；TF 仍按上次估计发布）",
-      converged ? "true" : "false", scoreToStr(score).c_str(), align_ms, source->size(),
-      max_fitness_score_, n);
-    if (n == no_improve_cycles_warn_) {
+    if (went_lost) {
+      const std::string plaus_txt = plaus_ok ? std::string("通过") : ("不通过（" + plaus_why + "）");
+      RCLCPP_ERROR(
+        get_logger(),
+        "★★★ 连续 %d 帧被拒绝 ⇒ **判定定位失效，停止发布 map→odom**（也停止 ~/pose 与配准）。\n"
+        "     判据：① score=%s（阈值 %.3f）；② 创新 %.4f m / %.3f°（门限 %.4f m / %.3f°，dt=%.3f s）；"
+        "③ 合理性=%s\n"
+        "     累计：门限拒绝 %d 帧、越界拒绝 %d 帧。\n"
+        "     ⚠️ 本节点**不会**自动猜一个位姿继续发（那正是这次要修的失败模式）。\n"
+        "     操作员请做（二选一）：① RViz 2D Pose Estimate 给一个大致正确的 map 系位姿；② 重启导航栈。",
+        lost_streak, scoreToStr(score).c_str(), max_fitness_score_, innov_xy, innov_yaw_deg,
+        allow_xy, allow_yaw_deg, gate_dt, plaus_txt.c_str(), n_gate, n_bound);
+    } else {
+      const std::string innov_txt = innov_ok ? std::string("") : std::string(" ★创新超门限（发散？）");
+      const std::string plaus_txt = plaus_ok ? std::string("通过") : ("✗" + plaus_why);
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "GICP 本帧未被采纳（converged=%s, score=%s m², align=%.1f ms, source=%zu 点, "
+        "score 阈值=%.3f | 创新 %.4f m / %.3f° vs 门限 %.4f m / %.3f°（dt=%.3f s）%s | "
+        "合理性 %s）⇒ map→odom 沿用上一次采纳值（连续 %d 帧；TF 仍按上次值发布）",
+        converged ? "true" : "false", scoreToStr(score).c_str(), align_ms, source->size(),
+        max_fitness_score_, innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, gate_dt,
+        innov_txt.c_str(), plaus_txt.c_str(), n);
+    }
+    if (n == no_improve_cycles_warn_ && !went_lost) {
       RCLCPP_WARN(
         get_logger(),
         "★★ GICP 已连续 %d 帧未被采纳：map→odom 一直沿用旧值 ⇒ **定位实际已失效**"
@@ -805,7 +1127,9 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         "量级会整体上移）；\n"
         "   ③ 两个 leaf（voxel_leaf_size=%.3f 地图 / voxel_leaf_size_scan=%.3f 实时点云，"
         "太密则 align 耗时涨、太稀则不收敛）、max_correspondence_distance；\n"
-        "   ④ 确认 PCD 与 map/<world>.pgm 同源同系（否则先验地图本身就错位）。",
+        "   ④ 确认 PCD 与 map/<world>.pgm 同源同系（否则先验地图本身就错位）；\n"
+        "   ⑤ 若 WARN 里是「创新超门限」：先看是不是**真的**在发散（对比 /odom_ground_truth），"
+        "再决定放宽 gate_trans_rate / gate_yaw_rate_deg（见 docs/gicp_divergence_and_jitter.md §3）。",
         n, max_correspondence_distance_, voxel_leaf_size_, voxel_leaf_size_scan_);
     }
   }
@@ -821,8 +1145,12 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
 
   // --- ⑧ 调试位姿：map 系机器人位姿（≈ /amcl_pose 语义，便于 A/B 对照） ---
   // 戳不再用点云时间戳（那是"过去"），而是与 TF 同一条 lookahead 戳 ⇒ 见 publishPose 注释。
+  // **值用"发布值"（平滑后的）**，与 50 Hz 定时器发出去的 TF 逐字一致
+  // （否则 ~/pose 会在采纳帧上跳一下，监控端看到两套数）。
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 采纳帧往往夹在两个定时器 tick 之间 ⇒ 这里也推进一步，让 ~/pose 与 TF 落在同一条轨迹上。
+    advanceSmoothedLocked();
     T_map_odom_cur = T_map_odom_;
     valid_cur = estimate_valid_;
   }
@@ -880,6 +1208,11 @@ bool GicpNode::consumePendingInitialPose()
   // ⇒ /initialpose 在 use_initial_pose=false 时同样有效（与改动前一致）。
   const Eigen::Matrix4d T_map_base = poseToMatrix(pose_raw.pose);
   const rclcpp::Time stamp(header_raw.stamp, get_clock()->get_clock_type());
+  bool lost_before = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lost_before = localization_lost_;
+  }
   Eigen::Matrix4d T_odom_base;
   bool used_latest = false;
   // 精确时间戳查不到会自动退到"最新可用"（用户点击的语义本来就是"此刻"）
@@ -892,10 +1225,23 @@ bool GicpNode::consumePendingInitialPose()
   const Eigen::Matrix4d T_map_odom = T_map_base * T_odom_base;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 人工初值 = 唯一可信的"绝对"来源 ⇒ 测量链与发布值**都直接对齐**它（不走平滑，
+    // 否则操作员点了初值却要等一秒才到位），并清掉门限/失效态（这是**恢复**路径）。
     T_map_odom_ = T_map_odom;
+    T_map_odom_target_ = T_map_odom;
     estimate_valid_ = true;
     param_init_pending_ = false;  // 人工给的初值优先于 initial_pose 参数
     no_improve_cycles_ = 0;
+    last_meas_stamp_valid_ = false;  // 门限的 dt 从"下一次采纳"重新起算
+    gate_reject_streak_ = 0;
+    localization_lost_ = false;
+    last_smooth_tp_valid_ = false;
+  }
+  if (lost_before) {
+    RCLCPP_WARN(
+      get_logger(),
+      "★ /initialpose 在**定位失效态**下被应用 ⇒ 退出失效态、恢复发布 map→odom"
+      "（gate 拒绝计数与失效标志已清零）");
   }
   RCLCPP_INFO(
     get_logger(), "/initialpose 更新初值：map 系机器人位姿 %s ⇒ map→odom = %s",
@@ -922,6 +1268,10 @@ void GicpNode::publishTimerCallback()
   rclcpp::Time last_cloud_stamp;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 平滑推进放在**定时器**里（50 Hz）：修正量按一阶低通慢慢走，高频运动继续由
+    // odom→base_link 提供 ⇒ nav2 看到的融合位姿既跟得上车，又不再"每采纳一帧跳一下"。
+    // align 回调在末尾也调用同一个函数（两边共用 steady_clock 基准 ⇒ 是同一条连续轨迹）。
+    advanceSmoothedLocked();
     T_map_odom = T_map_odom_;
     valid = estimate_valid_;
     cloud_seen = cloud_seen_;
@@ -953,8 +1303,11 @@ void GicpNode::publishTimerCallback()
   }
 
   // ---------------- ~1 Hz 状态行（2026-10-05 新增，纯可观测量） ----------------
-  // A/B 要一眼看到四件事：**采纳率**（定位是否在更新）、**align 耗时 ms**（两级 leaf 变细后的 CPU 代价）、
-  // **fitness score 量级**（半径 1.5 m 后量级会整体上移）、以及 source/target 点数与两个 leaf。
+  // A/B 要一眼看到：**采纳率**（定位是否在更新）、**align 耗时 ms**、**fitness score 量级**、
+  // source/target 点数与两个 leaf，以及（2026-10-06 新增）**运动一致性门限的实时值**：
+  //   最近创新 vs 门限、门限拒绝/越界拒绝的累计帧数、当前连续拒绝数、是否处于失效态。
+  //   ⇒ 用户那次跑的失败（map→odom 跑掉而 score 正常）在这一行里**再也藏不住**：
+  //     创新会顶到门限、拒绝计数会涨。
   // 限频用 steady_clock（跑在 wall timer 上，不受 use_sim_time 跳变影响）：约 1 Hz、单行、不刷屏。
   {
     const auto now_tp = std::chrono::steady_clock::now();
@@ -975,6 +1328,9 @@ void GicpNode::publishTimerCallback()
       double last_score = std::numeric_limits<double>::quiet_NaN();
       double last_align_ms = 0.0;
       size_t last_src_pts = 0;
+      int n_gate = 0, n_bound = 0, streak = 0;
+      double innov_xy = 0.0, innov_yaw = 0.0, allow_xy = 0.0, allow_yaw = 0.0;
+      bool lost = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         n_acc = accepted_cycles_;
@@ -982,8 +1338,25 @@ void GicpNode::publishTimerCallback()
         last_score = last_score_;
         last_align_ms = last_align_ms_;
         last_src_pts = last_source_points_;
+        n_gate = gate_rejects_;
+        n_bound = bound_rejects_;
+        streak = gate_reject_streak_;
+        innov_xy = last_innov_xy_;
+        innov_yaw = last_innov_yaw_deg_;
+        allow_xy = last_allow_xy_;
+        allow_yaw = last_allow_yaw_deg_;
+        lost = localization_lost_;
       }
-      if (n_tot == 0) {
+      if (lost) {
+        // 失效态：这一行必须**最醒目**（用户/操作员看日志第一眼就要知道"定位没了、要人工给初值"）
+        RCLCPP_ERROR(
+          get_logger(),
+          "[status] backend=%s **定位失效：已停发 map→odom**（连续 %d 帧被拒 ⇒ 阈值 %d）| "
+          "累计 门限拒绝 %d / 越界拒绝 %d | 采纳 %d/%d 帧 | 最近 score=%s m² | "
+          "等 /initialpose（RViz 2D Pose Estimate）或重启导航栈",
+          backend_->name(), streak, lost_after_rejections_, n_gate, n_bound, n_acc, n_tot,
+          scoreToStr(last_score).c_str());
+      } else if (n_tot == 0) {
         // 还没跑过任何一帧 align ⇒ 只报状态，避免打出误导性的 0 ms / nan
         RCLCPP_INFO(
           get_logger(), "[status] backend=%s 尚无配准帧：%s | target=%zu 点（地图 leaf %.3f m）",
@@ -994,10 +1367,13 @@ void GicpNode::publishTimerCallback()
       } else {
         RCLCPP_INFO(
           get_logger(),
-          "[status] backend=%s 采纳 %d/%d 帧 | 最近 score=%s m² | align=%.1f ms | "
-          "source=%zu 点（leaf %.3f）→ target=%zu 点（leaf %.3f）| map→odom %s",
-          backend_->name(), n_acc, n_tot, scoreToStr(last_score).c_str(), last_align_ms,
+          "[status] backend=%s 采纳 %d/%d 帧 | 拒绝 门限 %d / 越界 %d（连续 %d）| "
+          "最近 score=%s m² | align=%.1f ms | source=%zu 点（leaf %.3f）→ target=%zu 点"
+          "（leaf %.3f）| 创新 %.4f m / %.3f°（门限 %.4f m / %.3f°）| map→odom %s",
+          backend_->name(), n_acc, n_tot, n_gate, n_bound, streak,
+          scoreToStr(last_score).c_str(), last_align_ms,
           last_src_pts, voxel_leaf_size_scan_, map_cloud_->size(), voxel_leaf_size_,
+          innov_xy, innov_yaw, allow_xy, allow_yaw,
           poseToStr(T_map_odom).c_str());
       }
     }

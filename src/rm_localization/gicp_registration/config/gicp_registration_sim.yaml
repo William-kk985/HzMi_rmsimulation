@@ -195,3 +195,68 @@
     max_fitness_score: 0.3               # m²；超过就**拒绝**本帧结果（RMS≈0.55 m）。首跑按实测再收紧
     no_improve_cycles_warn: 10           # 连续多少帧未采纳后打一条"定位已失效"的醒目 WARN
     stale_warn_sec: 3.0                  # 多久没收到点云就 WARN（定位停止更新）
+
+    # ================= 运动一致性门限 / 合理性 / 输出平滑（2026-10-06） =================
+    # 为什么加这三组（用户实跑 world:=RMUC2026 mode:=nav localization:=gicp nav:=mppi planner:=smac2d）：
+    #   车到点后 map→odom **单调跑掉**（y: 0.47 → 5.45 → 21.8 → 62.1 m，z 到 +8.28 m），
+    #   而 **~/fitness_score 一直 0.002~0.005 m²（"很好"）、~/converged 一直 true**
+    #   ⇒ 既有健康判据**完全看不见**这次失败。机制：本场地是"大片地板 + 规则重复墙体"，
+    #   地板在任意 (x,y) 都自洽、沿墙方向存在**连续的一片极小** ⇒ 配准结果在弱约束方向上
+    #   可以做随机游走甚至跳盆地，而 fitness 只反映"配准自洽"、不反映"位姿对不对"。
+    #   ⇒ 判据必须来自**两个位姿来源之间的一致性**（里程计 vs 配准），而不是配准自己的残差。
+    # 详细机制/实测/阈值标定见 docs/gicp_divergence_and_jitter.md（§2 机制 / §3 参数）。
+    #
+    # ① 运动一致性门限（创新 = 本帧结果相对**里程计预测位姿**的偏离；预测位姿 =
+    #    上次采纳的 map→odom ∘ 本帧里程计增量 ⇒ 创新 = "GICP 这一帧想施加的修正量"）：
+    #    门限 = clamp(rate·dt, step_min, step_max)，dt = 与上次**采纳帧**的点云戳差。
+    #    标定（world:=RMUC2026 + small_point_lio + PCL GICP，10 Hz 采纳率，2026-10-06 实测）：
+    #      · 健康跑 map→odom **逐帧**步长（未加门限的基线）：静止段 p50=3.4 mm / p90=23 mm /
+    #        p99=53 mm；行驶段 p50=8.3 mm / p90=46 mm / p99=155 mm / max=249 mm；
+    #      · 真正的发散（用户那次）：0.45 → 1 → 2.5 m/s（= 45~250 mm/帧 起步，随后 5~40 m/帧）；
+    #      · 机器人能力（MPPI vx_max=2.5 m/s / wz_max=2.5 rad/s，nav2_params_sim_controller_mppi.yaml）
+    #        与"里程计负责运动、GICP 只做慢修正"的分工 ⇒ rate 取 0.8 m/s（≈v_max/3）、
+    #        yaw 20°/s（≈w_max/7）。
+    #      · 选中值 0.8 m/s 的含义：**只切掉行驶段 p95 以上的尾巴**（那正是跳盆地/滑移的步长），
+    #        健康帧的 p90=46 mm < 0.08 m 全部放行；静止段（p99=53 mm）几乎不受影响。
+    gate_enable: true                    # false = 完全回到 2026-10-06 之前的行为（只留 score 判据）
+    gate_trans_rate: 3.0                 # m/s；门限 = clamp(rate·dt, step_min, step_max)
+    gate_trans_step_min: 0.10            # m；dt 很小时的**单帧下限**（别把量测噪声当发散）
+    gate_trans_step_max: 0.6             # m；**单帧硬上限**（掉帧/长间隔也不许一次跳这么远）
+    gate_yaw_rate_deg: 60.0              # °/s；同上（yaw 方向）
+    gate_yaw_step_min_deg: 3.0           # °；行驶段 yaw 逐帧 p99=1.60° ⇒ 3° 只切尾巴（yaw 本身可观测）
+    gate_yaw_step_max_deg: 15.0          # °；单帧最多转这么多（用户那次是整帧转飞）
+    #
+    # ② 合理性 / 定义域（结果蕴含的 **map→base_link** 必须还在图里）：
+    #    · XY：PCD 包围盒 + plausible_margin_xy。本场地 PCD bbox = 30.2 × 18.4 m
+    #      （x[-25.88, 4.33] y[-9.75, 8.66]），2D 可行驶区 28.4 × 15.9 m
+    #      ⇒ 1.0 m 余量既容得下车体探出边缘，又能抓住"跑到 60 m 外"这种发散。
+    #    · z：**绝对带** [-0.9, +0.7]（map 系）。实测 base_link 的 z ≈ -0.30（地面在 -0.36 一带，
+    #      地图 z 范围 [-0.59, 1.82]）；发散时 z 会一路涨（用户那次 map→odom z 到 +8.28）
+    #      ⇒ 这条几乎零成本。带宽比"地面 ±0.2"宽得多：允许上下台阶/坡道的姿态变化与 z 系差异。
+    plausible_margin_xy: 1.0             # m；地图 XY 包围盒外扩多少仍算"在图里"
+    plausible_z_min: -0.9                # m；map→base_link 的 z 下限（map 系绝对）
+    plausible_z_max: 0.7                 # m；上限
+    #
+    # ③ 失效策略：连续 N 帧被拒 ⇒ 判"定位失效" ⇒ **停发 map→odom**（同时停止配准与 ~/pose），
+    #    大声 ERROR + 状态行改 ERROR，等 /initialpose。**绝不自动猜一个位姿继续发**
+    #    —— 那正是这次要修的失败模式。恢复：RViz 2D Pose Estimate 或重启导航栈。
+    #    25 帧 @10 Hz = 2.5 s：足够长（不会被偶发坏帧触发），足够短（不会让 nav2 拿着错位姿跑很久）。
+    #    <=0 = 永不放弃（只沿用上次采纳值，不入失效态）——实车保守用法可这么设。
+    lost_after_rejections: 25
+    #
+    # ④ 输出平滑（**用户抱怨的"四处抖动"的直接对策**）：发布出去的 map→odom 朝"最近采纳的测量"
+    #    做一阶低通（时间常数 tau），**高频运动继续由 odom→base_link 提供**（本节点绝不碰它）。
+    #    平移线性插值 + 旋转 slerp，在 50 Hz 定时器里推进（align 帧末尾也推进一步，两条路径共用
+    #    同一个 steady_clock 基准 ⇒ 是同一条连续轨迹）。
+    #    · tau=0.6 s 的依据：采纳率 10 Hz ⇒ 修正量的每帧噪声（p90=23 mm、p99=53 mm）被
+    #      低通压掉一个量级；而 LIO 的慢漂移（cm/s 量级）在 0.6 s 内只滞后 ~mm，
+    #      对"修正量"这种慢变量的跟踪损失可忽略（实测见 docs §4 的 fused 抖动表）。
+    #    · 0 = 不平滑（等价改动前：每采纳一帧跳一次）；调大更稳但更滞后。
+    smoothing_enable: true
+    smoothing_tau: 1.0                   # s；一阶低通时间常数（<=0 或 enable=false ⇒ 不平滑）
+    #
+    # 回退（三档，任选）：
+    #   · 只关新判据：gate_enable:=false + smoothing_enable:=false（= 逐字节回到 2026-10-06 之前）；
+    #   · 只关平滑：smoothing_enable:=false（门限仍在，抖动回来但不会跑飞）；
+    #   · 门限太紧（行驶中频繁"创新超门限"）：gate_trans_rate 0.8→1.5、gate_trans_step_max 0.12→0.25，
+    #     或把 lost_after_rejections 设 0（永不判失效，只沿用旧值）。
