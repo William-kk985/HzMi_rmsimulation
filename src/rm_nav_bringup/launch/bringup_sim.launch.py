@@ -5,7 +5,9 @@ from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import PackageNotFoundError
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo, TimerAction, OpaqueFunction
+from launch.actions import (IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo,
+                            TimerAction, OpaqueFunction, RegisterEventHandler, Shutdown)
+from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
@@ -206,6 +208,17 @@ def _as_pose3(text, what):
     if len(vals) != 3:
         raise RuntimeError('[launch] 参数 %s 需要 3 个数 [x, y, theta]，收到 %r' % (what, text))
     return vals
+
+
+def _as_float(text, what, default=None):
+    """启动参数（字符串）→ float；空串 ⇒ default。"""
+    t = str(text).strip()
+    if t == '' and default is not None:
+        return float(default)
+    try:
+        return float(t)
+    except Exception as e:
+        raise RuntimeError('[launch] 参数 %s 需要数字，收到 %r（%s）' % (what, text, e))
 
 
 def _mapper_resolution(params_yaml, default=0.05):
@@ -580,6 +593,44 @@ def generate_launch_description():
                     'PCD/<map_name>.pcd 这份 3D 先验也能**跨会话续建**（同样受 world/spawn 守卫保护）。'
                     '默认 False：它是只读消费者（不发 /map、不发 TF，不碰 map→odom 与 /segmentation 契约），'
                     '但属新增路径、还没做长跑验收 ⇒ 先关着，要用显式打开')
+
+    # ★ 2026-10-06（事故当天追加）：续建后的**一次性**一致性检查（详见 docs/continue_mapping.md §8）
+    #   动机：场地隔离守卫只管"world/spawn 对不对"，管不了"图本身歪了"——
+    #   当天用户续建的 map/RMUC2026.posegraph 里已经含有一段 LIO 退化（ATE max 1.15 m），
+    #   加载进来的图与真实场地不一致 ⇒ 建出来的图/定位"飘"。
+    #   做法：续建时额外起一个**一次性**小节点（rm_nav_bringup/scripts/map_resume_check.py），
+    #   它只订阅 /tf、不发任何话题/TF（「map→odom 单一发布者」契约逐字不变）；等 TF 可用 + 静置/
+    #   收敛窗口（map_resume_check_delay）结束后判两条：① 自基线以来 map→odom 被修正了多少
+    #   （图歪了会把位姿拉走，这条不需要机器人静止）② 实测 map→base_link 与**存档记录的
+    #   map_start_pose** 的绝对偏差（只在"一步没动"时参与，抓"起点被挪/存档被 doctored"）。
+    #   超阈值就喊响并可（strict）直接收栈 —— 两条判据的取舍见 docs/continue_mapping.md §8.3。
+    #   ⚠️ 它由 launch 在 t=0 与其它节点**并行**起，自己的定时器负责等待 ⇒ 不推迟任何节点的启动；
+    #      只有真的续建（map_file_name 有值）时才起；从零建图时压根不创建这个节点。
+    declare_map_resume_check_cmd = DeclareLaunchArgument(
+        'map_resume_check',
+        default_value='True',
+        description='True（默认）= 续建后做一次"加载的位姿图 vs 出生点"一致性检查（只喊不拦）；'
+                    'False = 完全关掉这个检查（只续建、不体检）')
+
+    declare_map_resume_check_delay_cmd = DeclareLaunchArgument(
+        'map_resume_check_delay',
+        default_value='8.0',
+        description='续建一致性检查的**静置/收敛窗口**（秒）：从"第一次拿到 map→base_link"（= slam_toolbox '
+                    '已反序列化完并开始发 TF）起算，等这么久再采样，让扫描匹配先收敛。')
+    declare_map_resume_check_strict_cmd = DeclareLaunchArgument(
+        'map_resume_check_strict',
+        default_value='False',
+        description='True = 检查不通过时**直接收栈**（检查节点退出码 1 ⇒ launch 收掉所有节点）；'
+                    'False（默认）= 只打响亮 WARNING，继续跑')
+    declare_map_resume_check_pos_tol_cmd = DeclareLaunchArgument(
+        'map_resume_check_pos_tol',
+        default_value='0.5',
+        description='位置偏差阈值（m）。实测健康的 LIO 重启一致性在厘米级，0.5 m 留给扫描匹配收敛与'
+                    '里程计补偿的余量；当天事故的 ATE max 是 1.15 m ⇒ 0.5 能抓住。')
+    declare_map_resume_check_yaw_tol_deg_cmd = DeclareLaunchArgument(
+        'map_resume_check_yaw_tol_deg',
+        default_value='10.0',
+        description='偏航偏差阈值（度），同上口径。')
 
     # Specify the actions
     start_rm_simulation = IncludeLaunchDescription(
@@ -1125,7 +1176,60 @@ def generate_launch_description():
             'started_at': guard.now_iso(),
             'written_by': 'bringup_sim.launch.py',
         })
-        return [LogInfo(msg=banner), TimerAction(period=4.0, actions=[node])]
+        actions = [LogInfo(msg=banner), TimerAction(period=4.0, actions=[node])]
+
+        # ★ 2026-10-06：**续建成功时**才追加"一次性一致性检查"节点（从零建图不创建它）。
+        #   期望值取**存档 sidecar 里记录的 map_start_pose**（不是本次传的 map_start_pose）：
+        #   要比的是"存档说它自己是什么样" vs "加载后现实是什么样"，用本次参数比等于自己跟自己比。
+        if verdict is not None and verdict['may_load']:
+            check_on = _as_bool(context.perform_substitution(LaunchConfiguration('map_resume_check')),
+                                'map_resume_check')
+            if check_on:
+                man = verdict.get('manifest') or {}
+                exp = [float(v) for v in (man.get('map_start_pose') or [0.0, 0.0, 0.0])]
+                sp = man.get('spawn_pose') or {}
+                check_node = Node(
+                    package='rm_nav_bringup',
+                    executable='map_resume_check.py',        # install(PROGRAMS …) 装到 lib/rm_nav_bringup/
+                    name='map_resume_check',
+                    output='screen',
+                    parameters=[{
+                        'use_sim_time': use_sim_time,
+                        'map_frame': 'map', 'odom_frame': 'odom', 'base_frame': 'base_link',
+                        'expected_pose': exp,
+                        'archive_name': name_v,
+                        'archive_base': base,
+                        'archive_world': man.get('world') or world_v,
+                        'archive_spawn': [float(sp.get('x', 0.0)), float(sp.get('y', 0.0)),
+                                          float(sp.get('z', 0.0)), float(sp.get('yaw', 0.0))],
+                        'pcd_path': os.path.join(guard.pcd_dir(rm_nav_bringup_dir), name_v + '.pcd'),
+                        'check_delay': _as_float(context.perform_substitution(
+                            LaunchConfiguration('map_resume_check_delay')), 'map_resume_check_delay'),
+                        'pos_tol': _as_float(context.perform_substitution(
+                            LaunchConfiguration('map_resume_check_pos_tol')), 'map_resume_check_pos_tol'),
+                        'yaw_tol_deg': _as_float(context.perform_substitution(
+                            LaunchConfiguration('map_resume_check_yaw_tol_deg')),
+                            'map_resume_check_yaw_tol_deg'),
+                        'strict': _as_bool(context.perform_substitution(
+                            LaunchConfiguration('map_resume_check_strict')), 'map_resume_check_strict'),
+                    }],
+                )
+                actions.append(check_node)
+
+                # strict 模式：检查节点以**非 0**退出码结束 ⇒ 收栈（非 0 才收，所以"检查通过后正常退出"
+                # 不会误伤；退出码 0 时这个 handler 返回空列表，什么都不做）。
+                def _on_check_exit(event, _context, _name=name_v):
+                    rc = getattr(event, 'returncode', 0)
+                    if rc not in (0, None):
+                        return [LogInfo(msg=('[map_resume_check] ❌ 续建一致性检查不通过（退出码 %s）⇒ '
+                                             'map_resume_check_strict:=True，收栈。存档 %s 未被写入。'
+                                             % (rc, _name))),
+                                Shutdown(reason='map_resume_check strict failure')]
+                    return []
+
+                actions.append(RegisterEventHandler(OnProcessExit(target_action=check_node,
+                                                                  on_exit=_on_check_exit)))
+        return actions
 
     start_mapping = GroupAction(
         condition=slam_mapping_condition,
@@ -1270,6 +1374,11 @@ def generate_launch_description():
     ld.add_action(declare_map_start_pose_cmd)
     ld.add_action(declare_map_allow_world_mismatch_cmd)
     ld.add_action(declare_cloud_accumulator_cmd)
+    ld.add_action(declare_map_resume_check_cmd)
+    ld.add_action(declare_map_resume_check_delay_cmd)
+    ld.add_action(declare_map_resume_check_strict_cmd)
+    ld.add_action(declare_map_resume_check_pos_tol_cmd)
+    ld.add_action(declare_map_resume_check_yaw_tol_deg_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
