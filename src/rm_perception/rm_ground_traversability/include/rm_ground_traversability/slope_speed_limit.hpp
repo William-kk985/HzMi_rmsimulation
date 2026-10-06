@@ -82,8 +82,10 @@ struct SpeedLimitCriteria
   double corridor_half_width_m{0.28}; ///< 走廊半宽（m）
   double corridor_spread_deg{8.0};    ///< 走廊张角（deg）
   double slope_baseline_m{0.40};      ///< 坡度描述子基线（m，= 2 个粗格；与 slopeOf() 一致）
-  double slope_change_deadband_deg{4.0};  ///< 坡度变化死区（deg）：噪声/正常起伏不触发
-  double step_deadband_m{0.040};      ///< 台阶残差死区（m）：噪声不触发
+  double slope_change_deadband_deg{5.5};  ///< 坡度变化死区（deg）：噪声/正常起伏不触发
+  // ★ 2026-10-07：4.0 → 5.5（与 traversability_criteria.yaml 逐键一致，见该文件注释与
+  //   docs/lio_divergence_no_impact.md §3：实测 why=slope_change 占限速行 56~79%）
+  double step_deadband_m{0.060};      ///< 台阶残差死区（m）：噪声不触发（★2026-10-07：0.040→0.060）
   double step_ignore_above_m{0.350};  ///< 残差 > 它 ⇒ 认成墙/高台（交给规划器绕），本限速器不管
   /// **来自判据**（`Criteria::drivable_slope_deg`，同一个 YAML 键 `drivable_slope_deg`，
   /// 不是第二个真源；ROS 层在构造时从 Criteria 填进来）：
@@ -98,22 +100,24 @@ struct SpeedLimitCriteria
   /// 实测（离线扫掠 .tmp_slopespeed/approach*.cpp）：1.0 + "承诺用格子远边" ⇒ 上限在特征处正好
   /// 降到 v_req（过坡脚速度 = v_req ±0.1）；0.7 会让它晚 0.4 m 才降到位（反而不保守）。
   double hold_decay_factor{1.0};
-  double floor_mps{0.45};             ///< 速度地板（m/s）：最低也就降到这（不是 0 ⇒ 永不停车）
+  double floor_mps{0.60};             ///< 速度地板（m/s）：最低也就降到这（不是 0 ⇒ 永不停车）
+  // ★ 2026-10-07：0.45 → 0.60（配合 peak_target 45；推导与实测见 YAML 同键注释）
   /// **支撑格数**：一个"定位型"特征必须在同一 0.40 m 距离带内被 ≥ 它个格确认才算数。
   /// 为什么需要：真实单帧走廊只有 7~14 个粗格、且集中在一两个距离带里（点云稀疏），
   /// 单格的坡度/台阶估计噪声很大（实测 maxΔ坡 在 0.6°~34° 之间跳）⇒ 不加支撑要求时
   /// 噪声会反复触发限速（实测整栈跑：38% 的运动时间被压在 0.6 m/s 以下、目标点超时）。
   int min_support_cells{2};
   std::vector<double> slope_knots_deg{2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0};
-  std::vector<double> slope_knots_mps{1.66, 1.10, 0.83, 0.66, 0.55, 0.45, 0.45};
+  // ★ 2026-10-07：target 30 → 45 后按 v = round_down_2(45·Δt_eff/tanθ × 0.975) 重算
+  std::vector<double> slope_knots_mps{2.48, 1.65, 1.24, 0.99, 0.82, 0.61, 0.60};
   /// 台阶表：模型解在死区(0.04 m ⇒ 等效坡度 11.3°)就已经 ≤0.35 m/s ⇒ 有意义的只有"到地板"这一档。
-  std::vector<double> step_knots_m{0.040};
-  std::vector<double> step_knots_mps{0.45};
+  std::vector<double> step_knots_m{0.060};   // ★ 2026-10-07：死区 0.04 → 0.06 同步
+  std::vector<double> step_knots_mps{0.60};
   // 锚点（只用于自检/文档：反算 Δt_eff 与每个结点的预期峰值）
   double anchor_v_mps{1.70};
   double anchor_tan_slope{0.10};
   double anchor_peak_mps2{86.0};
-  double peak_target_mps2{30.0};
+  double peak_target_mps2{45.0};      // ★ 2026-10-07：30 → 45（回退见 YAML 同键注释）
 
   /// 标定出来的等效接触时间（s）：Δt_eff = v_anchor·tanθ_anchor/a_anchor = 1.98 ms。
   double dt_eff_s() const
