@@ -11,6 +11,12 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>rviz2</exec_depend>
+  <!-- 会话播报器 map_session_announcer.py（2026-10-06 存档写错名字事故后新增）与
+       map_resume_check.py 都是 rclpy 节点；播报器另用 std_msgs/String（latched 负载）
+       + std_srvs/Trigger（查询服务）。 -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

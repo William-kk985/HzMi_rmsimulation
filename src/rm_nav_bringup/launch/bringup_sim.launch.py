@@ -1,4 +1,6 @@
 import os
+import sys
+import uuid
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
@@ -239,6 +241,16 @@ def _write_session_state(map_dir_path, payload):
     从零建图时 slam_toolbox 的 `map_file_name` 是空的（只有续建才有值），默认名
     （map_name 留空 ⇒ 取 world）在运行期完全不可见 ⇒ 会存到错名字上。
     写失败只警告（绝不因为一个记账文件挡住建图）。
+
+    ⚠️ 2026-10-06 事故（存档被写到别人那套会话的名字上）的根因就是**这个文件是可变的**：
+    任何后启动的 launch 都会覆盖它，而旧的 `save` 只做了一次 `kill -0 <pid>` 就照用。
+    现在的分工是：
+      · 本文件 = **次级**证据（还要配"活 launch 进程命令行 / slam_toolbox 的 map_file_name /
+        记录的 pid+cmdline+起始时刻"里的至少一条证明，见 map_asset_guard.py::resolve_session）；
+      · **活会话的第一手证据 = ROS 图上的播报器**（下面的 `map_session_announcer.py`，
+        latched 话题 /map_session/info + 服务 /map_session/query）——
+        它由本次 launch 起、随栈一起死，谁也覆盖不了。
+    因此这里额外记 `session_id`（与播报器同一份）与 `launch_cmdline`（与活进程 argv 逐项可比）。
     """
     try:
         os.makedirs(map_dir_path, exist_ok=True)
@@ -631,6 +643,23 @@ def generate_launch_description():
         'map_resume_check_yaw_tol_deg',
         default_value='10.0',
         description='偏航偏差阈值（度），同上口径。')
+
+    # ★ 2026-10-06（事故后追加）：**会话播报器**（map_session_announcer.py）。
+    #   动机：`map_archive.sh save`（另一个终端）以前靠读 `<map_dir>/.session.yaml` 猜名字，
+    #   而那个文件会被任何后启动的 launch 覆盖 —— 当天用户给自己那套栈（map_name:=RMUC2026_v2）
+    #   跑 save，却被写到了并发测试栈的名字（RMUC2026_dropab_ab_g_long）上（31.89 MB 位姿图）。
+    #   播报器把"本次会话是谁"挂到 ROS 图上（latched 话题 /map_session/info + 服务
+    #   /map_session/query），并自检"图上是否只有一个 /slam_toolbox、且它提供
+    #   /slam_toolbox/serialize_map"⇒ save 拿到的名字**来自活栈本身**，谁也没法覆盖。
+    #   它是**只发布**的附加节点：不发 /map、不发 TF、不订阅、不改任何既有节点/时序；
+    #   关掉它也只是少一条证据（save 会退到"活 launch 进程命令行 / .session.yaml + 活性证明"，
+    #   两条都不成立就拒绝写盘）。详见 docs/continue_mapping.md §11。
+    declare_map_session_announce_cmd = DeclareLaunchArgument(
+        'map_session_announce',
+        default_value='True',
+        description='True（默认）= 起会话播报器 map_session（只广播"本次 launch 用了哪个 map_name/'
+                    'world/存档基名/出生点/session_id"，供 map_archive.sh save 当场核对；'
+                    '只发布，不影响建图）；False = 不起（save 需要 --name 或依赖活进程/文件证据）')
 
     # Specify the actions
     start_rm_simulation = IncludeLaunchDescription(
@@ -1162,6 +1191,9 @@ def generate_launch_description():
             output='screen',
             parameters=[slam_toolbox_mapping_file_dir, params],
         )
+        # ★ 2026-10-06（事故后）：本次会话的**唯一身份号**。`.session.yaml` 与 ROS 图上的
+        #   会话播报器共用它 ⇒ `save` 能一眼看出"文件里记的"和"活栈上广播的"是不是同一次。
+        session_id = uuid.uuid4().hex[:12]
         _write_session_state(map_dir_path, {
             'map_name': name_v,
             'world': world_v,
@@ -1172,11 +1204,41 @@ def generate_launch_description():
             'map_allow_world_mismatch': allow_mismatch,
             'resumed': bool(verdict is not None and verdict['may_load']),
             'archive_base': base,
+            'session_id': session_id,
             'session_pid': os.getpid(),
+            'launch_cmdline': list(sys.argv),     # save 用它把"记录的那次 launch"与活进程 argv 逐项对比
             'started_at': guard.now_iso(),
             'written_by': 'bringup_sim.launch.py',
         })
         actions = [LogInfo(msg=banner), TimerAction(period=4.0, actions=[node])]
+
+        # ★ 2026-10-06（事故后）：**会话播报器**（只发布，不改变既有节点集/时序）。
+        #   动机：`save` 在另一个终端跑，它必须知道"现在这套栈是谁"，而 `.session.yaml`
+        #   会被任何后启动的 launch 覆盖（那天 31.89 MB 位姿图就是这么写到别人名字上的）。
+        #   播报器随本次 launch 生、随本次 launch 死 ⇒ 身份不可被后人改写；它自己还会核对
+        #   "图上是否只有一个 /slam_toolbox 且它提供 /slam_toolbox/serialize_map"。
+        #   不需要它时：map_session_announce:=False（save 会退到"活 launch 进程命令行 /
+        #   .session.yaml+活性证明"，两条都不成立就拒绝）。
+        if _as_bool(context.perform_substitution(LaunchConfiguration('map_session_announce')),
+                    'map_session_announce'):
+            actions.append(Node(
+                package='rm_nav_bringup',
+                executable='map_session_announcer.py',
+                name='map_session',
+                output='screen',
+                parameters=[{
+                    'map_name': name_v,
+                    'world': world_v,
+                    'archive_base': base,
+                    'map_start_pose': '[%r, %r, %r]' % tuple(start_pose),
+                    'resumed': bool(verdict is not None and verdict['may_load']),
+                    'autocontinue': autocontinue,
+                    'allow_world_mismatch': allow_mismatch,
+                    'started_at': guard.now_iso(),
+                    'session_id': session_id,
+                    'launch_pid': os.getpid(),
+                }],
+            ))
 
         # ★ 2026-10-06：**续建成功时**才追加"一次性一致性检查"节点（从零建图不创建它）。
         #   期望值取**存档 sidecar 里记录的 map_start_pose**（不是本次传的 map_start_pose）：
@@ -1379,6 +1441,7 @@ def generate_launch_description():
     ld.add_action(declare_map_resume_check_strict_cmd)
     ld.add_action(declare_map_resume_check_pos_tol_cmd)
     ld.add_action(declare_map_resume_check_yaw_tol_deg_cmd)
+    ld.add_action(declare_map_session_announce_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
