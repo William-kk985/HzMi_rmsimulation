@@ -341,6 +341,22 @@ P0 回归（--goal 0.5 3.0 --localization RMUC2026-spl）：
 
 ---
 
+## 7.5 后续：2D 先验图**不再从 `/scan` 推**（2026-10-06）
+
+本文的 2D 图（`map/RMUC2026_spl.pgm`）是 `slam_toolbox` 用 `/scan` 攒出来的。后续实测确认：
+**这条来源天然看不见"可行驶的斜坡"** —— `/scan` 是 `linefit 地面分割 → pointcloud_to_laserscan`
+（传感器系窄高度带）的产物，坡度够缓的斜面会被判成地面而**从 `/scan` 里消失**，
+于是"3D 点云里清清楚楚的坡道，在 2D 图上要么空白、要么根本不在图窗内"。
+
+⇒ **决定：2D 导航图改为从 3D 点云直接投影**，工具是
+`tools/scripts/mapping/pcd_to_nav2_map.py`（判据：相对**局部地面**的高度 + 坡度闸；
+缓坡保持 FREE），产物 `map/RMUC2026_cloud.pgm/.yaml`。
+两套 2D 先验的区域计数 A/B、坡道段判定、`/scan` 丢帧 A/B、`map→odom` 跳变哨兵与
+"怎么在这个 world 上建图而不把图跑歪"的规程，全部见
+**`docs/mapping_2d_from_cloud.md`**。
+
+---
+
 ## 8. 与 FAST-LIO 的 A/B（能比什么、不能比什么）
 
 | 维度 | small_point_lio（本次） | FAST-LIO（`docs/worlds.md` §5.1/§5.3 既有数据） | 可比性 |
