@@ -95,6 +95,12 @@ map_name:=RMUC2026_diag            # 测试专用名，不碰用户的任何存�
 
 ### 2.3 ⚠️ 指令角速度 ≠ 实际角速度（本仓底盘的真实传递曲线）
 
+> **★ 2026-10-07 更正（`docs/lio_divergence_no_impact.md` §2 第 1 条）**：下面这张表**与本仓当前栈不符**。
+> 用同一行内的"指令/真值"配对重测（`analyze_noimpact_divergence.py --yaw-transfer`，n=75~109、
+> 符号一致率 1.00）得到的是 **≈1:1**：指令 0.34→实测 0.36、0.65→0.67、1.07→1.11、**2.83→2.83**（原地）。
+> 也就是说底盘**听得懂** yaw 指令、没有那种巨大死区；"要 1.9 rad/s 得给满 6"不要再引用。
+> （下表大概率混进了"闭环里 cmd 与被控量不同口径"的问题，未追溯。）
+
 `S` 段实测（闭环 `cmd = target + 6·(target − measured)`，从零那一跑）：
 
 | 期望实际 ω (rad/s) | **实测 ω (rad/s)** | 为此需要的**指令** \|ω\| (rad/s) | 同向比例 |
@@ -587,3 +593,6 @@ python3 tools/scripts/diag/lio_drift_analyze.py \
 * `docs/worlds.md` §5.1 —— 采样饥饿陷阱的原始记录；§6 场地对这台车的几何约束。
 * `docs/lio_slots.md` —— LIO 槽位参数与离线重放结论。
 * `docs/tf_interface_contract.md` —— `map→odom` 单一发布者契约（本次两跑都只有 slam_toolbox）。
+* `docs/lio_divergence_no_impact.md` —— **nav 模式**下"没撞击却飘里程计"的实测归因（本文 §5.1 的
+  "甩转是唯一复现的失效模式"要按"建图模式 + 脚本化甩转"读；本文 §2.3 的 yaw 传递曲线在那边被更正，
+  §5.4 的"因果方向没定死"在那边用 50 Hz 逐帧时间轴定死了：GICP 先察觉、LIO 后跑飞）。

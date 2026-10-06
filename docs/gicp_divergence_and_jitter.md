@@ -9,6 +9,12 @@
 > 以及**没有验证的东西**。所有数字都能用 §6 的命令复跑（`tools/scripts/localization/` 下的三个脚本 +
 > `gicp_registration/bench/gicp_selfsim_probe`）。
 
+> **★ 2026-10-07 相关实测**：`docs/lio_divergence_no_impact.md` 用 50 Hz 逐帧时间轴把
+> "过台阶冲击 → `converged=False` → 拒绝级联 → LIO 跑飞 → 连续 25 帧被拒 ⇒ 停发 `map→odom`"
+> 这条链按时刻排出来了（3 次发散），并给出"同一个坡脚、同样量级的冲击，一次 21 km 发散、
+> 一次 0.46 m 干净"的对照 —— 分叉点在**本文讨论的位姿门**上。本文 §2/§3 的 `~/fitness_score`
+> 好看但 `map→odom` 跑掉的机制，与那边 §1.6 的 `map→odom` 停发口径一致。
+
 ---
 
 > 🔗 相关（2026-10-06）：`docs/path_clearance_and_contact.md` —— 用户下一次实跑（`spin_speed:=0.0`）的
