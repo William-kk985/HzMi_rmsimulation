@@ -30,22 +30,38 @@
 #   ⚠️ 注意：守卫只管"world/spawn **对不对**"，管不了"图**本身歪了**"（当天事故就是后者）
 #      ⇒ 续建后另有一次一致性检查（launch 参数 map_resume_check*，见 docs/continue_mapping.md §8）。
 #
-# 名字从哪来（按优先级）：
-#   ① --name X       ② 环境变量 $MAP_NAME
-#   ③ <map_dir>/.session.yaml（**推荐**：launch 每次都会写，见 bringup_sim.launch.py）
-#   ④ 正在跑的 /cloud_accumulator 的 map_name 参数
-#   ⑤ 正在跑的 /slam_toolbox 的 map_file_name（续建时才有值）
-#   ⑥ 都没有 ⇒ 报错让你显式给 --name（**故意不猜**：存错名字比报错危险得多）
+# 名字从哪来（**2026-10-06 事故后重写：不再"读文件就用"**）：
+#   ① --name X        —— 人担保；打印为"显式"。若 X ≠ 活栈会话名 ⇒ 仍拒绝（见 ④），
+#                        除非显式 --allow-cross-session（那时等于"另存一份"）
+#   ② **ROS 图上的活会话** —— launch 起的播报器节点 /map_session（latched 话题
+#                        /map_session/info + 服务 /map_session/query，内容含
+#                        map_name/world/archive_base/map_start_pose/started_at/session_id）
+#                        ⇒ 名字来自**正在跑的这套栈本身**，任何后启动的 launch 都覆盖不了它
+#   ③ 活着的 bringup_sim.launch.py 进程的命令行（map_name:= / world:=）；看不到进程时
+#                        （组合 launch / 别的 PID namespace）退一步用**活映射器自报的存档基名**
+#                        （slam_toolbox 的 map_file_name —— 续建时才有值）
+#   ④ <map_dir>/.session.yaml **+ 把它钉在活栈上的证明**（活 launch cmdline 对得上 /
+#                        slam_toolbox 的 map_file_name 基名对得上 / 记录的 pid 活着且
+#                        cmdline 与起始时刻都对得上 —— pid **单独不算证据**）
+#   ⑤ 都不成立 ⇒ **拒绝**（退出码 3，列出查了什么、给三条出路），**绝不猜名字**
+#   为什么不用 `kill -0 <session_pid>` 当活性检查（旧版的 bug）：
+#     · 假阳性：pid 会被回收 ⇒ 早已结束的会话"看起来还活着"；
+#     · 假阴性：记录的常是**包装进程**（`setsid ros2 launch … &` 的 $!、timeout、外层脚本）
+#       或 launch 主进程先走而子节点还活着（本仓库 §5.2 记过 setsid/$! 这个坑）。
+#   ⚠️ 多会话（同时两套栈）⇒ 直接拒绝并列出：两个 /slam_toolbox、两个 /map_session、
+#      两个 mapping 形态的 bringup_sim.launch.py、或两份 session_id 不同的播报。
+#      两套栈想同时存在就用不同 ROS_DOMAIN_ID（各自的 save 只看得到自己那一套）。
 #
 # 典型用法（终端 B，栈在终端 A 跑着）：
 #   tools/scripts/mapping/map_archive.sh save                 # 存档名 = 本次 launch 的 map_name
+#   tools/scripts/mapping/map_archive.sh save --check         # 只看"会用哪个名字+证据链"，不写盘
 #   tools/scripts/mapping/map_archive.sh save --name RMUC2026_home
 #   tools/scripts/mapping/map_archive.sh info --name RMUC2026_home
 #   tools/scripts/mapping/map_archive.sh list
 #   tools/scripts/mapping/map_archive.sh backups --name RMUC2026_home      # 看有几代备份
 #   tools/scripts/mapping/map_archive.sh restore --name RMUC2026_home      # 回滚到最新一代
 #
-# 退出码：0 成功；2 用法/环境问题；3 **守卫拒绝**（场地不一致，见打印出来的四条出路）；
+# 退出码：0 成功；2 用法/环境问题；3 **拒绝**（场地不一致 或 会话名不确认/多会话，见打印出来的出路）；
 #         4 落盘超时；5 restore/backups 找不到可用的备份代。
 # =============================================================================
 set -u
@@ -53,9 +69,11 @@ set -u
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GUARD="$WS/src/rm_nav_bringup/scripts/map_asset_guard.py"
 NAME=""; WORLD=""; TIMEOUT=60; ALLOW=0; WITH_CLOUD=1; RESOLUTION=""
-FROM=""; DRY_RUN=0; KEEP=3; LIST_JSON=0; KIND="all"
+FROM=""; DRY_RUN=0; KEEP=3; LIST_JSON=0; KIND="all"; ALLOW_XSESSION=0
+SESSION=""; SESSION_SOURCE=""; SESSION_WORLD=""; SESSION_SPAWN=""; SESSION_ID=""
+SESSION_ARCHIVE_BASE=""; SESSION_STARTED=""; SESSION_NAME_RESOLVED=""
 
-usage() { sed -n '2,51p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d'; }
 
 py_guard() { python3 "$GUARD" "$@"; }
 
@@ -64,8 +82,9 @@ MAP_DIR="$(py_guard dirs 2>/dev/null | sed -n 's/^map_dir=//p')"
 PCD_DIR="$(py_guard dirs 2>/dev/null | sed -n 's/^pcd_dir=//p')"
 [ -n "$MAP_DIR" ] || { echo "[map_archive] ❌ 拿不到 map 目录（先 source install/setup.bash？）" >&2; exit 2; }
 
-# ---- 会话状态（launch 写的；用于默认名字/场地）
-SESSION="$MAP_DIR/.session.yaml"
+# ---- 会话状态（launch 写的；用于宽松取名/出生点回退；save 走 guard 的严格解析）
+#      $MAP_ARCHIVE_SESSION_FILE 只给测试/排查用（把"会被覆盖的那份文件"指到别处，验证拒绝路径）
+SESSION="${MAP_ARCHIVE_SESSION_FILE:-$MAP_DIR/.session.yaml}"
 session_get() {   # session_get <key>
   [ -f "$SESSION" ] || return 0
   python3 - "$SESSION" "$1" <<'PY'
@@ -84,29 +103,52 @@ ros_param() {     # ros_param <node> <param>  —— 拿不到就空
 }
 
 resolve_name() {
-  [ -n "$NAME" ] && return 0
-  [ -n "${MAP_NAME:-}" ] && { NAME="$MAP_NAME"; echo "[map_archive] 名字来自 \$MAP_NAME=$NAME"; return 0; }
-  local v; v="$(session_get map_name)"
-  if [ -n "$v" ]; then
-    # 会话状态可能是"上一次跑完留下的"：pid 不在 ⇒ 至少提醒一句（不拦，用户仍可 --name 覆盖）
-    local spid; spid="$(session_get session_pid)"
-    if [ -n "$spid" ] && ! kill -0 "$spid" 2>/dev/null; then
-      echo "[map_archive] ⚠️ 会话状态里的 launch pid=$spid 已经不在了 ⇒ 下面这个名字可能来自**上一次**会话；若不对请显式 --name X" >&2
-    fi
-    NAME="$v"; echo "[map_archive] 名字来自本次会话状态 $SESSION：map_name=$NAME"; return 0
+  # ★ 2026-10-06 事故后：名字**不再**从 .session.yaml 直接取。
+  #   唯一出处 = guard 的 session-resolve（①--name ＞ ②图上活会话播报器 ＞ ③活 launch 进程
+  #   ＞ ④.session.yaml+活性证明 ＞ ⑤拒绝）。它会打印完整证据链，并在拒绝时给出出路。
+  #   这样做的原因：.session.yaml 会被任何后启动的 launch 覆盖（当天 31.89 MB 位姿图就是
+  #   这么写到并发测试栈的名字上的），而"活栈自己在 ROS 图上广播的名字"谁也覆盖不了。
+  local args=(session-resolve --session-file "$SESSION") out rc=0
+  if [ -z "$NAME" ] && [ -n "${MAP_NAME:-}" ]; then
+    NAME="$MAP_NAME"; echo "[map_archive] 名字来自 \$MAP_NAME=$NAME（等同 --name，仍会与活栈交叉核对）"
   fi
-  v="$(ros_param /cloud_accumulator map_name)"
-  if [ -n "$v" ]; then NAME="$v"; echo "[map_archive] 名字来自运行中的 /cloud_accumulator：map_name=$NAME"; return 0; fi
-  v="$(ros_param /slam_toolbox map_file_name)"
-  if [ -n "$v" ]; then NAME="$(basename "$v")"; echo "[map_archive] 名字来自运行中的 /slam_toolbox：map_file_name=$v"; return 0; fi
-  return 1
+  [ -n "$NAME" ] && args+=(--name "$NAME")
+  [ -n "$WORLD" ] && args+=(--world "$WORLD")
+  [ "$ALLOW_XSESSION" = 1 ] && args+=(--allow-cross-session)
+  out="$(py_guard "${args[@]}")"; rc=$?
+  printf '%s\n' "$out"
+  while IFS= read -r line; do
+    case "$line" in
+      session_source=*)       SESSION_SOURCE="${line#session_source=}";;
+      session_name=*)         SESSION_NAME_RESOLVED="${line#session_name=}";;
+      session_world=*)        SESSION_WORLD="${line#session_world=}";;
+      session_spawn=*)        SESSION_SPAWN="${line#session_spawn=}";;
+      session_id=*)           SESSION_ID="${line#session_id=}";;
+      session_started_at=*)   SESSION_STARTED="${line#session_started_at=}";;
+      session_archive_base=*) SESSION_ARCHIVE_BASE="${line#session_archive_base=}";;
+    esac
+  done <<< "$out"
+  if [ "$rc" != 0 ]; then
+    echo "[map_archive] ❌ 拒绝存档：**没法确认「这次该写哪个名字」**（退出码 $rc）—— 没有写任何文件。" >&2
+    echo "              依据在上面（每条查了什么、缺哪条证明、以及 --name 等出路）；详见 docs/continue_mapping.md §11" >&2
+    return "$rc"
+  fi
+  [ -n "$SESSION_NAME_RESOLVED" ] || { echo "[map_archive] ❌ 内部错误：解析成功但没拿到名字" >&2; return 2; }
+  NAME="$SESSION_NAME_RESOLVED"
+  echo "[map_archive] ✅ 会话名已确认：name=$NAME world=${SESSION_WORLD:-?} 来源=$SESSION_SOURCE" >&2
+  return 0
 }
 
 resolve_world() {
   [ -n "$WORLD" ] && return 0
   [ -n "${RM_WORLD:-}" ] && { WORLD="$RM_WORLD"; echo "[map_archive] 场地来自 \$RM_WORLD=$WORLD"; return 0; }
+  if [ -n "$SESSION_WORLD" ]; then
+    WORLD="$SESSION_WORLD"
+    echo "[map_archive] 场地来自活会话证据（来源=$SESSION_SOURCE）：world=$WORLD"
+    return 0
+  fi
   local v; v="$(session_get world)"
-  if [ -n "$v" ]; then WORLD="$v"; echo "[map_archive] 场地来自本次会话状态：world=$WORLD"; return 0; fi
+  if [ -n "$v" ]; then WORLD="$v"; echo "[map_archive] 场地来自会话状态文件：world=$WORLD"; return 0; fi
   if [ -n "$NAME" ] && [ -f "$MAP_DIR/$NAME.meta.yaml" ]; then
     v="$(python3 - "$MAP_DIR/$NAME.meta.yaml" <<'PY'
 import sys, yaml
@@ -119,6 +161,25 @@ PY
 )"
     if [ -n "$v" ]; then WORLD="$v"; echo "[map_archive] 场地来自存档自身的 sidecar：world=$WORLD"; return 0; fi
   fi
+  return 1
+}
+
+# ---- 宽松取名（info / backups / backup / restore 用；这些**不写存档**，且常在栈关掉之后跑）
+resolve_name_loose() {
+  [ -n "$NAME" ] && return 0
+  [ -n "${MAP_NAME:-}" ] && { NAME="$MAP_NAME"; echo "[map_archive] 名字来自 \$MAP_NAME=$NAME"; return 0; }
+  local v; v="$(session_get map_name)"
+  if [ -n "$v" ]; then
+    NAME="$v"
+    echo "[map_archive] ⚠️ 名字来自 $SESSION —— 这个文件**会被任何后启动的 launch 覆盖**（2026-10-06 事故根因）。" >&2
+    echo "              本子命令不写存档 ⇒ 只提示；save 则要求它被「活栈证据」钉住，否则拒绝。" >&2
+    echo "              要锁定名字请显式：map_archive.sh ${CMD:-info} --name $NAME" >&2
+    return 0
+  fi
+  v="$(ros_param /cloud_accumulator map_name)"
+  [ -n "$v" ] && { NAME="$v"; echo "[map_archive] 名字来自运行中的 /cloud_accumulator：map_name=$NAME"; return 0; }
+  v="$(ros_param /slam_toolbox map_file_name)"
+  [ -n "$v" ] && { NAME="$(basename "$v")"; echo "[map_archive] 名字来自运行中的 /slam_toolbox：map_file_name=$v"; return 0; }
   return 1
 }
 
@@ -148,10 +209,14 @@ pcd_health() {   # pcd_health <pcd> <z_span_warn>
 
 # ============================================================ save
 cmd_save() {
-  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X（或 --name / \$MAP_NAME；也可给 launch 传 map_name:=X）" >&2; exit 2; }
+  # ---- 名字：严格解析（--name ＞ 活图播报器 ＞ 活 launch 进程 ＞ .session.yaml+活性证明 ＞ 拒绝）
+  #      拒绝 ⇒ 直接非 0 退出（**没有写任何文件**）；这一段是 2026-10-06 事故的直接修复。
+  local rrc=0
+  resolve_name || rrc=$?
+  [ "$rrc" = 0 ] || exit "$rrc"
   resolve_world || { echo "[map_archive] ❌ 无法确定 world：请显式 --world W（例如 --world RMUC2026）" >&2; exit 2; }
   local base="$MAP_DIR/$NAME"
-  echo "[map_archive] 存档: name=$NAME world=$WORLD"
+  echo "[map_archive] 存档: name=$NAME world=$WORLD（会话来源=$SESSION_SOURCE${SESSION_ID:+ session_id=$SESSION_ID}）"
   echo "[map_archive]   map_dir=$MAP_DIR"
   echo "[map_archive]   base=$base"
 
@@ -175,6 +240,18 @@ cmd_save() {
     exit 3
   elif [ "$rc" != 0 ]; then
     echo "[map_archive] ❌ 守卫检查本身失败（退出码 $rc）" >&2; exit 2
+  fi
+
+  # ---- ★ --check / --dry-run：把"会用哪个名字 + 证据链 + 会做什么"打全，然后**什么都不写**
+  if [ "$DRY_RUN" = 1 ]; then
+    echo
+    echo "[map_archive] 🧪 --check/--dry-run：**没有写任何文件**。若现在真的 save，会依次做："
+    echo "    ① 覆盖前备份既有 map/$NAME.{posegraph,data,meta.yaml}（keep=$KEEP 代：*.prev-<时间戳>）"
+    echo "    ② ros2 service call /slam_toolbox/serialize_map \"{filename: '$base'}\""
+    echo "    ③ 等 $base.{posegraph,data} 落盘（最多 ${TIMEOUT}s）后刷新 sidecar（world=$WORLD${SESSION_SPAWN:+ spawn=$SESSION_SPAWN}）"
+    echo "    ④ 若 /cloud_accumulator/save 在 ⇒ 顺带覆盖 PCD/$NAME.pcd（它自己备份）"
+    echo "    名字来源=$SESSION_SOURCE；完整证据链见上面 ①~⑤ 五行。"
+    exit 0
   fi
 
   # ---- 记录写之前的指纹（用于确认"真的被重写了"，而不是"本来就在那儿"）
@@ -210,8 +287,10 @@ cmd_save() {
   fi
 
   # ---- 写/刷新 sidecar（world + 出生点 + 版本；这是下次续建能"拒绝错场地"的唯一依据）
+  #      出生点优先取**活会话证据**（播报器/活 launch），取不到才回退会话状态文件。
   local spawn_args=()
-  local sp; sp="$(session_get map_start_pose)"
+  local sp="$SESSION_SPAWN"
+  [ -n "$sp" ] || sp="$(session_get map_start_pose)"
   [ -n "$sp" ] && spawn_args+=(--map-start-pose "$sp")
   py_guard write-manifest --kind posegraph --name "$NAME" --world "$WORLD" \
       --resolution "$RESOLUTION" "${spawn_args[@]}" || {
@@ -235,6 +314,7 @@ cmd_save() {
 
   echo
   echo "[map_archive] ✅ 存档完成（同名覆盖；写前已备份，回滚：map_archive.sh restore --name $NAME）"
+  echo "  会话来源: $SESSION_SOURCE${SESSION_ID:+（session_id=$SESSION_ID${SESSION_STARTED:+，起于 $SESSION_STARTED}）}"
   echo "  位姿图 : $base.posegraph  $(human "$base.posegraph")"
   echo "  数据集 : $base.data       $(human "$base.data")"
   echo "  sidecar: $base.meta.yaml  $(human "$base.meta.yaml")"
@@ -253,7 +333,7 @@ cmd_save() {
 
 # ============================================================ info / list / adopt / dirs
 cmd_info() {
-  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  resolve_name_loose || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
   echo "[map_archive] 目录: map=$MAP_DIR  PCD=$PCD_DIR"
   if [ -f "$SESSION" ]; then
     echo "[map_archive] 本次会话（$SESSION）:"
@@ -287,18 +367,18 @@ cmd_dirs() { py_guard dirs; [ -f "$SESSION" ] && { echo "session=$SESSION"; sed 
 # ============================================================ backups / restore
 # （2026-10-06 事故后新增：save 是同名覆盖，一次坏 save 就能把好存档换掉）
 cmd_backups() {
-  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  resolve_name_loose || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
   py_guard backups --name "$NAME" --kind "$KIND" ${LIST_JSON:+--json}
 }
 
 cmd_backup() {
-  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  resolve_name_loose || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
   echo "[map_archive] 手工备份一代：name=$NAME kind=$KIND keep=$KEEP"
   py_guard backup --name "$NAME" --kind "$KIND" --keep "$KEEP"
 }
 
 cmd_restore() {
-  resolve_name || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
+  resolve_name_loose || { echo "[map_archive] ❌ 无法确定存档名：请显式 --name X" >&2; exit 2; }
   local args=(restore --name "$NAME" --kind "$KIND" --keep "$KEEP")
   [ -n "$FROM" ] && args+=(--from "$FROM")
   [ "$DRY_RUN" = 1 ] && args+=(--dry-run)
@@ -330,7 +410,8 @@ while [ $# -gt 0 ]; do
     --kind) KIND="$2"; shift 2;;
     --from) FROM="$2"; shift 2;;
     --keep) KEEP="$2"; shift 2;;
-    --dry-run) DRY_RUN=1; shift;;
+    --dry-run|--check) DRY_RUN=1; shift;;          # save 的 --check/--dry-run = 只打印不写盘
+    --allow-cross-session) ALLOW_XSESSION=1; shift;;  # 明确要"另存一份"（名字≠活栈会话名）时用
     -h|--help) usage; exit 0;;
     *) echo "[map_archive] 未知参数：$1" >&2; usage; exit 2;;
   esac

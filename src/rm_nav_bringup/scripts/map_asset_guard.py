@@ -42,7 +42,10 @@ import ast
 import datetime
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
 try:                                    # PyYAML 在所有 ROS 2 环境里都有；没有也能跑（退化到极简解析）
@@ -744,6 +747,743 @@ def restore_files(name, kind='all', from_ts=None, keep=BACKUP_KEEP, dry_run=Fals
          % (len(recs), ', '.join(used)))
 
 
+# ============================================================ 会话身份：活栈发现（2026-10-06 事故后新增）
+# 事故：用户给自己那套栈（map_name:=RMUC2026_v2，18:08 起）跑 save，但 `.session.yaml`
+#   已被**并发的自动化测试栈**（19:09:40 起，map_name:=RMUC2026_dropab_ab_g_long）覆盖。
+#   当时唯一的"活性检查"是 `kill -0 <session_pid>`，它只打了一句警告就放行 ⇒
+#   31.89 MB 的位姿图被写到**别人那套会话的名字**上。
+#
+# 为什么 pid 不能当活性依据（两头都错）：
+#   · 假阳性：pid 会被回收 —— 一个早已结束的会话，其 pid 可能正好被别的进程占用 ⇒ "看起来还活着"；
+#   · 假阴性：记录的可能只是**包装进程**（`setsid ros2 launch … &` 的 `$!`、`timeout`、
+#     外层脚本），包装一退出 pid 就没了；反过来 launch 主进程被 SIGKILL 时子节点也可能还活着
+#     ⇒ 栈活着但 pid 不在（本仓库已有前科：docs/continue_mapping.md §5.2 的 setsid/$! 陷阱）。
+#   ⇒ 活性/身份一律以 **ROS 图 + 进程命令行 + 存档参数** 为准，pid 只作为**辅助证据**，
+#     且必须同时满足"进程在 + cmdline 与记录一致 + 起始时刻与 started_at 一致"才算证据。
+#
+# 名字解析顺序（`resolve_session()`，从强到弱，任何一步都不"猜"）：
+#   ① `--name X`（人担保）
+#   ② ROS 图上的**活会话播报器**：launch 起的 `map_session` 节点在常驻（latched）话题
+#      `/map_session/info` 与服务 `/map_session/query` 上广播本次会话（名字/world/存档基名/
+#      出生点/started_at/session_id），并**自检**"图上有且只有一个 /slam_toolbox、
+#      且它提供 /slam_toolbox/serialize_map"才把 verified 置真；
+#   ③ 活着的 `bringup_sim.launch.py` 进程的命令行（`map_name:=` / `world:=`）；
+#      看不到 launch 进程时（组合 launch / 进程在别的 PID namespace）退一步用
+#      **活映射器自己报的存档基名**（`slam_toolbox` 的 `map_file_name`；**续建**时才有值）；
+#   ④ `.session.yaml` + 把它钉在**活栈**上的证明（活 launch cmdline 对得上 / slam_toolbox 的
+#      `map_file_name` 基名对得上 / 记录的 pid 活着且 cmdline 与起始时刻都对得上）；
+#   ⑤ 都不成立 ⇒ **拒绝**（列出查了什么、怎么继续），绝不退化成"读文件就用"。
+#
+# 多会话（两套栈同时在跑）⇒ 直接拒绝并列出：两个 `/slam_toolbox` 同名节点、两个 `map_session`
+#   节点、两个 mapping 形态的活 launch、或两份 session_id 不同的播报。
+SESSION_STATE_NAME = '.session.yaml'
+SESSION_NODE = 'map_session'
+SESSION_TOPIC = '/map_session/info'
+SESSION_SERVICE = '/map_session/query'
+SESSION_SCHEMA = 'rm_nav_bringup/map_session@1'
+MAPPER_NODE = 'slam_toolbox'
+SERIALIZE_SERVICE = '/slam_toolbox/serialize_map'
+MAPPING_LAUNCH_FILE = 'bringup_sim.launch.py'
+MAPPING_MODES = ('mapping', 'slam_nav')
+SESSION_PID_TOL_S = 300.0            # started_at 与进程起始时刻的允许差（launch 写文件在 t≈几秒）
+
+
+def session_state_path(directory=None):
+    return os.path.join(directory or map_dir(), SESSION_STATE_NAME)
+
+
+def read_session_state(path=None):
+    """读 launch 写的会话状态（`.session.yaml`）；不存在 ⇒ None，坏文件 ⇒ {'__parse_error__': …}。"""
+    p = path or session_state_path()
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, 'r') as f:
+            d = yaml.safe_load(f) if yaml else _mini_yaml(f.read())
+        if not isinstance(d, dict):
+            return {'__parse_error__': '内容不是 mapping', '__path__': p}
+        d = dict(d)
+        d['__path__'] = p
+        return d
+    except Exception as e:                                        # pragma: no cover
+        return {'__parse_error__': str(e), '__path__': p}
+
+
+# ------------------------------------------------------------ 进程表（pid 证据的正确用法）
+def _proc_stat(pid, btime, clk):
+    """从 /proc/<pid>/stat 取 (state, 起始 epoch)。字段 22 = starttime（时钟滴答）。"""
+    try:
+        with open('/proc/%d/stat' % pid, 'r') as f:
+            txt = f.read()
+    except Exception:
+        return None, None
+    rp = txt.rfind(')')                 # comm 里可能带空格/括号 ⇒ 从最后一个 ')' 之后切
+    if rp < 0:
+        return None, None
+    rest = txt[rp + 2:].split()
+    try:
+        state = rest[0]
+        starttime = int(rest[19])       # 3=state ⇒ 22 = rest[19]
+    except Exception:
+        return state if rest else None, None
+    return state, (btime + starttime / float(clk) if btime else None)
+
+
+def proc_table():
+    """当前 PID namespace 看得到的进程表：pid → {state, argv, started_epoch, cmdline}。
+
+    ⚠️ 只看得到同一个 PID namespace 里的进程（本仓库的沙箱 bash 每条命令一个 namespace，
+    用户自己的终端则共享一个）。started_epoch 与 `ps -o lstart=` 同源（/proc/stat 的 btime
+    + /proc/<pid>/stat 的 starttime），不依赖外部命令。
+    """
+    btime, clk = 0.0, 100.0
+    try:
+        with open('/proc/stat', 'r') as f:
+            for line in f:
+                if line.startswith('btime '):
+                    btime = float(line.split()[1])
+                    break
+    except Exception:                                             # pragma: no cover
+        pass
+    try:
+        clk = float(os.sysconf('SC_CLK_TCK'))
+    except Exception:                                             # pragma: no cover
+        clk = 100.0
+    out = {}
+    try:
+        names = os.listdir('/proc')
+    except Exception:                                             # pragma: no cover
+        return out
+    for n in names:
+        if not n.isdigit():
+            continue
+        pid = int(n)
+        try:
+            with open('/proc/%d/cmdline' % pid, 'rb') as f:
+                argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
+        except Exception:
+            continue
+        if not argv:                    # 内核线程 / 刚退出
+            continue
+        state, started = _proc_stat(pid, btime, clk)
+        out[pid] = {'pid': pid, 'state': state, 'argv': argv, 'started_epoch': started,
+                    'cmdline': ' '.join(argv)}
+    return out
+
+
+def parse_launch_args(argv):
+    """从 launch 进程 argv 里取 `key:=value`（ros2 launch 的启动参数一律是这个形式）。"""
+    out = {}
+    for a in argv:
+        if ':=' not in a or a.startswith('-'):
+            continue
+        k, v = a.split(':=', 1)
+        if k and all(c.isalnum() or c == '_' for c in k):
+            out[k] = v
+    return out
+
+
+def find_mapping_launches(procs):
+    """活着的 `bringup_sim.launch.py` 进程（要求该文件名是**独立的一个 argv 项**，
+    这样 `bash -c "ros2 launch … bringup_sim.launch.py …"` 这种包装不会被重复计入）。"""
+    res = []
+    for pid in sorted(procs):
+        p = procs[pid]
+        if p.get('state') == 'Z':
+            continue
+        if not any(os.path.basename(a) == MAPPING_LAUNCH_FILE for a in p['argv']):
+            continue
+        args = parse_launch_args(p['argv'])
+        world = (args.get('world') or '').strip()
+        name = (args.get('map_name') or '').strip() or world
+        res.append({'pid': pid, 'state': p.get('state'), 'argv': p['argv'],
+                    'started_epoch': p.get('started_epoch'), 'cmdline': p.get('cmdline'),
+                    'args': args, 'world': world, 'map_name': name,
+                    'mode': (args.get('mode') or '').strip()})
+    return res
+
+
+def describe_launch(l):
+    ts = (datetime.datetime.fromtimestamp(l['started_epoch']).astimezone().strftime('%Y-%m-%d %H:%M:%S')
+          if l.get('started_epoch') else '?')
+    return ('pid=%d map_name=%s world=%s mode=%s（起于 %s）'
+            % (l['pid'], l['map_name'] or '（空）', l['world'] or '（空）',
+               l['mode'] or '（默认）', ts))
+
+
+def _cmdline_matches(recorded, live_argv):
+    """记录的 launch argv 与活进程 argv 是否同一次启动（python 会在 argv[0] 前插解释器）。"""
+    if not recorded:
+        return False
+    rec = [str(a) for a in recorded]
+    live = [str(a) for a in live_argv]
+    return rec == live or rec == live[1:] or live == rec[1:] or \
+        (len(rec) >= 3 and rec[-3:] == live[-3:])
+
+
+# ------------------------------------------------------------ ROS 图 + 会话播报
+def ros_param_string(node_name, param, timeout=8):
+    """`ros2 param get` 取字符串参数；拿不到/不是字符串 ⇒ None。"""
+    try:
+        out = subprocess.run(['ros2', 'param', 'get', node_name, param],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=timeout).stdout.decode('utf-8', 'replace')
+    except Exception:
+        return None
+    for line in out.splitlines():
+        m = re.match(r'^\s*String value is:\s*(.*)$', line)
+        if m:
+            v = m.group(1).strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            return v
+    return None
+
+
+def ros_graph_probe(timeout=6.0, topic_timeout=5.0, node_name='map_archive_probe'):
+    """用 rclpy 看**活图**，并收 `/map_session/info`（latched）里的会话播报。
+
+    返回：ok / error / nodes / node_endpoints / services / helpers / mappers /
+          serialize_present / session_service_present / payloads（按 session_id 去重）。
+    `payloads` 收到 ≥2 份 ⇒ 图上有两套栈（各自的 session_id 不同）。
+    话题收不到时退化为调一次 `/map_session/query` 服务。
+    """
+    info = {'ok': False, 'error': '', 'nodes': [], 'node_endpoints': [], 'services': [],
+            'helpers': [], 'mappers': [], 'serialize_present': False,
+            'session_service_present': False, 'payloads': []}
+    try:
+        import rclpy
+        from rclpy.node import Node
+        from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy,
+                               QoSHistoryPolicy)
+        from std_msgs.msg import String
+        from std_srvs.srv import Trigger
+    except Exception as e:
+        info['error'] = 'rclpy/std_msgs/std_srvs 不可用（先 source install/setup.bash？）：%s' % e
+        return info
+    node = None
+    inited = False
+    try:
+        # ~/.ros/log 不可写时（沙箱/容器/只读 HOME）rclpy 会直接起不来 ⇒ 退到临时日志目录。
+        # 只影响本进程的环境变量，不写任何用户文件。
+        if not os.environ.get('ROS_LOG_DIR') and not os.access(os.path.expanduser('~'), os.W_OK):
+            import tempfile
+            os.environ['ROS_LOG_DIR'] = tempfile.mkdtemp(prefix='map_archive_roslog_')
+        rclpy.init(args=None)
+        inited = True
+        node = Node(node_name)
+        msgs = []
+        qos = QoSProfile(depth=8, history=QoSHistoryPolicy.KEEP_LAST,
+                         reliability=QoSReliabilityPolicy.RELIABLE,
+                         durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        node.create_subscription(String, SESSION_TOPIC, lambda m: msgs.append(m.data), qos)
+        # 等 discovery + latched 回放：收到第一份后再多留 1.0 s（抓可能的**第二套**播报），
+        # 最长不超过 topic_timeout（没有播报器时最多白等这么久，$MAP_ARCHIVE_TOPIC_TIMEOUT 可调）。
+        deadline = time.time() + max(0.5, float(topic_timeout))
+        first_at = None
+        while time.time() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            if msgs and first_at is None:
+                first_at = time.time()
+            if first_at is not None and time.time() - first_at > 1.0:
+                break
+
+        endpoints = []
+        for name, ns in node.get_node_names_and_namespaces():
+            endpoints.append(('/' + name) if ns in ('', '/') else (ns.rstrip('/') + '/' + name))
+        services = sorted(n for n, _t in node.get_service_names_and_types())
+        info['node_endpoints'] = sorted(endpoints)
+        info['nodes'] = sorted(set(endpoints))
+        info['services'] = services
+        info['helpers'] = [n for n in endpoints if os.path.basename(n) == SESSION_NODE]
+        info['mappers'] = [n for n in endpoints if os.path.basename(n) == MAPPER_NODE]
+        info['serialize_present'] = SERIALIZE_SERVICE in services
+        info['session_service_present'] = SESSION_SERVICE in services
+
+        if not msgs and info['session_service_present']:
+            # 话题被改名/QoS 不匹配时的兜底：直接问服务（返回 message = 同一份 JSON）
+            try:
+                cli = node.create_client(Trigger, SESSION_SERVICE)
+                if cli.wait_for_service(timeout_sec=min(3.0, max(1.0, timeout / 2.0))):
+                    fut = cli.call_async(Trigger.Request())
+                    t_end = time.time() + 3.0
+                    while not fut.done() and time.time() < t_end:
+                        rclpy.spin_once(node, timeout_sec=0.1)
+                    res = fut.result() if fut.done() else None
+                    if res is not None and res.message:
+                        msgs.append(res.message)
+            except Exception as e:                                # pragma: no cover
+                info['error'] = '（服务兜底也失败：%s）' % e
+
+        seen = {}
+        for raw in msgs:
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            seen[str(d.get('session_id') or raw)] = d
+        info['payloads'] = list(seen.values())
+        info['ok'] = True
+    except Exception as e:                                        # pragma: no cover
+        info['error'] = 'ROS 图探测失败：%s' % e
+    finally:
+        try:
+            if node is not None:
+                node.destroy_node()
+        except Exception:                                         # pragma: no cover
+            pass
+        if inited:
+            try:
+                import rclpy
+                rclpy.shutdown()
+            except Exception:                                     # pragma: no cover
+                pass
+    return info
+
+
+# ------------------------------------------------------------ 会话名解析（唯一出处）
+def _fmt_payload(d):
+    return ('map_name=%s world=%s session_id=%s launch_pid=%s resumed=%s started_at=%s'
+            % (d.get('map_name'), d.get('world'), d.get('session_id'), d.get('launch_pid'),
+               d.get('resumed'), d.get('started_at')))
+
+
+def resolve_session(explicit_name=None, explicit_world=None, allow_cross_session=False,
+                    probe=None, procs=None, state=None, no_ros=False, topic_timeout=5.0,
+                    session_file=None, mapper_param=None):
+    """确定「这次 save 该写哪个名字」；返回 dict（见模块头部的顺序说明）。
+
+    返回键：ok / code / name / source / world / map_start_pose / session_id / started_at /
+            resumed / archive_base / live_name / live_source / mapper_param / evidence /
+            message / summary / exit_code
+    · `evidence` 是给人看的证据链（⓵~⓹ 逐条），`message` 是拒绝时的完整文案（多行）。
+    · probe / procs / state / mapper_param 可注入 ⇒ 判定逻辑能离线单测（--no-ros 也走这条）。
+    """
+    ev = ['[map_archive] 会话名解析（①--name ＞ ②图上活会话 ＞ ③活 launch 进程/活映射器自报基名 '
+          '＞ ④.session.yaml+活性证明 ＞ ⑤拒绝）']
+    st = read_session_state(session_file) if state is None else state
+    procs = proc_table() if procs is None else procs
+    launches = find_mapping_launches(procs)
+    mapping_launches = [l for l in launches if l['mode'] in MAPPING_MODES]
+    other_launches = [l for l in launches if l['mode'] not in MAPPING_MODES]
+    if probe is None:
+        probe = ({'ok': False, 'error': '--no-ros：跳过了 ROS 图探测', 'nodes': [], 'services': [],
+                  'helpers': [], 'mappers': [], 'serialize_present': False,
+                  'session_service_present': False, 'payloads': []} if no_ros
+                 else ros_graph_probe(topic_timeout=topic_timeout))
+    mappers = list(probe.get('mappers') or [])
+    helpers = list(probe.get('helpers') or [])
+    payloads = list(probe.get('payloads') or [])
+    serialize_present = bool(probe.get('serialize_present'))
+    if mapper_param is None and not no_ros and probe.get('ok') and len(mappers) == 1:
+        mapper_param = ros_param_string(mappers[0], 'map_file_name')
+    mapper_base = (os.path.basename(mapper_param.rstrip('/')) if mapper_param else '')
+
+    # 图上必须有且只有一个"能落盘的映射器"（唯一 /slam_toolbox + serialize 服务）
+    mapper_ok = (len(mappers) == 1 and serialize_present)
+    res = {'ok': False, 'code': '', 'name': '', 'source': '', 'world': '',
+           'map_start_pose': None, 'session_id': '', 'started_at': '', 'resumed': False,
+           'archive_base': '', 'live_name': '', 'live_source': '', 'mapper_param': mapper_param or '',
+           'evidence': ev, 'message': '', 'summary': '', 'exit_code': 3}
+
+    def refuse(code, summary, lines):
+        res['code'] = code
+        res['summary'] = summary
+        res['message'] = '\n'.join(lines)
+        return res
+
+    def finish(name, source, world='', spawn=None, sid='', started='', resumed=False, base=''):
+        res.update(ok=True, code=source, name=name, source=source, world=world or '',
+                   map_start_pose=spawn, session_id=sid, started_at=started,
+                   resumed=bool(resumed), archive_base=base or '')
+        return res
+
+    # ---------------- ⓵ 证据收集（先把"看到了什么"全打出来，再决定） ----------------
+    ev.append('[map_archive]   ① --name               : %s'
+              % ('%s（显式，最高优先级）' % explicit_name if explicit_name else '（未给）'))
+    if payloads:
+        if len(payloads) == 1:
+            p = payloads[0]
+            ev.append('[map_archive]   ② 活会话播报（ROS 图） : %s；自检 verified=%s（mapper=%s ×%d、%s%s）'
+                      % (_fmt_payload(p), p.get('verified'), MAPPER_NODE,
+                         int(p.get('mapper_count') or 0), SERIALIZE_SERVICE,
+                         '✓' if p.get('serialize_present') else '✗'))
+        else:
+            ev.append('[map_archive]   ② 活会话播报（ROS 图） : ⚠️ 收到 %d 份不同的播报（= 同时有几套栈）' % len(payloads))
+            for p in payloads:
+                ev.append('[map_archive]        · %s' % _fmt_payload(p))
+    elif no_ros:
+        ev.append('[map_archive]   ② 活会话播报（ROS 图） : （跳过：--no-ros）')
+    else:
+        ev.append('[map_archive]   ② 活会话播报（ROS 图） : 没有 %s（%s / 服务 %s）；图探测 ok=%s%s'
+                  % (SESSION_NODE, SESSION_TOPIC, SESSION_SERVICE, probe.get('ok'),
+                     ('，error=%s' % probe.get('error')) if probe.get('error') else ''))
+    if launches:
+        ev.append('[map_archive]   ③ 活 launch 进程       : %d 个' % len(launches))
+        for l in launches:
+            ev.append('[map_archive]        · %s' % describe_launch(l))
+    else:
+        ev.append('[map_archive]   ③ 活 launch 进程       : 0 个（本 PID namespace 内没看到 %s）'
+                  % MAPPING_LAUNCH_FILE)
+    if st is None:
+        ev.append('[map_archive]   ④ .session.yaml        : 不存在（%s）'
+                  % (session_file or '(默认 map_dir/.session.yaml)'))
+    elif st.get('__parse_error__'):
+        ev.append('[map_archive]   ④ .session.yaml        : ⚠️ 解析失败：%s' % st['__parse_error__'])
+    else:
+        ev.append('[map_archive]   ④ .session.yaml        : map_name=%s world=%s session_pid=%s '
+                  'started_at=%s resumed=%s'
+                  % (st.get('map_name'), st.get('world'), st.get('session_pid'),
+                     st.get('started_at'), st.get('resumed')))
+    if mapper_param:
+        ev.append('[map_archive]   ⑤ slam_toolbox 参数    : map_file_name=%s ⇒ 基名 %s'
+                  % (mapper_param, mapper_base))
+    else:
+        ev.append('[map_archive]   ⑤ slam_toolbox 参数    : map_file_name=（未设置/取不到 ⇒ 本次是"从零建图"）')
+
+    # ---------------- ⓶ 多会话：先拒绝，不给任何"猜"的机会 ----------------
+    amb = []
+    if len(mappers) > 1:
+        amb.append('同名映射器 /%s 有 %d 个（ROS 图里同名节点，服务 %s 也无法指定目标；'
+                   'param get 同样二义）' % (MAPPER_NODE, len(mappers), SERIALIZE_SERVICE))
+    if len(helpers) > 1:
+        amb.append('活会话播报器 /%s 有 %d 个（= 同时起了两套会写 .session.yaml 的栈）'
+                   % (SESSION_NODE, len(helpers)))
+    if len(payloads) > 1:
+        amb.append('收到 %d 份不同的会话播报（session_id 不同）' % len(payloads))
+    if len(mapping_launches) > 1:
+        amb.append('mapping/slam_nav 形态的 %s 进程有 %d 个' % (MAPPING_LAUNCH_FILE, len(mapping_launches)))
+    if amb:
+        lines = ['[map_archive] ❌ 拒绝存档：检测到**多于一套**在跑的建图栈 —— 现在写盘可能写到你没在看的那一套上。']
+        lines += ['[map_archive]    · %s' % a for a in amb]
+        for l in launches:
+            lines.append('[map_archive]    · 活 launch：%s' % describe_launch(l))
+        for p in payloads:
+            lines.append('[map_archive]    · 活会话：%s' % _fmt_payload(p))
+        lines += ['[map_archive]    · 图上的 /%s 节点：%s' % (MAPPER_NODE, ', '.join(mappers) or '（无）'),
+                  '[map_archive]   ⇒ 绝不替你猜。三条出路：',
+                  '[map_archive]      ① 只留一套栈（关掉多余的那套）后重跑 save；',
+                  '[map_archive]      ② 两套栈各用各的 ROS_DOMAIN_ID（各自的 save 只看得到自己那一套）：',
+                  '[map_archive]           ROS_DOMAIN_ID=<n> tools/scripts/mapping/map_archive.sh save',
+                  '[map_archive]      ③ 明确知道在写谁：先关掉一套，再 save --name X。',
+                  '[map_archive]      参考：ros2 node list | grep -n %s ；pgrep -af %s'
+                  % (MAPPER_NODE, MAPPING_LAUNCH_FILE)]
+        ev.append('[map_archive]   ❌ 多会话 ⇒ 拒绝（见下）')
+        return refuse('refused_multi_session', '同时有多套建图栈在跑', lines)
+
+    # ---------------- ⓷ 活栈身份（名字必须**来自活证据**） ----------------
+    live_name, live_source, live_payload = '', '', None
+    if len(payloads) == 1:
+        p = payloads[0]
+        self_ok = bool(p.get('verified'))
+        ours_ok = (len(mappers) == 1 and serialize_present) if probe.get('ok') else None
+        if self_ok and ours_ok is not False:
+            live_name, live_source, live_payload = str(p.get('map_name') or ''), 'live-helper', p
+        else:
+            why = []
+            if not self_ok:
+                why.append('播报器自检 verified=False（mapper_count=%s serialize_present=%s）'
+                           % (p.get('mapper_count'), p.get('serialize_present')))
+            if ours_ok is False:
+                why.append('本进程独立核对：/%s 节点 %d 个、%s %s'
+                           % (MAPPER_NODE, len(mappers), SERIALIZE_SERVICE,
+                              '在' if serialize_present else '不在'))
+            ev.append('[map_archive]   ⚠️ 播报器在，但"活栈"没被证实：%s' % '；'.join(why))
+            res['_helper_unverified'] = '；'.join(why)
+    elif len(mapping_launches) == 1 and not other_launches:
+        live_name, live_source = mapping_launches[0]['map_name'], 'live-launch'
+    elif len(mapping_launches) == 1 and other_launches:
+        ev.append('[map_archive]   ⚠️ 除了一套 mapping 栈，还有 %d 个**非 mapping** 的 %s 进程；'
+                  '不带 --name 时不敢替你认哪一套是"本次会话"' % (len(other_launches), MAPPING_LAUNCH_FILE))
+        res['_extra_launches'] = [describe_launch(l) for l in other_launches]
+
+    # ③b 看不到 launch 进程时（组合 launch / 进程在别的 PID namespace）退一步：
+    #     用**活映射器自己加载的存档基名**（续建时 map_file_name 才有值）——它同样钉在活栈上，
+    #     与 `.session.yaml`（会被后人覆盖）无关。从零建图时它是空的 ⇒ 这条自然失效。
+    if not live_name and mapper_ok and mapper_base and not mapping_launches:
+        if st is not None and not st.get('__parse_error__') and (st.get('map_name') or '').strip() \
+                and str(st['map_name']).strip() != mapper_base:
+            ev.append('[map_archive]   ⚠️ .session.yaml 说 map_name=%s，而活映射器加载的是 %s '
+                      '⇒ 以**映射器自己**为准（文件可能被后启动的 launch 覆盖过）'
+                      % (st.get('map_name'), mapper_base))
+        live_name, live_source = mapper_base, 'live-mapper-param'
+        ev.append('[map_archive]   ✅ 名字取自活映射器自己加载的存档基名（续建）：%s' % mapper_base)
+
+    live_world = ''
+    if live_source == 'live-helper' and live_payload:
+        live_world = str(live_payload.get('world') or '')
+    elif live_source == 'live-launch':
+        live_world = mapping_launches[0]['world']
+
+    # 图上的映射器本身必须"活着且是 mapping 模式"，否则 save 无从落盘
+    if probe.get('ok') and not mapper_ok:
+        ev.append('[map_archive]   ⚠️ 活映射器检查：/%s ×%d、%s %s ⇒ %s'
+                  % (MAPPER_NODE, len(mappers), SERIALIZE_SERVICE,
+                     '在' if serialize_present else '不在',
+                     '没有可写的映射器' if not mappers else
+                     ('映射器不在 mapping 模式（没有 %s）' % SERIALIZE_SERVICE)))
+
+    # ---------------- ⓸ ⓵ 显式 --name ----------------
+    if explicit_name:
+        # 跨会话：解析出来的名字 ≠ 活栈会话名 ⇒ 会凭空造出"半个存档"（除非显式承担）
+        if live_name and explicit_name != live_name:
+            if not allow_cross_session:
+                lines = ['[map_archive] ❌ 拒绝存档：**--name 指定的名字 ≠ 正在跑的那套栈的会话名**'
+                         '（跨会话写盘 = 另起一份，而不是"覆盖同一个名字"）。',
+                         '[map_archive]    · --name            : %s' % explicit_name,
+                         '[map_archive]    · 活栈会话名         : %s（来源=%s%s）'
+                         % (live_name, live_source,
+                            ('，session_id=%s' % live_payload.get('session_id')) if live_payload else ''),
+                         '[map_archive]    · 活栈的 map_name 参数: %s' % (mapper_param or '（未设置）'),
+                         '[map_archive]   ⇒ 没有写任何文件。两条出路：',
+                         '[map_archive]      ① 用活栈自己的名字：--name %s' % live_name,
+                         '[map_archive]      ② 确实要另存一份：加 --allow-cross-session（你自己担保）']
+                ev.append('[map_archive]   ❌ --name=%s 与活栈会话名 %s 不一致 ⇒ 拒绝' % (explicit_name, live_name))
+                return refuse('refused_cross_session', '--name 与活栈会话不一致', lines)
+            ev.append('[map_archive]   ⚠️ --name=%s 与活栈会话名 %s 不一致，但给了 --allow-cross-session ⇒ 放行'
+                      % (explicit_name, live_name))
+        if live_name:
+            ev.append('[map_archive]   ✅ 采用 name=%s（来源=explicit；活栈会话名=%s 已核对）'
+                      % (explicit_name, live_name))
+        else:
+            ev.append('[map_archive]   ✅ 采用 name=%s（来源=explicit；没有可核对的活栈会话名）' % explicit_name)
+        w = explicit_world or live_world or (st.get('world') if st and not st.get('__parse_error__') else '')
+        spawn = None
+        if live_payload and live_payload.get('map_start_pose'):
+            spawn = live_payload.get('map_start_pose')
+        elif st and not st.get('__parse_error__') and st.get('map_start_pose'):
+            spawn = st.get('map_start_pose')
+        return finish(explicit_name, 'explicit', w, spawn,
+                      (live_payload or {}).get('session_id') or '',
+                      (live_payload or {}).get('started_at') or '', False, '')
+
+    # ---------------- ⓹ 没给 --name：按 ②③④ 找活会话 ----------------
+    # ② 播报器
+    if live_source == 'live-helper':
+        warn = _session_file_warning(st, live_name, live_source)
+        if warn:
+            ev.append(warn)
+        # 与 slam_toolbox 自己加载的存档基名交叉核对（续建时才有值）
+        if mapper_base and mapper_base != live_name and not allow_cross_session:
+            lines = ['[map_archive] ❌ 拒绝存档：**slam_toolbox 自己加载的存档基名 ≠ 本次会话名**。',
+                     '[map_archive]    · 会话名（来自活播报器）: %s' % live_name,
+                     '[map_archive]    · slam_toolbox map_file_name: %s ⇒ 基名 %s' % (mapper_param, mapper_base),
+                     '[map_archive]   ⇒ 这一般意味着"会话状态"与"实际加载的图"不是一次启动的产物；'
+                     '写下去会得到一份与它加载的图无关的新存档。',
+                     '[map_archive]      确认要这么做：加 --allow-cross-session；否则先查：',
+                     '[map_archive]      ros2 param get /%s map_file_name ； ros2 node list | grep %s'
+                     % (MAPPER_NODE, SESSION_NODE)]
+            ev.append('[map_archive]   ❌ 会话名 %s ≠ slam_toolbox 加载的基名 %s ⇒ 拒绝' % (live_name, mapper_base))
+            return refuse('refused_mapper_param_mismatch', 'slam_toolbox 加载的存档与会话名不一致', lines)
+        if mapper_base:
+            ev.append('[map_archive]   ✅ 与 slam_toolbox 的 map_file_name 基名一致（%s）' % mapper_base)
+        ev.append('[map_archive]   ✅ 采用 name=%s（来源=live-helper；world=%s session_id=%s）'
+                  % (live_name, live_world or '?', live_payload.get('session_id')))
+        return finish(live_name, 'live-helper', explicit_world or live_world,
+                      live_payload.get('map_start_pose'),
+                      live_payload.get('session_id') or '', live_payload.get('started_at') or '',
+                      live_payload.get('resumed'), live_payload.get('archive_base') or '')
+
+    # ② 播报器在但不 verified ⇒ 拒绝（不退化到读文件）
+    if payloads and res.get('_helper_unverified'):
+        lines = ['[map_archive] ❌ 拒绝存档：**会话播报器在，但"活栈"没被证实** —— 不猜名字。',
+                 '[map_archive]    · %s' % _fmt_payload(payloads[0]),
+                 '[map_archive]    · 没被证实的原因：%s' % res['_helper_unverified'],
+                 '[map_archive]    · 若 slam_toolbox 刚起来（launch 后 ~4 s 才起），等几秒重跑即可；',
+                 '[map_archive]      否则说明 /%s 不在 mapping 模式或不是唯一 —— 先看：' % MAPPER_NODE,
+                 '[map_archive]      ros2 node list | grep %s ； ros2 service list | grep serialize_map' % MAPPER_NODE,
+                 '[map_archive]      也可以自己担保名字：save --name X']
+        return refuse('refused_helper_unverified', '播报器自检不通过', lines)
+
+    # ③ 活 launch 进程
+    if live_source == 'live-launch':
+        l = mapping_launches[0]
+        if not mapper_ok:
+            lines = ['[map_archive] ❌ 拒绝存档：认出了活栈（%s），但**图上没有唯一可写的映射器**。' % describe_launch(l),
+                     '[map_archive]    · /%s ×%d、%s %s' % (MAPPER_NODE, len(mappers), SERIALIZE_SERVICE,
+                                                            '在' if serialize_present else '不在'),
+                     '[map_archive]    · 可能：slam_toolbox 还没起来（launch 后 ~4 s）/ 不是 mapping 模式 / '
+                     'mapper:=cartographer（不支持这条存档路径）',
+                     '[map_archive]   ⇒ 没有写任何文件。等栈起来后重跑，或显式 save --name X。']
+            return refuse('refused_no_live_mapper', '没有唯一可写的映射器', lines)
+        if mapper_base and mapper_base != live_name and not allow_cross_session:
+            lines = ['[map_archive] ❌ 拒绝存档：**slam_toolbox 自己加载的存档基名 ≠ 活栈会话名**。',
+                     '[map_archive]    · 活 launch：%s' % describe_launch(l),
+                     '[map_archive]    · slam_toolbox map_file_name: %s ⇒ 基名 %s' % (mapper_param, mapper_base),
+                     '[map_archive]   ⇒ 确认要这么做：加 --allow-cross-session。']
+            return refuse('refused_mapper_param_mismatch', 'slam_toolbox 加载的存档与会话名不一致', lines)
+        warn = _session_file_warning(st, live_name, live_source)
+        if warn:
+            ev.append(warn)
+        if mapper_base:
+            ev.append('[map_archive]   ✅ 与 slam_toolbox 的 map_file_name 基名一致（%s）' % mapper_base)
+        ev.append('[map_archive]   ✅ 采用 name=%s（来源=live-launch；world=%s）'
+                  % (live_name, live_world or '?'))
+        return finish(live_name, 'live-launch', explicit_world or live_world)
+
+    # ③b 活映射器自报的存档基名（续建时才有的 map_file_name）
+    if live_source == 'live-mapper-param':
+        warn = _session_file_warning(st, live_name, live_source)
+        if warn:
+            ev.append(warn)
+        ev.append('[map_archive]   ✅ 采用 name=%s（来源=live-mapper-param；slam_toolbox map_file_name=%s）'
+                  % (live_name, mapper_param))
+        return finish(live_name, 'live-mapper-param',
+                      explicit_world or (str(st.get('world') or '')
+                                         if st and not st.get('__parse_error__') else ''),
+                      (st.get('map_start_pose') if st and not st.get('__parse_error__') else None),
+                      str((st or {}).get('session_id') or ''),
+                      str((st or {}).get('started_at') or ''),
+                      bool((st or {}).get('resumed')), mapper_param or '')
+
+    # ⓸ .session.yaml + 把它钉在活栈上的证明
+    if st is not None and not st.get('__parse_error__') and (st.get('map_name') or '').strip():
+        name = str(st['map_name']).strip()
+        proof, notes = _session_file_proof(st, procs, launches, mapper_base, live_name)
+        for n in notes:
+            ev.append('[map_archive]       · %s' % n)
+        if not mapper_ok:
+            lines = ['[map_archive] ❌ 拒绝存档：**没有活着的建图栈**（拿不到任何活性证明），'
+                     '.session.yaml 里的名字无法证明属于谁 ⇒ 不写任何文件。',
+                     '[map_archive]    查了什么（都不是"活"的）：',
+                     '[map_archive]      ① /%s 播报器（%s / %s）: 没有'
+                     % (SESSION_NODE, SESSION_TOPIC, SESSION_SERVICE),
+                     '[map_archive]      ② 活着的 %s 进程        : %d 个' % (MAPPING_LAUNCH_FILE, len(launches)),
+                     '[map_archive]      ③ /%s 唯一且提供服务 %s: /%s ×%d，服务 %s'
+                     % (MAPPER_NODE, SERIALIZE_SERVICE, MAPPER_NODE, len(mappers),
+                        '在' if serialize_present else '不在'),
+                     '[map_archive]      ④ .session.yaml         : map_name=%s session_pid=%s started_at=%s（%s）'
+                     % (name, st.get('session_pid'), st.get('started_at'), notes[0] if notes else '未证实'),
+                     '[map_archive]   ⇒ 这就是 2026-10-06 事故的形态（文件是上一次/别人那次会话留下的）。',
+                     '[map_archive]      请：① 起栈后重跑 save（推荐）；或 ② 显式 save --name X（你担保这个名字）']
+            ev.append('[map_archive]   ❌ 没有活栈 ⇒ 拒绝使用 .session.yaml 里的名字')
+            return refuse('refused_no_live_stack', '没有活着的建图栈', lines)
+        if not proof:
+            lines = ['[map_archive] ❌ 拒绝存档：**没法把 .session.yaml 钉在活栈上** —— 它可能是被更晚的'
+                     'launch 覆盖过的（2026-10-06 事故就是这一条）。',
+                     '[map_archive]    · .session.yaml      : map_name=%s session_pid=%s started_at=%s'
+                     % (name, st.get('session_pid'), st.get('started_at')),
+                     '[map_archive]    · 活着的 launch 进程 : %s'
+                     % ('；'.join(describe_launch(l) for l in launches) or '（本 namespace 内 0 个）'),
+                     '[map_archive]    · slam_toolbox      : map_file_name=%s' % (mapper_param or '（未设置）'),
+                     '[map_archive]    · 证明失败的原因    :']
+            lines += ['[map_archive]        - %s' % n for n in notes]
+            lines += ['[map_archive]   ⇒ 没有写任何文件。三条出路：',
+                      '[map_archive]      ① 用活栈自己的名字：save --name <活栈的 map_name>；',
+                      '[map_archive]      ② 让 launch 说清楚（重启栈，或用 2026-10-06 之后带播报器的 launch）；',
+                      '[map_archive]      ③ 确认这份文件确实属于当前栈：删掉 %s 后重启 launch'
+                      % (st.get('__path__') or session_file or SESSION_STATE_NAME)]
+            ev.append('[map_archive]   ❌ .session.yaml 未被活证据钉住 ⇒ 拒绝')
+            return refuse('refused_session_file_unproven', '.session.yaml 无法钉在活栈上', lines)
+        ev.append('[map_archive]   ✅ 采用 name=%s（来源=session-file+活性证明；%s）' % (name, proof))
+        spawn = st.get('map_start_pose')
+        return finish(name, 'session-file', explicit_world or str(st.get('world') or ''), spawn,
+                      str(st.get('session_id') or ''), str(st.get('started_at') or ''),
+                      bool(st.get('resumed')), str(st.get('archive_base') or ''))
+
+    # ⓹ 什么都没有
+    lines = ['[map_archive] ❌ 拒绝存档：**无法确定"现在这套栈是谁"** ⇒ 不猜名字、不写任何文件。',
+             '[map_archive]    查了什么：',
+             '[map_archive]      ① /%s 播报器（%s / %s）: 没有' % (SESSION_NODE, SESSION_TOPIC, SESSION_SERVICE),
+             '[map_archive]      ② 活着的 %s 进程        : %d 个' % (MAPPING_LAUNCH_FILE, len(launches)),
+             '[map_archive]      ③ /%s（唯一 + %s）    : /%s ×%d，服务 %s'
+             % (MAPPER_NODE, SERIALIZE_SERVICE, MAPPER_NODE, len(mappers),
+                '在' if serialize_present else '不在'),
+             '[map_archive]      ④ .session.yaml         : %s'
+             % ('没有' if st is None else
+                ('解析失败：%s' % st.get('__parse_error__') if st.get('__parse_error__') else
+                 'map_name=%s（未通过活性/身份证明）' % st.get('map_name')))]
+    if res.get('_extra_launches'):
+        lines.append('[map_archive]      ⚠️ 另有非 mapping 的 launch：%s' % '；'.join(res['_extra_launches']))
+    lines += ['[map_archive]   ⇒ 三条出路：',
+              '[map_archive]      ① 起栈（launch 里带会话播报器）后重跑 save —— 这是默认推荐路径；',
+              '[map_archive]      ② 显式给名字：save --name X（你担保它）；',
+              '[map_archive]      ③ 先确认栈真的在 mapping 模式：ros2 service list | grep serialize_map']
+    ev.append('[map_archive]   ❌ 既没有活会话，也没有可信的 .session.yaml ⇒ 拒绝')
+    return refuse('refused_no_evidence', '无法确定会话名', lines)
+
+
+def _session_file_warning(st, live_name, live_source):
+    """名字来自活证据、而 `.session.yaml` 与它不一致 ⇒ 这正是事故形态，必须大声打出来。"""
+    if not st or st.get('__parse_error__'):
+        return ''
+    fname = str(st.get('map_name') or '').strip()
+    if not fname or fname == live_name:
+        return ''
+    return ('[map_archive]   ⚠️⚠️ .session.yaml 说 map_name=%s（session_pid=%s，started_at=%s），'
+            '与活栈（来源=%s）的 %s **不一致** ⇒ 这份文件已被更晚的 launch 覆盖过，'
+            '已忽略它（2026-10-06 事故就是这个形态）'
+            % (fname, st.get('session_pid'), st.get('started_at'), live_source, live_name))
+
+
+def _session_file_proof(st, procs, launches, mapper_base, live_name):
+    """把 `.session.yaml` 钉在活栈上的三重证明；返回 (证明文本 or '', 每条尝试的说明)。"""
+    name = str(st.get('map_name') or '').strip()
+    notes = []
+    # (a) 活 launch 进程自己就报同一个名字
+    for l in launches:
+        if l['name'] == name:
+            notes.append('活 launch pid=%d 自己的 map_name 就是 %s（%s）'
+                         % (l['pid'], name, describe_launch(l)))
+            return ('活 launch 进程 pid=%d 报同名 %s' % (l['pid'], name)), notes
+    notes.append('活着的 %s 进程没有报出 %s（%d 个：%s）'
+                 % (MAPPING_LAUNCH_FILE, name, len(launches),
+                    '；'.join(describe_launch(l) for l in launches) or '0 个'))
+    # (b) slam_toolbox 自己加载的存档基名
+    if mapper_base:
+        if mapper_base == name:
+            notes.append('slam_toolbox 的 map_file_name 基名 = %s' % mapper_base)
+            return ('slam_toolbox 的 map_file_name 基名 = %s' % mapper_base), notes
+        notes.append('slam_toolbox 的 map_file_name 基名 = %s ≠ %s' % (mapper_base, name))
+    else:
+        notes.append('slam_toolbox 的 map_file_name 未设置（从零建图）⇒ 基名对不上任何名字')
+    # (c) 记录的 pid 活着 + cmdline/起始时刻对得上（pid 单独不算证据，三条一起才算）
+    pid = st.get('session_pid')
+    try:
+        pid = int(pid)
+    except Exception:
+        pid = 0
+    if pid > 0:
+        p = procs.get(pid)
+        if p is None:
+            notes.append('session_pid=%d 不在 /proc（进程已退出，或它只是包装进程的 pid，'
+                         '或它在一个看不到的 PID namespace 里）' % pid)
+        elif p.get('state') == 'Z':
+            notes.append('session_pid=%d 是僵尸进程 ⇒ 不算活着' % pid)
+        else:
+            rec = st.get('launch_cmdline')
+            if rec and not _cmdline_matches(rec, p['argv']):
+                notes.append('session_pid=%d 活着但 cmdline 与记录的 launch 命令行不一致 ⇒ 很可能是'
+                             'pid 回收（假阳性）' % pid)
+            elif not rec and not any('launch' in a for a in p['argv']):
+                notes.append('session_pid=%d 活着但不是 launch 进程（且文件没记 launch_cmdline）' % pid)
+            else:
+                started = _parse_iso_epoch(st.get('started_at'))
+                if started and p.get('started_epoch') and abs(started - p['started_epoch']) > SESSION_PID_TOL_S:
+                    notes.append('session_pid=%d 活着，但起始时刻 %s 与 started_at %s 差 %.0f s ⇒ 不是同一次会话'
+                                 % (pid,
+                                    datetime.datetime.fromtimestamp(p['started_epoch']).astimezone()
+                                    .strftime('%H:%M:%S'), st.get('started_at'),
+                                    abs(started - p['started_epoch'])))
+                else:
+                    notes.append('session_pid=%d 活着 + cmdline 与记录一致 + 起始时刻与 started_at 一致' % pid)
+                    return ('记录的 session_pid=%d 活着且 cmdline/起始时刻都对得上' % pid), notes
+    else:
+        notes.append('session_pid 缺失/非法（%r）⇒ pid 一侧无证据' % st.get('session_pid'))
+    return '', notes
+
+
+def _parse_iso_epoch(text):
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(text)).timestamp()
+    except Exception:
+        return None
+
+
 # ============================================================ CLI
 def _cmd_check(a):
     if a.dir:
@@ -871,6 +1611,35 @@ def _cmd_spawn_table(a):
 
 def _kind_label(kind):
     return {'all': '2D 位姿图 + 3D 点云', KIND_POSEGRAPH: '2D 位姿图', KIND_PCD: '3D 点云'}[kind]
+
+
+def _cmd_session_resolve(a):
+    """打印「这次 save 该写哪个名字」的证据链；退出码 0=定了，3=拒绝（不写任何文件），2=环境问题。"""
+    res = resolve_session(explicit_name=a.name, explicit_world=a.world,
+                          allow_cross_session=a.allow_cross_session, no_ros=a.no_ros,
+                          topic_timeout=a.topic_timeout,
+                          state=(read_session_state(a.session_file) if a.session_file else None))
+    if a.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res['ok'] else res['exit_code']
+    for line in res['evidence']:
+        print(line)
+    if res['ok']:
+        print('session_source=%s' % res['source'])
+        print('session_name=%s' % res['name'])
+        print('session_world=%s' % (res['world'] or ''))
+        if res.get('map_start_pose'):
+            print('session_spawn=%s' % json.dumps(res['map_start_pose']))
+        print('session_id=%s' % (res.get('session_id') or ''))
+        print('session_started_at=%s' % (res.get('started_at') or ''))
+        print('session_resumed=%s' % ('true' if res.get('resumed') else 'false'))
+        print('session_archive_base=%s' % (res.get('archive_base') or ''))
+        return 0
+    print(res['message'])
+    print('[map_archive] ❌ 拒绝存档（%s）：上面是完整证据链与出路；**没有写任何文件**（退出码 %d）'
+          % (res['summary'], res['exit_code']))
+    sys.stdout.flush()      # 调用方（map_archive.sh）会捕获 stdout 再原样打印 ⇒ 顺序不乱
+    return res['exit_code']
 
 
 def _cmd_backup(a):
@@ -1010,6 +1779,22 @@ def build_parser():
     p = sub.add_parser('spawn-table', help='打印/核对场地出生点表（本文件 = 单一事实来源）')
     p.add_argument('--check', action='store_true', help='与 hzmi_rm_simulation 的 spawn 值逐项核对')
     p.set_defaults(func=_cmd_spawn_table)
+
+    p = sub.add_parser('session-resolve',
+                       help='确定「这次 save 写哪个名字」（2026-10-06 事故后新增）：'
+                            '①--name ＞ ②图上活会话播报器 ＞ ③活 launch 进程/活映射器自报基名 '
+                            '＞ ④.session.yaml+活性证明 ＞ ⑤拒绝')
+    p.add_argument('--name', help='显式指定的存档名（最高优先级；仍会与活栈会话做交叉核对）')
+    p.add_argument('--world', help='显式指定的 world（只用于跨核对与汇报）')
+    p.add_argument('--allow-cross-session', action='store_true',
+                   help='放行"解析出的名字 ≠ 活栈会话名"（明确要另存一份时用）')
+    p.add_argument('--session-file', help='覆盖 .session.yaml 路径（测试用；默认 <map_dir>/.session.yaml）')
+    p.add_argument('--no-ros', action='store_true', help='跳过 ROS 图探测（测试用：只看进程/文件证据）')
+    p.add_argument('--topic-timeout', type=float,
+                   default=float(os.environ.get('MAP_ARCHIVE_TOPIC_TIMEOUT') or 5.0),
+                   help='收 /map_session/info 的等待秒数（默认 5.0，可用 $MAP_ARCHIVE_TOPIC_TIMEOUT 覆盖）')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=_cmd_session_resolve)
     return ap
 
 
