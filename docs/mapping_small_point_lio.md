@@ -386,6 +386,14 @@ P0 回归（--goal 0.5 3.0 --localization RMUC2026-spl）：
 5. `world:=RMUC2026` 的**另一半场**没有覆盖（0.45 m 窄口过不去，`docs/worlds.md` §6 已论证）。
 6. 新 2D 图**已知区域较小**（65.5 m²）⇒ 图外/未知区的目标不可用；
    若要更大覆盖，得先解决 §9 第 1 条的卡死问题（或把跑法改成"多段短直线、每段之间手动回正"）。
+   > ★ **2026-10-06 更新：分块照建，但不要再手工拼接。**
+   > 现在有「同名存档 + 下次续建」的正式流程：`mode:=mapping` 起来时若
+   > `map/<map_name>.posegraph` 存在，slam_toolbox 会**反序列化并接着建**（`map_name` 默认取
+   > `<world>`）；走完 `tools/scripts/mapping/map_archive.sh save` 就是**同名覆盖**。
+   > 3D 先验 `PCD/<map_name>.pcd` 同理（`cloud_accumulator:=True`）。
+   > 换场地续建会被**默认拒绝**（每份存档旁边的 `<名字>.meta.yaml` 记着 world/出生点，
+   > 不一致就终止 launch）⇒ "以后换地图换场地会不会有干扰"这个问题由守卫兜住。
+   > 完整流程、实测数字与未验证项见 **`docs/continue_mapping.md`**。
 7. ⚠️ **`map/RMUC2026.pgm/.yaml` 在本次工作开始前就已经被移走**（工作树里是 `D` 状态，
    旁边有 `RMUC2026.pgm.prior` / `.yaml.prior`，`cmp` 与 `git show HEAD:` **逐字节相同**）。
    本次**没有动它们**，也没动那两个 `.prior`；GICP 验证时临时占用过这两个文件名，
@@ -438,3 +446,9 @@ rm src/rm_localization/small_point_lio/pcd/scan.pcd           # 源码树里别�
 python3 tools/scripts/mapping/pcd_stats.py /tmp/spl_raw.pcd --voxel 0.10 \
   --out src/rm_nav_bringup/PCD/RMUC2026_spl.pcd
 ```
+
+> ★ **2026-10-06 起，这条交互流程可以"接着上次建"**（本文 §11 的三步仍然有效，只是不必每次从零开始）：
+> 给 launch 加一个名字、走完存一次档，下次同一条命令就会自动反序列化接着建。
+> 3D 那一份（`save_pcd` + `/map_save` + 手工搬文件）也可以换成常驻累加器
+> （`cloud_accumulator:=True` + `~/save`），它的 PCD 同样按名字跨会话续建、同样受场地守卫保护。
+> 完整命令/边界条件/回滚见 **`docs/continue_mapping.md`**。

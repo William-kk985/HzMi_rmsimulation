@@ -408,6 +408,13 @@ python3 tools/scripts/mapping/compare_2d_maps.py \
 4. **存图前先看 `/map` 的窗口盖不盖得住你要用的地方**：`/scan` 累积图的窗口只长在"走过的地方"，
    坡道/走廊这类没走到的区域**根本不在图里**（这比"判成 free"更危险 —— 规划器直接拒答）。
 5. **2D 图与 3D 点云永远同源**：换点云就重投影一次，别把两份不同时代的东西配对用。
+6. ★ **2026-10-06 新增：一次走不完就"接着上次建"，不要分块建完再手工拼。**
+   给 launch 一个存档名（`map_name:=RMUC2026_cloud_home`），走完
+   `tools/scripts/mapping/map_archive.sh save`；下次同一条命令会**反序列化并接着建**，
+   再 save 就是同名覆盖（3D 点云同理：`cloud_accumulator:=True`）。
+   存档自带 sidecar（world/出生点），**换场地续建会被默认拒绝**（这正是配套那条
+   "2D 图与 3D 点云同源"的跨会话版本：图、点云、场地三者不许错配）。
+   流程与实测见 **`docs/continue_mapping.md`**。
 
 ---
 

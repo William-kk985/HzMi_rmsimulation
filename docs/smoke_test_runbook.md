@@ -241,6 +241,16 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
 | `lio_rviz` | `True` / `False` | `False` | 开 LIO 点云 RViz |
 | `nav_rviz` | `True` / `False` | `True` | 开 nav2 RViz（`mode:=mapping` 也会给一块） |
 | `use_sim_time` | `True` / `False` | `True` | 仿真是 `True` |
+| **`map_name`** | 任意名字 | `''` ⇒ 取 `<world>` | **存档基名**（续建/保存都用它，同名覆盖）。★ 新增，见 `docs/continue_mapping.md` |
+| **`map_autocontinue`** | `True` / `False` | `True` | 同名 `map/<map_name>.posegraph` 存在 ⇒ **反序列化接着建**；不存在 ⇒ 从零建（日志写明路径）。★ 新增 |
+| **`map_start_pose`** | `[x, y, θ]` | `[0.0, 0.0, 0.0]` | 续建时"机器人在旧图里的位姿"（`map` 系 = 出生点相对系 ⇒ 出生点起步就是 0,0,0）。★ 新增 |
+| **`map_allow_world_mismatch`** | `True` / `False` | `False` | `False` = 存档的 world/出生点与本次不一致（或无 sidecar 的旧存档）⇒ **拒绝续建并终止 launch**。★ 新增 |
+| **`cloud_accumulator`** | `True` / `False` | `False` | 仅 `mode:=mapping`：起 3D 点云累加器，让 `PCD/<map_name>.pcd` 也跨会话续建。★ 新增 |
+
+> ★ **2026-10-06：`mode:=mapping` 支持"在上次基础上继续建图"**（同名存档 + 场地隔离守卫）。
+> 流程：起栈（给 `map_name`）→ 走 → `tools/scripts/mapping/map_archive.sh save` → 关栈 →
+> 下次同一条命令自动续建。**换 world 续建同一份存档会被默认拒绝**（防串场地）。
+> 全部命令、拒绝消息原文、实测数字与未验证项见 **`docs/continue_mapping.md`**。
 
 > 另有两个**只对 cartographer 生效**的参数（`cartographer_sim.launch.py`）：
 > `load_state_filename`（pbstream 路径，留空=纯建图）与 `load_frozen_state`，以及
@@ -328,6 +338,12 @@ ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGrap
 ros2 service call /map_save std_srvs/srv/Trigger
 ls -l src/rm_nav_bringup/map/RMUL2026.* src/rm_nav_bringup/PCD/RMUL2026.pcd
 ```
+
+> ★ **2026-10-06 更省事的做法（推荐）**：起栈时给一个 `map_name:=<名字>`，走完直接
+> `tools/scripts/mapping/map_archive.sh save` —— 它会 ① 调 `serialize_map` 写同名
+> `.posegraph/.data`、② 刷新 sidecar `<名字>.meta.yaml`（记 world/出生点，供下次**拒绝错场地**续建）、
+> ③ 若 `cloud_accumulator:=True` 在跑，顺带存 `PCD/<名字>.pcd`。下次同一条命令即**接着上次建**。
+> 细节见 `docs/continue_mapping.md`（含"旧版存档没有 sidecar 会被拒绝"的处理）。
 
 建完图后**务必做两件事**：
 1. 用可达性工具确认全场连通、记下可用的测试目标点：
