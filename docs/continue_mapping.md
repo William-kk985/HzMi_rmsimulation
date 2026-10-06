@@ -33,9 +33,11 @@ tools/scripts/control/improved_teleop.sh          # 键盘；⚠️ 松手必须
 tools/scripts/mapping/map_archive.sh save
 #   默认就用**本次 launch 的 map_name**（launch 会把会话信息写到 map/.session.yaml）。
 #   要存成别的名字： map_archive.sh save --name RMUC2026_home2
-#   它做三件事：① /slam_toolbox/serialize_map → map/<名字>.{posegraph,data}（同名覆盖）
-#              ② 等两个文件真的落盘，再刷新 sidecar map/<名字>.meta.yaml
-#              ③ 若 3D 累加器在跑（cloud_accumulator:=True），顺带存 PCD/<名字>.pcd
+#   它做四件事：① **覆盖前先备份**既有存档（<文件>.prev-<时间戳>，默认留 3 代，见 §3.2）
+#              ② /slam_toolbox/serialize_map → map/<名字>.{posegraph,data}（同名覆盖）
+#              ③ 等两个文件真的落盘，再刷新 sidecar map/<名字>.meta.yaml
+#              ④ 若 3D 累加器在跑（cloud_accumulator:=True），顺带存 PCD/<名字>.pcd
+#                 （PCD 那一侧的写前备份由累加器自己打印；写完还会再体检一次 z 跨度，见 §3.3）
 
 # ── 关栈 ────────────────────────────────────────────────────────────────────
 #   在 launch 的终端 Ctrl+C（SIGINT）。⚠️ 关栈**不会**存图：存档只在 save 那一步发生。
@@ -48,10 +50,13 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 #     [map_archive] ✅ 续建（slam_toolbox 反序列化）：加载 …/map/RMUC2026_home.posegraph
 #       · 存档 world=RMUC2026 / 本次 world=RMUC2026
 #       · 存档 spawn: x=10.925 y=2.525 z=0.200 yaw=0.000
-#   然后**接着走没走过的区域**，再 save —— 同名覆盖，两张图是同一张。
+#   ★ 再等 ~8 s（map_resume_check_delay），会出现**续建一致性检查**的结论（见 §8）：
+#     ✅ 续建一致性检查通过 …   —— 或 ——
+#     ❌❌ 续建一致性检查**不通过** …（存档很可能是退化过的；别往它上面 save）
+#   然后**接着走没走过的区域**，再 save —— 同名覆盖（写前已备份），两张图是同一张。
 ```
 
-### 0.1 新增的 5 个启动参数（`bringup_sim.launch.py`，默认值 = 现有行为）
+### 0.1 新增的 10 个启动参数（`bringup_sim.launch.py`，默认值 = 现有行为；前 5 个 = 续建/隔离，后 5 个 = 续建后一致性检查 §8）
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -60,6 +65,11 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 | `map_start_pose` | `[0.0, 0.0, 0.0]` | 续建时告诉 slam_toolbox「机器人现在在**旧图**的哪个位姿」（x, y, θ，`map` 系） |
 | `map_allow_world_mismatch` | `False` | `True` = 显式跳过 world/spawn 隔离检查（**日志会一直提醒**）。只想从零建请用 `map_autocontinue:=False` |
 | `cloud_accumulator` | `False` | 仅 `mode:=mapping`。`True` = 起 3D 点云累加器（见 §3），让 `PCD/<名字>.pcd` 也跨会话续建 |
+| `map_resume_check` | `True` | **续建后的一次性一致性检查**（见 §8）：比一次 `map→base_link` vs 存档记录的 `map_start_pose`，对不上就喊（`strict` 时收栈）。`False` = 关掉 |
+| `map_resume_check_delay` | `8.0` | 检查的静置/收敛窗口（秒）：从"第一次拿到 `map→base_link`"起算，等这么久再采样，让扫描匹配先收敛 |
+| `map_resume_check_strict` | `False` | `True` = 检查不通过时**直接收栈**（检查节点退出码 1 ⇒ launch 收掉所有节点）；`False` = 只打响亮 WARNING |
+| `map_resume_check_pos_tol` | `0.5` | 位置偏差阈值（m）：健康续建实测在**厘米级**（0.000~0.03 m），0.5 m 留足余量；当天事故的 ATE max 是 1.15 m ⇒ 抓得住 |
+| `map_resume_check_yaw_tol_deg` | `10.0` | 偏航偏差阈值（度），同口径 |
 
 为什么 `cloud_accumulator` 默认 **关**：它是本仓库新增的一条路径（只读消费者，不发 `/map`、
 不发 TF、不发 `/segmentation`，所以对既有契约零影响），但还没有长跑验收 ⇒ 默认不改变任何现有启动集；
@@ -207,6 +217,70 @@ ros2 param set /cloud_accumulator map_name RMUC2026_home2
 （§5 的隔离测试里核对了被保护 PCD 的 md5 前后一致）。
 `autoload` 跟随 `map_autocontinue`：`map_autocontinue:=False` ⇒ 3D 也不加载。
 
+### 3.1 数据卫生：什么进云、什么被丢（2026-10-06 事故后新增）
+
+`cloud_accumulator` 不是告警节点，它是**决定什么进累积云**的清洗层：被丢的帧**整帧不进云**，
+被丢的点单独计数；阈值全部是参数（`ros2 param set` 可改），启动横幅与每 15 s 的 `[status]` 行
+都会把**阈值 + 全部剔除计数**打出来。
+
+| 规则（参数） | 默认 | 默认值的实测依据 | 计数（`[status]` 字段） |
+|---|---|---|---|
+| 高度带 `z_band_min` / `z_band_max` | `[-0.5, +1.8] m`，相对 `z_ref_frame:=base_link` 在 `map` 系的 z（取不到按 0） | 健康累积云实测 z ∈ [−0.25, 1.77]（用户 2026-10-06 同场地）、`PCD/RMUC2026_mapped.pcd` 145 万点 z ∈ [−0.53, 1.43]；污染云 z ∈ [−4.31, 23.10]。上界取 **1.8 = 实测最高结构 1.77 + 0.03**（不用 1.5：那会把实测结构顶切掉 27 cm）。两端离群（−2.62 / +5.56）都远在带外 | `高度带滤除=N 点`、`高度带滤空=N 帧` |
+| 单帧跳变 `max_frame_step` | `0.50 m` | 机器人速度 ≲1 m/s（覆盖路线 13.9 m / 91 s）+ 10 Hz 点云 ⇒ 健康单帧位移 ≲0.1 m，留 5 倍余量 | `跳变跳过=N 帧`、`最近跳过原因` |
+| 速度 `max_speed` | `1.50 m/s` | 同上，1.5 倍余量。帧间隔 > `jump_gate_dt_max`（0.5 s）时单帧闸无意义 ⇒ 只看速度 | 同上 |
+| 转角 `max_frame_yaw_deg` | `25°/帧` | 仿真原地自转 ~1 rad/s ⇒ 10 Hz 下 5.7°/帧，取 4 倍余量；帧间隔大时改用 `max_yaw_rate_dps:=90°/s` | 同上 |
+| TF 退化帧 `allow_tf_fallback_frame` | `False`（**默认跳过**） | "带戳查询失败、退化到最新"= 位姿来路不明，不该进先验。实测一次健康无头长跑：TF 失败 30 次，其中 5 次走了退化路径 ⇒ 这 5 帧不再进云 | `TF失败=N(退化最新=M/其中跳过=K)` |
+
+**运动闸的细节（容易误解，写清楚）**：跳变帧只丢**这一帧**，参考位姿仍推进到最后一次观测
+⇒ 一次跳变不会把后面所有帧都判成跳变（否则退化开始那一下会吃掉整段）。
+
+**已知边界（诚实登记）**：以上都是**位姿层面**的判据 —— 慢漂（例：1.15 m 用 15 s 漂完 =
+0.077 m/s）**看不出来**，因为只靠位姿无法与"机器人真的慢慢走"区分。抓得住的是：跳变、突变、
+TF 来路不明的帧、高度上离谱的点。慢漂只能靠 ① `save` 时的 bbox 体检（§3.3）与 ②
+`tools/scripts/mapping/pcd_stats.py` 的 z 分位数体检。
+
+### 3.2 覆盖前备份 + 恢复（2026-10-06 事故后新增）
+
+`save` 一直是**同名覆盖**。现在它**写之前**先把既有产物复制一份带时间戳的备份：
+
+- 命名 `<文件名>.prev-<YYYYmmdd-HHMMSS>`（例 `RMUC2026.posegraph.prev-20261006-161530`），
+  **默认留最新 3 代**，更老的自动删。为什么不用固定 `.bak`：`save` 会被反复调用，固定名只有一代，
+  连续两次坏 save 就把好存档挤掉；时间戳可留多代，代价只是磁盘（一份 ~64 s 存档 = 5.4 MB posegraph
+  + 0.6 MB data ⇒ 3 代 ≈ 18 MB；PCD 侧一份 3~18 MB ⇒ 3 代 ≈ 9~54 MB）。
+- **谁写谁备份**（避免双重备份/两套命名）：`map_archive.sh save` 备 `map/<名字>.{posegraph,data,meta.yaml}`；
+  累加器的 `~/save` 备 `PCD/<名字>.{pcd,meta.yaml}`。两侧时间戳天然不同。
+- 一整套一起备、一起恢复（位姿图侧 3 个 / PCD 侧 2 个）——单独恢复 `*.data` 没有意义。
+- **恢复命令**（`tools/scripts/mapping/map_archive.sh`）：
+
+  ```bash
+  map_archive.sh backups --name X                              # 现存几代（新的在前）
+  map_archive.sh restore --name X                              # 回滚：两侧各取本组最新一代
+  map_archive.sh restore --name X --from 20261006-164418       # 指定某一代（也可给 *.prev-* 路径）
+  map_archive.sh restore --name X --dry-run                    # 只看会做什么
+  map_archive.sh backup  --name X --kind posegraph             # 手工备份一代（save 内部调的就是这条）
+  ```
+  回滚前会把**当前**文件也留一代 ⇒ **restore 本身可逆**；只回滚备份过的文件，不会删任何东西；
+  退出码 `5` = 没有可用的备份代。
+- ⚠️ 位姿图侧与 PCD 侧是**两个写者、两个时刻** ⇒ `restore` 按**组**对齐（各自取本组最新一代），
+  而不是"全局最新一个时间戳"。2026-10-06 实测：按全局最新只恢复了 PCD 侧、位姿图被漏掉
+  （证据 `.tmp_hygiene/out/real1/run.txt`）⇒ 已改成按组对齐。
+- 恢复出来的 sidecar 与图/云**同代** ⇒ 守卫看到的仍是一套自洽的（不会出现"图是旧的、sidecar 是新的"）。
+
+### 3.3 `~/save` 落盘前的健康告警（**仍然照写**）
+
+`~/save` 在写之前体检当前累积云的 bbox：
+
+- `z 跨度 > save_warn_z_span`（默认 **3.0 m**）或 `XY 跨度 > save_warn_xy_span`（默认 40 m，故意很松）
+  ⇒ 打**响亮 WARNING**，点名数字、完整 bbox、剔除计数，并建议**改名另存**
+  （`ros2 param set /cloud_accumulator map_name <名字>_bad` 后再 save）或回滚备份。
+- 阈值依据：健康云 z 跨度 1.96~2.02 m，污染云 27.41 m（`PCD/RMUC2026_cont.pcd`）/ 8.00 m（合成测试云）
+  ⇒ 3.0 m 落在两侧都 ≥1.5 倍间隔处。
+- **为什么只喊不拦**：① 拒绝落盘会把"想留一份坏数据取证/对比"的路堵死；② "别场地"这种硬冲突已经由
+  守卫（§2.3）负责拒绝；③ 用户明确要求"仍然写、但要说清楚"。
+- `map_archive.sh save` 在写完之后还会用 `tools/scripts/mapping/pcd_bbox_health.py` **独立**再量一次
+  （同口径阈值，退出码 3 = 不合理）——因为节点的告警在**另一个终端**的日志里，而这一步的输出里
+  也该有数字。
+
 ---
 
 ## 4. 目录与"存了却不生效"这个坑（**必读**）
@@ -299,6 +373,51 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 mode:=mapping \
 > 在 `setsid` 会 fork 的情况下拿到的是已死 wrapper 的 pid ⇒ **SIGINT 根本没送出去**。
 > 改成"pgrep 找真正的 ros2 launch 进程 + 退出码写文件"后才拿到可信数字（表里就是这个版本）。
 
+### 5.3 2026-10-06 三项修复的验收（脚本与原始输出都在 `.tmp_hygiene/`，未入库）
+
+**① 数据卫生（合成点云，无需 Gazebo；`.tmp_hygiene/filter_test.sh`）**
+合成源每帧 440 点：200 点地面（map z≈0.05）+ 200 点墙（z≈0.5~1.8）+ **20 点 z≈+5.5** + **20 点 z≈−2.5**
+（照着当天污染云的 ± 值造），另加**一帧单帧跳变 2.0 m** 与**一帧 stamp 打到未来 1 s**（带戳 TF 必失败 ⇒ 只能退化到最新）。
+
+| 指标 | A 旧行为（卫生全关） | B 新默认 |
+|---|---|---|
+| 累积 bbox | x[2.36,9.54] y[−1.98,2.00] **z[−2.50,5.50]**（z 跨度 **8.00 m**） | x[2.37,9.54] y[−1.94,2.00] **z[0.05,1.78]**（z 跨度 **1.73 m**） |
+| 累积点 / 帧 | 28600 = 65 帧 × 440 | 24800 = 62 帧 × 400 |
+| 高度带滤除点 | 0 | **2480 = 62 帧 × 40 点**（正好是注入的离群点，一个不多一个不少） |
+| 跳变跳过帧 | 0 | **1**（那帧 2.0 m 跳变） |
+| TF 退化帧 | 退化最新=1 / 跳过 **0**（照旧累积） | 退化最新=1 / 跳过 **1** |
+| `~/save` 结果 | **⚠️ 健康告警触发**（z 跨度 8.00 m > 3.00 m；仍照写） | ✅ 无告警 |
+
+**② 覆盖前备份 / 恢复（`.tmp_hygiene/backup_test.sh` + `.tmp_hygiene/restore_regression.sh`）**
+真点云两代（污染代 z 跨度 8.00 m vs 干净代 1.73 m，哈希与 bbox 都能一眼分辨）+ map/ 侧合成的
+`.posegraph/.data/.meta.yaml`：破坏 live 后 `restore` ⇒ **5 个文件全部逐字节恢复**（sha256 一致，
+含 sidecar）；restore 前会把被破坏的那一代也留档 ⇒ **restore 本身可逆**；`keep=3` 轮转生效。
+两侧在不同时刻备份时，`restore` 按**组**各取本组最新一代（这正是当天实测踩到的坑，见 §3.2）。
+
+**③ 续建后一致性检查（合成 7 场景 `.tmp_hygiene/resume_check_test.sh` + 真机无头两跑）**
+
+| 场景 | 结果 |
+|---|---|
+| 健康 + 静止 | ✅ 通过（0.000 m / 0.00°） |
+| 健康 + **一起来就开走**（1 m/s） | ✅ 通过（修正量 0.000 m；**不误报**） |
+| 起点被挪 1.5 m（doctored 存档） | ❌ 报警（绝对偏差 1.500 m） |
+| 图歪了 + 开走（每帧被拉 0.08 m） | ❌ 报警（修正量 6.480 m） |
+| 图歪了 + 静止（每帧被拉 0.10 m） | ❌ 报警（修正量 6.200 m） |
+| `strict=True` + doctored | 退出码 **1** ⇒ launch 收栈（真机：`process has died … exit code 1` + 整栈被收） |
+| `strict=True` + 健康 | 退出码 **0**（不误收栈） |
+
+真机无头（`mode:=mapping lio:=small_point_lio mapper:=slam_toolbox cloud_accumulator:=True`，
+续建一份 `RMUC2026_cont` 的**测试改名副本**）：健康续建 ⇒ ✅ 通过（偏差 **0.021 m / 0.03°**，无任何
+WARN/ERROR）；从零建图 ⇒ 日志里 `map_resume_check` 出现 **0** 次（只在真的续建时才创建）；
+SIGINT 关栈退出码 **0**。
+
+**④ 无回归（真机无头 A/B）**：`--show-args` 退出码 0、**75** 个参数（原 70 + 新 5）；
+`mode:=nav`（amcl+fastlio）用 **HEAD 版 launch** 与**改后 launch** 各跑一次 ⇒ 节点清单**逐行一致**
+（34 行，仅 `transform_listener_impl_<随机后缀>` 辅助节点名字不同）；mapping 下 `/map` 发布者恒 1
+（slam_toolbox）、`/segmentation/obstacle` 与 `/segmentation/ground` 各恒 1 个发布者、
+节点表里没有 `amcl`/`map_server`/`lio_tf_adapter` ⇒ `map→odom` 仍只有 slam_toolbox；
+检查节点与累加器**都不创建任何 publisher**（源码级核对：两个文件里 `create_publisher` 出现 0 次）。
+
 ---
 
 ## 6. 命令行速查（`tools/scripts/mapping/map_archive.sh`）
@@ -313,9 +432,15 @@ map_archive.sh info [--name X]      # sidecar + 每个文件的大小/时间戳�
 map_archive.sh list                 # map/ 与 PCD/ 下所有存档 + world 摘要（旧版会标"无 sidecar"）
 map_archive.sh adopt --name X --world W   # 给旧版存档补 sidecar（人工担保）
 map_archive.sh dirs                 # launch/脚本实际读写的那两个目录
+# ★ 2026-10-06 新增（覆盖前备份 / 恢复，详见 §3.2）
+map_archive.sh backup  --name X [--kind posegraph|pcd|all] [--keep 3]
+#   手工备份一代（save 内部调的是同一条 guard 命令）：<文件>.prev-<时间戳>
+map_archive.sh backups --name X     # 列出各代（新的在前；没有 ⇒ 退出码 5）
+map_archive.sh restore --name X [--from <时间戳|*.prev-* 路径>] [--dry-run]
+#   回滚：位姿图侧与 PCD 侧各取本组最新一代；回滚前把当前文件也留一代 ⇒ 可逆
 ```
 
-退出码：`0` 成功；`2` 用法/环境问题（比如没有 `/slam_toolbox/serialize_map`）；`3` **守卫拒绝**；`4` 落盘超时。
+退出码：`0` 成功；`2` 用法/环境问题（比如没有 `/slam_toolbox/serialize_map`）；`3` **守卫拒绝**；`4` 落盘超时；`5` `restore`/`backups` 找不到可用的备份代。
 
 ---
 
@@ -337,24 +462,167 @@ rm -f src/rm_nav_bringup/map/<名字>.{posegraph,data,meta.yaml} \
 
 # 5) 只想让某份存档"重新可用于续建"而不删它：改名即可（守卫按名字找文件）
 mv src/rm_nav_bringup/map/X.posegraph src/rm_nav_bringup/map/X.posegraph.bak   # .data/.meta.yaml 同步
+
+# 6) 关掉/放宽"续建后一致性检查"（§8）
+ros2 launch … map_resume_check:=False                 # 完全不要这个检查
+ros2 launch … map_resume_check_delay:=20.0            # 让它等更久（机器人起得慢/扫描匹配慢）
+ros2 launch … map_resume_check_pos_tol:=1.0           # 你的场地确实允许 1 m 级偏差时的放宽
+
+# 7) 存档被写坏了：回滚到上一代（§3.2；两侧各取本组最新一代，可逆）
+tools/scripts/mapping/map_archive.sh backups --name X
+tools/scripts/mapping/map_archive.sh restore --name X
+tools/scripts/mapping/map_archive.sh restore --name X --from 20261006-164418   # 指定某一代
+
+# 8) 关掉 3D 数据卫生的某一层（默认全开；排查"是不是过滤太狠"时用）
+ros2 param set /cloud_accumulator z_band_max 3.0      # 放宽高度带上界
+ros2 param set /cloud_accumulator max_frame_step 0.0  # 0 = 关掉单帧跳变闸
+ros2 param set /cloud_accumulator allow_tf_fallback_frame true   # 退化帧照旧累积（不推荐）
 ```
 
 ---
 
-## 8. 未验证 / 已知坑
+---
+
+## 8. 续建后的**一次性**一致性检查（`map_resume_check*`，2026-10-06 事故后新增）
+
+### 8.1 它补的是守卫补不了的那一格
+
+守卫（§2）只管 **"world / 出生点对不对"**；它管不了 **"图本身歪了"**：当天用户续建的
+`map/RMUC2026.posegraph` 里**已经含有一段 LIO 退化**（ATE max 1.15 m）的位姿 —— world 对、出生点也对，
+但加载进来的图与真实场地不一致 ⇒ 建出来的图/定位"飘"（详见 §9）。
+
+> **互补关系（写清楚）**：§2 的场地/出生点隔离守卫 + §8 的续建一致性检查是**两道不同的门**，
+> 谁也不能替代谁。守卫在 **launch 期**拦"拿错场地的存档"（硬拒绝、退出码 1）；
+> 本检查在**起来之后**量"这份存档与现实是否自洽"（默认只喊不拦、`strict` 才收栈）。
+
+### 8.2 它是什么、放在哪、为什么放那
+
+- **一次性启动体检**，不是持续 watchdog：拿到结论就退出（不留常驻进程）；**不发布任何话题、不发布任何 TF**
+  ⇒ 「`map→odom` 单一发布者」契约逐字不变。
+- 实现：`src/rm_nav_bringup/scripts/map_resume_check.py`（装到 `lib/rm_nav_bringup/`，由 launch 用
+  `Node(package='rm_nav_bringup', executable='map_resume_check.py')` 起）。
+- **只在"真的续建"时创建**（`verdict['may_load']` 为真才会往 launch 里加这个 Node）；从零建图时
+  日志里连它的名字都不会出现（§5 无回归里核过：`map_resume_check` 出现次数 = 0）。
+- 为什么不在别处：
+  · **不能放 launch 期**（`OpaqueFunction`）：t=0 时既没有 TF 也没有 slam_toolbox，硬等会**推迟所有节点启动**；
+    而本节点由 launch 在 t=0 与其它节点**并行**起，自己的定时器负责等 ⇒ **不推迟任何节点的启动时序**。
+  · **不能塞进 slam_toolbox**：那是上游包，且"体检"与"建图"职责不同。
+  · 也不做成持续监控 / 不发任何修正（发 `map→odom` 会直接破坏单一发布者契约）。
+
+### 8.3 判定口径（两条判据，缺一不可）
+
+采样时机：**第一次拿到 `map→base_link`**（= slam_toolbox 反序列化完并开始发 TF）起算，等
+`map_resume_check_delay`（默认 8 s）的静置/收敛窗口再判。原因：刚 resume 时 slam_toolbox 把位姿设成
+`map_start_pose`（自我一致、偏差 0）；真正暴露问题的是**随后扫描匹配按"（可能是歪的）图"把位姿拉走**的量。
+
+| 判据 | 定义 | 什么时候参与判定 | 阈值 |
+|---|---|---|---|
+| ① **修正量** | 实测 `map→base_link` vs「基线位姿 ⊕ 自基线以来的里程计位移」= 自基线以来 `map→odom` 修正了多少 | **总是**参与（不需要机器人静止） | `map_resume_check_pos_tol`=0.5 m / `yaw_tol_deg`=10° |
+| ② **绝对偏差** | 实测 `map→base_link` vs **存档 sidecar 记录的 `map_start_pose`** | 只在「自基线以来**一步没动**」时参与 | 同上 |
+
+为什么必须两条：
+
+- 只用 ② ⇒ 用户"一起来就开走"会被误报（实测假偏差 **7.5 m**，见 `.tmp_hygiene/out/resume_drive_healthy_strictfalse.log`）；
+- 只用 ① ⇒ 存档 sidecar 记的起点与现实不符（起点被挪 / 存档被 doctored）时，扫描匹配**不会产生任何修正**
+  （① ≈ 0），抓不住 —— 这时只有 ② 能发现。
+
+阈值来源：健康续建的实测偏差是**厘米级**（真机无头实测 `map→base_link` 与记录起点差 **0.021 m / 0.03°**），
+0.5 m / 10° 是给"扫描匹配收敛 + 里程计补偿"留的余量；而当天事故的 ATE max = 1.15 m ⇒ 0.5 m 抓得住。
+`map_resume_check_delay` 也可以调大（机器人起得慢/场地纹理差时）。
+
+### 8.4 看到什么（真机无头实测原文，2026-10-06）
+
+健康续建（**不误报**，`strict=False`）：
+
+```
+✅ 续建一致性检查通过：加载的位姿图与出生点一致
+  · 实测 map→base_link : x=-0.000 y=0.003 z=-0.021 yaw=-0.03°
+  · ① 修正量（期望=基线x=0.000 y=0.006 z=-0.006 yaw=-0.01° ⊕ 里程计位移）= x=-0.000 y=0.003 z=-0.021 yaw=-0.03°
+       偏差 0.000 m / 0.00°（阈值 0.50 m / 10.0°）⇒ ✅ 在阈值内
+  · ② 与存档记录 map_start_pose['0.000', '0.000', '0.000'] 的绝对偏差 = 0.021 m / 0.03°（阈值同上）⇒ ✅ 在阈值内
+  · 机器人状态  : 自基线以来一步没动（自基线以来最大位移 0.016 m；静止判据 0.050 m）
+```
+
+存档与现实不一致（`strict=False` 只喊；`strict=True` 追加"收栈"并把整栈收掉）：
+
+```
+❌❌ 续建一致性检查**不通过**：加载进来的位姿图与出生点/现实对不上，这份存档很可能是**退化过的**
+  · 判定依据：实测起点与存档记录的起点差 1.497 m / 0.02°（= 存档的 map_start_pose 与现实不符）
+  · ① 修正量 … 偏差 0.000 m / 0.00° ⇒ ✅ 在阈值内
+  · ② 与存档记录 map_start_pose['1.500', '0.000', '0.000'] 的绝对偏差 = 1.497 m / 0.02° ⇒ ❌ 超阈值
+  建议（按优先级）：
+    ① 本次不要 save 到这个名字：换一个新名字另存（map_name:=X_new / ros2 param set …）
+    ② 这份存档先留着别动，用备份回滚到上一代：map_archive.sh restore --name X
+    ③ 顺手体检 3D 先验的 z 跨度：python3 tools/scripts/mapping/pcd_stats.py PCD/X.pcd
+    ④ 确认是"起点猜错"而不是"图歪了"：检查本次 map_start_pose 是否真的等于机器人在旧图里的位姿
+    ⑤ 只想先跑起来、不要这个检查：加 map_resume_check:=False
+（strict=True 时还会打：map_resume_check_strict:=True ⇒ **收栈**（退出码 1）…；
+  launch 侧同时打：`[map_resume_check] ❌ 续建一致性检查不通过（退出码 1）⇒ map_resume_check_strict:=True，收栈。`）
+```
+
+### 8.5 怎么关 / 怎么调
+
+```bash
+ros2 launch … map_resume_check:=False              # 完全不要这个检查
+ros2 launch … map_resume_check_strict:=True        # 不通过就收栈（CI/比赛前一晚自检推荐）
+ros2 launch … map_resume_check_delay:=20.0         # 收敛窗口加长（默认 8 s）
+ros2 launch … map_resume_check_pos_tol:=1.0        # 位置阈值放宽（默认 0.5 m）
+ros2 launch … map_resume_check_yaw_tol_deg:=20.0   # 偏航阈值放宽（默认 10°）
+```
+
+其余细分参数（`still_window` / `still_eps` / `settle_timeout` / `tf_wait_timeout`）在节点上，
+可用 `ros2 param set /map_resume_check …` 或参数文件覆盖。
+
+---
+
+## 9. 事故复盘：2026-10-06「续建后地图发飘」
+
+### 9.1 事件顺序（用户实际遇到的）
+
+| # | 发生了什么 | 证据 |
+|---|---|---|
+| 1 | 上一次（run B）建图中，**sim 59→74 s 一段 LIO 退化**（ATE max **1.15 m**） | §5 的 run B 行；`docs/continue_mapping.md` §5 的"诚实登记" |
+| 2 | 那十几秒的点云被**按错的位姿**累积进 `PCD/RMUC2026_cont.pcd` ⇒ 3D 先验被污染（z 到 23.10 m、y 到 19.30 m，健康应是 z ∈ [−0.3, 1.8]） | `PCD/RMUC2026_cont.pcd` 实测 bbox；`pcd_stats.py` |
+| 3 | **同一段退化也被写进了 `map/RMUC2026.posegraph`** ⇒ 存档里的几何与真实场地不一致 | 用户续建后 `map→base_link` 与真实出生点对不上（"发飘"） |
+| 4 | 用户从 `map/RMUC2026.posegraph` **续建**：`cloud_accumulator` autoload 打出 `bbox z[-2.62, 5.56]`（健康云是 `z[-0.25, 1.77]`） | 用户当天的日志原文 |
+| 5 | **`save` 同名覆盖** ⇒ 坏数据把好存档换掉了（当时的 `save` 没有任何备份） | 本次改动前的 `map_archive.sh` / 累加器 `~/save` 都是直接覆盖 |
+| 6 | 结果：续建的图/定位发飘；`map/RMUC2026.{posegraph,data}` 被父进程删除、`PCD/RMUC2026.pcd` 从合成备份恢复 ⇒ 用户稍后重新建图 | 事故处置记录 |
+
+### 9.2 四个修复各自拦住哪一步
+
+| 修复（本次） | 作用位置 | 拦住的是第几步 |
+|---|---|---|
+| ① 累加器**数据卫生**（高度带 + 跳变/速度/转角闸 + TF 退化帧跳过，§3.1） | 3D 点云**进云之前** | 第 2 步（把退化段的点挡在云外；当天那朵 `z[-2.62, 5.56]` 会被高度带大量剔掉，突变帧整帧丢） |
+| ② **落盘前 bbox 体检**（`~/save` 与 `map_archive.sh save` 各一次，§3.3） | 3D 先验**写盘之前** | 第 2/4 步的发现环节：`z 跨度 8.18 m > 3.0 m` 会当场打响 WARNING 并建议改名另存（不会再"静默"留一份坏先验） |
+| ③ **覆盖前自动备份 + `restore`**（§3.2） | 写盘**之前** | 第 5 步：即使真的存了坏数据，好存档还在 `*.prev-<ts>` 里，一条 `map_archive.sh restore --name X` 就能回到上一代 |
+| ④ **续建后一次性一致性检查**（§8） | 续建**起来之后 ~8 s** | 第 3/4/6 步：图本身歪了的话，`map→base_link` 与实际起点对不上 ⇒ 立刻响亮 WARNING（`strict` 时直接收栈），并明确提示"别往这份存档上 save / 换个 map_name / 体检 `PCD/<名字>.pcd` 的 z 跨度" |
+
+### 9.3 仍然防不住的（别把这几条当成万能）
+
+- **慢漂**（≲1.5 m/s 的位姿漂移、单帧步长 ≲0.5 m）：位姿层面与正常运动无法区分 ⇒ 只能靠
+  `save` 时体检 + `pcd_stats.py` 事后体检（§3.1 的"已知边界"）。
+- **一直不 save 的重建**：三个修复都在"进云/写盘/续建"三个点上，如果用户从不 save、也不续建，
+  它们不会说话（那时问题本来就只影响本次会话）。
+- **2D 图本身**：本次的一致性检查只看 `map→base_link` 与存档记录是否自洽；2D 栅格的质量仍要靠
+  `/map` 的 occ/bbox 与 `pcd_to_nav2_map.py` 的体检（`docs/mapping_2d_from_cloud.md`）。
+
+---
+
+## 10. 未验证 / 已知坑
 
 1. **`lio:=fastlio` / `pointlio` 没跑续建验证**：本次只验了 `lio:=small_point_lio`。
    机制上续建与 LIO 无关（只跟 `map_file_name` 和 `map/odom` 有关），但**未实测**。
 2. **`mapper:=cartographer` 不支持续建**：cartographer 的存档是 `.pbstream`（另一套
    `load_state_filename`/`load_frozen_state` 机制），本次**没有**接入本守卫；
    用 `mapper:=cartographer` 时这 5 个参数里只有 `cloud_accumulator` 与 `map_name`（3D 名字）生效。
-3. **`mode:=slam_nav` 下也会走同一套续建判定**（同一个节点），但**没有单独跑验收**。
+3. **`mode:=slam_nav` 下也会走同一套续建判定与一致性检查**（同一个节点/分支），但**没有单独跑验收**
+   （§8 的验收全部在 `mode:=mapping` 下做的）。
 4. **`resolution` 改变只报警不拦**：同一份存档被 0.05 → 0.10 的栅格续建时，
    旧图与新帧不在同一栅格上，质量自负（日志里有 ⚠️）。
-5. **3D 先验的干净程度完全取决于 LIO**（§5 的 run B 末段就是反例）。
-   目前没有"离群帧剔除 / z 带过滤 / 跳变闸"——`status` 的 bbox 与 `pcd_stats.py`
-   的 z 分位数是唯一的体检手段。要做需要另开一条（跳变闸在
-   `tools/scripts/diag/map_odom_jump_gate.py` 里有现成的 alert-only 版本可参考）。
+5. **3D 先验的干净程度仍取决于 LIO**（§5 的 run B 末段就是反例）。2026-10-06 已补上
+   "高度带 + 跳变/速度/转角闸 + TF 退化帧跳过"（§3.1），但它们都是**位姿层面**的判据
+   ⇒ **慢漂看不出来**（1.15 m 用 15 s 漂完 = 0.077 m/s，与"机器人真的慢慢走"无法只靠位姿区分）。
+   慢漂只能靠 `save` 时的 bbox 体检（§3.3）与 `pcd_stats.py` 的 z 分位数。
 6. **存档体积**：一次 ~64 s 的建图 = 5.4 MB posegraph + 0.6 MB data。
    长跑（十几分钟、多回环）会长到几十 MB，**别顺手 `git add`**（`RMUC.posegraph` 13 MB /
    `RMUC.data` 8.5 MB 就是历史教训）。存档是否入库由你决定，本仓库的 `.gitignore` **没有**忽略
@@ -362,5 +630,5 @@ mv src/rm_nav_bringup/map/X.posegraph src/rm_nav_bringup/map/X.posegraph.bak   #
 7. **多机/多栈同名**：`.session.yaml` 只记"最近一次 launch"。同时在两个终端起两套不同
    `map_name` 的栈，`map_archive.sh save`（不带 `--name`）只会认最后写会话的那一套 ⇒ 多栈请显式 `--name`。
 8. **`adopt` 是人工担保**，脚本无法验证真伪；写错 sidecar ⇒ 以后续建就歪。
-9. **没做**：`map_allow_world_mismatch` 的"只警告不拦"中间档；存档自动备份（覆盖前留 `.bak`）；
-   同名存档的版本历史。要的话都得再改一层。
+9. **没做**：`map_allow_world_mismatch` 的"只警告不拦"中间档；同名存档的**完整版本历史**
+   （现在只有覆盖前自动留的 3 代 `*.prev-*`，见 §3.2）；`restore` 的"恢复后自动跑一次守卫验收"。
