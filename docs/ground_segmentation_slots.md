@@ -16,6 +16,7 @@
 | 默认值改了吗 | **没改**。`ground` 默认 `linefit`，linefit 节点、参数文件、p2l、其它所有槽位**一个字节都没动**。 |
 | patchwork 更好吗 | **在斜面/倒角上明显更好，在低矮障碍上要调一个参数才追平，CPU 更省**。逐项见 §5/§6 与 §7 的结论。 |
 | 能用了吗 | ⚠️ **可以 A/B，但建议先别换默认**：本次只做了离线 + 建图链 smoke，**没做 `mode:=nav` 整栈回归**（§9）。 |
+| **2026-10-07 追加** | 缺陷 ③（实时链路没有坡度/台阶判据）与缺陷 ②（p2l 高度带 0.326 m 截断）**已修**，见 **§10 / §11**；重跑建图的命令与验收 recipe 见 **§12**；整栈验证见 **§13**；回退见 **§14**。`ground` 默认**仍然是 `linefit`**（理由见 §10.5）。 |
 
 ---
 
@@ -435,10 +436,11 @@ bash src/rm_perception/patchwork_ground_segmentation/bench/ground_slot_smoke.sh 
 | 0.40~1.00 m | 971 / 972 | 0.0% / 7.3% | 0.0% / 7.3% | 都≈0（**因为 p2l 的 `max_height 0.1` 把 z_sensor>0.1 的点全丢了**，与分割器无关） |
 | ≥1.00 m | 874 / 875 | 0% | 0% | 同上 |
 
-⚠ **重要更正**：`0.40~1.00 m` 那一档覆盖率≈0 **不是分割器的锅**，是 `pointcloud_to_laserscan` 的
-`max_height: 0.1`（= 离地 0.326 m）把更高的点全过滤掉了。所以"0.4 m 护墙靠 p2l 保住"这个说法
-**只在护墙下沿 0.326 m 以内成立**；护墙上部要靠 STVL（`min_obstacle_height 0.0`）那条路。
-这一点与本次改动无关，只是本次量出来了。
+⚠ **重要更正（2026-10-07 已修，见 §11）**：`0.40~1.00 m` 那一档覆盖率≈0 **不是分割器的锅**，
+是 `pointcloud_to_laserscan` 的 `max_height: 0.1`（= 离地 0.326 m）把更高的点全过滤掉了。
+所以"0.4 m 护墙靠 p2l 保住"这个说法**只在护墙下沿 0.326 m 以内成立**。
+**现在 `max_height` 已改成 1.0（离地 1.226 m）**：0.30–0.40 m 档 83→98%，0.40–1.00 m 与 ≥1.00 m
+两档从 **0% 变成 100% / 98.5%**（§11 有同一批帧的前后对照与 `/scan` 束数增量）。
 
 ---
 
@@ -497,7 +499,9 @@ bash src/rm_perception/patchwork_ground_segmentation/bench/ground_slot_smoke.sh 
 
 ## 9. 未验证清单（不要当成已知）
 
-1. **`mode:=nav` / `slam_nav` 整栈没跑过**（本次只做离线 + `mode:=mapping` smoke）。
+1. ~~**`mode:=nav` / `slam_nav` 整栈没跑过**（本次只做离线 + `mode:=mapping` smoke）。~~
+   **2026-10-07 已补跑**（§13）：感知链 4 组合同帧 A/B + 整栈 nav（旧图 / 重跑图）+ P0 回归。
+   仍然未跑的：`ground:=patchwork` × 各 `localization:=*` 槽位的组合。
    代价：`/scan` 内容变化对 `costmap` / STVL / planner 的连锁影响**未测**；`localization:=*` 各槽位与 patchwork 的组合**未测**。
 2. **只跑了 RMUC2026 一个场地**；RMUL2026 / RMUC 未跑。
 3. **`ground:=patchwork` 没有做过 P0 回归**（`tools/scripts/regress/nav_smoke_regression.py` 口径）。
@@ -511,3 +515,268 @@ bash src/rm_perception/patchwork_ground_segmentation/bench/ground_slot_smoke.sh 
 7. **上游 `ros/**` wrapper 没跑过**，所以"我们的节点 vs 上游 wrapper"没有对照。
 8. **`th_dist` 与 `max_range` 的交互没扫**：`max_range` 决定 patch 尺寸，patch 尺寸 × `th_dist` 共同决定坡面拟合质量，
    本次只固定 `max_range=20` 扫 `th_dist`。
+
+---
+
+# ★ 2026-10-07 追加：坡度/台阶判据进实时链路（缺陷 ③）+ p2l 高度带（缺陷 ②）
+
+> 背景：`docs/path_clearance_and_contact.md` §0/§2.2 把用户那次 `world:=RMUC2026 mode:=nav
+> lio:=small_point_lio localization:=gicp nav:=mppi planner:=smac2d`、目标 `(-12.64,-0.31)`
+> 的撞击归因成**三件事**（下面 §10/§11 各修一件）。§9 里"`mode:=nav` 没跑过"这条**本次补上了**（§13）。
+
+## 10. 缺陷 ③：实时链路没有坡度/台阶判据（本次修复）
+
+### 10.1 问题（一句话）
+
+离线出先验图的 `tools/scripts/mapping/pcd_to_nav2_map.py` **有**一整套"相对局部地面的高差 + 可行驶坡度"
+判据，而**实时链路完全没有** —— 实时链路"什么算障碍"完全由 `linefit`（`max_slope ±0.4` ≈ 21.8°、
+`max_dist_to_line 0.05 m`）或 `patchwork` 一家说了算。于是**实时代价图与先验图口径不一致**：
+先验图里判"台阶/边沿"的东西，实时链路里可能连点都没留下（`/segmentation/obstacle` → `/scan` → STVL）。
+
+### 10.2 修法：判据下沉到**地面分割节点之后**，只降不升
+
+新增 header-only 判据库（**无节点、无话题**）：
+`src/rm_perception/rm_ground_traversability/include/rm_ground_traversability/low_terrain_classifier.hpp`
++ ROS 接线层 `traversability_ros.hpp`。两个地面分割槽位**都**接上（`ground:=linefit` 与 `ground:=patchwork`），
+在各自的 `segment()` 之后调用一次：
+
+```
+局部地面 g(x,y)  = 该点所在 ground_cell(0.20 m) 粗格内、各 fine_cell(0.05 m) 细格"最低点"的 p05
+                   （= "我脚下这块地大概多高"；细格取最低点 ⇒ 竖直墙面格不会把自己抬成地面）
+可行驶(drivable) ⟺ z − g ≤ step_height_threshold(0.15 m)
+                  且 不是（局部地面坡度 > drivable_slope_deg(25°) 且 z − g > slope_min_height(0.05 m)）
+台阶/边沿(step_edge) ⟺ 判据命中（高度台阶 ∪ 超限坡面）
+```
+
+* **只降不升**：只会把上一级判成 `ground` 的点**降级**为 `obstacle`，永不把 `obstacle` 升成 `ground`
+  ⇒ 不会删掉任何已有障碍（安全性单调，`obstacle ⊇ 原 obstacle`）。
+* **可行驶的斜坡必须保持 free**（硬要求，本车能爬 23°）：判据是"相对**局部**地面的高差"，
+  坡面上每个点自己就是局部地面 ⇒ 24° 的坡（0.20 m 粗格内只升 0.089 m）不会被误判。**上界论证**：
+  0.20 m 粗格 × tan25° = 0.093 m < 0.15 m ⇒ 任何 ≤25° 的坡都不会触发高度闸。
+  坡度判据另带一个 0.05 m 的高度闸（与离线同款），所以"又缓又长"的坡也不会因为坡度阈值被误判。
+* **契约不变**：`/segmentation/ground` 与 `/segmentation/obstacle` 的**发布者各 1 个**、消息类型/帧处理/QoS
+  全不变，每个输入点仍恰好落在某一侧。**新增**一个诊断话题 `segmentation/step_edge`
+  （判据命中的点 = obstacle 的**子集**）+ 私有话题 `~/traversability_stats`（每帧一行 JSON）。
+  下游**可以**不订阅；p2l 仍然只吃 `/segmentation/obstacle`。
+
+### 10.3 阈值真源（**单一真源**，别在别处写第二份）
+
+`src/rm_nav_bringup/config/traversability_criteria.yaml`。它同时被：
+
+| 谁 | 怎么读 | 键 |
+|---|---|---|
+| `bringup_sim.launch.py`（两个地面分割槽位都喂） | ROS **参数文件**（`/**:` 段） | 全部 |
+| `tools/scripts/mapping/pcd_to_nav2_map.py`（离线出先验图） | `--criteria-file`（默认就是这一份）当 argparse 默认值 | `step_height_threshold`→`--height-threshold`、`drivable_slope_deg`→`--slope-limit`、`slope_min_height`→`--slope-min-height`、`ground_cell_m`→`--ground-cell`、`fine_cell_m`→`--resolution`、`ground_percentile`→`--ground-percentile`、`ground_min_points`→`--ground-min-points` |
+
+⇒ **实时代价图与先验图用的是同一套阈值**。C++ `struct Criteria` 与 Python `CRITERIA_FALLBACK`
+里的字面值只是"没拿到参数文件时的兜底"，一致性由
+`python3 tools/scripts/regress/check_traversability_criteria.py` **断言**（三处逐键比对，退出码非 0 = 漂移）。
+参数不合法（例如 `ground_cell_m` 不是 `fine_cell_m` 的整数倍）时节点**直接抛错拒绝启动** —— 不允许"判据静默不生效"。
+
+### 10.4 实测（A/B 装置与口径）
+
+| 装置 | 命令 | 说明 |
+|---|---|---|
+| 离线逐点台架（同一批帧、两个分割器 + 判据开关） | `install/patchwork_ground_segmentation/lib/patchwork_ground_segmentation/ground_seg_ab --frames-dir .tmp_ground_ab/rmuc_lf --sensor-height 0.226 [--traversability on]` | 台架新增 `--traversability` 与 `--p2l-max-height`；**权威口径**（60 帧真帧） |
+| 实时链路同帧 A/B（起真节点 + 两个 p2l 实例 + 回放一袋点云的同一批帧） | `python3 tools/scripts/regress/low_terrain_ab.py replay --bag <bag> --passes lf_off,pw_off,lf_on,pw_on` | 逐帧指标 + map 系对账（用包里的 /tf） |
+| 场地真值 | `RMUC2026.stl` → 0.05 m 高度图（`field_mesh_vs_map.height_grid`） | "台阶格" = 该格比 3×3 邻域最低高 > 0.12 m |
+
+**① 台架（`.tmp_ground_ab/rmuc_lf`，60 帧真帧；obs% = 判成障碍的比例）**
+
+| 局部法向倾角 | 点数 | linefit 关 | linefit 开 | patchwork 关 | patchwork 开 | 读法 |
+|---|---|---|---|---|---|---|
+| 0–5°（平地） | 12 963 | 11.93% | **11.95%** | 4.34% | **4.34%** | 判据**没有**在平地上造出假障碍（Δ≤0.02 pp） |
+| 5–10° | 3 280 | 8.17% | 8.23% | 4.82% | 4.85% | 同上 |
+| 10–15°（可行驶倒角） | 2 933 | 10.64% | 11.11% | 6.00% | 6.41% | 可行驶斜面**基本不动** |
+| 15–22°（可行驶倒角） | 7 164 | 5.85% | 6.38% | 4.20% | 4.41% | 同上（本车能爬 23°） |
+| **22–35°** | 20 652 | 44.29% | **55.78%** | 2.45% | **27.29%** | 判据把"超过可行驶坡度"的那部分抓回来（>25° 本就不该走） |
+| **35–60°（陡立面）** | 61 151 | 86.23% | **92.87%** | 66.76% | **84.35%** | **patchwork 的主要漏判被补上（+17.6 pp）** |
+| 60–90°（墙） | 34 071 | 83.88% | 87.60% | 84.17% | 87.48% | 墙两者都保住 |
+| 判据耗时（60 帧 × 2 次 apply/帧） | — | — | median **0.155 ms** / p95 0.675 ms | — | 同上 | 相对分割器 0.4~1.2 ms 不构成负担 |
+| 被降级 ground→obstacle | — | — | **30 923 点 / 60 帧**（≈258/帧/分割器） | — | 同上 | 这就是"新看见的东西" |
+
+**② 按【离地高度带】的方位覆盖率（= 该高度的特征还能不能出现在 `/scan` 里）**
+
+| 高度带 | bins | linefit 关 | linefit 开 | patchwork 关 | patchwork 开 |
+|---|---|---|---|---|---|
+| 0.05–0.10 m | 1256 | 93.9% | **95.8%** | 84.2% | **96.2%** |
+| 0.10–0.20 m | 1460 | 99.7% | **99.9%** | 89.9% | **92.3%** |
+| 0.20–0.30 m（台阶/台面） | 968 | 97.0% | 97.4% | 94.0% | 96.2% |
+| 0.30–0.40 m | 932 | 98.5% | 98.7% | 97.4% | 98.3% |
+| 0.40–1.00 m | 971 | 100% | 100% | 100% | 100% |
+| ≥1.00 m（墙） | 874 | 98.5% | 98.6% | 98.5% | 98.6% |
+
+（本表用的是**新** p2l 高度带 `z ∈ (−1.0, 1.0)`；旧带下 0.40 m 以上全是 **0%** —— 那是缺陷 ②，见 §11。）
+
+**③ 实时链路同帧 A/B（撞击点 `map(−3.6, 3.1)` ±0.6 m；202 帧采样，含开到坡脚那一段）**
+
+| 指标（p50 / max） | lf_off | pw_off | lf_on | pw_on |
+|---|---|---|---|---|
+| 框内 `step_edge` 点数 | 0 / 0 | 0 / 0 | **3 / 18** | **3 / 19** |
+| 框内 obstacle 点数 | 30 / 3986 | 44.5 / 3986 | 29 / 3986 | 44 / 3986 |
+| `step_edge` 点到"真值台阶格"的最近距离 | — | — | **0.10 m** | **0.10 m** |
+| 出生点框内 obstacle 点数（假障碍对照） | 0 / 1 | 0 / 26 | 0 / 1 | 0 / 27 |
+
+读法：**判据确实在撞击点那一带点出了台阶/边沿**（且最近的判据点到真值台阶格只有 0.10 m = 2 格），
+而两个分割器自身在那里的 obstacle 点数几乎不变 ⇒ 这是**新增的可观测性**，不是把别的东西搬过去。
+
+### 10.5 默认值改了吗：**没改**（`ground` 仍是 `linefit`）
+
+把 `ground:=patchwork` 提为默认的触发条件（旧 §7.2）本次**只满足了部分**，逐条对账：
+
+| 条件 | 现状 | 判定 |
+|---|---|---|
+| `mode:=nav` 整栈 A/B 跑完 | 本次跑了（§13），两者都能跑通 | ✅ |
+| `tools/scripts/regress/nav_smoke_regression.py` P0 回归 PASS | 本次跑了（§13） | ✅ |
+| 至少再跑一个场地 | **没有**（只有 RMUC2026） | ❌ |
+| §5.3 那两个新毛病在目标场地上确认无害 | 本次量到 patchwork 在**出生点附近**留下 26~27 个障碍点（linefit 1 个），真值那里没有 >0.12 m 的台阶格；倒角附近的假障碍没消 | ❌ |
+| 实车 `sensor_height` 重新标定 | 没做（0.226 是仿真值） | ❌ |
+
+而且**换默认的收益不足以压过风险**：判据接上之后两者在**安全相关**的指标上互有胜负——
+linefit 在 35–60° 陡面（92.9% vs 84.4%）与 0.10–0.20 m 覆盖（99.9% vs 92.3%）更好，
+patchwork 在平地/倒角的假障碍率（4.3% vs 12.0%）与 CPU（0.41 ms vs 1.2 ms）更好。
+⇒ **保持 `linefit` 为默认**（= 已验证资产不动），`patchwork` 仍是一个词的对照臂；
+**判据对两个槽位都生效**，所以"低矮地形看不见"这件事不依赖槽位选择。
+
+## 11. 缺陷 ②：`pointcloud_to_laserscan` 的高度带（本次修复）
+
+**改动**：`src/rm_perception/pointcloud_to_laserscan/config/laserscan_params.yaml`
+`max_height: 0.1 → 1.0`（`min_height: −1.0` **不动**）。
+`target_frame: ""` ⇒ z 过滤发生在**点云自带帧**（livox_frame，离地 0.226 m）⇒ 离地换算 = `z + 0.226`：
+
+| 口径 | `max_height` | 离地覆盖上限 |
+|---|---|---|
+| 旧 | 0.1 | **+0.326 m** |
+| 新 | 1.0 | **+1.226 m** |
+
+**实测（同一批帧、同一朵 obstacle 云，只换 z 过滤；台架 `--p2l-max-height` 并排打印两套带）**
+
+| 高度带 | 旧带 `0.1` linefit/patchwork | 新带 `1.0` linefit/patchwork |
+|---|---|---|
+| 0.20–0.30 m | 96.3% / 93.7% | 97.0% / 94.0% |
+| 0.30–0.40 m | 83.3% / 85.3% | **98.5% / 97.4%** |
+| **0.40–1.00 m** | **0.0% / 0.0%** | **100% / 100%** |
+| **≥1.00 m** | **0.0% / 0.0%** | **98.5% / 98.6%** |
+
+**实测（实时链路同帧 A/B：`/scan` 内容真的变了多少）**
+
+| 指标（202 帧） | linefit 旧带 | linefit 新带 | patchwork 旧带 | patchwork 新带 |
+|---|---|---|---|---|
+| `/scan` 有限束数（均值） | 856.8 | **934.7（+77.8，+9.1%）** | 1113.8 | **1163.5（+49.7，+4.5%）** |
+| 只在新带里出现的束（p50 / max） | — | **+83 / +143** | — | **+44.5 / +150** |
+| 新带**丢掉**的束（均值） | — | 0.0 | — | 0.6 |
+| 同一方位回波**距离**的变化（p50） | — | **0.000 m** | — | **0.000 m** |
+
+⇒ 这是**纯增量**改动：老回波一个不动、距离不变，多出来的是"以前整条方位是 `inf`"的那些
+（`inf_is_valid=true` 时下游会把 `inf` 当"10 m 处有回波"沿射线清成 free ⇒ 那才是真正的危险方向）。
+
+**为什么 `min_height` 保持 −1.0**：它的语义是"雷达下方 1.0 m 以内的点也要"（离地 −0.774 m），
+比本场地最低几何（坑底 −0.2 m）更低 ⇒ 不丢东西。COD 2026 的 `min_height 0.01 / max_height 1.00`
+看着像另一组数，但他们的 p2l 配 `target_frame: chassis`（**地面高度附近**的帧）⇒ 那组数是**离地**的；
+我们不做 TF（`target_frame: ""`，见该配置顶部的理由），同样的 `1.0` 落在**离雷达 1.0 m = 离地 1.226 m**。
+
+**风险与回退**：抬到 1.226 m 意味着**头顶结构**（悬挑/限高杆/桥）也会被投影到地面 ⇒ 假障碍。
+本场地**没有**这类几何（`docs/worlds.md` §6："隧道 / 设计坡道：没有"；本次也用 178 543 点的
+`PCD/RMUC2026.pcd` 与 `RMUC2026.stl` 复核过：driving 区内 z>1.2 m 的几何都是墙/立柱的**上方部分**，
+其正下方本来就有同一面墙）。换场地/真机若有悬挑，回退 = §14 表里那一条。
+
+## 12. 怎么重跑建图，让"撞击点"不再隐身（**用户要照抄的命令**）
+
+**结论先说**：修完感知之后，**先验图必须重出一份** —— 因为 2D 先验图是**离线**从 3D 点云投出来的
+（`pcd_to_nav2_map.py`），它的输入是**建图那一次的 3D 点云**；老点云里没有的几何，重投影一万次也不会出现。
+实时链路（`/scan` → 局部代价图）**不需要重跑建图**就已经生效（§10/§11），但**全局先验图要重出**。
+
+### 12.1 命令（三步，第三份是新图，**不覆盖**现有资产）
+
+```bash
+# ① 重跑建图（用户 workflow；map_name 用新名字，cloud_accumulator 落 3D 先验）
+ros2 launch rm_nav_bringup bringup_sim.launch.py \\
+  world:=RMUC2026 mode:=mapping lio:=small_point_lio mapper:=slam_toolbox \\
+  map_name:=RMUC2026_v3 cloud_accumulator:=True ground:=linefit nav_rviz:=False spin_speed:=0.0
+#    （栈跑着的时候用 coverage_drive.py 跑覆盖路线；跑完在**另一个终端**执行 ②）
+
+# ② 存档（2D 位姿图 + 3D 点云；同名覆盖前会自动留 *.prev-<ts> 备份）
+tools/scripts/mapping/map_archive.sh save --name RMUC2026_v3
+tools/scripts/mapping/map_archive.sh info --name RMUC2026_v3      # 核对 world/出生点/点数
+
+# ③ 3D 点云 → 2D 先验图（**判据与实时链路同一份 YAML**；窗口与现有图对齐）
+python3 tools/scripts/mapping/pcd_to_nav2_map.py \\
+  --pcd src/rm_nav_bringup/PCD/RMUC2026_v3.pcd \\
+  --out .tmp_cache/hzmap2d/RMUC2026_v3 \\
+  --bbox -24.8 -8.92 -3.6 2.3 \\
+  --json .tmp_cache/hzmap2d/RMUC2026_v3.json --png .tmp_cache/hzmap2d/RMUC2026_v3.png
+#    ⚠ --bbox 要与 map/RMUC2026.yaml 的窗口一致（origin −24.8,−8.92；568×318 格 @0.05 m
+#      ⇒ x∈[−24.8,3.6) y∈[−8.92,6.98)）。不写 --bbox 就按点云 bbox 自动取窗口（也能用，但两张图不可逐格比）。
+```
+
+**先别覆盖** `map/RMUC2026.yaml`：用新的 `map_yaml:=` 参数做对照跑（本次新增，默认行为不变）：
+
+```bash
+# 用新先验图跑用户那次的目标（**不碰** map/RMUC2026.*）
+ros2 launch rm_nav_bringup bringup_sim.launch.py \\
+  world:=RMUC2026 mode:=nav lio:=small_point_lio localization:=gicp nav:=mppi planner:=smac2d \\
+  map_yaml:=/abs/path/.tmp_cache/hzmap2d/RMUC2026_v3.yaml nav_rviz:=False spin_speed:=0.0
+```
+
+确认没问题再决定要不要把它变成 `map/RMUC2026.{pgm,yaml}`（那是用户资产，本仓库的脚本**不会**替你覆盖）。
+
+### 12.2 重跑之后怎么验（`tools/scripts/regress/verify_low_terrain.py`）
+
+```bash
+# 旧图 vs 新图，同一口径（真值 = RMUC2026.stl → 0.05 m 高度图）
+python3 tools/scripts/regress/verify_low_terrain.py --map src/rm_nav_bringup/map/RMUC2026.yaml \\
+    --label old --json .tmp_lowterrain/verify_old.json --png .tmp_lowterrain/verify_old.png
+python3 tools/scripts/regress/verify_low_terrain.py --map .tmp_cache/hzmap2d/RMUC2026_v3.yaml \\
+    --label new --json .tmp_lowterrain/verify_new.json --png .tmp_lowterrain/verify_new.png
+```
+
+打印的四组判据（本次在**旧图**上的基线值给在括号里，作对照）：
+
+| 判据 | 含义 | 旧图实测 |
+|---|---|---|
+| 【全场台阶/边沿被表示】 | 真值"台阶/边沿格"（比 3×3 邻域最低高 >0.12 m）里，0.10 m 内有占用格的比例 | **49.44%**（2822/5708） |
+| 【撞击点 ±0.6 m】 | 该窗口内台阶格被表示的比例 / 占用格数 / 真值最高 | 28/33 被表示；39 占用格；真值最高 0.272 m |
+| 【可行驶斜面不许被标占用】 | 真值 ∈[0.02,0.15) 且 ≤22° 的格被判 occupied 的比例 | free 84.07% / **occupied 3.29%** / unknown 12.64% |
+| 【路径】 | 在图上求最短路（可加余量约束）：到撞击点的最近距离 / 沿途最大**局部台阶** | 余量≥0.25 m 时最近 **0.051 m**；无余量约束时沿途最大局部台阶 **0.200 m** |
+
+后两行是"这条命令回答不了、必须真跑"的部分（见 §13）：**实时链路的 `/scan`/代价图**用
+`low_terrain_ab.py replay` 在同一次录的包上量（`--passes lf_off,pw_off,lf_on,pw_on`）。
+
+## 13. 本次补跑的整栈验证（§9 第 1 条已作废）
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 感知链同帧 A/B（4 个组合） | `low_terrain_ab.py replay --bag .tmp_lowterrain/capture_lt1/lt1.bag --passes lf_off,pw_off,lf_on,pw_on` | 见 §10.4 ③ / §11 |
+| 整栈 nav（旧先验图） | `tools/scripts/regress/run_nav_clearance_ab.sh --tag lt_fix_old --goal -12.64 -0.31 --extra "spin_speed:=0.0"` | 首次撞击 86.4→**68.2 m/s²（−21%）**，但撞击后仍"LIO 发散 → 停发 TF → 盲开"，90 s 未到目标（里程 20.15 m）。逐条见 `docs/path_clearance_and_contact.md` §7.5 |
+| 整栈 nav（重跑先验图） | 同上 + `--extra "map_yaml:=<new>.yaml spin_speed:=0.0"` | **规划不出来**（ABORTED、plans=0、IMU 全程 <20）：新投影图**过度占用**（128.4 m² vs 旧图 22.7 m²），根因是**累积点云的垂向拖影**（真值平坦处 z 跨度 0.154 m），不是判据。⇒ 换先验图前必须过 `verify_low_terrain.py`（§12.2） |
+| P0 回归 | `tools/scripts/localization/run_nav_smoke_regress.sh --tag lt_reg_default --domain 173 --port 11873 --localization gicp`（另跑一发用户槽位 `--nav mppi --planner smac2d`） | 见下 §13.1 |
+| 重跑建图（用户 workflow） | `tools/scripts/regress/run_remap_lowterrain.sh --tag ltmap --domain 165 --port 11865 --map-name RMUC2026_lt` | ✅ 走通：`map/RMUC2026_lt.{posegraph,data,meta.yaml}` + `PCD/RMUC2026_lt.pcd`（86 594 点 / z 跨度 1.96 m），`map_archive.sh save` 的会话/守卫/备份链路全绿 |
+
+### 13.1 P0 回归（无回归证据）
+
+```bash
+bash tools/scripts/localization/run_nav_smoke_regress.sh --tag lt_reg_default --domain 173 --port 11873 --localization gicp
+bash tools/scripts/localization/run_nav_smoke_regress.sh --tag lt_reg_user    --domain 174 --port 11874 --localization gicp --nav mppi --planner smac2d
+```
+
+口径 = 目标 `(-1.00, 2.00)`、`x=475 y=218` 落格必须 free、终态 SUCCEEDED。
+
+| 跑 | 槽位 | 结果 | 用时 | recoveries | d_min | 对照（修复前同口径） |
+|---|---|---|---|---|---|---|
+| `lt_reg_default` | `localization=gicp nav=rpp planner=navfn` | ✅ **PASS** | 83.0 s | 6 | 0.0 m | `regress_gicp`（75.5 s / 5 次）⇒ 同级 |
+| `lt_reg_user` | `localization=gicp nav=mppi planner=smac2d`（用户槽位） | ✅ **PASS** | **3.2 s** | **0** | 0.0 m | `regress_navfix`（3.3 s / 0 次）⇒ 同级 |
+
+⇒ **无回归**：`/scan` 内容变化（缺陷 ②）与判据（缺陷 ③）没有破坏 P0 回归链路
+（落格 free、终态 SUCCEEDED、`d_min=0.0`、命令链限幅不变）。
+
+## 14. 回退（本次三处改动，逐个可退）
+
+| 改动 | 回退方式 | 代价 |
+|---|---|---|
+| 判据（缺陷 ③） | 跑的时候 `traversability_enable:=false`（launch 参数传进两个节点都生效）；或把 YAML 里 `traversability_enable: false` | 坡脚/台阶回到"只有分割器自己的判定" |
+| 判据的阈值 | 只改 `config/traversability_criteria.yaml`（实时 + 离线**一起**变）；要单侧覆盖就用 `pcd_to_nav2_map.py --height-threshold/--slope-limit/...` | 两侧不一致 ⇒ 就是缺陷 ③ 本身，不要长期这样 |
+| p2l 高度带（缺陷 ②） | `laserscan_params.yaml` 的 `max_height` 改回 `0.1` | 0.40 m 以上几何重新从 `/scan` 消失（§11 表） |
+| `ground` 槽位 | 本来就是 `linefit`（没改）；要试另一个词就 `ground:=patchwork` | 见 §10.5 |
+| `map_yaml` 参数 | 不传 = 完全等于旧行为（默认值 = `map/<world>.yaml`） | 无 |
+| 整个特性 | `git revert <commit>`（3~6 个 commit，见 `git log --oneline`）；或删 `src/rm_perception/rm_ground_traversability/` 并去掉两个节点的 include/依赖 | 回到 2026-10-06 的行为 |
+
