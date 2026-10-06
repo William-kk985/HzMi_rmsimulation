@@ -38,7 +38,7 @@ set -u
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TAG=""; OUT_DIR=""; ROUTE=""; SAVE_2D=""; WORLD="RMUC2026"; LIO="small_point_lio"
 DOMAIN=97; PORT=11507; SPEED=0.20; TIMEOUT=300; WARMUP=15; POSE_SOURCE=lio
-P2L_TF=""; SLAM_TT=""; SLAM_MTI=""
+P2L_TF=""; SLAM_TT=""; SLAM_MTI=""; SLAM_SQS=""; TIMING_PROBE=0
 JUMP_T="0.20"; JUMP_R="8.0"; EXTRA_DRIVER=""
 P2L_CFG="$WS/src/rm_perception/pointcloud_to_laserscan/config/laserscan_params.yaml"
 SLAM_CFG="$WS/src/rm_localization/slam_toolbox/config/mapper_params_online_async_sim.yaml"
@@ -60,6 +60,8 @@ while [ $# -gt 0 ]; do
     --p2l-target-frame) P2L_TF="$2"; shift 2;;
     --slam-transform-timeout) SLAM_TT="$2"; shift 2;;
     --slam-min-time-interval) SLAM_MTI="$2"; shift 2;;
+    --slam-scan-queue-size) SLAM_SQS="$2"; shift 2;;
+    --timing-probe) TIMING_PROBE=1; shift 1;;
     --jump-threshold-trans) JUMP_T="$2"; shift 2;;
     --jump-threshold-rot-deg) JUMP_R="$2"; shift 2;;
     --driver-args) EXTRA_DRIVER="$2"; shift 2;;
@@ -145,6 +147,23 @@ open(p,'w').write(s2)
 PY
   VARIANTS="$VARIANTS,slam_minimum_time_interval=$SLAM_MTI"
 fi
+if [ -n "$SLAM_SQS" ]; then
+  # scan_queue_size 默认不在本仓 yaml 里（源码默认 1.0）⇒ 这里**插入**一行；
+  # 若已存在则改写。语义见 docs/slam_toolbox_scan_drops.md。
+  python3 - "$SLAM_CFG" "$SLAM_SQS" <<'PY'
+import re,sys
+p,v=sys.argv[1],sys.argv[2]
+s=open(p).read()
+if re.search(r'(?m)^\s*scan_queue_size:', s):
+    s2,n=re.subn(r'(?m)^(\s*scan_queue_size:\s*).*$', lambda m: m.group(1)+v, s, count=1)
+else:
+    s2,n=re.subn(r'(?m)^(\s*minimum_time_interval:.*)$',
+                 lambda m: m.group(1)+'\n    scan_queue_size: %s'%v, s, count=1)
+assert n==1,'scan_queue_size 插入失败'
+open(p,'w').write(s2)
+PY
+  VARIANTS="$VARIANTS,slam_scan_queue_size=$SLAM_SQS"
+fi
 echo "[ab] tag=$TAG variants=$VARIANTS"
 
 set +u
@@ -163,7 +182,7 @@ cd "$WS" || exit 2
 : > "$LOG"
 trap cleanup EXIT
 
-echo "[ab] 生效值：$(grep -m1 target_frame "$P2L_CFG" | tr -d ' ') $(grep -m1 transform_timeout "$SLAM_CFG" | tr -d ' ') $(grep -m1 minimum_time_interval "$SLAM_CFG" | tr -d ' ')"
+echo "[ab] 生效值：$(grep -m1 target_frame "$P2L_CFG" | tr -d ' ') $(grep -m1 transform_timeout "$SLAM_CFG" | tr -d ' ') $(grep -m1 minimum_time_interval "$SLAM_CFG" | tr -d ' ') $(grep -m1 scan_queue_size "$SLAM_CFG" | tr -d ' ' || echo 'scan_queue_size=(未配⇒源码默认1)')"
 
 ARGS=(world:=$WORLD mode:=mapping lio:=$LIO mapper:=slam_toolbox
       nav_rviz:=False lio_rviz:=False spin_speed:=0.0)
@@ -209,6 +228,13 @@ timeout -k 5 $((TIMEOUT + WARMUP + 130)) python3 -u tools/scripts/diag/map_odom_
   --threshold-trans "$JUMP_T" --threshold-rot-deg "$JUMP_R" \
   --duration $((TIMEOUT + WARMUP + 30)) >"$OUT.gate.log" 2>&1 &
 GPID_=$!
+TPID_=""
+if [ "$TIMING_PROBE" = 1 ]; then
+  # 时间戳链测量仪器（一次性，见 tools/scripts/diag/scan_tf_timing_probe.py 头注）
+  timeout -k 5 $((TIMEOUT + WARMUP + 130)) python3 -u tools/scripts/diag/scan_tf_timing_probe.py \
+    --out "$OUT.timing" --duration $((TIMEOUT + WARMUP + 90)) >"$OUT.timing.log" 2>&1 &
+  TPID_=$!
+fi
 sleep 8
 
 DRV=(python3 -u tools/scripts/mapping/coverage_drive.py
@@ -223,6 +249,7 @@ DRVRC=$?
 echo "[ab] coverage_drive rc=$DRVRC"
 
 wait $PPID_ 2>/dev/null; wait $GPID_ 2>/dev/null
+[ -n "$TPID_" ] && wait $TPID_ 2>/dev/null
 grep -a "PROBEJSON" "$OUT.probe.log" | tail -1 || echo "PROBEJSON {}"
 grep -a "PROBESTUCK" "$OUT.probe.log" | tail -1 || echo "PROBESTUCK []"
 
@@ -246,6 +273,7 @@ drops=[float(x) for x in open(out+'.drops.txt') if x.strip()] if os.path.exists(
 probe=j(out+'.probe.json',{}) or {}
 gate=j(out+'.gate.json',{}) or {}
 drive=j(out+'.drive.json',{}) or {}
+timing=j(out+'.timing.json',{}) or {}
 scan=probe.get('scan',{}) or {}
 # 丢帧窗口 = 探针收到的 /scan 的仿真时间跨度（分母同一把尺子）
 n_scan=scan.get('n',0)
@@ -266,6 +294,8 @@ summary={
  'gate_jumps':gate.get('jump_details',[])[:10],
  'drive_rc':int(drvrc),
  'drive':{k:v for k,v in drive.items() if not isinstance(v,(list,dict))} if drive else {},
+ 'timing':{k:v for k,v in timing.items() if k not in ('tf_frames','pose_processed')} if timing else {},
+ 'timing_pose_n':(timing.get('pose_processed') or {}).get('n') if timing else None,
 }
 json.dump(summary,open(out+'.summary.json','w'),ensure_ascii=False,indent=1)
 print(json.dumps(summary,ensure_ascii=False))
