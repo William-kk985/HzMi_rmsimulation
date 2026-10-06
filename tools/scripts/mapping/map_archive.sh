@@ -70,7 +70,14 @@ resolve_name() {
   [ -n "$NAME" ] && return 0
   [ -n "${MAP_NAME:-}" ] && { NAME="$MAP_NAME"; echo "[map_archive] 名字来自 \$MAP_NAME=$NAME"; return 0; }
   local v; v="$(session_get map_name)"
-  if [ -n "$v" ]; then NAME="$v"; echo "[map_archive] 名字来自本次会话状态 $SESSION：map_name=$NAME"; return 0; fi
+  if [ -n "$v" ]; then
+    # 会话状态可能是"上一次跑完留下的"：pid 不在 ⇒ 至少提醒一句（不拦，用户仍可 --name 覆盖）
+    local spid; spid="$(session_get session_pid)"
+    if [ -n "$spid" ] && ! kill -0 "$spid" 2>/dev/null; then
+      echo "[map_archive] ⚠️ 会话状态里的 launch pid=$spid 已经不在了 ⇒ 下面这个名字可能来自**上一次**会话；若不对请显式 --name X" >&2
+    fi
+    NAME="$v"; echo "[map_archive] 名字来自本次会话状态 $SESSION：map_name=$NAME"; return 0
+  fi
   v="$(ros_param /cloud_accumulator map_name)"
   if [ -n "$v" ]; then NAME="$v"; echo "[map_archive] 名字来自运行中的 /cloud_accumulator：map_name=$NAME"; return 0; fi
   v="$(ros_param /slam_toolbox map_file_name)"

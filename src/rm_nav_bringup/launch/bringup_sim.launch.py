@@ -5,7 +5,7 @@ from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import PackageNotFoundError
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo, TimerAction
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo, TimerAction, OpaqueFunction
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
@@ -97,6 +97,144 @@ class _PackageShareFile(Substitution):
     def describe(self):
         return '%s(package=%s, path=%s)' % (
             type(self).__name__, self.__package_name, os.path.join(*self.__relative_path))
+
+
+# =============================================================================
+# 「在上次基础上继续建图」= 存档（posegraph / PCD）+ 场地隔离守卫
+# -----------------------------------------------------------------------------
+# 用户需求原话：「能不能就是我在上次基础上继续建，手动指定一个地图名字去覆盖之类的」
+#              「以后换地图换场地会不会有干扰」
+#
+# ① 续建机制（slam_toolbox 原生能力，我们只是把它接上）：
+#      · 存档 = `<map_dir>/<name>.posegraph` + `.data`（`/slam_toolbox/serialize_map` 写出，
+#        见 slam_toolbox/include/slam_toolbox/serialization.hpp:44-45）；
+#      · 续建 = 给 slam_toolbox 传 `map_file_name=<base>`：节点起来时
+#        `loadPoseGraphByParams()`（slam_toolbox_common.cpp:313）会反序列化同一对文件并**接着建**
+#        （`map_file_name` 为空 ⇒ 什么都不加载 = 从零建，源码 349 行 `if (!filename.empty())`）；
+#      · `map_start_pose` 只在"要反序列化"时有意义：它告诉 slam_toolbox
+#        「机器人现在在**这张旧图**的哪个位姿」（START_AT_GIVEN_POSE ⇒ PROCESS_NEAR_REGION）。
+#        本工程约定 `map` 系 = 出生点相对系 ⇒ 机器人每次都在出生点重生 ⇒ `[0,0,0]` 对任何 world 都对。
+#
+# ② 场地隔离（用户的第二个问题，也是最容易"静默毁图"的地方）：
+#      存档旁边必须有一份 sidecar `<name>.meta.yaml`（记录 world / spawn / resolution / 写它的版本）。
+#      续建前由 `map_asset_guard.py` 核对：world 不同、spawn 不同、或 sidecar 缺失（旧版存档）
+#      ⇒ **默认拒绝并终止 launch**，除非显式 `map_allow_world_mismatch:=True`。
+#
+# ③ 判定放在哪、为什么放这里（"最简可靠"的取舍）：
+#      放在 **launch 期**（OpaqueFunction，t=0 执行），而不是"另起一个守卫节点"：
+#        · 守卫节点只能"打印/退出"，slam_toolbox 照样会把错的图 load 进来 ⇒ 拦不住；
+#        · launch 期判定可以在**构造节点参数之前**决定"传不传 map_file_name"，并且能直接
+#          `raise` ⇒ launch 收尾、退出码 1、错误信息完整（与文件顶部 `_PackageShareFile` 同一机制）；
+#        · OpaqueFunction 是 Action，`ros2 launch ... --show-args` **不执行** Action
+#          ⇒ 存档缺失/不匹配时 `--show-args` 依然正常（这一点已实测，见 docs/continue_mapping.md）。
+#      副作用（有意的）：判定与"续建/从零"横幅在 t=0 就打印，而不是等 4 s 后 slam_toolbox 起来；
+#      节点本身仍在 4 s 起（TimerAction 由 OpaqueFunction 内部返回，时序与原来逐字节一致）。
+# =============================================================================
+
+# 惰性加载守卫模块（模块本体在 share/rm_nav_bringup/scripts/map_asset_guard.py，与 shell 脚本共用同一份判定）
+_MAP_GUARD_CACHE = {}
+
+
+def _find_source_pkg_dir(share_dir):
+    """从 `share/<pkg>/<sub>/` 里挑一个指向别处的软链，反推**仓库源码里的包目录**。
+
+    为什么需要：`colcon build --symlink-install` 下 share 里的每个文件是**单独**的软链
+    （目录本身是真的）⇒ 运行期新建的 `map/<name>.posegraph` 不会自动出现在 share 里。
+    守卫模块因此优先从源码树加载（与 map_asset_guard.canonical_asset_dir() 同一套判断，
+    互为兜底：即使忘了重编 rm_nav_bringup，launch 也能找到源码里的守卫）。
+    """
+    for sub in ('map', 'PCD', 'launch'):
+        d = os.path.join(share_dir, sub)
+        try:
+            for entry in sorted(os.listdir(d)):
+                p = os.path.join(d, entry)
+                if os.path.islink(p):
+                    real = os.path.realpath(p)
+                    # …/src/<pkg>/<sub>/<file> → 上溯两级 = …/src/<pkg>
+                    cand = os.path.dirname(os.path.dirname(real))
+                    if os.path.isfile(os.path.join(cand, 'package.xml')):
+                        return cand
+        except OSError:
+            continue
+    return None
+
+
+def _load_map_asset_guard(share_dir):
+    if 'mod' in _MAP_GUARD_CACHE:
+        return _MAP_GUARD_CACHE['mod']
+    cands = [os.path.join(share_dir, 'scripts', 'map_asset_guard.py')]
+    src_pkg = _find_source_pkg_dir(share_dir)
+    if src_pkg:
+        cands.append(os.path.join(src_pkg, 'scripts', 'map_asset_guard.py'))
+    path = next((p for p in cands if os.path.isfile(p)), None)
+    if path is None:
+        raise RuntimeError(
+            "[launch] 找不到地图存档守卫模块 map_asset_guard.py（试过：%s）\n"
+            '  它是 rm_nav_bringup 包的一部分，安装方式：\n'
+            '      colcon build --symlink-install --packages-select rm_nav_bringup\n'
+            '      source install/setup.bash\n'
+            '  （续建 + 场地隔离都靠它，缺了它宁可不起栈，也不要在没有隔离检查的情况下续建。）'
+            % ' / '.join(cands))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('rm_map_asset_guard', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _MAP_GUARD_CACHE['mod'] = mod
+    _MAP_GUARD_CACHE['path'] = path
+    return mod
+
+
+def _as_bool(text, what):
+    t = str(text).strip().lower()
+    if t in ('true', '1', 'yes', 'on'):
+        return True
+    if t in ('false', '0', 'no', 'off', ''):
+        return False
+    raise RuntimeError('[launch] 参数 %s 需要 True/False，收到 %r' % (what, text))
+
+
+def _as_pose3(text, what):
+    """把 `map_start_pose`（启动参数是字符串）解析成 [x, y, theta]。"""
+    try:
+        if isinstance(text, (list, tuple)):
+            vals = [float(v) for v in text]
+        else:
+            import ast
+            vals = [float(v) for v in ast.literal_eval(str(text).strip())]
+    except Exception as e:
+        raise RuntimeError('[launch] 参数 %s 解析失败（要形如 "[0.0, 0.0, 0.0]"）：%s' % (what, e))
+    if len(vals) != 3:
+        raise RuntimeError('[launch] 参数 %s 需要 3 个数 [x, y, theta]，收到 %r' % (what, text))
+    return vals
+
+
+def _mapper_resolution(params_yaml, default=0.05):
+    """读 slam_toolbox 参数文件里的 resolution（用于与存档 sidecar 比对，只报警不拦）。"""
+    try:
+        with open(params_yaml, 'r') as f:
+            d = yaml.safe_load(f) or {}
+        return float(d.get('slam_toolbox', {}).get('ros__parameters', {}).get('resolution', default))
+    except Exception:
+        return default
+
+
+def _write_session_state(map_dir_path, payload):
+    """把本次会话"存档落在哪、叫什么名字"写到 `<map_dir>/.session.yaml`。
+
+    为什么需要这个文件：`map_archive.sh save` 在**另一个终端**里跑，它必须知道
+    「这次 launch 到底用的是什么 map_name / world」。只靠 `ros2 param get` 是不够的：
+    从零建图时 slam_toolbox 的 `map_file_name` 是空的（只有续建才有值），默认名
+    （map_name 留空 ⇒ 取 world）在运行期完全不可见 ⇒ 会存到错名字上。
+    写失败只警告（绝不因为一个记账文件挡住建图）。
+    """
+    try:
+        os.makedirs(map_dir_path, exist_ok=True)
+        with open(os.path.join(map_dir_path, '.session.yaml'), 'w') as f:
+            yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+        return True
+    except Exception as e:                                        # pragma: no cover
+        print('[map_archive] ⚠️ 写会话状态失败（不影响建图，但 map_archive.sh save 需要 --name）：%s' % e)
+        return False
 
 
 def generate_launch_description():
@@ -398,6 +536,50 @@ def generate_launch_description():
                     'ground_segmentation_sim.yaml）。'
                     '两者同契约 ⇒ 下游（pointcloud_to_laserscan / STVL / costmap）零改动、互斥切换；'
                     '回退 = 省略本参数或 ground:=linefit')
+
+    # ★ 2026-10-06：以下 5 个参数 = 「在上次基础上继续建图」+ 场地隔离（详见文件中部那段说明与
+    #   docs/continue_mapping.md）。全部是**新增**的、有默认值 ⇒ 不传时现有行为逐字节不变
+    #   （唯一例外见 map_autocontinue：它默认 True，会在**同名存档已存在**时改成"续建"；
+    #    本仓库现有 map/*.posegraph 只有 RMUC / RMUL 两份旧图，且它们没有 sidecar
+    #    ⇒ 默认 world:=RMUL2026 时 map/RMUL2026.posegraph 根本不存在 ⇒ 仍然是从零建图）。
+    declare_map_name_cmd = DeclareLaunchArgument(
+        'map_name',
+        default_value='',
+        description='存档基名（续建/保存都用它，同名覆盖）。留空 = 取 <world>。'
+                    '存档落在 map/<map_name>.{posegraph,data} + map/<map_name>.meta.yaml；'
+                    '3D 先验落在 PCD/<map_name>.pcd + PCD/<map_name>.meta.yaml。'
+                    '换场地怕串味时给每个 world 一个独立名字（如 RMUC2026_home / RMUL2026_home）')
+
+    declare_map_autocontinue_cmd = DeclareLaunchArgument(
+        'map_autocontinue',
+        default_value='True',
+        description='True = 若 map/<map_name>.posegraph 存在则**反序列化并接着建**（slam_toolbox '
+                    'map_file_name + map_start_pose），不存在则从零建（两种情况都会在日志里明确写出路径）；'
+                    'False = 永远从零建（旧存档原封不动，保存时才会被同名覆盖）')
+
+    declare_map_start_pose_cmd = DeclareLaunchArgument(
+        'map_start_pose',
+        default_value='[0.0, 0.0, 0.0]',
+        description='续建时告诉 slam_toolbox「机器人现在在**那张旧图**的哪个位姿」（x, y, theta，map 系）。'
+                    '本工程 map 系 = 出生点相对系 ⇒ 机器人在出生点重生时 [0,0,0] 对任何 world 都正确；'
+                    '只有"这次不在出生点起"才需要改')
+
+    declare_map_allow_world_mismatch_cmd = DeclareLaunchArgument(
+        'map_allow_world_mismatch',
+        default_value='False',
+        description='False（默认）= 存档 sidecar 记录的 world/出生点与本次不一致、或存档没有 sidecar'
+                    '（旧版存档）时**拒绝加载并终止 launch**（防止把两个场地的图叠在一起）；'
+                    'True = 显式承担风险、跳过隔离检查（日志会一直提醒）。'
+                    '只想从零建图请改用 map_autocontinue:=False，不要用这个参数')
+
+    declare_cloud_accumulator_cmd = DeclareLaunchArgument(
+        'cloud_accumulator',
+        default_value='False',
+        description='仅 mode:=mapping 生效。True = 额外起 3D 点云累加器（cloud_accumulator 包）：'
+                    '把 LiDAR 点云按 TF 变换到 map 系、体素下采样后累积，服务 save/load 让 '
+                    'PCD/<map_name>.pcd 这份 3D 先验也能**跨会话续建**（同样受 world/spawn 守卫保护）。'
+                    '默认 False：它是只读消费者（不发 /map、不发 TF，不碰 map→odom 与 /segmentation 契约），'
+                    '但属新增路径、还没做长跑验收 ⇒ 先关着，要用显式打开')
 
     # Specify the actions
     start_rm_simulation = IncludeLaunchDescription(
@@ -879,15 +1061,75 @@ def generate_launch_description():
          LaunchConfiguration('mapper'), "' == 'cartographer' and '",
          LaunchConfiguration('lio'), "' != 'cartographer'"]))
 
-    start_mapping = Node(
-        condition = slam_mapping_condition,
-        package='slam_toolbox',
-        executable='async_slam_toolbox_node',
-        name='slam_toolbox',
-        parameters=[
-            slam_toolbox_mapping_file_dir,
-            {'use_sim_time': use_sim_time,}
-        ],
+    # ===== 在线 2D 建图后端（slam_toolbox）+ 「续建 + 场地隔离」=====
+    # 与改造前的差别只有两点：① 节点在 OpaqueFunction 里构造（这样才能按"存档在不在/合不合规"
+    # 决定传不传 map_file_name）；② 判定/横幅提前到 t=0（节点本身仍由内部 TimerAction 延后 4 s）。
+    # 节点的包/可执行文件/节点名/参数文件一律没变 ⇒ /map、map→odom 的"唯一发布者"契约不变。
+    def _launch_slam_toolbox_mapping(context, *args, **kwargs):
+        guard = _load_map_asset_guard(rm_nav_bringup_dir)
+        world_v = context.perform_substitution(LaunchConfiguration('world')).strip()
+        name_v = context.perform_substitution(LaunchConfiguration('map_name')).strip() or world_v
+        autocontinue = _as_bool(context.perform_substitution(LaunchConfiguration('map_autocontinue')),
+                                'map_autocontinue')
+        allow_mismatch = _as_bool(
+            context.perform_substitution(LaunchConfiguration('map_allow_world_mismatch')),
+            'map_allow_world_mismatch')
+        start_pose = _as_pose3(context.perform_substitution(LaunchConfiguration('map_start_pose')),
+                               'map_start_pose')
+        map_dir_path = guard.map_dir(rm_nav_bringup_dir)
+        base = os.path.join(map_dir_path, name_v)
+        resolution = _mapper_resolution(slam_toolbox_mapping_file_dir)
+
+        verdict = None
+        if autocontinue:
+            verdict = guard.verify(base, name_v, world_v, kind=guard.KIND_POSEGRAPH,
+                                   allow_mismatch=allow_mismatch,
+                                   map_start_pose=start_pose, resolution=resolution)
+            if verdict['code'] == 'fresh':
+                banner = (verdict['message'] +
+                          '\n  · 本次会话的存档名 = %s（world=%s）；保存用：'
+                          ' tools/scripts/mapping/map_archive.sh save'
+                          '\n  · 想续建别的存档就加 map_name:=<名字>；想永远从零建就加 map_autocontinue:=False'
+                          % (name_v, world_v))
+            elif verdict['may_load']:
+                banner = verdict['message']
+            else:
+                # ★ 拒绝：直接抛 ⇒ launch 收尾、退出码 1、错误整段打到 [ERROR]（不静默、不半启动）
+                raise RuntimeError(verdict['message'])
+        else:
+            banner = ('[map_archive] map_autocontinue:=False ⇒ 本次**从零建图**，不加载任何旧状态'
+                      '（存档名仍为 %s，保存时会同名覆盖 map/%s.*）' % (name_v, name_v))
+
+        params = {'use_sim_time': use_sim_time}
+        if verdict is not None and verdict['may_load']:
+            params['map_file_name'] = base          # ← slam_toolbox 反序列化并接着建（续建的全部秘密）
+            params['map_start_pose'] = start_pose   # ← 机器人在旧图里的位姿（出生点相对系 ⇒ [0,0,0]）
+        node = Node(
+            package='slam_toolbox',
+            executable='async_slam_toolbox_node',
+            name='slam_toolbox',
+            output='screen',
+            parameters=[slam_toolbox_mapping_file_dir, params],
+        )
+        _write_session_state(map_dir_path, {
+            'map_name': name_v,
+            'world': world_v,
+            'map_dir': map_dir_path,
+            'pcd_dir': guard.pcd_dir(rm_nav_bringup_dir),
+            'map_start_pose': start_pose,
+            'map_autocontinue': autocontinue,
+            'map_allow_world_mismatch': allow_mismatch,
+            'resumed': bool(verdict is not None and verdict['may_load']),
+            'archive_base': base,
+            'session_pid': os.getpid(),
+            'started_at': guard.now_iso(),
+            'written_by': 'bringup_sim.launch.py',
+        })
+        return [LogInfo(msg=banner), TimerAction(period=4.0, actions=[node])]
+
+    start_mapping = GroupAction(
+        condition=slam_mapping_condition,
+        actions=[OpaqueFunction(function=_launch_slam_toolbox_mapping)],
     )
 
     start_cartographer_mapping = IncludeLaunchDescription(
@@ -912,6 +1154,68 @@ def generate_launch_description():
             'configuration_basename': 'cartographer_lio.lua',
             # 全包形态没有 LIO 的 /odom → 用仿真底盘里程计喂 use_odometry（实车换成下位机轮速）
             'odom_topic': '/odom_ground_truth'}.items()
+    )
+
+    # ===== 3D 点云累加器（cloud_accumulator:=True，仅 mode:=mapping）=====
+    # 目的：让 **3D 先验**（PCD/<map_name>.pcd）也能跨会话续建，同样受 world/spawn 守卫保护。
+    # 契约：它只**订阅**点云 + 查 TF，不发 /map、不发任何 TF、不发 /segmentation
+    #   ⇒ 「map→odom 单一发布者」「/segmentation/* 单一发布者」两条契约逐字不变。
+    # 默认关闭（理由见 declare_cloud_accumulator_cmd 的 description）。
+    cloud_accumulator_condition = IfCondition(PythonExpression([
+        "'", LaunchConfiguration('mode'), "' == 'mapping' and '",
+        LaunchConfiguration('cloud_accumulator'), "' == 'True'"]))
+
+    def _launch_cloud_accumulator(context, *args, **kwargs):
+        guard = _load_map_asset_guard(rm_nav_bringup_dir)
+        world_v = context.perform_substitution(LaunchConfiguration('world')).strip()
+        name_v = context.perform_substitution(LaunchConfiguration('map_name')).strip() or world_v
+        autocontinue = _as_bool(context.perform_substitution(LaunchConfiguration('map_autocontinue')),
+                                'map_autocontinue')
+        allow_mismatch = _as_bool(
+            context.perform_substitution(LaunchConfiguration('map_allow_world_mismatch')),
+            'map_allow_world_mismatch')
+        # 3D 先验一旦越过场地边界同样是"把两张图叠在一起"⇒ 走同一份 sidecar / 同一套判定
+        # （节点内部还会在 load/save 前各查一次；这里先查是为了在**起栈时**就把问题喊出来，
+        #   但 3D 存档不匹配**不终止 launch** —— 2D 位姿图才是主线，用户可能只想建 2D）。
+        verdict = None
+        if autocontinue:
+            verdict = guard.verify(os.path.join(guard.pcd_dir(rm_nav_bringup_dir), name_v),
+                                   name_v, world_v, kind=guard.KIND_PCD,
+                                   allow_mismatch=allow_mismatch)
+            if verdict['may_load']:
+                banner = verdict['message']
+            elif verdict['code'] == 'fresh':
+                banner = ('[map_archive] 3D 先验：没有 PCD/%s.pcd ⇒ 本次从零点云开始累积'
+                          '（cloud_accumulator 的 save/load 服务在 ~/save、~/load）' % name_v)
+            else:
+                # 3D 这一路被拒绝**不终止 launch**（2D 位姿图才是主线，用户可能只想建 2D）；
+                # 节点内部还会在 load/save 前再各查一次 ⇒ 它不会加载、也不会覆盖那份 PCD。
+                banner = ('[map_archive] ⚠️ 3D 先验这一路被守卫拒绝（**2D 建图不受影响**）：\n' +
+                          verdict['message'])
+        else:
+            banner = ('[map_archive] 3D 先验：map_autocontinue:=False ⇒ 不加载 PCD/%s.pcd，'
+                      '从零点云开始累积' % name_v)
+        node = Node(
+            package='cloud_accumulator',
+            executable='cloud_accumulator_node',
+            name='cloud_accumulator',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'map_name': name_v,
+                'world': world_v,
+                'allow_world_mismatch': allow_mismatch,
+                'autoload': autocontinue,
+                'pcd_dir': guard.pcd_dir(rm_nav_bringup_dir),
+                # 与 PCD/ 既有资产的体素口径一致（0.10 m，见 docs/mapping_small_point_lio.md §6.2）
+                'voxel_size': 0.10,
+            }],
+        )
+        return [LogInfo(msg=banner), TimerAction(period=6.0, actions=[node])]
+
+    start_cloud_accumulator = GroupAction(
+        condition=cloud_accumulator_condition,
+        actions=[OpaqueFunction(function=_launch_cloud_accumulator)],
     )
 
     # 纯建图（mode:=mapping）不再启动 nav2，因此 nav2 自带的 rviz_launch 也不会起。
@@ -960,6 +1264,12 @@ def generate_launch_description():
     ld.add_action(declare_ground_cmd)
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
+    # ★ 2026-10-06：「续建 + 场地隔离」相关（默认值下现有行为不变，详见各自的 description）
+    ld.add_action(declare_map_name_cmd)
+    ld.add_action(declare_map_autocontinue_cmd)
+    ld.add_action(declare_map_start_pose_cmd)
+    ld.add_action(declare_map_allow_world_mismatch_cmd)
+    ld.add_action(declare_cloud_accumulator_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
@@ -981,7 +1291,11 @@ def generate_launch_description():
     ld.add_action(TimerAction(period=4.0, actions=[start_localization_group]))
     ld.add_action(bringup_fake_vel_transform_node)
     ld.add_action(lio_tf_adapter_node)
-    ld.add_action(TimerAction(period=4.0, actions=[start_mapping, start_cartographer_mapping,
+    # ★ 续建/从零的判定与横幅在 **t=0** 就执行（OpaqueFunction 是 Action，`--show-args` 不执行它）；
+    #   slam_toolbox 节点本身仍由 OpaqueFunction 内部的 TimerAction 延后 4 s 起 ⇒ 时序与改造前一致。
+    ld.add_action(start_mapping)
+    ld.add_action(start_cloud_accumulator)
+    ld.add_action(TimerAction(period=4.0, actions=[start_cartographer_mapping,
                                                    start_cartographer_as_lio_mapping]))
     ld.add_action(TimerAction(period=10.0, actions=[start_navigation2]))
     # 纯建图模式的 RViz（nav2 未启动时 nav_rviz 仍要能出图）
