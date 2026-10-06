@@ -21,6 +21,7 @@
 | 查某个名词是什么意思 | `glossary.md` | 按主题四组检索 |
 | 排查某个诡异现象 | `issues_and_findings.md` + `smoke_test_runbook.md` §10.1 | 「现象 → 归属」表 |
 | 改感知/代价图层、换 3D→2D 做法 | `3d_to_2d_survey.md` | §二 两种降维哲学 / §三 共性旋钮 / §七 本工程分布 |
+| 想加"坡度 / 落空 / 净空"这类 2D 表示不了的东西（**先看这份**） | `traversability_plan.md` | §1 问题定义 / §2 表示选型 / §3 三个派生层 / §5 STL 真值验证 / §7 分阶段计划（**plan only，未实现**） |
 | 挑算法（选型池） | `rm_algorithm_catalog.md` | §〇.0 前端 vs 系统 / 各章候选 |
 | 改 TF/话题契约 | `tf_interface_contract.md` | T1–T5 已实施、T6 撤销 |
 | 判断"这个改动会不会上实车 / 是不是为仿真妥协" | `sim_real_contract.md` | §一 分界点与替身 / §四 三分类判据 / §五 禁止清单 |
@@ -55,6 +56,7 @@
 | 文档 | 定位 | 状态 |
 |---|---|---|
 | `rm_algorithm_catalog.md` | 候选算法池（2D/3D 建图、重定位、相机；含 §〇.0 前端 vs 系统） | **现行**，加新候选算法时更新 |
+| `traversability_plan.md` | **3D 派生可通行性的设计计划**（坡度/落空/净空三层：表示选型取舍 + 包可用性核对 + 三个派生层设计 + 动作怎么接 BT + **用 STL 当真值做逐格验证** + RViz/PNG 怎么看 + 三步计划与"不做什么"） | **plan only（未实现、无代码/参数改动）**；本文只写设计与"要量什么"，不写实测结论 |
 | `rm_bench_refactor_plan.md` | 实验台改造路线（M0–M4 设计草案） | **部分完成**：M0/M1 相关项已在 `issues_and_findings.md` 落地；**未完成项看 `algorithm_matrix.md` §五/§六** |
 
 ## 三、专题子目录
