@@ -427,9 +427,24 @@ def main():
     ex = MultiThreadedExecutor(num_threads=4)
     ex.add_node(node)
     t0 = time.monotonic()
+    # ⚠️ 收尾必须**保证落盘**：SIGINT 会被 rclpy 的 signal handler 转成"context 失效"，
+    #    此时 `ex.spin_once()` 抛的是 `RCLError: failed to initialize wait set: the given
+    #    context is not valid…` 而**不是** KeyboardInterrupt ⇒ 如果只捕 KeyboardInterrupt，
+    #    整个跑次的 npz/json 会丢（2026-10-06 在 dropab 的 b2 格真实踩到）。
+    #    ⇒ 这里把"context 已经没了"也当成正常收尾。
     try:
         while rclpy.ok() and (time.monotonic() - t0) < args.duration:
-            ex.spin_once(timeout_sec=0.1)
+            try:
+                ex.spin_once(timeout_sec=0.1)
+            except KeyboardInterrupt:
+                break
+            except Exception as e:            # noqa: BLE001
+                if rclpy.ok():
+                    print('[probe] spin_once 异常（继续）: %r' % (e,), file=sys.stderr)
+                    time.sleep(0.05)
+                else:
+                    print('[probe] context 已失效 ⇒ 正常收尾落盘（%r）' % (e,), file=sys.stderr)
+                    break
     except KeyboardInterrupt:
         pass
     node.stop()
