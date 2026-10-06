@@ -49,6 +49,7 @@ _SLOT_ALTERNATIVES = {
     'small_point_lio': 'lio:=fastlio（默认值）或 lio:=pointlio',
     'icp_registration': 'localization:=amcl（默认 2D 栅格图路线）或 localization:=gicp',
     'gicp_registration': 'localization:=amcl（默认 2D 栅格图路线）或 localization:=icp',
+    'patchwork_ground_segmentation': 'ground:=linefit（默认值，现有已验证路径）',
 }
 
 
@@ -372,6 +373,32 @@ def generate_launch_description():
         choices=['cartographer', 'slam_toolbox'],
         description='Choose 2D mapping backend (only mode:=mapping): slam_toolbox | cartographer')
 
+    # ★ 2026-10-06：新增 **地面分割槽位** `ground`。
+    #   为什么需要它：现有链路的"什么算障碍"由 linefit 一家决定（每扇区直线拟合 + 硬
+    #   `max_dist_to_line`）。linefit 在**斜面**上会把坡道/路缘判错（坡面点超出垂直容差 ⇒ 判成障碍
+    #   ⇒ p2l 投出一圈"假墙" ⇒ 2D 图歪）。Patchwork++ 用**自适应平面拟合**（RNR/RVPF/GLE/TGR），
+    #   对坡面天然友好 ⇒ 需要能在**不改任何别的槽位/参数文件**的前提下 A/B 两者。
+    #   契约（两者必须一致，否则下游要跟着改）：同一个输入话题、同一对输出话题
+    #   （/segmentation/obstacle + /segmentation/ground）、同一消息类型、同一帧处理、同一 QoS，
+    #   且**每个输入点必属 ground 或 obstacle 之一**。
+    #   ⇒ 由**条件**保证互斥：同一时刻只有一个分割器在跑，绝不会有第二个 /segmentation/* 发布者。
+    #   默认 `linefit` = 现有行为**逐字节不变**（linefit 节点照旧无条件逻辑，只是多了一层恒真的条件）。
+    #   对照表 / 参数来源 / A/B 实测 / 回退见 docs/ground_segmentation_slots.md。
+    declare_ground_cmd = DeclareLaunchArgument(
+        'ground',
+        default_value='linefit',
+        choices=['linefit', 'patchwork'],
+        description='地面分割器槽位（A/B 对照用，只换"谁发 /segmentation/*"，其它一律不动）: '
+                    'linefit = 已验证默认（linefit_ground_segmentation_ros，每扇区直线拟合 + '
+                    'max_dist_to_line 硬容差；参数在 linefit_ground_segmentation_ros/config/'
+                    'segmentation_sim.yaml）| '
+                    'patchwork = Patchwork++（url-kaist/patchwork-plusplus，BSD-2-Clause，vendored '
+                    '在 patchwork_ground_segmentation 包内，pin 3e6903a1 = v1.4.1；自适应平面拟合，'
+                    '坡面更稳；参数在 patchwork_ground_segmentation/config/'
+                    'ground_segmentation_sim.yaml）。'
+                    '两者同契约 ⇒ 下游（pointcloud_to_laserscan / STVL / costmap）零改动、互斥切换；'
+                    '回退 = 省略本参数或 ground:=linefit')
+
     # Specify the actions
     start_rm_simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(hzmi_rm_simulation_launch_dir, 'rm_simulation.launch.py')),
@@ -411,7 +438,25 @@ def generate_launch_description():
         # ★ 2026-09-23 修复：原来漏了 use_sim_time ⇒ 这个节点跑在**墙钟**上，而全链路（plugin/scan/
         #   costmap/AMCL/tf）都是仿真钟。它的输出戳虽然抄自输入（所以看起来还好），但任何依赖
         #   "本节点时钟"的逻辑（tf2 Buffer 的缓存窗口、超时判定）都会用错时间轴。
-        parameters=[segmentation_params, {'use_sim_time': use_sim_time}]
+        parameters=[segmentation_params, {'use_sim_time': use_sim_time}],
+        # ★ 2026-10-06：地面分割槽位 ground（默认 linefit ⇒ 本节点照旧启动，行为不变）。
+        condition=LaunchConfigurationEquals('ground', 'linefit'),
+    )
+
+    # ★ 2026-10-06：ground:=patchwork —— 与上面 linefit 节点**同契约**的替代分割器。
+    #   参数文件用惰性 substitution 解析（_PackageShareFile）：这样"没构建过
+    #   patchwork_ground_segmentation 包"时，只要不选这个槽位，`--show-args` 与其它槽位组合
+    #   都不会被它挡住（理由见本文件顶部那段"描述构建期陷阱"）。
+    bringup_patchwork_ground_segmentation_node = Node(
+        package='patchwork_ground_segmentation',
+        executable='patchwork_ground_segmentation_node',
+        name='ground_segmentation',      # 与 linefit 节点同名（两者互斥 ⇒ 不会重名冲突）
+        output='screen',
+        parameters=[
+            _PackageShareFile('patchwork_ground_segmentation', 'config',
+                              'ground_segmentation_sim.yaml'),
+            {'use_sim_time': use_sim_time}],
+        condition=LaunchConfigurationEquals('ground', 'patchwork'),
     )
 
     bringup_pointcloud_to_laserscan_node = Node(
@@ -912,12 +957,16 @@ def generate_launch_description():
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
+    ld.add_action(declare_ground_cmd)
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
 
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
+    # 地面分割槽位：两个节点都进 LaunchDescription，但各自的 condition 保证**只有一个**真的被启动
+    #（⇒ /segmentation/obstacle 与 /segmentation/ground 恒定只有一个发布者）。
     ld.add_action(bringup_linefit_ground_segmentation_node)
+    ld.add_action(bringup_patchwork_ground_segmentation_node)
     ld.add_action(bringup_pointcloud_to_laserscan_node)
     ld.add_action(bringup_LIO_group)
     

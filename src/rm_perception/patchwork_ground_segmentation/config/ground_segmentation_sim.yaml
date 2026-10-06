@@ -1,0 +1,121 @@
+# =============================================================================
+# ground:=patchwork 槽位的节点参数 —— patchwork_ground_segmentation
+# -----------------------------------------------------------------------------
+# 契约（输入/输出话题/帧/QoS/点类型）**故意与 linefit 那份 segmentation_sim.yaml 逐键同名同默认**，
+# 这样 `ground:=patchwork` 只换分割器，接线一点不动。
+#
+# 每个默认值的来源标注规则（三档）：
+#   [上游默认] = url-kaist/patchwork-plusplus @ 3e6903a1… 的 `patchwork::Params()` 构造函数字面值
+#   [上游 ROS] = 同一 commit 的 ros/launch/patchworkpp.launch.py 里显式写的值（COD 2025 直接 include 它）
+#   [本仓实测] = 本仓库自己量出来的（出处写在行内）
+#   [本仓决定] = 上面三档都不适用、由本次改动基于我们场地/安装高度拍的值，附理由
+# =============================================================================
+ground_segmentation:
+  ros__parameters:
+    # ----------------------------- 契约键（与 linefit 完全一致） -----------------------------
+    input_topic: "/livox/lidar/pointcloud"     # [上游 ROS 无此键 / 本仓] linefit 同值 ⇒ 同一个输入源
+    obstacle_output_topic: "segmentation/obstacle"   # 相对名 ⇒ /segmentation/obstacle（与 linefit 同）
+    ground_output_topic: "segmentation/ground"       # 相对名 ⇒ /segmentation/ground（与 linefit 同）
+    # 空 = 不做重力对齐（= 用雷达自身坐标系做地面拟合）。与 linefit 同默认；
+    # ★ 这是本槽位成立的前提之一：Patchwork++ 假定输入云的 z 轴与重力对齐、且原点在传感器上，
+    #   而我们的 livox_frame 安装 rpy = 0 0 0（measurement_params_sim.yaml），正好满足 ⇒ 不需要 TF。
+    gravity_aligned_frame: ""
+    # 调试用：发 ~/segmentation_time_ms (std_msgs/Float64) = 本帧 estimateGround() 的墙钟毫秒。
+    # 只占一个私有话题，不参与 /segmentation/* 契约；A/B 取 CPU 数据靠它。
+    publish_timing: true
+
+    # ----------------------------- Patchwork++ 算法键 -----------------------------
+    # 传感器离地高度 [m]。⚠ **它只是前几帧的种子**：上游 update_elevation_thr() 每帧会把
+    #   params_.sensor_height 改写成 -（近处地面 patch 的 mean z）⇒ 之后自适应。
+    #   [本仓实测] 0.226：RMUL2026 仿真里雷达系地面峰 z = −0.226 m（2026-09-22 标定，见 linefit
+    #   config/segmentation_sim.yaml 与 docs/issues_and_findings.md 第 26 条；
+    #   URDF 几何 = base_link→livox 0.175 + 车高≈0.06 ≈ 0.235，Gazebo 轮胎略下沉 ⇒ 0.226）。
+    #   ⚠ RMUC2026 用同一台车同一安装位 ⇒ 同一值；换车/换安装位必须重标（与 linefit 同理）。
+    sensor_height: 0.226
+    # 地面估计的有效半径 [m]。[本仓决定] min_range = linefit 的 r_min = 0.2（相同近场截断：
+    #   更小的点上游会判 nonground ⇒ 变成障碍 ⇒ p2l 会在近处生成假墙）。
+    min_range: 0.2
+    # [本仓决定] 20.0 = COD 2025 的 p2l range_max（见 docs/cod_nav_comparison.md:11 与
+    #   COD_NAV master nav_bringup/launch/bringup.launch.py 的 range_max: 20.0）——
+    #   超出的点 p2l 本来就不要；且 max_range 越小 ⇒ 同心区分环越细 ⇒ patch 越小 ⇒ 坡面拟合越好。
+    #   上游默认 80.0 / 上游 ROS launch 也是 80.0，是按 KITTI 高速场景定的，对我们无意义。
+    max_range: 20.0
+    # 地面"厚度"阈值 [m]（点到拟合平面的距离 < th_dist 才算地面）。
+    #   [上游默认] 0.125；**[本仓实测改成 0.08]** —— 这是本包唯一一处**故意偏离上游默认**的算法键，
+    #   理由是实测出来的、可复现的（台架 ground_seg_ab --synthetic，见 docs/ground_segmentation_slots.md §5.2）：
+    #     · th_dist=0.125 ⇒ **离地 <12.5cm 的特征会被整体吸进地面平面**。实测 0.15 m 薄墙在
+    #       p2l 口径下的**方位覆盖率只剩 11.8%**（linefit 100%）⇒ 矮墙从 /scan 里消失 —— 违反
+    #       "矮墙必须留成障碍"这条本项目的硬要求（min_obstacle_height 0.0 的存在理由）。
+    #     · th_dist=0.05（= linefit 的 max_dist_to_line）⇒ 矮墙 100% 保留，但坡面优势几乎被抹平
+    #       （0.2 m/15° 倒角判地面的比例从 91% 掉到 53%）。
+    #     · **0.08 = 实测折中**：0.2/0.3 m 平台顶面仍是 100% 障碍、立面 ≥55% 覆盖，
+    #       同时 0.2 m/15° 倒角有 69% 的点判成地面（linefit 只有 26.5%）⇒ 仍然显著优于 linefit。
+    #   坡面之所以本来就能过，是因为我们拟合的是**任意平面**（PCA），不是 linefit 那种
+    #   "每扇区一条近似水平线"，所以坡度本身不消耗这个容差；这个键只影响"多厚算同一层地面"。
+    th_dist: 0.08
+    # 种子点（最低点代表）选择阈值。[上游默认] 0.125（上游 ROS launch 用 0.3）
+    th_seeds: 0.125
+    # R-VPF（垂直面剔除）用的种子/厚度阈值。[上游默认] 0.25 / 0.1
+    #   ⚠ 上游 ROS launch 把 th_dist_v 放到 0.9（非常激进）—— 我们保持库默认。
+    th_seeds_v: 0.25
+    th_dist_v: 0.1
+    # PCA 迭代次数。[上游默认] 3（也与上游 ROS launch 一致）
+    num_iter: 3
+    # 每次选多少"最低点"当种子。[上游默认] 20
+    num_lpr: 20
+    # 一个 patch 至少要多少点才做平面估计，否则整 patch 判障碍。[上游默认] 10
+    #   ⚠ 上游 ROS launch 用 0（KITTI 点密）；0 会让 1~2 个点的 patch 也去拟合 PCA ⇒ 退化法向 ⇒
+    #     乱判。我们保持库默认 10（本仓点云单帧 ~1e4 点，10 点阈值不会把 patch 饿死）。
+    num_min_pts: 10
+    # 同心区（CZM）分区数。[上游默认] 4；上游代码硬上限 4（见节点里的形状校验）。
+    num_zones: 4
+    # 每个区的**方位**扇区数（"azimuth 阈值"在 Patchwork++ 里就是它 + 下面的 ring 数）。
+    #   [上游默认] {16, 32, 54, 32}（近处扇区少、远处多 ⇒ 近处 patch 大、远处 patch 小）
+    num_sectors_each_zone: [16, 32, 54, 32]
+    # 每个区的**径向**环数。[上游默认] {2, 4, 4, 4}
+    #   我们的 max_range 20 / min_range 0.2 ⇒ 4 个区边界 (7*0.2+20)/8=2.675、(3*0.2+20)/4=5.15、
+    #   (0.2+20)/2=10.1 m；zone0 环宽 (2.675−0.2)/2 = 1.24 m，zone3 环宽 (20−10.1)/4 = 2.48 m。
+    num_rings_each_zone: [2, 4, 4, 4]
+    # GLE（地面似然估计）里"近处环"的个数：只有这些环的 elevation/flatness 阈值会被在线更新。
+    #   [上游默认] 4（个数与 num_zones 无关，是"距离最近的 4 个 ring"）
+    num_rings_of_interest: 4
+    # 法向"竖直度"阈值 = cos(允许的最大坡度) = 0.707 ⇒ 约 45°。
+    #   [上游默认] 0.707。⚠ 上游 ROS launch / COD 用 0.101（≈84°）—— 那等于"几乎不挡坡度"，
+    #   连近垂直的面片都可能被当成 upright 进而进 GLE 判地面。我们的场地最大设计坡度是 STL 的
+    #   10~22° 倒角（cos22° = 0.927 ≫ 0.707）⇒ 保持库默认 0.707 既够用又更保守。
+    uprightness_thr: 0.707
+    # 自适应种子选择余量。[上游默认] −1.2（zone>0 的种子下限相对该区 elevation_thr 的余量）
+    adaptive_seed_selection_margin: -1.2
+    # ---- GLE 的两个**自适应**阈值数组（每帧由观测到的地面 patch 统计量更新）----
+    #   elevation_thr[i] = mean(地面 patch 的 mean z) + k·stdev（k=3 for i==0，否则 2）；
+    #   flatness_thr[i]   = mean(patch 的最小奇异值) + stdev。
+    #   [上游默认] 全 0 —— 只是**冷启动种子**，不是常量阈值。别把它们当固定高度带用。
+    elevation_thr: [0.0, 0.0, 0.0, 0.0]
+    flatness_thr: [0.0, 0.0, 0.0, 0.0]
+    # 自适应阈值的滑动窗口长度。[上游默认] 1000 / 1000
+    max_flatness_storage: 1000
+    max_elevation_storage: 1000
+
+    # ---- 三个开关 ----
+    # RNR（反射噪声剔除）：**必须关**。上游 reflected_noise_removal() 第一句就是
+    #   `if (cloud_in.cols() < 4) { cout << "RNR requires intensity information !"; return; }`，
+    #   而我们的仿真点云是 pcl::PointXYZ（x/y/z，无 intensity）⇒ 开了也只有一行 stdout、实际不生效。
+    #   [上游默认] true；上游 ROS wrapper 里被硬写成 false（`params.enable_RNR = false; // ToDo. Support intensity`）
+    #   ⇒ 我们取 false，与上游 wrapper 的实际行为一致。真机接 Livox 原始点云（带 intensity）后可改 true。
+    enable_RNR: false
+    # R-VPF（区域垂直面拟合，剔除"地面平面下方"的垂直结构）。[上游默认] true —— 保留：
+    #   坡道/路缘的**竖直面**正是我们希望被判成障碍的东西。
+    enable_RVPF: true
+    # TGR（时序地面回退：按整个 ring 的平坦度统计把可疑 patch 退回地面）。[上游默认] true —— 保留：
+    #   这是 Patchwork++ 相对 Patchwork 的主要增益（v1.3.1 还修了它的 ringwise_flatness 泄漏 #69）。
+    enable_TGR: true
+    # RNR 的两个阈值（enable_RNR=false 时完全不生效，只为参数完整性保留；[上游默认]）
+    RNR_ver_angle_thr: -15.0
+    RNR_intensity_thr: 0.2
+
+    # 上游 cout 刷屏开关。[上游默认] false；上游 ROS launch 用 true（会每帧打十几行）。
+    #   [本仓决定] false —— 仿真机 RTF 本来就紧张，且 node 自己已发 ~/segmentation_time_ms 供 A/B 取数。
+    verbose: false
+
+    # 上游 patchwork::Params 里还有 intensity_thr（0.2），但 patchworkpp.cpp 里**一次都没读**
+    # ⇒ 死参数，本节点**故意不声明**（避免"设了以为生效"）。
