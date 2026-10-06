@@ -720,6 +720,14 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \\
 
 确认没问题再决定要不要把它变成 `map/RMUC2026.{pgm,yaml}`（那是用户资产，本仓库的脚本**不会**替你覆盖）。
 
+> ★ **另一条更稳的路线（本次实测）**：**直接存"跑图那一次的 `/map`"**（slam_toolbox 的占据栅格，
+  由 `/scan` 累积 + 射线清除，**对点云垂向拖影免疫**），也就是 `coverage_drive.py --save-2d` 那一份
+  （`map_archive.sh save` 存的是位姿图，2D 栅格在 drive 脚本里存）。本次重跑建图（判据已生效）存下来的
+  `ltmap.slam2d.yaml` 实测：占用 **4 053 格（10.1 m²）**、可行驶斜面被误占 **1.82%**、
+  撞击点窗口 33 个真值边沿格中 **32 个**被表示（与旧图同量级，但**没有** 3D 投影那种大面积误占）。
+  ⇒ 若 `pcd_to_nav2_map.py` 出来的图过不了 §12.2 那两关（本次就是没过：可行驶斜面被误占 30.26%），
+  **用这一份 `/map` 当先验**，别用 3D 投影那份。
+
 ### 12.2 重跑之后怎么验（`tools/scripts/regress/verify_low_terrain.py`）
 
 ```bash
