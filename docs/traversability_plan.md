@@ -566,18 +566,19 @@ BT 只读结论。否则调一次阈值要改两处，且两处会漂。
 
 ## 9. 实施状态（2026-10-07 更新：计划 vs 已实现）
 
-> 本文原本是 **plan only**（一个字节都没改）。2026-10-07 的修复把其中**一条半**落地了，
-> 下面把"计划"与"现状"逐行对上，省得下一个人以为 §3 的设计已经全做完。
+> 本文原本是 **plan only**（一个字节都没改）。2026-10-07 的修复把其中**两条半**落地了
+> （判据 + **坡度/台阶连续量与限速**），下面把"计划"与"现状"逐行对上，
+> 省得下一个人以为 §3 的设计已经全做完。
 
 | 计划里的项 | 现状 | 证据 / 位置 |
 |---|---|---|
 | **A. 坡度（"这格是能开的斜面还是台阶沿"）判据** | ✅ **已实现（实时 + 离线同一套阈值）** | `src/rm_perception/rm_ground_traversability/include/rm_ground_traversability/low_terrain_classifier.hpp`（实时，接在两个地面分割节点之后）；阈值真源 `src/rm_nav_bringup/config/traversability_criteria.yaml`（离线 `pcd_to_nav2_map.py --criteria-file` 读同一份）。实测见 `docs/ground_segmentation_slots.md` §10 |
-| A 的"**坡度值本身要发布出去**"（连续量，供限速） | ❌ **没做**：现在只发布二值的 `step_edge` 诊断话题 | `segmentation/step_edge` 是 `sensor_msgs/PointCloud2`（判据命中的点），没有坡度字段 |
+| A 的"**坡度值本身要发布出去**"（连续量，供限速） | ✅ **2026-10-07 已做**：同一帧的粗格缓存上再算一次"车前 1~3 m 走廊"的**连续量**（局部坡度、**坡度变化** `dtan`、**台阶残差** `step`），并按物理标定的速度表 + 刹车距离界换成**速度上限**，发 nav2 原生 `nav2_msgs/SpeedLimit`（controller_server → MPPI `setSpeedLimit()` 缩放 `vx_max/vy/wz`） | 连续量出口：`low_terrain_classifier.hpp` 的 `CorridorProfile`；速度映射：`slope_speed_limit.hpp`；ROS 接线：`traversability_ros.hpp`；**独立报告**（含物理推导与整栈 A/B）：`docs/slope_speed_limiting.md` |
 | A 的"**2.5D 高程图层**" | ❌ 没做（不建 `rm_elevation_map`） | 判据仍是"点云 + 栅格"的一次性计算，没有跨帧高程图 |
 | **B. 落空 / 负障碍（坑、边沿）** | ⚠️ **只做了一半**：台阶/边沿的"上跳"能判（`step_edge`），**"下跳/落空"没有独立判据** —— 坑沿只在"高差判据"能覆盖的方向上被抓到（判据是相对**局部最低**地面的高差，向下跳变在点云里表现为"那一侧没有点"） | `docs/ground_segmentation_slots.md` §10.4 的"台阶/边沿格"口径就是上跳；下跳缺"反证"结构（本文 §2 表 B 行原样） |
 | **C. 净空高度（限高）** | ❌ **没做**（也因此 `p2l max_height` 抬到 1.226 m 之后，"头顶结构"会成为假障碍 —— 本场地没有悬挑，真机/别的场地必须另想办法） | `docs/ground_segmentation_slots.md` §11 的风险段 |
-| **动作怎么接**：写 cost（costmap 图层） | ⚠️ **绕过了本文的设计**：现在不新增 nav2 图层，走的是"**把判据命中的点塞回 `/segmentation/obstacle`**"这条更窄的路（+ `p2l` → `/scan` → STVL/静态层） | 好处：零新增图层、零 nav2 改动、单发布者契约不变；代价：坡度**连续量**与"该不该限速"仍然没有载体（与上表第 2 行同一条） |
-| **B/C 的"触发行为"（BT 条件节点）** | ❌ 没做 | — |
+| **动作怎么接**：写 cost（costmap 图层） | ⚠️ **绕过了本文的设计**：现在不新增 nav2 图层，走的是"**把判据命中的点塞回 `/segmentation/obstacle`**"这条更窄的路（+ `p2l` → `/scan` → STVL/静态层）；"该不该限速"则走 **nav2 原生的 `SpeedLimit` 通道**（新增的第 3 条路） | 好处：零新增图层、零 nav2 代码改动、单发布者契约不变（`/cmd_vel` 仍然只有 `velocity_smoother` 发）；`SpeedLimit` 这条是 nav2 1.1.20 自带的订阅/接口，命令链上没有新节点 |
+| **B/C 的"触发行为"（BT 条件节点）** | ❌ 没做（**也不打算做"停/取消目标"那一类**：本次落地的动作是"**限速**"——不停车、不取消目标、无 watchdog，见 `docs/slope_speed_limiting.md` §1） | — |
 | **验证方法（本文 §5：STL 真值逐格对账）** | ✅ **已实现并跑过** | `tools/scripts/regress/verify_low_terrain.py`（台阶/边沿覆盖率、可行驶斜面被误占率、图上最短路到撞击点的距离与沿途最大局部台阶） |
 
 ### 9.1 与本文 §1.1 验收表的对照（本次实测）
