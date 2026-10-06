@@ -34,6 +34,21 @@ planner_server:
       use_final_approach_orientation: false
       # 平滑器子块（2D 侧 `_smoother->smooth()` 是无条件调用，参数无效也照样平滑）
       smoother:
-        w_smooth: 0.4
+        # ★ 2026-10-06：0.4 → 0.0。依据 docs/path_clearance_and_contact.md §2.1（源码级）+ §3（实测）：
+        #   SmacPlanner2D 的平滑器**没有代价项**——smoother.cpp:140-170 的迭代只有
+        #     y += w_data·(x−y) + w_smooth·(y₊₁+y₋₁−2y)
+        #   代价只用于硬回退（`:157-168`，cost > MAX_NON_OBSTACLE(252) 就整条退回），而
+        #   constants.hpp:64-65 是 INSCRIBED=253 / MAX_NON_OBSTACLE=252
+        #   ⇒ 它的可行域边界**正好是内切带外沿**，而 w_smooth:w_data 原本 4:1（+do_refinement 再 4 轮）
+        #   ⇒ 把 A\* 用 cost_travel_multiplier=4.0 买来的余量又拉回带边。
+        #   0.0 = 只留"朝原始 A\* 路径收敛"那一项（4 轮 refinement 后 ≈ 原路径）。
+        #   A/B（同世界/同目标/同 spin_speed:=0.0，13 次跑里的 2 次）：
+        #     计划路径到内切带的距离 p50 0.250 → 0.335 m（不再贴带）
+        #     执行路径余量 p50 0.570 → 0.850 m（健康段 0.750 → 1.030 m）；足迹压内切带 5.9% → 0%
+        #     goal SUCCEEDED、0 次 recovery、定位未失效
+        #   ⚠️ 它**只治"贴边"**，**不治"撞"**：同一配置健康段 IMU 峰值仍有 89.6 m/s²（9 个 >30 的样本），
+        #      因为真正撞的是"地图看不见的坡道面"（§2.2）⇒ 别把它当"撞车修好了"。
+        #   回滚：改回 0.4。
+        w_smooth: 0.0
         w_data: 0.1
         do_refinement: true
