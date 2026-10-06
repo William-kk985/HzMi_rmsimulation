@@ -71,6 +71,18 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=nav lio:=
 
 ### 1.1 `gicp` 槽位细节（2026-10-05 新增；与 `icp` 同资产、同初值契约）
 
+> ★ **2026-10-06 行为变更**（用户实跑 `world:=RMUC2026 mode:=nav lio:=small_point_lio localization:=gicp
+> nav:=mppi planner:=smac2d` 报"到点后四处抖动"，日志里 `map→odom` 单调跑掉而 `~/fitness_score` 一直很好）：
+> 本槽位与 `small_gicp` 槽位新增 **三道接受判据 + 环路内低增益滤波**
+> （运动一致性门限 / 合理性-定义域 / 连续拒绝判"定位失效"并停发 TF / tau=1.0 s 平滑），
+> 新增键 `gate_*`、`plausible_*`、`lost_after_rejections`、`smoothing_*`（**全都有默认值**，
+> 逐键依据写在 `gicp_registration/config/gicp_registration_sim.yaml`）。
+> **契约不变**（只发 `map→odom`、时间戳契约、三个健康话题、`/initialpose` handoff/apply 都不动）；
+> 唯一语义收紧：`~/converged` 现在 = "被采纳 **且** 通过新判据"（原来只看 `fitness_score_warn`）。
+> 机制（自相似性实测：偏 0.07~2.5 m 的位姿 fitness 仍 0.002~0.10 m²）、复现数字、A/B 表与回退：
+> **`docs/gicp_divergence_and_jitter.md`**。回退到改动前行为：
+> `-p gate_enable:=false -p smoothing_enable:=false`（或 `git revert` 那个 commit）。
+
 - **节点**：`gicp_registration/gicp_registration_node`（`ament_cmake` + `rclcpp_components`）；
   **两个对等配准后端**（`backend: pcl | small_gicp`，**默认 `pcl`**）：
   `pcl` = PCL `pcl::GeneralizedIterativeClosestPoint`（单线程，BFGS 内层迭代），

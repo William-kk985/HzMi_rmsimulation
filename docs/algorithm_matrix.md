@@ -368,6 +368,23 @@ CustomMsg QoS 背压、`use_sim_time` 键名漏引号、上游 nav2 丢弃 `tran
 | **调度** | `MultiThreadedExecutor` + TF/状态定时器独立 callback group | 单线程下 350 ms 的 align 会把 50 Hz TF 饿到 2.3 Hz |
 | **初值** | 默认 `use_initial_pose:true` + `initial_pose [0,0,0]` ⇒ 开机即发 | 真正的"不发 TF"只在 `use_initial_pose:true` **且**无 `odom→base` TF **且**无 `/initialpose` 时出现（最后保护分支，不是常见路径） |
 
+### ★ 2026-10-06 追加：`RMUC2026` 上的"发散 + 抖动"复现与修复（`localization:=gicp` / `small_gicp`）
+
+一句话：**本场地的先验地图没有分辨力** —— 实测偏 **0.07~2.5 m** 的位姿 fitness 仍只有 **0.002~0.10 m²**
+（接受阈值 0.3）⇒ "配准自洽" ≠ "位姿正确"；叠加 LIO odom 的较大误差（同批实测最坏 **13 m**）
+后，`map→odom` 与融合位姿会一起跟着假位姿走，nav2 拿到假位姿。
+修复 = 本地化节点内**三道接受判据**（运动一致性门限 / 合理性-定义域 / 连续 25 帧拒绝判失效并停发 TF）
++ **环路内低增益滤波**（tau=1.0 s，治抖动与静止随机游走）；契约与其它槽位不受影响。
+全部实测数字、A/B、回退与新参数：**`docs/gicp_divergence_and_jitter.md`**。
+
+| 判据（基线跑，`world:=RMUC2026 lio:=small_point_lio nav:=mppi planner:=smac2d`，目标 (-12.64,-0.31)） | 实测 |
+|---|---|
+| 采纳率 / `fitness_score` | **100% 采纳**，p95 **0.0029 m²** ⇒ 既有健康判据**完全看不见**这次失败 |
+| `map→odom` 逐帧修正步长（行驶段） | p50 8.3 mm / p90 46 mm / p99 155 mm / **max 249 mm**（10 Hz） |
+| `map→odom` 相对基线偏离 | 最大 **0.97 m**（xy）、0.41 m（z）、6.3°（yaw） |
+| 融合位姿逐样本跳变（nav2 真正看到的量） | 行驶段 p95 **16.4 cm**；静止 120 s 内定位误差长到 **47.8 cm** |
+| 车的行为 | 12.7 m 的路程走了 **29.7 m**、`/cmd_vel` 角速度换向 **35 次**、**15 次 recovery** |
+
 ### 遗留 / 待办
 
 1. 工具 settle 阈值偏严：静止 30 s 漂 3.4 cm / 0.0139 rad 略超 0.02 m / 0.01 rad ⇒ 应视为 **GICP 噪声底参考**（要消 WARNING 可放宽 `TH.settle_dxy→0.05` / `settle_dyaw→0.02`，一行可回退）。
