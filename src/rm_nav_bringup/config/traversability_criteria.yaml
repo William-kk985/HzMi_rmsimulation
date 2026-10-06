@@ -14,6 +14,11 @@
 #     可行驶 ⟺ z − g ≤ step_height_threshold
 #               且 不是（地面坡度 > drivable_slope_deg 且 z − g > slope_min_height）
 #     step_edge（台阶/边沿）= 判据命中的点；它**必然进 obstacle**（见节点实现）。
+#
+# ★ 2026-10-07 追加：`speed_limit_*` 一组键（前瞻限速）。
+#   它们**只服务实时链路**（两个地面分割节点把"车前走廊的坡度/台阶连续量"换成速度上限，
+#   发成 nav2 SpeedLimit）；离线出图脚本 pcd_to_nav2_map.py **不读**这些键（只读上面那组判据）。
+#   判据本身（哪些算可行驶）仍然只有一份：drivable_slope_deg / step_height_threshold。
 #   为什么"坡度判据"还要带一个高度闸 slope_min_height：只看坡度会把**坡道本身**判成障碍
 #   （坡道 24° 就超阈值），加高度闸后"24° 的坡每 0.20 m 只升 0.09 m"不会被误判，
 #   而"0.05 m 内升 0.15 m"的台阶沿会被判中 —— 与 pcd_to_nav2_map.py 的注释同源。
@@ -55,3 +60,106 @@
     publish_step_edge: true
     # 诊断话题：发 `~/traversability_stats`（每帧 JSON 文本；私有命名空间，不参与 /segmentation/* 契约）
     publish_traversability_stats: true
+
+    # =========================================================================
+    # ★ 2026-10-07：**前瞻限速**（坡度/台阶连续量 ⇒ 速度上限）—— 缺陷 ③ 的后半段
+    # -------------------------------------------------------------------------
+    # 为什么：（实测）车以 ~1.7 m/s 冲上 map(−3.6,3.1) 的**可行驶**坡脚 ⇒ IMU |a| 79~90 m/s²
+    #   ⇒ 小点云 LIO 发散 ⇒ 导航崩。坡面可行驶 ⇒ **不能靠"标障碍"来治**，只能在到之前减速。
+    #   详细机制/推导/实测见 docs/slope_speed_limiting.md 与 docs/traversability_plan.md §9。
+    #
+    # 物理模型（一个测点标定，见下 speed_limit_anchor_*）：
+    #   a_peak ≈ v · tanθ / Δt_eff，Δt_eff = 1.70 × 0.10 / 86 = **1.98 ms**
+    #   ⇒ 要 a_peak ≤ 30 m/s²，就必须 v ≤ 30 · Δt_eff / tanθ（θ 越大越慢）
+    # 实现：节点在同一帧的粗格上再算一次"车前 1~3 m 走廊"里的**局部坡度**（宽尺度）与
+    #   **台阶残差**（窄尺度：格内抬升 − 该格坡度能解释的部分），按下面两张表取速度，再做
+    #   "刹车距离界" v_cap(d) = sqrt(v_req² + 2·brake·d) ⇒ **特征越近、允许的当前速度越低**
+    #   （这才是"过坡脚前自动减速"而不是"在坡脚上减速"）。
+    # 输出：`nav2_msgs/msg/SpeedLimit`（绝对值 m/s；**0.0 = nav2 的 NO_SPEED_LIMIT**）
+    #   发到 controller_server 的 `speed_limit_topic`（默认 "speed_limit"），nav2 自己转给
+    #   MPPI 的 setSpeedLimit() 缩放 vx_max/vy/wz —— **命令链上没有新节点，也不发 /cmd_vel**。
+    # 回退：speed_limit_enable: false ⇒ 完全不发（速度回到 nav2 自己的 vx_max / smoother 限制）。
+    # 校验：python3 tools/scripts/regress/check_slope_speed_table.py
+    #   （断言：两张表单调 + 每个结点的预期峰值 ≤ peak_target（或已到地板）+ 本文件 == C++ 默认值
+    #    + speed_limit_vx_max == min(MPPI vx_max, velocity_smoother.max_velocity[0])
+    #    + brake ≤ |velocity_smoother.max_decel|）
+    # =========================================================================
+    speed_limit_enable: true
+    # 发到哪个话题（= nav2 controller_server 的 speed_limit_topic，默认同名；相对名 ⇒ /speed_limit）
+    speed_limit_topic: "speed_limit"
+    # 有效最高速（m/s）= min(MPPI FollowPath.vx_max 2.5, velocity_smoother.max_velocity[0] 2.0)
+    #   ⚠ 改 nav2 那两个键时必须同步改这里（校验脚本会断言；它是"限速的起点"而不是新真源）
+    speed_limit_vx_max: 2.0
+    # 反方向窗口（m）：>0 ⇒ 同时看**运动方向的背面**。这是"倒车撞车尾后面的坡脚"那个坑的默认修法：
+    #   实测两次整栈跑里最重的一击都发生在**倒车**时（110.8 / 67.7 m/s²，v<0），而 MID360 在车顶、
+    #   只朝前看的走廊完全看不见车尾后面的坡脚。取 1.2 m（比正向 3.0 m 短）：倒车速度实测 ~1.0~1.4 m/s
+    #   需要的预警更短，同时把"过了特征还要慢多久"限制在 1.2 m 以内（时间代价可控）。
+    speed_limit_rear_lookahead_m: 1.2
+    # 按**运动方向**决定走廊朝向（订阅 speed_limit_direction_topic 的速度符号）：
+    #   ⚠ 默认 **false**：这条路径实测**没有触发**（整栈跑里明明在倒车、日志仍打"前进"，根因未定位）
+    #   ⇒ 默认用上面的"双向窗口"，不依赖任何话题语义。开之前先看有没有"拿不到 /odom"的 WARN。
+    speed_limit_direction_aware: false
+    # 方向判据：|vx| ≤ 它视为静止（保持上次方向）；话题超过 timeout 当拿不到（同样保持）
+    speed_limit_direction_min_vx: 0.05
+    speed_limit_direction_timeout_s: 0.5
+    # 方向来源话题（**只订阅**，不发；契约不变）：nav 模式下 = LIO 里程计
+    speed_limit_direction_topic: "odom"
+    # 前瞻距离（m）：3.0 覆盖"雷达能看见的地面"（MID360 下视 −7.22°、离地 0.226 m ⇒ 最近 1.78 m）
+    speed_limit_lookahead_m: 3.0
+    # 走廊几何：固定半宽（m）+ 随距离张开的半角（deg，覆盖转弯时的扫掠）
+    speed_limit_corridor_half_width_m: 0.28
+    speed_limit_corridor_spread_deg: 8.0
+    # 坡度描述子的基线（m）：= 2 个粗格（与 slopeOf 的中心差分一致）；台阶残差按半格折算等效坡度
+    speed_limit_slope_baseline_m: 0.40
+    # 「坡度变化」死区（deg）：撞击来自**坡度变化**（a ≈ v·Δtanθ/Δt），恒定坡面不该限速；
+    #   死区挡住噪声与场地正常起伏（仿真点云 σ=2 mm、0.40 m 基线 ⇒ 坡度噪声 ~0.6°）
+    speed_limit_slope_change_deadband_deg: 4.0
+    # 台阶残差死区（m）：噪声不触发（仿真点云 σ=2 mm；格内最高点 − 地面 的噪声 ~5 mm）
+    speed_limit_step_deadband_m: 0.040
+    # 台阶残差 > 它 ⇒ 认成墙/高台（交给规划器绕行），本限速器不再为它减速
+    #   （否则"贴着墙走"会一路爬行；不这么做的话 0.45 m 走廊里全是假特征）
+    speed_limit_step_ignore_above_m: 0.350
+    # 刹车距离界用的**规划**减速度（m/s²）：上限曲线 v(d)=sqrt(v_req²+2·brake·d) 的含义是
+    #   "以 brake 减速就能正好在 d=0（特征处）降到 v_req"。取 0.4（物理极限 4.0 的 1/10）
+    #   实测（离线扫掠 bench/slope_speed_offline.cpp）：过坡脚速度 0.8⇒1.18、0.5⇒0.90、
+    #   **0.4⇒0.70**、0.3⇒0.65 m/s ⇒ 0.4 是"够低"与"别一路爬"的折中
+    #   （校验脚本断言 brake ≤ velocity_smoother.max_decel）
+    speed_limit_brake_mps2: 0.4
+    # 放开（升速）速率上限（m/s²）：降 = 立即（安全），升 = 慢（防抖、防"过了坡就全油门"）
+    speed_limit_release_mps2: 1.0
+    # 「已承诺特征」剩余距离的前推系数：每帧按 limit×系数×dt 扣减剩余距离。
+    #   1.0 = 拿上一帧上限当速度（仿真里 planar_move 完美跟踪 ⇒ 就是真实行进距离）；
+    #   <1 = 假设车走得比上限慢（承诺保持更久，更保守）；>1 更激进。
+    #   实测（离线扫掠）：1.0 + 承诺用格子远边 ⇒ 上限在特征处正好降到 v_req（过坡脚速度 = v_req±0.1）
+    speed_limit_hold_decay_factor: 1.0
+    # 「定位型」特征的**支撑格数**：同一 0.40 m 距离带内 ≥ 它个粗格给出该特征才算数。
+    #   为什么：真实单帧走廊只有 7~14 个粗格且集中在一两个距离带（点云稀疏）⇒ 单格坡度/台阶
+    #   估计噪声很大（实测 maxΔ坡 在 0.6°~34° 之间跳）；不加这一条时噪声反复触发限速
+    #   （实测整栈跑：38% 的运动时间被压在 0.6 m/s 以下、目标点超时）。
+    #   例外：台阶残差 ≥ 2× 死区时单格也认（真台阶沿本来就可能只占一格）。
+    speed_limit_min_support_cells: 2
+    # 速度地板（m/s）：**不许为 0** —— 本机制永不发 0（不停车）。低于它的需求一律按它执行
+    #   0.45 是"够慢"与"别把时间都花在爬"的折中（预测峰值 = 0.45·tanθ/Δt_eff；
+    #   6° ⇒ 24 m/s²、8° ⇒ 32 m/s²）
+    speed_limit_floor_mps: 0.45
+    # 坡度表（deg → m/s）：第一结点以下 = 不限速；线性插值；末段落到地板
+    #   结点值 = round_down(30 · Δt_eff / tanθ)：2°⇒1.66(峰值29.3) 3°⇒1.10(29.2) 4°⇒0.83(29.4)
+    #   5°⇒0.66(29.2) 6°⇒0.55(29.2)；8°/10° ⇒ 0.45 = 地板（模型解 0.41/0.34 已低于地板）
+    #   ⇒ 模型保证"预期峰值 ≤30 m/s²"覆盖到 **6~7°**；更陡的一律走地板 0.45 m/s
+    #     （模型外推在那儿已经没有意义：实测锚点只有 ~10% 坡那一档）
+    speed_limit_slope_knots_deg: [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+    speed_limit_slope_knots_mps: [1.66, 1.10, 0.83, 0.66, 0.55, 0.45, 0.45]
+    # 台阶表（m → m/s）：台阶折成等效坡度 tanθ_eff = 台阶 / 0.20 m（判据自己的粗格）。
+    #   死区 0.04 m ⇒ 等效 11.3° ⇒ 模型解 0.297 m/s 已经低于地板 ⇒ 台阶只有"到地板"这一档
+    speed_limit_step_knots_m: [0.040]
+    speed_limit_step_knots_mps: [0.45]
+    # 标定锚点（只用于自检/文档，不参与控制）：实测 (1.7 m/s, 局部坡度 tanθ 0.10) ⇒ 86 m/s²
+    speed_limit_anchor_v_mps: 1.70
+    speed_limit_anchor_tan_slope: 0.10
+    speed_limit_anchor_peak_mps2: 86.0
+    speed_limit_peak_target_mps2: 30.0
+    # 诊断：`~/slope_speed_stats`（每帧 JSON：限速决策 + 走廊逐格坡度/台阶）+
+    #       `segmentation/terrain_slope` / `segmentation/terrain_step`（逐格连续量点云，intensity 带值）
+    speed_limit_publish_diag: true
+    # `[slope_speed]` 状态行节流周期（s）；限速值变化 >0.03 m/s 时立即打一条
+    speed_limit_log_period_s: 2.0
