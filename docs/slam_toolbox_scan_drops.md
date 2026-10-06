@@ -17,6 +17,13 @@
 
 ---
 
+> ★ **2026-10-06 后续（`docs/lio_drift_diagnosis.md`）**：本文 §7 的"处理门
+> （`minimum_time_interval 0.5 s` + `minimum_travel_distance 0.447 m`）⇒ 只有 ~3% 的 `/scan`
+> 真的被拿去匹配"这一条，是理解 **`map→base_map` 为什么是"分段常数"**、
+> 以及**为什么 slam_toolbox 救不回一次大跳**的关键。分段诊断里实测：
+> 正常工况下 `map→base_link` 的误差是 LIO 的 **1.66~1.94 倍**且不发散；
+> 但 LIO 一旦崩（高角速度甩转），融合位姿与 LIO **1:1 同步**（比值 0.869），slam 没有拉回来。
+
 ## 0. 一句话结论
 
 | # | 问题 | 结论 |
