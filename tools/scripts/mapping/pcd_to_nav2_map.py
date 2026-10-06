@@ -50,6 +50,28 @@ nav2 会把它当未知区挡路）；`--fill-empty unknown` 是严格口径（"
 * 像素值沿用本仓既有图（`map_saver_cli`）的口径：`0=占用 / 205=未知 / 254=空闲`，
   `mode: trinary`、`free_thresh 0.25`、`occupied_thresh 0.65`。
 
+## 判据的**单一真源**（★ 2026-10-07）
+
+占用/空闲的四个阈值不再写在本脚本里，而是读
+`src/rm_nav_bringup/config/traversability_criteria.yaml` —— **同一份文件**也被
+`bringup_sim.launch.py` 当参数文件喂给两个地面分割节点（`ground:=linefit` / `ground:=patchwork`），
+经由 `rm_ground_traversability/low_terrain_classifier.hpp` 在**实时链路**上执行同一套判据。
+
+```
+YAML 键                     → 本脚本的 CLI                → 实时链路（地面分割节点）
+step_height_threshold       --height-threshold            step_height_threshold
+drivable_slope_deg          --slope-limit                 drivable_slope_deg
+slope_min_height            --slope-min-height            slope_min_height
+ground_cell_m               --ground-cell                 ground_cell_m
+fine_cell_m                 --resolution                  fine_cell_m
+ground_percentile           --ground-percentile           ground_percentile
+ground_min_points           --ground-min-points           ground_min_points
+```
+
+⇒ **实时代价图与先验图口径一致**（这正是缺陷 ③ 的修法：以前只有离线这一侧有坡度/台阶判据）。
+改阈值只改那份 YAML；CLI 仍可临时覆盖（A/B 用）。一致性由
+`tools/scripts/regress/check_traversability_criteria.py` 断言。
+
 ## 用法
 
     # 最常用：把真实建图点云投成 nav2 图（窗口自动取数据 bbox + 0.5 m 外扩）
@@ -84,6 +106,66 @@ OCC_PX = 0
 UNK_PX = 205
 
 RMUC2026_SPAWN = (10.925, 2.525)   # world 系出生点；--world-to-map-shift 的默认建议值
+
+# 判据真源（与 bringup_sim.launch.py / rm_ground_traversability 共用同一份文件）
+CRITERIA_REL = os.path.join('src', 'rm_nav_bringup', 'config', 'traversability_criteria.yaml')
+# YAML 键 → argparse 目标名（单一真源的映射表；两处实现共用同一批键名）
+CRITERIA_KEYS = {
+    'step_height_threshold': 'height_threshold',
+    'drivable_slope_deg': 'slope_limit',
+    'slope_min_height': 'slope_min_height',
+    'ground_cell_m': 'ground_cell',
+    'fine_cell_m': 'resolution',
+    'ground_percentile': 'ground_percentile',
+    'ground_min_points': 'ground_min_points',
+}
+# 读不到文件时的兜底（**必须**与 YAML / C++ Criteria 默认值逐键相同，见 check_traversability_criteria.py）
+CRITERIA_FALLBACK = {
+    'step_height_threshold': 0.15, 'drivable_slope_deg': 25.0, 'slope_min_height': 0.05,
+    'ground_cell_m': 0.20, 'fine_cell_m': 0.05, 'ground_percentile': 5.0,
+    'ground_min_points': 2,
+}
+
+
+def load_criteria(path, repo_root=None):
+    """读判据 YAML（`/**:` 段下的 ros__parameters）⇒ (dict, 诊断字符串)。
+
+    只认 CRITERIA_KEYS 里的键；缺键用 CRITERIA_FALLBACK 补齐并把缺的键报出来。
+    故意**不**依赖 pyyaml（本脚本历史上零第三方依赖，只要 numpy）：用一个只认
+    "缩进 + 键: 值" 的极小解析器 —— 判据文件的结构是扁平的，够用且可解释。
+    """
+    src = path
+    if src is None:
+        root = repo_root or os.getcwd()
+        cand = [os.path.join(root, CRITERIA_REL)]
+        here = os.path.dirname(os.path.abspath(__file__))
+        cand.append(os.path.abspath(os.path.join(here, '..', '..', '..', CRITERIA_REL)))
+        cand.append(os.path.abspath(os.path.join(here, '..', '..', '..', '..', CRITERIA_REL)))
+        src = next((c for c in cand if os.path.isfile(c)), None)
+    out = dict(CRITERIA_FALLBACK)
+    if src is None or not os.path.isfile(src):
+        return out, 'fallback(找不到 %s)' % CRITERIA_REL
+    seen = set()
+    with open(src) as f:
+        for line in f:
+            line = line.split('#')[0].rstrip()
+            if not line or line.lstrip().startswith('/**') or 'ros__parameters' in line:
+                continue
+            if ':' not in line:
+                continue
+            k, v = line.split(':', 1)
+            k = k.strip()
+            if k not in CRITERIA_KEYS:
+                continue
+            v = v.strip()
+            try:
+                out[k] = float(v) if ('.' in v or 'e' in v.lower()) else int(v)
+            except ValueError:
+                continue
+            seen.add(k)
+    missing = sorted(set(CRITERIA_KEYS) - seen)
+    diag = os.path.abspath(src) + ('(缺键，已用兜底：%s)' % ','.join(missing) if missing else '')
+    return out, diag
 
 
 # ------------------------------------------------------------------ 栅格工具
@@ -231,34 +313,77 @@ def build(args):
         from scipy import ndimage as _ndi
     except Exception as e:  # noqa: BLE001
         raise SystemExit('需要 scipy（法向估计 + 最小值滤波）：%s' % e)
-    kq = int(min(args.normal_k + 1, len(P)))
-    tree = cKDTree(P[:, :3])
-    _, nidx = tree.query(P[:, :3], k=kq, workers=-1)
-    nb = P[nidx]
-    ctr = nb - nb.mean(axis=1, keepdims=True)
-    cov = np.einsum('nki,nkj->nij', ctr, ctr, optimize=True) / max(kq, 1)
-    _, vec = np.linalg.eigh(cov)
-    nrm = vec[:, :, 0]
-    nrm = np.where(nrm[:, 2:3] < 0, -nrm, nrm)
-    pt_slope = np.degrees(np.arccos(np.clip(np.abs(nrm[:, 2]), 0.0, 1.0)))
-    walk = pt_slope <= args.slope_limit
-    rep['normals'] = {'k': kq, 'walkable_points': int(walk.sum()),
-                      'walkable_pct': round(100.0 * walk.mean(), 1),
-                      'pt_slope_deg': {'p50': round(float(np.percentile(pt_slope, 50)), 1),
-                                       'p90': round(float(np.percentile(pt_slope, 90)), 1)}}
+    _gm = getattr(args, 'ground_mode', 'lowest')
+    if _gm == 'lowest':
+        # lowest 档不需要点法向（局部地面走"细格最低点"，坡度走栅格梯度）⇒ 整段 KD-tree 省掉。
+        walk = np.zeros(len(P), dtype=bool)
+        rep['normals'] = {'k': 0, 'walkable_points': -1, 'walkable_pct': -1.0,
+                          'note': 'ground_mode=lowest ⇒ 不做点法向 PCA'}
+    else:
+        kq = int(min(args.normal_k + 1, len(P)))
+        tree = cKDTree(P[:, :3])
+        _, nidx = tree.query(P[:, :3], k=kq, workers=-1)
+        nb = P[nidx]
+        ctr = nb - nb.mean(axis=1, keepdims=True)
+        cov = np.einsum('nki,nkj->nij', ctr, ctr, optimize=True) / max(kq, 1)
+        _, vec = np.linalg.eigh(cov)
+        nrm = vec[:, :, 0]
+        nrm = np.where(nrm[:, 2:3] < 0, -nrm, nrm)
+        pt_slope = np.degrees(np.arccos(np.clip(np.abs(nrm[:, 2]), 0.0, 1.0)))
+        walk = pt_slope <= args.slope_limit
+        rep['normals'] = {'k': kq, 'walkable_points': int(walk.sum()),
+                          'walkable_pct': round(100.0 * walk.mean(), 1),
+                          'pt_slope_deg': {'p50': round(float(np.percentile(pt_slope, 50)), 1),
+                                           'p90': round(float(np.percentile(pt_slope, 90)), 1)}}
 
     gc = args.ground_cell if args.ground_cell > 0 else res * 4
     og = np.array([x0, y0])
     Wc = int(math.ceil(W * res / gc))
     Hc = int(math.ceil(H * res / gc))
     jc, _ = _cell_index(P[:, :2], og, gc, (Wc, Hc))
-    Pw = P[walk]
-    jw, _ = _cell_index(Pw[:, :2], og, gc, (Wc, Hc))
     g_cand = np.full((Wc, Hc), np.nan)
-    if len(Pw):
-        g_cand, wcnt = _per_cell_percentile(Pw[:, 2], jw[:, 0], jw[:, 1], (Wc, Hc),
-                                            args.ground_percentile)
-        g_cand[wcnt < args.ground_min_points] = np.nan
+    gmode = getattr(args, 'ground_mode', 'lowest')
+    if gmode == 'lowest':
+        # ★ 2026-10-07（与实时判据统一）：局部地面 = 粗格内**各 0.05 m 细格最低点**的 p05。
+        #   与 rm_ground_traversability/low_terrain_classifier.hpp 的 groundOf() **逐条同构**
+        #   （细格取最低点 ⇒ 竖直墙面格不会把自己抬成地面；不做法向闸）。
+        #   为什么需要这一档：`normal` 档用"点法向 ≤ slope-limit"筛可行驶面，
+        #   而**从没被开上去过的台面/坡面**在雷达里是掠射，k 近邻法向不可靠 ⇒ 合格点判不出来
+        #   ⇒ 那里的"地面"会借到旁边的低处 ⇒ 整片 0.2~0.3 m 台面被判成"高出 0.2~0.3 m"的障碍，
+        #   连目标点自己都变成占用格。实测（RMUC2026_lt 的 86 594 点 PCD）：
+        #   normal 档 122.6 m² 占用、可行驶斜面里 30.3% 被标占用；lowest 档见 --json 的 cells。
+        ij_f, _ = _cell_index(P[:, :2], np.array([x0, y0]), res, (W, H))
+        zmin_map = np.full((W, H), np.inf)
+        np.minimum.at(zmin_map, (ij_f[:, 0], ij_f[:, 1]), P[:, 2])
+        has_f = np.isfinite(zmin_map)
+        blk = int(round(gc / res)) if gc >= res else 1
+        # 每个粗格 = blk×blk 个细格；取这些细格最低点的 p05（与实时实现同一条取秩公式）
+        rr, cc = np.where(has_f)
+        br = rr // blk
+        bc = cc // blk
+        order = np.lexsort((zmin_map[rr, cc], br * (Wc + 1) + bc))
+        lin = (br * (Wc + 1) + bc)[order]
+        zz = zmin_map[rr, cc][order]
+        uniq, start = np.unique(lin, return_index=True)
+        cnt = np.diff(np.append(start, len(lin)))
+        rank = np.arange(len(lin)) - np.repeat(start, cnt)
+        target = np.floor(args.ground_percentile / 100.0 *
+                          np.maximum(np.repeat(cnt, cnt) - 1, 0)).astype(np.int64)
+        keep = rank == target
+        b_un = lin[keep] // (Wc + 1)
+        c_un = lin[keep] % (Wc + 1)
+        z_un = zz[keep]
+        ok_pts = np.repeat(cnt, cnt)[keep] >= args.ground_min_points
+        g_cand[b_un[ok_pts], c_un[ok_pts]] = z_un[ok_pts]
+        rep['normals']['ground_mode'] = 'lowest(fine-cell minima p%d)' % args.ground_percentile
+    else:
+        Pw = P[walk]
+        jw, _ = _cell_index(Pw[:, :2], og, gc, (Wc, Hc))
+        if len(Pw):
+            g_cand, wcnt = _per_cell_percentile(Pw[:, 2], jw[:, 0], jw[:, 1], (Wc, Hc),
+                                                args.ground_percentile)
+            g_cand[wcnt < args.ground_min_points] = np.nan
+        rep['normals']['ground_mode'] = 'normal(可行驶面点的 p%d)' % args.ground_percentile
     finite_cand = np.isfinite(g_cand)
     # 借地面 = 半径 r 内候选格里**最低**的那个（min 滤波）⇒ 台阶沿一定借到低的那侧
     r = int(args.ground_borrow_cells)
@@ -358,11 +483,15 @@ def build(args):
         'occupied_despeckled': int(despeckled),
     }
     rep['params'] = {
+        'ground_mode': getattr(args, 'ground_mode', 'lowest'),
         'resolution': res, 'height_threshold': args.height_threshold,
         'slope_limit_deg': args.slope_limit, 'slope_min_height': args.slope_min_height,
         'fill_empty': args.fill_empty, 'border': args.border,
         'occ_dilate_cells': dil, 'occ_min_neighbors': args.occ_min_neighbors,
         'seed': args.seed,
+        # ★ 判据来源（单一真源）：与实时链路（rm_ground_traversability）共用同一份 YAML
+        'criteria_source': getattr(args, 'criteria_diag', ''),
+        'criteria_file': os.path.abspath(args.criteria_file) if args.criteria_file else None,
     }
 
     # ---- 坡道段分类（--report-box；以及自动找"缓坡区"）
@@ -454,19 +583,31 @@ def main():
         epilog=__doc__.split('## 用法')[-1])
     ap.add_argument('--pcd', required=True)
     ap.add_argument('--out', required=True, help='输出前缀（写 <out>.pgm 与 <out>.yaml）')
-    ap.add_argument('--resolution', type=float, default=0.05)
-    ap.add_argument('--height-threshold', type=float, default=0.15,
-                    help='相对局部地面的高度超过它 = 占用（m，默认 0.15，与 STL 管线同口径）')
-    ap.add_argument('--slope-limit', type=float, default=25.0,
-                    help='可行驶坡度上限（deg，默认 25）；超过它的"又陡又高"面算占用')
-    ap.add_argument('--slope-min-height', type=float, default=0.05,
-                    help='坡度判据的高度闸（m，默认 0.05）：低于它不因坡度判占用（保住坡道本身）')
-    ap.add_argument('--ground-cell', type=float, default=0.20,
-                    help='估计"局部地面"的粗格边长（m，默认 0.20）；0 = 4*resolution')
-    ap.add_argument('--ground-percentile', type=float, default=5.0,
-                    help='粗格内取 z 的哪个分位当局部地面（默认 p05）')
-    ap.add_argument('--ground-min-points', type=int, default=2,
-                    help='粗格至少几个点才认为能估出地面（默认 3）')
+    ap.add_argument('--criteria-file', default=None,
+                    help='判据真源 YAML（默认 src/rm_nav_bringup/config/traversability_criteria.yaml）；'
+                         '--height-threshold / --slope-limit / --slope-min-height / --ground-cell / '
+                         '--resolution / --ground-percentile / --ground-min-points 的**默认值**来自它')
+    # 先解析 --criteria-file，再把它填进下面这些键的默认值（单一真源；CLI 仍可临时覆盖）
+    _pre, _ = ap.parse_known_args()
+    _crit, _crit_diag = load_criteria(_pre.criteria_file)
+    ap.set_defaults(criteria_diag=_crit_diag)
+    ap.add_argument('--resolution', type=float, default=_crit['fine_cell_m'])
+    ap.add_argument('--height-threshold', type=float, default=_crit['step_height_threshold'],
+                    help='相对局部地面的高度超过它 = 占用（m，默认来自判据真源 YAML）')
+    ap.add_argument('--slope-limit', type=float, default=_crit['drivable_slope_deg'],
+                    help='可行驶坡度上限（deg，默认来自判据真源 YAML）；超过它的"又陡又高"面算占用')
+    ap.add_argument('--slope-min-height', type=float, default=_crit['slope_min_height'],
+                    help='坡度判据的高度闸（m，默认来自真源 YAML）：低于它不因坡度判占用（保住坡道本身）')
+    ap.add_argument('--ground-cell', type=float, default=_crit['ground_cell_m'],
+                    help='估计"局部地面"的粗格边长（m，默认来自真源 YAML）；0 = 4*resolution')
+    ap.add_argument('--ground-percentile', type=float, default=_crit['ground_percentile'],
+                    help='粗格内取 z 的哪个分位当局部地面（默认 p05，来自真源 YAML）')
+    ap.add_argument('--ground-min-points', type=int, default=_crit['ground_min_points'],
+                    help='粗格至少几个点才认为能估出地面（默认来自真源 YAML）')
+    ap.add_argument('--ground-mode', choices=['lowest', 'normal'], default='lowest',
+                    help='局部地面怎么估：lowest（默认）= 粗格内各 0.05 m 细格"最低点"的 p05，'
+                         '与实时判据 rm_ground_traversability 同构；normal = 只用"法向 ≤ slope-limit"的'
+                         '可行驶面点（老口径，在"没被开上去过的台面/掠射坡面"上会把地面借低、整片判占用）')
     ap.add_argument('--normal-k', type=int, default=8,
                     help='点法向 PCA 的近邻数（默认 8）；法向决定"哪些点算可行驶面"')
     ap.add_argument('--ground-borrow-cells', type=int, default=1,

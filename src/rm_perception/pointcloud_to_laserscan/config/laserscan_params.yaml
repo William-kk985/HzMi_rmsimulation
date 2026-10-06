@@ -11,8 +11,26 @@
     # 显式给队列深度：原来没配 ⇒ 默认 std::thread::hardware_concurrency() = 本机 28
     # （同时作为 MessageFilter 队列与订阅 QoS 深度）⇒ 最多少排 28 帧 0.2MB 的旧数据。
     queue_size: 5
+    # ★★ 2026-10-07（缺陷 ②）：max_height 0.1 → **1.0**。
+    #   p2l 的 z 过滤发生在**点云自带帧**（本配置 target_frame: "" ⇒ 不做 TF ⇒ 就是 livox_frame），
+    #   而 livox 装在 base_link+0.175、雷达系地面在 z = −0.226 m（config/segmentation_sim.yaml 实测值）
+    #   ⇒ 高度带的**离地**换算 = z_filter + 0.226 m：
+    #      旧值   min_height −1.0 / max_height 0.1 ⇒ 离地 [−0.774, **+0.326**] m
+    #      新值   min_height −1.0 / max_height 1.0 ⇒ 离地 [−0.774, **+1.226**] m
+    #   实测后果（docs/path_clearance_and_contact.md §2.2、docs/ground_segmentation_slots.md §6.2）：
+    #   0.4~1.0 m 高度带的方位覆盖率在旧值下是 **0.0~7.3%**，也就是"墙的 2/3 从来没进过 /scan"。
+    #   ⇒ 代价图/先验图只看得见墙脚那一小段，与"车贴墙/撞进去"的观感一致。
+    #   COD 2026 的配方也是 0.1/1.0（docs/ground_segmentation_slots.md §1.5：他们的 p2l
+    #   min_height 0.01 / max_height 1.00，配 target_frame=chassis —— 那个帧在地面高度附近，
+    #   所以他们那组数**是离地**的；我们不做 TF，同样的 1.0 是"离雷达 1.0 m = 离地 1.226 m"）。
+    #   ⚠ min_height 保持 −1.0 **不动**：它的语义是"雷达下方 1.0 m 以内的点也要"，
+    #   在离地换算里等于 −0.774 m —— 比本场地最低几何（坑底 −0.2 m）更低 ⇒ 不丢任何东西。
+    #   本场地**没有天花板/悬挑/限高杆**（docs/worlds.md §6："隧道 / 设计坡道：没有"），
+    #   所以把上界抬到 1.226 m 不会引入"头顶结构投影到地面"的假障碍；
+    #   真机/别的场地若有悬挑，必须改回窄带或改用带净空层的方案（回退见
+    #   docs/ground_segmentation_slots.md §11 回退表）。
     min_height: -1.0
-    max_height: 0.1
+    max_height: 1.0
     angle_min: -3.14159   # -M_PI/2
     angle_max: 3.14159    # M_PI/2
     angle_increment: 0.0043   # M_PI/360.0

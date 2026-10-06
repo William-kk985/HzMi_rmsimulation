@@ -8,6 +8,13 @@
 //   · **按"局部法向倾角"分桶的障碍保留率**（回答：10~22° 坡面被判成地面了吗）
 //   · 单帧耗时（median/p95/max）
 //
+// ★ 2026-10-07 增补（缺陷 ②③ 的验收台架）：
+//   · `--traversability on` ⇒ 在**两侧分割器之后**再跑一遍 rm_ground_traversability 的
+//     坡度/台阶判据（与节点、与 pcd_to_nav2_map.py 同一份阈值），表里的 obs%/覆盖率随之变化
+//     ⇒ "判据带来多少/是否误伤可行驶坡面"就是同一台架两种开关的对照。
+//   · `--p2l-max-height` ⇒ 方位覆盖率用的 p2l 高度带上界（默认 1.0 = 现在的配置）。
+//     同时**并排**打印旧口径（max_height 0.1）⇒ 缺陷 ② 的"0.4~1.0 m 从来没进过 /scan"直接可读。
+//
 // 两个模式：
 //   --frames-dir DIR   读 DIR/frame_XXXXXX.bin（Nx3 float32 原始点，雷达系，脚本 tools 从 bag 导出）
 //   --synthetic        构造一份 RMUC2026 风格地形（平地 + 10/15/22° 坡 + 0.2/0.3 m 台阶 +
@@ -43,6 +50,7 @@
 
 #include "ground_segmentation/ground_segmentation.h"
 #include "patchwork/patchworkpp.h"
+#include "rm_ground_traversability/low_terrain_classifier.hpp"
 
 namespace fs = std::filesystem;
 
@@ -73,6 +81,9 @@ struct AbOptions
   bool drop_zeros = false;
   double normal_radius = 0.25;
   int min_neighbors = 8;
+  // ★ 2026-10-07：判据开关 + p2l 高度带（-1.0/0.1 = 旧配置；-1.0/1.0 = 现在的配置）
+  bool traversability = false;
+  double p2l_min_height = -1.0, p2l_max_height = 1.0;
 };
 
 // ---------------------------------------------------------------- 计时
@@ -141,7 +152,8 @@ struct BandCov
 {
   const char * name;
   double lo, hi;
-  std::set<int> all, lf, pw;
+  // all/lf/pw = 当前配置的 p2l 高度带；*_old = 旧口径（z ∈ (-1.0, 0.1)，即 max_height 0.1）
+  std::set<int> all, lf, pw, lf_old, pw_old;
 };
 
 static std::vector<BandCov> make_band_cov()
@@ -417,6 +429,12 @@ int main(int argc, char ** argv)
     else if (a == "--num-min-pts") {o.num_min_pts = std::stoi(next());}
     else if (a == "--no-tgr") {o.enable_TGR = false;}
     else if (a == "--drop-zeros") {o.drop_zeros = true;}
+    else if (a == "--traversability") {
+      const std::string v = next();
+      o.traversability = (v != "0" && v != "off" && v != "false");
+    }
+    else if (a == "--p2l-min-height") {o.p2l_min_height = std::stod(next());}
+    else if (a == "--p2l-max-height") {o.p2l_max_height = std::stod(next());}
     else if (a == "--normal-radius") {o.normal_radius = std::stod(next());}
     else if (a == "--out") {o.out_json = next();}
     else if (a == "--help" || a == "-h") {
@@ -568,7 +586,8 @@ int main(int argc, char ** argv)
     // ★ 下游（pointcloud_to_laserscan）真正关心的不是"障碍点占比"，而是
     //   "**这个方位上还有没有障碍点**" —— p2l 每个角度 bin 只留最近的一个点。
     //   所以按 p2l 的 angle_increment(0.0043 rad) 分方位 bin，统计"该 bin 内至少有一个
-    //   **落在 p2l 高度带内**(z_sensor ∈ (-1.0, 0.1)，取自 laserscan_params.yaml)的障碍点"的 bin 数。
+    //   **落在 p2l 高度带内**（--p2l-min-height/--p2l-max-height，默认 -1.0/1.0 =
+    //   现在的 laserscan_params.yaml）的障碍点"的 bin 数。
     std::set<int> lf_bins, pw_bins;
     std::set<int> all_bins;
   };
@@ -581,8 +600,9 @@ int main(int argc, char ** argv)
   std::vector<Bucket> tb = make_tilt_buckets();
   long long pooled_total = 0, pooled_agree = 0;
   long long both_ground = 0, lf_only = 0, pw_only = 0, both_obs = 0;
-  Stats lf_ms, pw_ms, agree_pct, ground_ratio_lf, ground_ratio_pw;
+  Stats lf_ms, pw_ms, agree_pct, ground_ratio_lf, ground_ratio_pw, clf_ms;
   long long nonzero_pts = 0, degenerate_pts = 0;
+  long long step_hits = 0, clf_hits = 0;
 
   std::vector<std::string> per_frame_lines;
 
@@ -655,14 +675,49 @@ int main(int argc, char ** argv)
     std::vector<float> tilt;
     estimate_normals(f.pts, o.normal_radius, 8, &tilt);
 
+    // ★ 判据（可选）：把两侧的 ground 标签按"相对局部地面高差 + 可行驶坡度"再判一次。
+    //   只降不升 ⇒ obstacle 只会变多。两条掩码分别统计"判据新增的障碍点"。
+    std::vector<char> lf_use(n, 0);
+    for (size_t i = 0; i < n; ++i) {lf_use[i] = (lf_labels[i] == 1) ? 1 : 0;}
+    std::vector<char> pw_use(n, 0);
+    for (size_t i = 0; i < n; ++i) {pw_use[i] = pw_ground[i];}
+    if (o.traversability) {
+      pcl::PointCloud<pcl::PointXYZ> cloud;
+      cloud.reserve(n);
+      for (size_t i = 0; i < n; ++i) {
+        pcl::PointXYZ q;
+        q.x = f.pts[i].x(); q.y = f.pts[i].y(); q.z = f.pts[i].z();
+        cloud.push_back(q);
+      }
+      rm_ground_traversability::Criteria crit;
+      rm_ground_traversability::LowTerrainClassifier clf(crit);
+      std::vector<uint8_t> lg(n, 0), pg(n, 0), lstep, pstep;
+      for (size_t i = 0; i < n; ++i) {
+        lg[i] = (lf_use[i] == 1) ? 1u : 0u;
+        pg[i] = (pw_use[i] == 1) ? 1u : 0u;
+      }
+      clf.apply(cloud, &lg, &lstep);
+      clf.apply(cloud, &pg, &pstep);
+      clf_ms.add(clf.stats().classify_ms);
+      for (size_t i = 0; i < n; ++i) {
+        const bool lf_new = (lf_use[i] == 1) && (lg[i] == 0u);
+        const bool pw_new = (pw_use[i] == 1) && (pg[i] == 0u);
+        if (lf_new) {++clf_hits;}
+        if (pw_new) {++clf_hits;}
+        lf_use[i] = (lg[i] != 0u) ? 1 : 0;
+        pw_use[i] = (pg[i] != 0u) ? 1 : 0;
+        if (!lstep.empty() && lstep[i] != 0u) {++step_hits;}
+      }
+    }
+
     long long frame_total = 0, frame_agree = 0;
     long long fg = 0, fo = 0;
     for (size_t i = 0; i < n; ++i) {
       if (f.pts[i].x() == 0.0f && f.pts[i].y() == 0.0f && f.pts[i].z() == 0.0f) {
         ++degenerate_pts;
       } else {++nonzero_pts;}
-      const bool lg = lf_labels[i] == 1;
-      const bool pg = pw_ground[i] == 1;
+      const bool lg = lf_use[i] == 1;
+      const bool pg = pw_use[i] == 1;
       const bool lobs = !lg, pobs = !pg;
       ++frame_total;
       if (lobs == pobs) {++frame_agree;}
@@ -672,7 +727,8 @@ int main(int argc, char ** argv)
       const double h_rel = f.pts[i].z() - z_ground;
       tally(hb, h_rel, lobs, pobs);
       {
-        const bool in_band = (f.pts[i].z() > -1.0f && f.pts[i].z() < 0.1f);
+        const bool in_band = (f.pts[i].z() > o.p2l_min_height && f.pts[i].z() < o.p2l_max_height);
+        const bool in_band_old = (f.pts[i].z() > -1.0f && f.pts[i].z() < 0.1f);
         const double az = std::atan2(f.pts[i].y(), f.pts[i].x());
         const int abin = static_cast<int>(std::floor((az + M_PI) / 0.0043));
         for (auto & b : bc) {
@@ -681,6 +737,10 @@ int main(int argc, char ** argv)
           if (in_band) {
             if (lobs) {b.lf.insert(abin);}
             if (pobs) {b.pw.insert(abin);}
+          }
+          if (in_band_old) {
+            if (lobs) {b.lf_old.insert(abin);}
+            if (pobs) {b.pw_old.insert(abin);}
           }
           break;
         }
@@ -692,11 +752,11 @@ int main(int argc, char ** argv)
           ++ks.n;
           if (lobs) {++ks.lf_obs;}
           if (pobs) {++ks.pw_obs;}
-          // p2l 口径的方位覆盖（0.0043 rad/bin，高度带 z_sensor ∈ (-1.0, 0.1)）
+          // p2l 口径的方位覆盖（0.0043 rad/bin，高度带 = 配置的 p2l 带）
           const double az = std::atan2(f.pts[i].y(), f.pts[i].x());
           const int bin = static_cast<int>(std::floor((az + M_PI) / 0.0043));
           ks.all_bins.insert(bin);
-          const bool in_band = (f.pts[i].z() > -1.0f && f.pts[i].z() < 0.1f);
+          const bool in_band = (f.pts[i].z() > o.p2l_min_height && f.pts[i].z() < o.p2l_max_height);
           if (in_band) {
             if (lobs) {ks.lf_bins.insert(bin);}
             if (pobs) {ks.pw_bins.insert(bin);}
@@ -763,16 +823,35 @@ int main(int argc, char ** argv)
     lf_ms.median(), lf_ms.pct(0.95), lf_ms.max(),
     pw_ms.median(), pw_ms.pct(0.95), pw_ms.max(),
     lf_ms.median() > 0 ? pw_ms.median() / lf_ms.median() : 0.0);
+  if (o.traversability) {
+    std::printf("\n== 判据（坡度/台阶，rm_ground_traversability）==\n");
+    std::printf("  enable=on  step_edge 命中点数(两分割器合计) = %lld  被降级 ground→obstacle 次数 = %lld\n",
+      step_hits, clf_hits);
+    std::printf("  判据耗时: median %.3f / p95 %.3f / max %.3f ms（每次 apply 一帧；本行是两次 apply 之和）\n",
+      clf_ms.median(), clf_ms.pct(0.95), clf_ms.max());
+  } else {
+    std::printf("\n== 判据（坡度/台阶）: **关**（--traversability on 可开）==\n");
+  }
   std::printf("\n== 按【离地高度带】的方位覆盖率（p2l 口径：该方位在该高度带里还有没有障碍点）==\n");
   std::printf("  口径：把每个方位分成 p2l 的 0.0043 rad bin；覆盖率 = 该高度带里有点的 bin 中，\n"
     "        至少还有一个**障碍点且 z_sensor ∈ (-1.0, 0.1)**（= p2l 的高度带）的 bin 占比。\n"
     "  0%% = 这个高度的特征在 /scan 里整个消失；100%% = 每个方位都还留着。\n");
+  std::printf("高度带(离地) 使用的是配置的 p2l 带 z ∈ (%.2f, %.2f)\n", o.p2l_min_height,
+    o.p2l_max_height);
   std::printf("%-16s %10s %14s %14s\n", "高度带(离地)", "bins", "linefit_cov%", "patchwork_cov%");
   for (const auto & b : bc) {
     if (b.all.empty()) {continue;}
     std::printf("%-16s %10zu %13.2f%% %13.2f%%\n", b.name, b.all.size(),
       100.0 * static_cast<double>(b.lf.size()) / static_cast<double>(b.all.size()),
       100.0 * static_cast<double>(b.pw.size()) / static_cast<double>(b.all.size()));
+  }
+  std::printf("\n== 同一批帧、**旧** p2l 带（max_height 0.1 ⇒ z ∈ (-1.0, 0.1)）的方位覆盖率 ==\n");
+  std::printf("%-16s %10s %14s %14s\n", "高度带(离地)", "bins", "linefit_cov%", "patchwork_cov%");
+  for (const auto & b : bc) {
+    if (b.all.empty()) {continue;}
+    std::printf("%-16s %10zu %13.2f%% %13.2f%%\n", b.name, b.all.size(),
+      100.0 * static_cast<double>(b.lf_old.size()) / static_cast<double>(b.all.size()),
+      100.0 * static_cast<double>(b.pw_old.size()) / static_cast<double>(b.all.size()));
   }
   print_buckets("== 按【离地高度】分桶的障碍保留率 ==", hb);
   print_buckets("== 按【局部法向倾角】分桶的障碍保留率（仅离地<0.5m 的点）==", tb);
