@@ -1,0 +1,3 @@
+# launch 每次启动写的「本次会话用了哪个存档名 / 哪个 world」状态文件
+# （tools/scripts/mapping/map_archive.sh save 默认读它当存档名）—— 机器本地产物，不入库。
+.session.yaml
