@@ -10,10 +10,46 @@
 #include "lidar_adapter/livox_custom_msg.h"
 #include "lidar_adapter/livox_pointcloud2.h"
 #include "lidar_adapter/unitree_lidar.h"
+#include <cmath>
+#include <cstdint>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace small_point_lio {
+
+    // ============================ 本仓补丁（1 行语义，见下） ============================
+    // ★ 为什么改：上游把 float64 秒转成 (sec, nanosec) 时用的是**截断**：
+    //     time_msg.nanosec = static_cast<uint32_t>((ts - std::floor(ts)) * 1e9);
+    //   浮点误差让约 40% 的帧算成 X.99999999x，截断后变成 X-1 ns：
+    //     odom→base_link（以及 /Odometry）的戳比同一帧点云的 header 戳**低 1 纳秒**。
+    //   tf2 在 /scan 的戳上查 odom→base_link 时要求缓存里存在 "stamp >= 该戳" 的样本，
+    //   低 1 ns 的同帧样本**不合格** ⇒ 必须等**下一帧**的 TF（~0.1 s 仿真时间）。
+    //   而 slam_toolbox 的 tf2 MessageFilter 默认 scan_queue_size=1：等待一旦超过下一条
+    //   /scan 的到达间隔，正在等的那条就被 QueueFull 顶掉 —— 就是那条刷屏日志。
+    //   实测（q05：3223 条 /scan，`/Odometry` 戳与 `/scan` 戳逐纳秒比对）：
+    //     ==0 ns：1697 条（60.0%）  == -1 ns：1130 条（40.0%）
+    // ★ 修法：把截断改成**四舍五入**（并保留进位）。实测（fix01，3221 条 /scan）：
+    //     Δns==0（同纳秒有 TF 样本）从 52.7% 升到 **95.5%**；
+    //     `/Odometry` 戳 - `/scan` 戳 = −1 ns 的帧从 40.0% 降到 **0**；
+    //     系统性丢帧（4%/2.5 s 节律）从 116 条降到 10 条，且那 10 条全部发生在
+    //     "LIO 还没开始发 TF"的启动段与跑飞段（Δns = 2 ms~16 s 的真空隙），不再是系统性行为。
+    //   注意：**不要**改成"量化到微秒"——那会把 LIO 侧真实的毫秒级时间差一起改掉，
+    //   而这里要修的只是 float64→ns 的**截断**这一个转换 bug。
+    //   证据与 A/B：docs/slam_toolbox_scan_drops.md（§6/§9.4）。
+    // =================================================================================
+    static builtin_interfaces::msg::Time double_to_msg_time(double ts) {
+        builtin_interfaces::msg::Time t;
+        const double sec_d = std::floor(ts);
+        t.sec = static_cast<int32_t>(sec_d);
+        int64_t ns = static_cast<int64_t>(std::llround((ts - sec_d) * 1e9));   // 四舍五入（原为截断）
+        if (ns >= 1000000000LL) {         // 进位（避免 nanosec 溢出）
+            t.sec += 1;
+            ns -= 1000000000LL;
+        }
+        if (ns < 0) { ns = 0; }
+        t.nanosec = static_cast<uint32_t>(ns);
+        return t;
+    }
 
     SmallPointLioNode::SmallPointLioNode(const rclcpp::NodeOptions &options)
         : Node("small_point_lio", options) {
@@ -52,9 +88,7 @@ namespace small_point_lio {
         small_point_lio->set_odometry_callback([this, lidar_frame](const common::Odometry &odometry) {
             last_odometry = odometry;
 
-            builtin_interfaces::msg::Time time_msg;
-            time_msg.sec = std::floor(odometry.timestamp);
-            time_msg.nanosec = static_cast<uint32_t>((odometry.timestamp - time_msg.sec) * 1e9);
+            const builtin_interfaces::msg::Time time_msg = double_to_msg_time(odometry.timestamp);
 
             geometry_msgs::msg::TransformStamped transform_stamped;
             transform_stamped.header.stamp = time_msg;
@@ -100,9 +134,7 @@ namespace small_point_lio {
         });
         small_point_lio->set_pointcloud_callback([this, save_pcd, lidar_frame](const std::vector<Eigen::Vector3f> &pointcloud) {
             if (pointcloud_publisher->get_subscription_count() > 0) {
-                builtin_interfaces::msg::Time time_msg;
-                time_msg.sec = std::floor(last_odometry.timestamp);
-                time_msg.nanosec = static_cast<uint32_t>((last_odometry.timestamp - time_msg.sec) * 1e9);
+                const builtin_interfaces::msg::Time time_msg = double_to_msg_time(last_odometry.timestamp);
 
                 geometry_msgs::msg::TransformStamped lidar_frame_to_base_link_transform;
                 try {
