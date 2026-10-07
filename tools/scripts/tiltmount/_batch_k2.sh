@@ -10,6 +10,7 @@
 # 两次编译只差插件里那一行 ⇒ 点云/分割/scan/代价图/契约的差就是"0.1 m 内移"造成的。
 # 每次跑两件事：`regress/run_robot11_mount_probe.sh`（代价图 + 契约）
 #             + `tiltmount/run_costmap_input_dump.sh`（raw 云落盘 ⇒ 离线量"传感器系地面高度"）
+# 每档跑完立刻把 `probe.json` 复制到 `<tag>.done.json`（批次被中断也知道哪几跑是好的）。
 # =============================================================================
 set +u
 REPO=/home/weicheng/HzMi_rmsimulation
@@ -30,6 +31,16 @@ build_and_run() {
   tools/scripts/regress/run_robot11_mount_probe.sh "$tag" \
       --settle 25 --duration 20 --frames 3 --grid-dump ".tmp_robotslot/$tag/local_grid.npz" -- \
       "$@" 2>&1 | tail -3
+  if [ -f ".tmp_robotslot/$tag/probe.json" ]; then
+    python3 - "$tag" <<'PY'
+import json, sys
+t = sys.argv[1]
+d = json.load(open('.tmp_robotslot/%s/probe.json' % t))
+ok = bool(d.get('frames'))
+print('[batch] %s frames=%s ⇒ %s' % (t, len(d.get('frames') or {}), 'OK' if ok else '**空跑，需要重跑**'))
+json.dump(d, open('.tmp_robotslot/%s.done.json' % t, 'w'), ensure_ascii=False, default=str)
+PY
+  fi
   tools/scripts/tiltmount/run_costmap_input_dump.sh "${tag}_dump" --settle 25 --duration 8 \
       --frames 3 -- "$@" 2>&1 | tail -3
   cp .tmp_tiltmount/plugin.keep "$PLUG"
