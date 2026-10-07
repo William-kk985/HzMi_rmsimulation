@@ -106,7 +106,49 @@ namespace small_point_lio {
             tf_lidar_odom_to_lidar_frame.setRotation(tf2::Quaternion(odometry.orientation.x(), odometry.orientation.y(), odometry.orientation.z(), odometry.orientation.w()));
             tf2::Transform tf_base_link_to_lidar_frame;
             tf2::fromMsg(base_link_to_lidar_frame_transform.transform, tf_base_link_to_lidar_frame);
-            tf2::Transform tf_odom_to_base_link = tf_base_link_to_lidar_frame.inverse() * tf_lidar_odom_to_lidar_frame * tf_base_link_to_lidar_frame;
+            // ★★ 2026-10-09 修复（bug ③，见 docs/tilted_lidar_fidelity.md §I.5.3 与 §J.1）：
+            //   原来这里是**相似变换（共轭）**：`T_bl⁻¹ · T_ol · T_bl`，其中
+            //     T_bl = lookupTransform(lidar_frame, "base_link") = T(livox_frame ← base_link)
+            //          = "base_link 在 livox_frame 里的位姿"（本变量名就是这个意思）；
+            //     T_ol = T(odom ← livox_frame) = 本函数上面的 LIO 状态
+            //          （small_point_lio.cpp 的出点公式 `p_odom = R_ol·(extrinsic_R·p_lidar + extrinsic_T) + t_ol`
+            //           定的就是这个语义）。
+            //   **姿态**的正确值只能由坐标映射链式法则推：
+            //     p_odom = T_ol · p_livox = T_ol · (T_bl · p_base)  ⇒  T_odom←base = T_ol · T_bl
+            //   共轭只在 T_bl 是**纯平移**时"姿态碰巧对"；一旦倾角记进关节
+            //   （`robot11_mount:=urdf|sensor`，T_bl 的旋转 = R_x(+30°)）就给出**假俯仰**：
+            //   实测（`robot:=robot11 robot11_mount:=urdf`、车静止，.tmp_tiltmount/tm_urdf/）：
+            //     发布的 odom→base_link rpy = [0.383, **4.890**, 7.701]°、pitch 随 yaw 一起长大
+            //     （`/odom` 窗口内 pitch 跨度 4.924°，真值 `/odom_ground_truth` 只有 0.003°）；
+            //     正演 R_bl·R_ol·R_blᵀ 与实测 rpy 逐位相同 ⇒ 机理钉死（nav2 拿到的车身姿态是假的）。
+            //   本行 = **合成**（正确姿态）。正确性由 tools/scripts/tiltmount/tf2_compose_order_test.cpp 钉住
+            //   （非单位 T_bl 下满足位姿一致性 `T_ob·T_bl⁻¹ == T_ol` + 逐点坐标恒等式）。
+            tf2::Transform tf_odom_to_base_link = tf_lidar_odom_to_lidar_frame * tf_base_link_to_lidar_frame;
+            //   ⚠️⚠️ **平移故意保留旧写法（共轭）的值** —— 这是一个**实测过的、有意的**取舍，不是漏改：
+            //     合成的平移 = t_ol − R_ol·p（p = livox 原点在 base_link 里的坐标 =
+            //     (0.000562, 0.130916, 0.157028)，见 TF base_link→livox_frame）**才是物理真值**；
+            //     共轭的平移 = t_ol + (I − R_ol)·p，两者相差**恰好 −p（0.2044 m）**。
+            //     但把平移也改成真值会让**默认档（plugin）与默认模型**的局部代价图**整张变空**，
+            //     机理与实测（2026-10-09，`.tmp_tiltmount/{tm_plugin,j1_plugin,j1_default}/`）：
+            //       · nav2 的 `obstacle_layer.scan` **没有**配 `min_obstacle_height`
+            //         ⇒ nav2 默认 0.0，而这条带子是量在**代价图帧 = odom** 里的
+            //         （`rm_navigation/params/nav2_params_sim_base.yaml:128` global_frame: odom，
+            //           :187 的注释写明设计假设"odom 的 z=0 ≈ base_link 起始高度、地面约 −0.05"）；
+            //       · `/scan` 是一张**二维平盘**、盘面过它自己的帧原点（`livox_frame`）
+            //         ⇒ 它落在 odom 里的 z = TF(odom←livox_frame) 的 z；
+            //       · 实测 scan 盘面 z(odom)：旧平移 **+0.057…+0.084 m（0/949 在带外 ⇒ 全部进图）**；
+            //         新平移（= 物理真值） **−0.102…−0.077 m（950/950 在带外 ⇒ 一条都不进图）**；
+            //       · 后果：局部代价图 lethal **471 → 0**、inscribed **15909 → 0**、整张图全 free
+            //         （默认模型同向：445 → 0、11029 → 0）⇒ 车会"看不见任何障碍"。
+            //     为什么不能在这一提交里一并修：那条 `min_obstacle_height` 属于
+            //     `src/rm_navigation/**/params`（**本任务禁改**），而它对**默认模型**同样生效
+            //     ⇒ 任何"只改本 LIO"的方案都会破坏默认路径。⇒ **平移的完整修法 + 代价图高度带
+            //     重新定基（把 odom z 基准或两条带子对齐到地面）登记为后续项**（§J.5/§J.8）。
+            //     保守做法：姿态正确（这是用户实测到的那个 bug：假俯仰），平移与旧版**逐位相同**
+            //     ⇒ 默认档/默认模型的行为**逐字节不变**（回归证据见 §J.2）。
+            const tf2::Transform tf_legacy_odom_to_base_link =
+                    tf_base_link_to_lidar_frame.inverse() * tf_lidar_odom_to_lidar_frame * tf_base_link_to_lidar_frame;
+            tf_odom_to_base_link.setOrigin(tf_legacy_odom_to_base_link.getOrigin());
             transform_stamped.transform = tf2::toMsg(tf_odom_to_base_link);
 
             nav_msgs::msg::Odometry odometry_msg;
@@ -136,24 +178,20 @@ namespace small_point_lio {
             if (pointcloud_publisher->get_subscription_count() > 0) {
                 const builtin_interfaces::msg::Time time_msg = double_to_msg_time(last_odometry.timestamp);
 
-                geometry_msgs::msg::TransformStamped lidar_frame_to_base_link_transform;
-                try {
-                    lidar_frame_to_base_link_transform = tf_buffer->lookupTransform("base_link", lidar_frame, time_msg);
-                } catch (tf2::TransformException &ex) {
-                    RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"), "Failed to lookup transform from %s to base_link: %s", lidar_frame.c_str(), ex.what());
-                    return;
-                }
-                Eigen::Vector3f lidar_frame_to_base_link_T;
-                lidar_frame_to_base_link_T << static_cast<float>(lidar_frame_to_base_link_transform.transform.translation.x),
-                        static_cast<float>(lidar_frame_to_base_link_transform.transform.translation.y),
-                        static_cast<float>(lidar_frame_to_base_link_transform.transform.translation.z);
-                Eigen::Matrix3f lidar_frame_to_base_link_R =
-                        Eigen::Quaternionf(
-                                static_cast<float>(lidar_frame_to_base_link_transform.transform.rotation.w),
-                                static_cast<float>(lidar_frame_to_base_link_transform.transform.rotation.x),
-                                static_cast<float>(lidar_frame_to_base_link_transform.transform.rotation.y),
-                                static_cast<float>(lidar_frame_to_base_link_transform.transform.rotation.z))
-                                .toRotationMatrix();
+                // ★★ 2026-10-09 修复（bug ②，见 docs/tilted_lidar_fidelity.md §I.5.1/§J.1）：
+                //   进来的这朵云**已经在 odom 系里**了 —— small_point_lio.cpp 的出点公式
+                //     `p_odom = R_ol · (extrinsic_R·p_lidar + extrinsic_T) + t_ol`
+                //   用的是 LIO 自己的状态 (R_ol, t_ol)，与下面 `frame_id = "odom"` 一致。
+                //   原来这里**又**查了一次 TF 并做 `p_pub = R(base_link←livox_frame)·p_odom + t`：
+                //     · 默认档（`robot11_mount:=plugin`）那条 TF 的旋转是单位阵 ⇒ 只把整朵云平移了
+                //       0.20 m（t = (0.000562, 0.130916, 0.157028)），肉眼/单帧统计都看不出来；
+                //     · 倾角一记进关节（`urdf` 档）那条 TF 就带 R_x(−30°) ⇒ **整个 odom 场景被
+                //       刚性旋转 30°**：实测 `/cloud_registered` 的地面倾角 30.970°，而把这朵云按
+                //       同一条 TF 反变换回去只剩 **1.041°**（.tmp_tiltmount/tm_urdf）——这就是
+                //       用户"点云像平放扫到的东西被倾斜了"的直接来源。
+                //   改法 = 什么都不做（点云与 `frame_id = "odom"` 本来就自洽）+ 不再查 TF。
+                //   ⚠️ 影响面：默认档这朵云会**整体移动 −t（0.20 m）**回到真正的 odom 坐标；
+                //      帧内几何（地面倾角/点数/扇区分布）逐项不变（回归见 §J.2 的 before/after 表）。
                 sensor_msgs::msg::PointCloud2 msg;
                 msg.header.stamp = time_msg;
                 msg.header.frame_id = "odom";
@@ -185,15 +223,13 @@ namespace small_point_lio {
                 msg.point_step = 16;
                 msg.row_step = msg.width * msg.point_step;
                 msg.data.resize(msg.row_step * msg.height);
-                Eigen::Vector3f transformed_point;
                 auto pointer = reinterpret_cast<float *>(msg.data.data());
                 for (const auto &point: pointcloud) {
-                    transformed_point = lidar_frame_to_base_link_R * point + lidar_frame_to_base_link_T;
-                    *pointer = transformed_point.x();
+                    *pointer = point.x();
                     ++pointer;
-                    *pointer = transformed_point.y();
+                    *pointer = point.y();
                     ++pointer;
-                    *pointer = transformed_point.z();
+                    *pointer = point.z();
                     ++pointer;
                     *pointer = 0;
                     ++pointer;
