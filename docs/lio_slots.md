@@ -1,5 +1,13 @@
 # 里程计槽位补充：`lio:=small_point_lio`（vendored `Yancey2023/small_point_lio`）
 
+> ⚠️ **换机器人模型时的两条前提**（2026-10-07 追加，见 `docs/robot_models.md`）：
+> ① 本文 §2 的 `extrinsic_T=[0,0,0.05]`（雷达在 IMU 系下）是**按"IMU 在雷达下方 0.05 m"这个装法**
+>    写的；`robot:=hzmirm` 刻意保持同一相对装法 ⇒ **这个键不用改**（换别的装法必须重算）；
+> ② `lio_tf_adapter` 的杆臂补偿 `xyz`（默认 `[-0.12,0,-0.125]`）**是随车几何变的**：
+>    换模型时 launch 会按 `robot` 槽位切到另一条互斥分支（hzmirm = `[0,0,-0.75]`），
+>    不改就会出现"`base_link` 在 odom 里被抬高"的假杆臂。
+> 实测（RMUC2026，10 s 直线）：默认模型 22 mm/2.00 m，hzmirm 20 mm/1.95 m ⇒ 两车里程计同量级。
+
 > 2026-10-05 · 新增 `bringup_sim.launch.py` 的 `lio` 取值 `small_point_lio`（默认值仍是 `fastlio`，零影响）
 > 2026-10-05（同日稍后）· **调参完成**：该槽位从"跟不住（30 m 级、不可重复）"调到
 > "与 FAST-LIO 参照同量级（长度 0.95~1.15×、形状误差 ATE 0.24~0.42 m）"，新参数文件

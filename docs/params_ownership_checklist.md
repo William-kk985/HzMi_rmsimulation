@@ -2,6 +2,17 @@
 
 > 目标（R1，见 `docs/rm_bench_refactor_plan.md`）：**算法自己的参数回归各自的算法包**（回到包最原始的样子），总装层不再集中存放算法配置。
 > 本清单登记"每个配置文件现在在哪、属于谁、该回归到哪里、回归时要同步改什么"。**当前只是清单，代码未动。**
+>
+> ⚠️ **2026-10-07 追加（换机器人模型 `robot:=hzmirm`）**：本次新增了一个**按模型分叉**的参数文件与两条按槽位
+> 互斥的节点分支，都**遵守本文的归属规则**：
+> · `linefit_ground_segmentation_ros/config/segmentation_sim_hzmirm.yaml` —— **算法参数留在算法包自己**
+>   （与 `segmentation_sim.yaml` 同目录、逐键同构，只改 `sensor_height` 与 `gravity_aligned_frame`）；
+> · `lio_tf_adapter` 的杆臂 `xyz` 仍留在**它自己包的 config** 里（默认 `[-0.12,0,-0.125]` 未动），
+>   `bringup_sim.launch.py` 只在 `robot:=hzmirm` 时**注入一条装配级覆盖**（`[0,0,-0.75]`）——
+>   与"装配级参数（use_sim_time/话题 remap）留 launch、算法参数留包"同一条分界线。
+> 哪些**几何量**其实应该跟着车走、却还留在别处（例如 nav2 的 `robot_radius: 0.22`、
+> `traversability_criteria.yaml` 的 `speed_limit_lookahead_m: 3.0`），本文件**一个字都没改**，
+> 逐项差异列在 `docs/robot_models.md` §4。
 
 ---
 
