@@ -22,7 +22,18 @@ docs/tilted_lidar_fidelity.md §I 服务。它只订阅，不发布任何东西�
   7. `/scan`：有限波束总数、逐扇区有限波束数、最近波束；并用 TF 把每条波束搬到 odom，
      统计 z 分布 ⇒ 直接量 obstacle_layer 的 min/max_obstacle_height(0/2.0) 会丢掉多少波束。
   8. `/local_costmap/costmap`：lethal/inscribed/free/unknown + 车心到最近 lethal 的距离 +
-     **lethal 格的方位分布**（以车为原点、在车体系里）。
+     **lethal 格的方位分布**（以车为原点、在车体系里）+ ★ 2026-10-09 新增：**车半径圆内**的
+     格数/≥99 格数/free 格数（"车是不是一开始就被膨胀团包住"的判据）。
+  9. ★ 2026-10-09 新增（为 docs/tilted_lidar_fidelity.md §J 的 A/B 服务）：
+     · `/segmentation/ground` 每帧点数（与 obstacle 一起看"分割有没有塌"）；
+     · `/scan` 的**距离带**直方图（0.05–0.1 / 0.1–0.3 / … / 4–7 m）；
+     · **RTF**（记录窗内 Δ仿真钟/Δ墙钟，与 /clock 同口径）；
+     · `--drive`：记录窗内注入**固定动作**（直行 10 s vx=0.30 ↔ 原地转 10 s wz=0.60 交替），
+       窗口末尾报"odom 位移 − 真值位移"漂移与 yaw 差（本仓惯例，见 §H.5）；
+     · `--goal-forward H`（+`--goal-wait`）：窗口末尾沿车头方向发一次 `/goal_pose`，
+       报 pre/post 位姿、真值位移、`/cmd_vel` 非零条数、`/plan` 条数（"目标被接受但车不动"的判据）。
+     ⚠️ `--drive` / `--goal-forward` 的注入**都在 settle 之后**（本沙箱里在 spawn+插件加载期
+     注入会让 gzserver segfault，见 §H.6）；不带这两个开关时探针仍然**只订阅**。
 
 用法：
   python3 tools/scripts/tiltmount/tilt_mount_probe.py --out <dir>/probe.json \
@@ -43,7 +54,8 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from builtin_interfaces.msg import Time as TimeMsg
-from nav_msgs.msg import Odometry, OccupancyGrid
+from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import Imu, LaserScan, PointCloud2
 import tf2_ros
@@ -299,6 +311,12 @@ class TiltProbe(Node):
         self.costmap = {}
         self.tf = {}
         self.dumps = defaultdict(int)
+        # ★ 2026-10-09：A/B 需要的额外量（--drive / --goal-forward）
+        self.cmdvel_abs = []                  # /cmd_vel 的 |vx|+|wz|（nav2 侧；恢复行为也在这里）
+        self.clock_marks = []                 # (wall, clock) —— 记录窗首尾 ⇒ RTF
+        self.goal_pub = None
+        self.vel_pub = None
+        self.goal_result = None
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -312,6 +330,12 @@ class TiltProbe(Node):
                                  lambda m: self.on_cloud('registered', m), QOS_BE)
         self.create_subscription(PointCloud2, '/segmentation/obstacle',
                                  lambda m: self.on_cloud('obstacle', m), QOS_BE)
+        # ★ 2026-10-09：地面那一半也要（A/B 里看"分割有没有塌"；只数点数，不落点）
+        self.create_subscription(PointCloud2, '/segmentation/ground',
+                                 lambda m: self.on_cloud('ground', m), QOS_BE)
+        # ★ 2026-10-09：nav2 侧证据（--goal-forward 时用来判"目标被接受但车不动"）
+        self.create_subscription(Twist, '/cmd_vel', self.on_cmdvel, QOS_RE)
+        self.create_subscription(Path, '/plan', self.on_plan, QOS_RE)
         self.create_subscription(PointCloud2, '/global_costmap/voxel_grid',
                                  lambda m: self.on_cloud('voxel_grid', m), QOS_BE)
         self.create_subscription(LaserScan, '/scan', self.on_scan, QOS_BE)
@@ -399,6 +423,53 @@ class TiltProbe(Node):
                 'n_unknown': int(((data < 0)).sum()),
                 '_data': data}
 
+    def on_cmdvel(self, m):
+        with self.lock:
+            self.frames['cmd_vel'] += 1
+            self.cmdvel_abs.append(abs(m.linear.x) + abs(m.angular.z))
+
+    def on_plan(self, m):
+        with self.lock:
+            self.frames['plan'] += 1
+            self.pts['plan'].append(len(m.poses))
+
+    def drive_step(self, t_in_window, period=20.0, straight_s=10.0):
+        """★ 2026-10-09：`--drive` 的固定动作（与 run_robot11_mount_probe.sh **逐字相同**的协议）。
+
+        直行 10 s（vx=0.30）↔ 原地转 10 s（wz=0.60）交替，注入点 = `/cmd_vel_chassis`
+        （mecanum 插件订阅的那个；`fake_vel_transform` 是事件驱动转发，不会持续发零覆盖它）。
+        """
+        if self.vel_pub is None:
+            self.vel_pub = self.create_publisher(Twist, '/cmd_vel_chassis', 10)
+        m = Twist()
+        if (t_in_window % period) < straight_s:
+            m.linear.x = 0.30
+        else:
+            m.angular.z = 0.60
+        self.vel_pub.publish(m)
+
+    def send_goal(self, x, y):
+        """发一次 `/goal_pose`（map 系；只为取证，不改任何参数/配置）。"""
+        if self.goal_pub is None:
+            self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        p = PoseStamped()
+        p.header.frame_id = 'map'
+        p.header.stamp = self.get_clock().now().to_msg()
+        p.pose.position.x = float(x)
+        p.pose.position.y = float(y)
+        p.pose.orientation.w = 1.0
+        for _ in range(5):
+            self.goal_pub.publish(p)
+            time.sleep(0.2)
+
+    def robot_map_pose(self):
+        """车在 map 系里的 (x, y, yaw)（拿不到就 None）。"""
+        tr = self._lookup('map', 'base_link')
+        if tr is None:
+            return None
+        R, t = tf_msg_to_RT(tr)
+        return (float(t[0]), float(t[1]), math.radians(R_to_rpy_deg(R)[2]))
+
     # ---------------- TF
     def _lookup(self, target, source, stamp=None):
         tries = []
@@ -447,6 +518,15 @@ def main():
     ap.add_argument('--settle', type=float, default=0.0)
     ap.add_argument('--frames', type=int, default=3)
     ap.add_argument('--variant', default='')
+    # ★ 2026-10-09：A/B 用的三个开关（都不带 = 探针仍然**只订阅、不发布**）
+    ap.add_argument('--drive', action='store_true',
+                    help='记录窗内注入固定动作（直行 10 s vx=0.30 ↔ 原地转 10 s wz=0.60），'
+                         '末尾报"odom 位移 − 真值位移"漂移（口径同 docs/tilted_lidar_fidelity.md §H.5）')
+    ap.add_argument('--goal-forward', type=float, default=None,
+                    help='窗口末尾沿车头方向发一次 /goal_pose（map 系），观察 --goal-wait 秒')
+    ap.add_argument('--goal-wait', type=float, default=30.0)
+    ap.add_argument('--robot-radius', type=float, default=0.3565,
+                    help='local costmap "车半径圆内"统计用的半径（robot11 = 0.3565）')
     args = ap.parse_args()
 
     rclpy.init()
@@ -460,8 +540,14 @@ def main():
         print('[probe] settle %.0f s …' % args.settle, flush=True)
         time.sleep(args.settle)
     t0 = time.time()
-    print('[probe] 记录窗口 %.0f s …' % args.duration, flush=True)
+    print('[probe] 记录窗口 %.0f s …%s' % (args.duration,
+          '（--drive：直行/原地转交替，注入点 /cmd_vel_chassis）' if args.drive else ''),
+          flush=True)
+    with node.lock:
+        node.clock_marks.append((time.time(), node.clock if node.clock is not None else 0.0))
     while time.time() - t0 < args.duration:
+        if args.drive:
+            node.drive_step(time.time() - t0)
         time.sleep(0.5)
         with node.lock:
             nraw = node.frames.get('raw', 0)
@@ -469,6 +555,57 @@ def main():
             nimu = node.frames.get('imu', 0)
         print('[probe] t=%.0f raw=%d reg=%d imu=%d' % (time.time() - t0, nraw, nreg, nimu),
               flush=True)
+    with node.lock:
+        node.clock_marks.append((time.time(), node.clock if node.clock is not None else 0.0))
+    if args.drive:
+        try:
+            node.vel_pub.publish(Twist())          # 收尾一发零速（与 regress 工具同款）
+        except Exception:
+            pass
+
+    # ★ 2026-10-09：`--goal-forward` = 窗口末尾发一次 /goal_pose（在 settle+窗口之后 ⇒ 不会
+    #   落在 spawn/插件加载窗口里，见 §H.6 的沙箱崩溃教训）
+    if args.goal_forward is not None:
+        pose = node.robot_map_pose()
+        if pose is None:
+            print('[probe] **拿不到 map→base_link ⇒ 不发目标**', flush=True)
+        else:
+            gx = pose[0] + args.goal_forward * math.cos(pose[2])
+            gy = pose[1] + args.goal_forward * math.sin(pose[2])
+            print('[probe] 车在 map 系 (%.3f, %.3f, %.1f°)，目标 = 车头前 %.2f m → (%.3f, %.3f)'
+                  % (pose[0], pose[1], math.degrees(pose[2]), args.goal_forward, gx, gy), flush=True)
+            with node.lock:
+                plan0 = node.frames.get('plan', 0)
+                cmd0 = len(node.cmdvel_abs)
+                gt0 = list(node.odom.get('/odom_ground_truth', []))
+            node.send_goal(gx, gy)
+            time.sleep(args.goal_wait)
+            post = node.robot_map_pose()
+            with node.lock:
+                plan1 = node.frames.get('plan', 0)
+                cmd1 = len(node.cmdvel_abs)
+                gt1 = list(node.odom.get('/odom_ground_truth', []))
+            def _xy(seq):
+                a = np.array([r[:8] for r in seq], dtype=np.float64) if seq else None
+                return (None if a is None else
+                        (float(a[-1, 1]), float(a[-1, 2]), R_to_rpy_deg(quat_to_R(*a[-1, 4:8]))[2]))
+            p0, p1 = _xy(gt0), _xy(gt1)
+            node.goal_result = {
+                'goal': [round(gx, 4), round(gy, 4)],
+                'goal_forward_m': args.goal_forward, 'goal_wait_s': args.goal_wait,
+                'pre_map_pose': None if pose is None else [round(v, 4) for v in pose],
+                'post_map_pose': None if post is None else [round(v, 4) for v in post],
+                'gt_pre': None if p0 is None else [round(v, 4) for v in p0],
+                'gt_post': None if p1 is None else [round(v, 4) for v in p1],
+                'gt_moved_m': (None if (p0 is None or p1 is None) else
+                               round(math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 5)),
+                'gt_yaw_delta_deg': (None if (p0 is None or p1 is None) else
+                                     round(math.degrees(p1[2] - p0[2]), 3)),
+                'plan_frames_during_wait': int(plan1 - plan0),
+                'cmd_vel_n_during_wait': int(cmd1 - cmd0),
+                'dist_to_goal_after_m': (None if post is None else
+                                         round(math.hypot(post[0] - gx, post[1] - gy), 4))}
+            print('[probe] 目标后：%s' % node.goal_result, flush=True)
 
     node.snapshot_tf()
 
@@ -476,6 +613,14 @@ def main():
            'frame_ids': {k: dict(v) for k, v in node.frame_ids.items()},
            'pts_median': {k: pct(v, 50) for k, v in node.pts.items() if v},
            'tf': node.tf}
+    # ★ 2026-10-09：RTF（记录窗口径：Δ仿真钟 / Δ墙钟；与 /clock 同一条时间轴）
+    with node.lock:
+        marks = list(node.clock_marks)
+    if len(marks) >= 2:
+        dc = marks[-1][1] - marks[0][1]
+        dw = max(1e-6, marks[-1][0] - marks[0][0])
+        out['rtf'] = {'sim_seconds': round(dc, 3), 'wall_seconds': round(dw, 3),
+                      'rtf': round(dc / dw, 4)}
 
     # ---- 点云统计（raw / registered / obstacle / voxel_grid 的**最后一帧**，再对 raw 全部帧）
     cloud_stats_out = {}
@@ -641,6 +786,38 @@ def main():
             'pos_mean': [float(v) for v in arr[:, 1:4].mean(axis=0)],
             'rpy_deg_mean_of_last': R_to_rpy_deg(quat_to_R(*q))}
 
+    # ---- ★ 2026-10-09：`--drive` 的动作/漂移 + `/cmd_vel` 证据（"目标被接受但车不动"也看这里）
+    with node.lock:
+        cmd_abs = list(node.cmdvel_abs)
+        plan_pts = list(node.pts.get('plan', []))
+    out['cmd_vel'] = {
+        'n': len(cmd_abs),
+        'max_abs_vx_plus_wz': round(max(cmd_abs), 4) if cmd_abs else 0.0,
+        'nonzero': int(sum(1 for v in cmd_abs if v > 1e-3))}
+    out['plan'] = {'n_frames': len(plan_pts),
+                   'pts_median': pct(plan_pts, 50) if plan_pts else None}
+    if args.drive and odom.get('/odom') and odom.get('/odom_ground_truth'):
+        def _trip(seq):
+            a = np.array([r[:8] for r in seq], dtype=np.float64)
+            d = math.hypot(a[-1, 1] - a[0, 1], a[-1, 2] - a[0, 2])
+            p = float(np.sum(np.hypot(np.diff(a[:, 1]), np.diff(a[:, 2]))))
+            y0 = R_to_rpy_deg(quat_to_R(*a[0, 4:8]))[2]
+            y1 = R_to_rpy_deg(quat_to_R(*a[-1, 4:8]))[2]
+            return d, p, y1, y0
+        do_, po_, yo1, yo0 = _trip(odom['/odom'])
+        dg_, pg_, yg1, yg0 = _trip(odom['/odom_ground_truth'])
+        a = np.array([r[:8] for r in odom['/odom']], dtype=np.float64)
+        b = np.array([r[:8] for r in odom['/odom_ground_truth']], dtype=np.float64)
+        dx = (a[-1, 1] - a[0, 1]) - (b[-1, 1] - b[0, 1])
+        dy = (a[-1, 2] - a[0, 2]) - (b[-1, 2] - b[0, 2])
+        out['drive'] = {
+            'protocol': '直行 10 s (vx=0.30) ↔ 原地转 10 s (wz=0.60) 交替 → /cmd_vel_chassis',
+            'odom_displacement_m': round(do_, 5), 'odom_path_m': round(po_, 5),
+            'gt_displacement_m': round(dg_, 5), 'gt_path_m': round(pg_, 5),
+            'gt_yaw_start_end_deg': [round(yg0, 3), round(yg1, 3)],
+            'drift_vs_truth_m': round(math.hypot(dx, dy), 5),
+            'drift_vs_truth_yaw_deg': round((yo1 - yo0) - (yg1 - yg0), 4)}
+
     # ---- /scan：有限波束 + 逐扇区 + 搬到 odom 后的 z 分布（obstacle_layer 高度带）
     sc = None
     if node.scan_frames:
@@ -672,6 +849,14 @@ def main():
                 if a <= lo < b:
                     q[name] += s['n_finite']
         sc['quadrants_n_finite'] = q
+        # ★ 2026-10-09：**距离带**直方图（与 tools/scripts/regress 探针的分带口径一致 ⇒ 可并排读）
+        BANDS = [(0.00, 0.05), (0.05, 0.10), (0.10, 0.15), (0.15, 0.20), (0.20, 0.30),
+                 (0.30, 0.50), (0.50, 1.00), (1.00, 2.00), (2.00, 4.00), (4.00, 7.00),
+                 (7.00, 1e9)]
+        rf = r[fin]
+        sc['range_bands_per_frame'] = {
+            ('%.2f-%.2f' % (lo, hi) if hi < 1e8 else '>7.00'): int(((rf >= lo) & (rf < hi)).sum())
+            for lo, hi in BANDS}
         # 逐波束搬到 odom：z 分布（obstacle_layer 的 min/max_obstacle_height = 0/2.0 在 odom 里量）
         tr = node._lookup('odom', f['frame_id'])
         if tr is not None:
@@ -728,8 +913,31 @@ def main():
                 'left': int(((az > 45) & (az <= 135)).sum()),
                 'back': int((np.abs(az) > 135).sum()),
                 'right': int(((az > -135) & (az <= -45)).sum())}
+        # ★ 2026-10-09：**车半径圆内**的格（"车一开始就在膨胀团里"的判据，见 §D.2 的口径）。
+        #   车心 = TF(costmap_frame ← base_link) 的平移 —— 与 lethal 的方位统计同一个变换。
+        try:
+            trc = node._lookup(cm['frame_id'], 'base_link')
+            if trc is not None:
+                rc = tf_msg_to_RT(trc)
+                cx, cy = float(rc[1][0]), float(rc[1][1])
+                yy, xx = np.nonzero(np.ones_like(data, dtype=bool))
+                wx2 = ox + (xx + 0.5) * res
+                wy2 = oy + (yy + 0.5) * res
+                rr = np.hypot(wx2 - cx, wy2 - cy)
+                m_in = rr <= float(node.args.robot_radius)
+                vals = data[yy[m_in], xx[m_in]]
+                cm['robot_center_cell'] = int(data[int((cy - oy) / res), int((cx - ox) / res)])
+                cm['robot_center_xy_in_map'] = [round(cx, 4), round(cy, 4)]
+                cm['circle_cells'] = int(m_in.sum())
+                cm['circle_n_ge99'] = int((vals >= 99).sum())
+                cm['circle_n_lethal'] = int((vals == 100).sum())
+                cm['circle_n_free'] = int((vals == 0).sum())
+                cm['circle_n_unknown'] = int((vals < 0).sum())
+        except Exception as e:                                # pragma: no cover
+            cm['circle_error'] = str(e)
         out['costmap_local'] = cm
 
+    out['goal'] = node.goal_result
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or '.', exist_ok=True)
     with open(args.out, 'w') as fh:
         json.dump(out, fh, indent=1, ensure_ascii=False, default=str)

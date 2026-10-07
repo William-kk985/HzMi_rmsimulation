@@ -4,7 +4,15 @@
 #
 # 用法：
 #   tools/scripts/tiltmount/run_tilt_mount_probe.sh <tag> [--variant NAME] \
-#       [--settle S] [--duration D] [--frames N] -- [LAUNCH_ARGS...]
+#       [--settle S] [--duration D] [--frames N] [--drive] [--goal-forward H] [--goal-wait S] \
+#       [--robot-radius R] -- [LAUNCH_ARGS...]
+#
+# ★ 2026-10-09：新增三个**探针参数**（直接透传给 tilt_mount_probe.py；不带时仍然只订阅）：
+#   · `--drive`       记录窗内注入固定动作（直行 10 s vx=0.30 ↔ 原地转 10 s wz=0.60）⇒ 漂移 A/B；
+#   · `--goal-forward H` 窗口末尾沿车头方向发一次 /goal_pose 并观察 `--goal-wait` 秒
+#                     （"目标被接受但车不动"的判据：/plan 条数、/cmd_vel 非零、真值位移）；
+#   · `--robot-radius R` local costmap "车半径圆内"统计的半径（robot11 = 0.3565）。
+#   注入都在 settle + 记录窗之后/之内（**绝不落在 spawn/插件加载窗口**，见 §H.6）。
 # 例：
 #   tools/scripts/tiltmount/run_tilt_mount_probe.sh tm_plugin --variant plugin \
 #       --settle 25 --duration 45 -- world:=RMUL2026 mode:=slam_nav \
@@ -132,6 +140,13 @@ for pair in "base_link livox_frame" "base_link imu_link" "odom base_link" "odom 
   timeout 12 ros2 run tf2_ros tf2_echo "$1" "$2" 2>/dev/null \
     | grep -m1 -A4 "Translation" | tr '\n' ' ' | sed 's/  */ /g' | tee -a "$OUT/mount_evidence.txt"
   echo | tee -a "$OUT/mount_evidence.txt"
+done
+echo "=== [run] 契约：关键话题的发布者个数（必须逐个 = 1）===" | tee -a "$OUT/mount_evidence.txt"
+for t in /livox/lidar /livox/lidar/pointcloud /cloud_registered /segmentation/ground \
+         /segmentation/obstacle /scan /odom /local_costmap/costmap /global_costmap/voxel_grid; do
+  printf '  %-34s publishers=' "$t" | tee -a "$OUT/mount_evidence.txt"
+  timeout 15 ros2 topic info -v "$t" 2>/dev/null \
+    | awk '/Publisher count:/{print $3}' | head -1 | tee -a "$OUT/mount_evidence.txt"
 done
 echo "=== [run] Gazebo 侧真身（mesh 姿态 + 传感器 scoped name） ===" | tee -a "$OUT/mount_evidence.txt"
 timeout 25 gz model -m robot -i > "$OUT/gz_model_info.txt" 2>&1 || true
