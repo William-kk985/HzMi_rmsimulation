@@ -1167,3 +1167,256 @@ launch 里新增 `_Nav2ParamsForSlot`：`robot:=robot11` 时把这份覆盖层**
 8. **`/scan` 的 98022 条 <1 m 波束里，云台自击占多少**没有单独统计（只有累计数）；
 9. **插件改动没有跑默认模型/hzmirm 的回归**（论证是"缺省参数 = 单位阵 ⇒ 逐字节不变"，
    但**没有**实测对照）⇒ 收尾前应补一次默认模型的 A/B（本轮补跑了默认模型对照，见 §11.2.1）。
+
+## 12. Phase 4：让 `robot:=robot11` 能带 GUI 用 + 自击不再污染限速 + 接线的**运行期**证据（2026-10-07）
+
+> 状态：**新增**。触发 = 用户 2026-10-07 带 GUI 的一次实跑
+> （`ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 mode:=mapping lio:=small_point_lio
+> robot:=robot11 nav_rviz:=True`，~13 s 后 Ctrl-C）暴露的三个缺陷：
+> ① `gzclient` 被 SIGKILL（`exit code -9`）、rviz2 黑屏且 5 s 内退不掉；② 车**静止**时限速被钉在
+> 0.60 m/s 地板；③ launch 横幅说"linefit 参数没有跟着切"，而代码里其实**已经切了**（横幅在骗人）。
+> 默认模型与所有 launch/config 默认值**仍未改**（本轮每一项偏离都逐条登记；`robot:=robot11` 之外
+> 的行为逐字节不变）。
+
+### 12.1 一句话结论
+
+| # | 缺陷 | 根因（实测） | 修法 | 现在的状态 |
+|---|---|---|---|---|
+| ① | GUI 被杀 / 黑屏 | 视觉是上游原始 STL：**12 个 mesh 合计 2,821,320 面 / 141.07 MB**，其中 `base_link.STL` 一项 99 MiB / **2,078,226 面**。实测 rviz2 峰值 RSS 随它在 **243 MiB ↔ 1444 MiB** 之间（+1.2 GB） | 新增 `robot11_visual:=decimated|full`（**默认 decimated**）：`<visual>` 复用 Phase 1 已入库的抽稀件 `generated/*_collision.stl`（**9,700 面 / 0.486 MB**，bbox 与原件差 ≤3 mm、单位/原点不变） | **可交互**（虚拟屏 + 软件 GL 下 gzclient/rviz2 都活满窗口、rviz2 有像素） |
+| ② | 静止也被压到地板 | 雷达装在底盘凹槽里 ⇒ **26.9~29.0% 的点落在 r ≤ 0.09 m**，它们在前瞻走廊里造出 d=0.00 的粗格：**局部地面 = +0.000 m**（= 雷达自身高度！真值 −0.223 m）、台阶残差 **0.023~0.203 m**（帧间跳）、并把"参考坡度"钉成 **0.0°**（真值 ~2.9°） | 判据层新增**自击掩膜**（`self_mask_*`，**默认关**；只有 robot11 槽位的参数文件打开）：(a) 自身 collision 包络 113 个 AABB + (b) 近场死区 `r_xy ≤ 0.2416 m 且 z ≥ −0.2295 m`（上界 = 几何盲半径 0.3416 m − 10 cm） | **静止无假台阶**（近场 d<0.30 m 的 max 台阶 0.023~0.032 → **0.002~0.005 m**，低于 0.06 死区）；**真台阶仍限速**（2.6~2.8 m 的真特征照旧触发，见 §12.3） |
+| ③ | 横幅说"参数没跟着切" | Phase 3 已经把 linefit 切成 `segmentation_sim_robot11.yaml`，但**横幅那一行写死了旧结论**（说的是"意图"不是"生效值"） | 横幅改成**运行时从真正递给节点的那份 YAML 里读出生效值**再打印；并补运行期 `ros2 param get` 证据 | **已修**：节点侧 `sensor_height=0.2595`、`gravity_aligned_frame=""`（§12.4） |
+
+### 12.2 缺陷 ①：带 GUI 的代价（full vs decimated，**实测**）
+
+口径：`world:=RMUC2026 mode:=mapping lio:=small_point_lio robot:=robot11 nav_rviz:=True`、车静止、
+**虚拟屏 `Xvfb 3200x1200x24` + 软件 GL（llvmpipe / Mesa 23.2.1）**、RSS 每 1 s 采样一次、
+窗口从"gzclient 与 rviz2 都起来"开始计 50~60 s。脚本：`tools/scripts/regress/robot11_gui_bench.sh`。
+原始数据：`.tmp_robotslot/r11p4guiFULL{,2}/{rss.csv,shot-final.xwd,summary.txt}`、
+`.tmp_robotslot/r11p4guiDEC{,2,3}/`。
+
+| 指标 | `full`（上游原始 STL） | `decimated`（**默认**） | 差 |
+|---|---|---|---|
+| `<visual>` 三角形合计（12 个 mesh） | **2,821,320** | **9,700** | **−291×** |
+| `<visual>` 文件字节合计 | **141.07 MB** | **0.486 MB** | −290× |
+| 其中 `base_link` | 2,078,226 面 / 103.91 MB | 3,000 面 / 0.150 MB | −693× |
+| `gzclient` 峰值 RSS | 474 MiB | 474 MiB | **0**（视觉档位**不动它**） |
+| `gzserver` 峰值 RSS | 3,202 MiB（GUI）/ **3,112 MiB（无头对照，full）** | 3,202 MiB | 0（是 RMUC2026 世界的物理/网格，与视觉无关） |
+| **`rviz2` 峰值 RSS** | **1,381 MiB**（另一跑 1,444） | **243 MiB**（两跑一致） | **−1,138 MiB（−82%）** |
+| 三进程 RSS 合计 | ~5.06 GiB | ~3.92 GiB | −1.14 GiB |
+| `gzclient` 活到窗口结束 | ✅ 50/50 s（60 s 那跑也满），**无死亡行** | ✅ 50/50 s（60 s 那跑也满），无死亡行 | — |
+| `rviz2` 活到窗口结束 | ✅ | ✅ | — |
+| 截图：**rviz2 窗口矩形内**非黑像素 / 颜色数 | **0.5768 / 1023** | **0.5768 / 1438** | 都真的在画（不是黑屏） |
+| 截图：root 全屏非黑像素 | 0.3773 | 0.3773 | — |
+| `/odom` 消息数（50 s 窗口内） | 90 | 115 | — |
+
+**结论与诚实边界**：
+
+1. **`robot11_visual:=decimated` 只换 `<visual>`**：`<collision>`（76 个 box + 云台细盒 + cylinder）、
+   `<sensor>`、`<plugin>`、inertial 一个字节都没动 ⇒ **物理/感知/契约与全 mesh 版逐字节一致**。
+   抽稀件是 Phase 1 用 VTK `vtkQuadricDecimation` 生成的**米制同原点**网格（`collision_assets.json`
+   里逐个记了 `bbox_in/bbox_out` 与采样误差：`base_link` 出→参 max 26 mm / p99 18 mm）。
+2. **本轮的 GUI 数字是"虚拟屏 + 软件 GL"上量的**：能测的是**进程存活、峰值 RSS、有没有画**；
+   **不能**代表真 GPU 的渲染吞吐（llvmpipe 的帧率没有参考价值）。
+3. ⚠️ **我们没能复现 `gzclient` 的 SIGKILL**：本机 31.9 GB 内存、空载可用 ~12~15 GB，两档都活满窗口、
+   **都没有死亡行**。用户那次被杀最可能是**内存压力**（整栈 ~5 GiB：gzserver 3.1 + rviz2 1.4 + gzclient 0.5），
+   而 `full` 档比 `decimated` 档**多 ~1.14 GiB**。⇒ 这是**推断**，不是实测（见 §12.7 第 1 项）。
+   反过来说：**本轮也没有证据表明 `full` 档本身会让 GUI 崩**（两档都渲染正常）。
+4. ⚠️ `gzclient` 的 RSS **不随视觉档位变**（464 vs 474 MiB，噪声内）⇒ "把 `base_link.STL` 换成抽稀件"
+   **不会**降低 gzclient 的常驻内存；真正被降下来的是 **rviz2**（+1.2 GB → 243 MiB）。
+   本次 GUI 里 gzclient 的内存主体是 RMUC2026 世界与 Gazebo 客户端本身。
+
+### 12.3 缺陷 ②：自击掩膜（设计 + 前后实测）
+
+#### 12.3.1 先更正一条 Phase 3 的归因（诚实更正）
+
+§11.2 写的是"近点 100% 落在**云台** `l10/l11` 上，中位距离 0.14 m"。Phase 4 逐点复核后**要更正**：
+
+* 实测近场点的**中位半径只有 0.021 m**（p95 = 0.048 m、max = 0.121 m），而不是 0.14 m；
+* 它们**不在任何 `<collision>` 几何上**：把 113 个 collision AABB 逐个点数，"命中"的只有 **3 个点**；
+* 它们是**射线插件把点重建成 `range·axis`** 的系统内移：射线实际从 `minDist·axis`（= 0.1 m）出发
+  （`livox_points_plugin.cpp`：`start_point = minDist * axis`），而发布时按 `point = range * axis`
+  算 ⇒ **每个点都朝传感器方向内移 0.1 m**。
+* **独立证据（与掩膜无关）**：地面点的 z 随距离单调变化 —— r 0.25–0.35 → **−0.208**；
+  r 0.35–0.50 → −0.219；r 0.5–1.0 → −0.237；r 2–4 → −0.253；几何真值 **−0.2595**。
+  这正是"沿射线内移 0.1 m"应有的样子（近处仰角大 ⇒ 抬得高）。
+  ⇒ 修那个插件会改变**所有模型**的点云（默认模型也移了 0.1 m）⇒ **不属本主题、且违反"默认逐字节不变"**，
+  本轮只在**判据层**把这团近场剔掉。
+
+#### 12.3.2 掩膜定义（两部分并集；默认两部分都关）
+
+| 部分 | 定义 | 依据 |
+|---|---|---|
+| (a) 自身 collision 包络 | 本模型 12 个 link 的 `<collision>` 在 `livox_frame` 下的 **113 个 AABB**（逐个 ≥5 mm 膨胀；z 下限抬到地面以上 0.03 m） | Gazebo 的 ray sensor 走 ODE、**只与 `<collision>` 求交** ⇒ 真自击点必在某个 collision 体表面上 ⇒ 必在其 AABB 内；真障碍不可能在机器人自己的 collision 体内部 |
+| (b) 近场死区 | `r_xy ≤ 0.2416 m` **且** `z ≥ −0.2295 m`（= 地面 +0.03 m） | 上界是**几何硬约束**：下俯 30° + FOV 下沿 7.22° ⇒ 最低射线的地面交点在 **0.3416 m**，即 **r < 0.3416 m 内不可能有地面回波**；取 0.3416 − 0.10 = **0.2416 m** 留余量 |
+
+生成/验证工具：`tools/scripts/regress/robot11_self_mask.py`
+（`--emit` 生成两份 YAML、`--check` 断言"YAML == 由模型重算的结果"、`--verify` 离线射线验证、
+`--dump-fk` 打印零位 FK 供与运行期 TF 对照）。参数文件按 **robot 槽位**选
+（`config/traversability_self_mask.yaml` = 默认**关**；`…_robot11.yaml` = 开 + 点表），
+机制与 linefit 的 `segmentation_sim_<slot>.yaml` **完全同款**。
+
+**离线验证（`--verify`，30000 条 MID-360 射线）**：
+
+| 检查 | 结果 |
+|---|---|
+| 地面环（射线打到 z = 地面平面，7560 点，最近 **0.3457 m**）被掩点数 | **0** ✅ |
+| 真 mesh 表面的 <0.75 m 命中被掩比例 | 0.2310 → **0.9992**（(b) 补上之后） |
+| z 下限裁掉的 collision 形状数 / 最大裁掉量 | 8 个 / 0.035 m（= 轮子下沿，**故意的**地面保护） |
+
+**在线验证（同一朵云、逐点判掩膜；3 帧实测）**：
+
+| 帧 | 被掩点数 | 其中地面带(z<−0.20) | 走廊最近格 d | 该格 ground | 该格 台阶 |
+|---|---|---|---|---|---|
+| 无掩膜 | 0 | — | **0.00 m** | **+0.0000 m**（= 雷达自身高度） | 0.077~0.095 m |
+| `robot11_self_mask_robot11.yaml` | 26.9~28.1% | **0** | **0.20 m** | **−0.2228 m**（真地面） | **0.006 m** |
+
+#### 12.3.3 前后数字（同世界/同出生点/同参数；`mode:=mapping`、静止窗口）
+
+`[slope_speed]` 与 `~/traversability_stats` 的**逐帧**统计（新增探针
+`tools/scripts/regress/slope_speed_probe.py`；原始数据 `.tmp_robotslot/r11p4off/slope.log`（掩膜关）
+与 `.tmp_robotslot/r11p4fin2/slope.log`（掩膜开））：
+
+| 指标（静止） | BEFORE（掩膜关） | AFTER（掩膜开） |
+|---|---|---|
+| `self_masked` 点/帧（中位） | **0** | **3374**（≈ 全帧 11459 点的 29.4%） |
+| 走廊最近格 `data_min_d` | **0.00 m**（37/37 帧） | **0.20 m**（46/46 帧） |
+| 近场（d<0.30 m）max 台阶残差 | 0.023~0.032 m（该窗口）／日志里出现过 **0.128~0.203 m** | **0.002~0.005 m** |
+| 近场（d<0.30 m）max 局部坡度 | 2.38~2.79° | 2.50~2.83° |
+| `近坡`（参考坡度，取自最近一列） | **0.0°**（被自击格钉住） | **2.9~3.1°**（真地面坡度） |
+| 限速落在地板 0.60 m/s 的帧数 | 12/129 条日志行出现 `d=0.00 m 台阶≈0.164 m`（其中 **9 条** `limit=0.60`）；另一窗口的逐帧统计 0/37 | **0/46**（最小 0.606 m/s） |
+| 走廊 max 台阶（全走廊） | 0.104~0.189 m @ 2.6~2.8 m（**真场地特征**） | 0.075~0.191 m @ 2.6~2.8 m（同一真特征） |
+
+**真台阶仍然限速（这一条是"没有把功能关掉"的证据）**：
+
+* 静止窗口里 `why=step` 占 40/46 帧，触发格在 **2.3~2.8 m**、`台阶=0.180 m`（走廊 max 0.191 m）
+  ⇒ 限速随"特征距离"变化：`d=2.34 m → 1.49 m/s`、`d=1.76 m → 1.33 m/s`、`d=1.14 m → 0.94 m/s`；
+* 直行段（0.35 m/s × 8 s 向特征开过去）`why=slope_change 26 / slope 9 / step 1` 帧，
+  限速 min 0.614 m/s、p50 1.13 m/s，走廊 max 台阶 p95 = 0.123 m ⇒ **接近特征时真的在减速**；
+* 掩膜**只**剔"近场 + 自身 collision 体"里的点 ⇒ 2.6 m 处的特征一个点都没少（上表两列 max 台阶同源）。
+
+⚠️ 一条**诚实更正**：日志里 `why=step d=0.00 m 台阶=0.164 m` 这个签名有**两个**来源 ——
+(a) 上面那个近场自击格（Phase 4 已消除）；(b) **"已承诺特征"的距离前推**（`hold_decay_factor=1.0`
+按"车以限速前进"扣减剩余距离）在**车其实没动**时会一路衰减到 0 ⇒ 即使特征在 2.6 m 也会被报成
+`d=0.00`。本轮**没有**改 (b)（它不在本主题范围内、且改成"按真值里程计扣减"要动限速器的输入契约）
+⇒ 见 §12.7 第 2 项。
+
+### 12.4 缺陷 ③：接线（**运行期**证据，不是"我说配了"）
+
+**修的是什么**：Phase 3 已经把 linefit 切到槽位文件（`_RobotSlotFile` 的 `slot_map`），
+但 launch 横幅里那行字**写死了 Phase 2 的旧结论**（"linefit 参数**没有**跟着切（sensor_height 仍是 0.226…）"）
+⇒ 用户照它排查就查错方向。根因是"横幅说的是**意图**，不是**生效值**"。
+
+**修法**：新增 `_YamlKeysReadout` / `_SelfMaskReadout` 两个 Substitution —— 横幅在**运行时**把
+**真正递给节点的那份 YAML** 读出来、把键值打进日志 ⇒ 横幅与"节点实际读到的文件"不可能再分叉。
+
+**运行期证据（`robot:=robot11` + `lio:=small_point_lio`，一次跑里同时取）**：
+
+| 证据 | 值 | 取自 |
+|---|---|---|
+| launch 横幅（运行时读文件） | `sensor_height=0.2595, gravity_aligned_frame="", input_topic="/livox/lidar/pointcloud", ground_output_topic="segmentation/ground" ← …/config/segmentation_sim_robot11.yaml` | `launch.log` 第 3 行 |
+| 同上，掩膜那一路 | `self_mask_enable=true, 近场死区 r<=0.2416 m（z>=-0.2295）, 113 个 collision AABB ← …/traversability_self_mask_robot11.yaml` | 同上 |
+| **节点侧**参数 | `ros2 param get /ground_segmentation sensor_height` → **`Double value is: 0.2595`** | `run_robot_model_probe.sh` |
+| 同上 | `gravity_aligned_frame` → **`String value is:`**（空串，符合设计） | 同上 |
+| 同上 | `self_mask_enable` → **`Boolean value is: True`**；`self_mask_boxes` → **678 个数**（113 盒） | 同上 |
+| 节点自己的日志 | `自击掩膜（self_mask）：开：113 个 collision AABB（传感器系）…` | `launch.log` |
+| 上游 linefit 的**输出**没变差 | `/segmentation/ground` **6641 点/帧**（中位；Phase 3 是 5637） | `probe.json` |
+
+**`lio_tf_adapter` 的杆臂/旋转补偿在本配置里到底应不应当生效 —— 实测判定**：
+
+* `lio:=small_point_lio` 时 `lio_tf_adapter` **按设计不启动**（同一时刻只能有一个 `odom→base_link`
+  发布者）。运行期证据：`ros2 param get /lio_tf_adapter xyz` → **`Node not found`**；
+  `ros2 node list` 里没有该节点。
+* 这个配置下杆臂由 **LIO 自己**做：`small_point_lio_node.cpp` 用
+  `lookupTransform(lidar_frame,"base_link")` 求 `T_bl←lidar`，再算
+  `T_odom→base_link = T_bl←lidar⁻¹ · T_odom→lidar · T_bl←lidar`（相似变换 ⇒ **平移与旋转一起**处理）。
+* **旋转补偿在本槽位不需要**：Phase 3 把 `body_to_livox` 的 rpy 改成 **0**（帧重力对齐、倾角搬进
+  `<tilt_rpy>`）。运行期证据（`robot_state_publisher` 发的 TF，独立于任何离线生成器）：
+  `ros2 run tf2_ros tf2_echo base_link livox_frame` → `Translation: [0.001, 0.131, 0.157]`、
+  `RPY (radian) [0.000, -0.000, 0.000]` ⇒ **纯平移**。
+* 离线生成器的零位 FK 与运行期 TF 一致（`robot11_self_mask.py --dump-fk`：
+  `livox_frame livox_xyz=[0.000000 0.000000 0.000000]`、`l10 = [−0.000562, −0.130916, +0.055972]`）。
+* ⇒ 所以横幅里那句"`lio_tf_adapter` 杆臂 = T_imu←base_link（含 30° 旋转补偿）"在本配置下是**误导**，
+  已改成说明"本配置不启动该节点 + LIO 自己做相似变换"。
+
+### 12.5 验收表（无头 + GUI）
+
+口径：`world:=RMUC2026 mode:=mapping lio:=small_point_lio robot:=robot11 map_autocontinue:=False`、
+静止窗口；无头 = `unset DISPLAY` + `HOME`/`ROS_DOMAIN_ID`/`GAZEBO_MASTER_URI` 全隔离。
+原始数据：`.tmp_robotslot/r11p4fin2/`（无头，掩膜开）、`.tmp_robotslot/r11p4base/`（无头，掩膜关）、
+`.tmp_robotslot/r11p4guiDEC3/`、`r11p4guiFULL2/`（GUI）。
+
+| 检查 | 无头（掩膜开，默认 decimated） | 无头（掩膜关，对照） | GUI（decimated + rviz2） | GUI（full + rviz2） |
+|---|---|---|---|---|
+| `/odom` 消息数 | **53**（53 帧）/ 静止窗口 | 67 | 115（60 s 窗口） | 103 |
+| `/livox/lidar/pointcloud` | 10.0 Hz，**11405 点/帧** | 10.0 Hz，11188 点/帧 | 10 Hz | 10 Hz |
+| `/segmentation/ground` 点/帧 | **6641** | 6644 | — | — |
+| `/segmentation/obstacle` 点/帧 | 4766 | 4544 | — | — |
+| `/scan` 有效波束/帧（中位） | 514 | 523 | — | — |
+| `/scan` **>4 m** 波束/帧 | **304.2** | 283.6 | — | — |
+| `/scan` **<1 m** 波束/帧 | **218.7** | 259.8 | — | — |
+| 自击 `r<0.12 m`（**原始云点**口径） | **29.0%**（**故意不变**：近场回波是物理真实的；掩膜只作用于判据） | 28.6% | — | — |
+| 其中**被掩膜剔出判据**的比例 | **29.4%（3374 点/帧）** | 0% | — | — |
+| 静止时的假台阶（近场 d<0.30 m max 台阶） | **0.002~0.005 m** | 0.023~0.032 m（日志里出现过 0.128~0.203） | — | — |
+| 静止时限速落在地板 0.60 的帧数 | **0/46**（min 0.606） | 9/129 条日志行 | — | — |
+| RTF（`/clock` 口径） | **0.32~0.38**（本机与他任务并发，波动大；Phase 3 无头是 0.46） | 0.416 | 见下 | 见下 |
+| `gzclient` 峰值 RSS / 存活 | 不启动（无 DISPLAY ⇒ 起不来） | 同 | **474 MiB / 活满 50 s** | 464 MiB / 活满 60 s |
+| `gzserver` 峰值 RSS | **3112 MiB**（full 对照，无 DISPLAY） | — | 3202 MiB | 3202 MiB |
+| `rviz2` 峰值 RSS / 存活 / 画面 | 不启动 | 不启动 | **243 MiB / 活满 / 窗口内非黑 0.5768** | **1381 MiB / 活满 / 窗口内非黑 0.5768** |
+| `/cmd_vel_chassis` 发布者 | **1**（订阅者 1 = planar_move 插件） | 1 | 1 | 1 |
+| `/segmentation/obstacle` 发布者 | **1** | 1 | 1 | 1 |
+| `/segmentation/ground` 发布者 | **1** | 1 | 1 | 1 |
+| `/map` 发布者 | **1** | 1 | 1 | 1 |
+| `/odom` 发布者 | **1**（`small_point_lio`；`lio_tf_adapter` 未启动） | 1 | 1 | 1 |
+| `/livox/imu` 发布者 | **1** | 1 | 1 | 1 |
+| GPU 帧率 | — | — | **不可测**（llvmpipe 软件 GL，不代表真 GPU） | 同 |
+
+**判定：`robot:=robot11` 现在 (a) 可以带 GUI 交互建图**（在"虚拟屏 + 软件 GL"上两档都活满窗口、
+rviz2 有像素；`decimated` 把 rviz2 内存从 1381 → 243 MiB）。**未复现**用户那次的 SIGKILL，
+所以"用户机器上还会不会被杀"仍属**未验证**（§12.7 第 1 项）。
+
+### 12.6 作用域与回退（默认模型/其它槽位逐字节不变）
+
+* (a)(b) 两处偏离都在 **robot 槽位作用域**内：`SelfMask::enable{false}` 是 C++ 兜底默认，
+  默认槽位读到的 `traversability_self_mask.yaml` 也写死 `false` ⇒ `buildGrid()` 里那一行
+  `if (self_mask_.contains(...))` 恒假（**没有**掩膜时的行为与 Phase 3 逐字节相同）。
+* `robot11_visual` 的默认 `decimated` **只对 `robot:=robot11` 生效**（其它槽位的 xacro 根本不引用
+  `visual_dir`/`visual_ext` 这两个 property；不传该 arg 时 xacro 默认 `false` = 上游原始 STL）。
+* 判据层只**新增**了参数（`self_mask_*`），`traversability_criteria.yaml` 一个字节没改
+  ⇒ `tools/scripts/regress/check_traversability_criteria.py` 仍然通过。
+* **默认模型的回归证据**（`robot` 槽位留空，同世界同 LIO；`.tmp_robotslot/r11p4def/`）：
+  运行期 `ros2 param get /ground_segmentation self_mask_enable` → **`Boolean value is: False`**、
+  `self_mask_boxes` **空**、`sensor_height` 仍是 **0.226**；实测 **RTF 0.703、点/帧 5279、
+  地面 2804 点/帧、自击 r<0.12 = 0.0%** —— 与 Phase 3 的默认模型对照（6256 / 2739 / 0%）在
+  跑间波动内一致 ⇒ "新增一个默认关的掩膜"**没有**改变默认模型的任何行为。
+* 契约不变：`/cmd_vel_chassis` / `/segmentation/*` / `map→odom` 的发布者个数全部实测 = 1；
+  掩膜**不改**任何点云的标签（自击点仍在 `/segmentation/obstacle` 里，物理真实）。
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| 退回"没有自击掩膜" | `config/traversability_self_mask_robot11.yaml` 的 `self_mask_enable: false`（或 launch 里撤掉 `self_mask_params` 那一路） |
+| 退回"视觉用上游原始 STL" | `robot:=robot11 robot11_visual:=full`（= Phase 1~3 的逐字节行为） |
+| 退回 Phase 2 的"实心 4 box"碰撞 | 见 §11.7 的同名行 |
+| 整套 robot11 | 见 §11.7 最后一行 |
+
+### 12.7 未验证清单（Phase 4 新增，诚实清单）
+
+1. **"用户机器上 `gzclient` 为什么被 SIGKILL"没有复现**：本机（31.9 GB 内存）两档都活满窗口。
+   本轮量到的是**内存代价差**（rviz2 1444 → 243 MiB），据此**推断**是内存压力所致 ——
+   这是推断，不是实测。要证实需要在同类内存受限环境里跑一次 `full` 并看 OOM 记录。
+2. **限速器的"承诺距离前推"在车不动时会衰减到 0**（`speed_limit_hold_decay_factor=1.0` 按"以限速前进"
+   扣减剩余距离）⇒ 即使特征还在 2.6 m，日志也会出现 `d=0.00`。本轮**没有**改它（不在本主题范围，
+   且"按真值里程计扣减"要动限速器的输入契约）⇒ `d=0.00` 这个签名以后仍有第二种来源。
+3. **射线插件 `point = range * axis`（漏了 `start = minDist*axis`）的系统内移 0.1 m 没有修**：
+   它是**共享代码**、改了会改变所有模型的点云（默认模型也移了 0.1 m）⇒ 不属本主题。
+   本轮只是在判据层把这团近场剔掉。**未做**：量化"内移 0.1 m"对 LIO/代价图/`/scan` 的影响。
+4. **`/scan` 的 <1 m 波束仍是 218.7 条/帧**（自击点仍在 obstacle 里）：本地代价图会不会被这圈
+   "自障碍"填满、nav2 是否因此规划失败 —— **未验证**（§11.8 第 1 项"车 90 s 没动"的根因仍未定，
+   本轮给出一个新候选：**局部代价图里恒有一圈 r≈0.02~0.09 m 的自身障碍**）。
+5. **GUI 的渲染吞吐没有测**（llvmpipe 软件 GL）⇒ "带 GUI 时 RTF 是多少"在真 GPU 上仍未知；
+   本轮只测了进程存活 / 峰值 RSS / 有没有画。
+6. **`robot11_visual:=full` 下 rviz2 逐窗口像素只测了一次**（非黑 0.5769 / 1430 色），
+   没有做"长时间（>5 min）连续建图时的内存增长"曲线。
+7. **有头侧的默认值改了**（`robot11_visual` 默认 `decimated`）⇒ §11 里"visual = 原始 mesh、视觉零损失"
+   这句话现在只在 `robot11_visual:=full` 下成立（已在 §12.2 写清）。
+8. **掩膜盒子表是"生成物"**：模型改了（碰撞/关节/抬高）必须重跑
+   `robot11_self_mask.py --emit`，否则 `--check` 会报错；本轮**没有**把它接进 CI/构建（只接了自检脚本）。
