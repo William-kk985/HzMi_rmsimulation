@@ -24,7 +24,7 @@
 
 ```bash
 # ① 治好"Gazebo 卡住不出来 / 车在 Gazebo 里没有"（根因：robot11 的 model:// mesh 本地解析不到）
-GAZEBO_MODEL_PATH="$GAZEBO_MODEL_PATH:$PWD/install/robot11/share" \
+#    ★ 2026-10-08 起**已经自动化**：不需要再手工前缀 GAZEBO_MODEL_PATH（机制见 §5.1）
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 robot:=robot11
 
 # ② 干脆不看 Gazebo 窗口（一条命令无头跑；RViz 照旧）
@@ -34,8 +34,12 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 robot:=robot11 
 ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 robot:=robot11 gui:=False gazebo_offline:=True
 ```
 
-`gui` / `gazebo_offline` 都是**新增的 opt-in 参数，默认值 = 改造前的行为**（`gui=True`、
+`gui` / `gazebo_offline` 都是**opt-in 参数，默认值 = 改造前的行为**（`gui=True`、
 `gazebo_offline=False`），不动任何节点的集合与时序。实测三种组合都**PASS**（§5.3）。
+
+> ①里的那条命令在 2026-10-08 之前需要写成
+> `GAZEBO_MODEL_PATH="$GAZEBO_MODEL_PATH:$PWD/install/robot11/share" ros2 launch …`。
+> 那个手工写法**仍然有效**（§5.1.4），但已不再是必需的。
 
 ---
 
@@ -298,41 +302,204 @@ tools/scripts/localization/run_nav_smoke_regress.sh:44,60: pkill -9 -x gzserver
 
 > 分级：**【修法】** = 消除根因；**【绕过】** = 不改根因但让你能干活；**【环境】** = 机器/环境层面。
 
-### 5.1 【修法·本项目】让 `model://robot11/...` 本地可解析
+### 5.1 【修法·本项目｜★ 2026-10-08 已自动化】让 `model://robot11/...` 本地可解析
 
-三选一，**任选一个**即可同时解决"GUI 卡在模型库"和"车在 Gazebo 里没有 mesh"：
+> **现在一条命令就够**（不需要任何手工环境变量）：
+> ```bash
+> ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 robot:=robot11 mode:=nav \
+>   lio:=small_point_lio localization:=gicp nav:=mppi planner:=smac2d spin_speed:=0.0 nav_rviz:=True
+> ```
+> 手工前缀环境变量的老办法**仍然有效**，但只作 fallback（§5.1.4）。
 
-**(a) 启动时追加一个 `GAZEBO_MODEL_PATH` 解析根（不改任何文件，推荐先试）**
+#### 5.1.1 现在是谁在修：两条腿，互为兜底
+
+| # | 机制 | 落点（文件 / 键） | 贡献的解析根 | 生效范围 |
+|---|---|---|---|---|
+| (a) **启动侧** | `rm_nav_bringup/launch/bringup_sim.launch.py` 与 `hzmi_rm_simulation/launch/rm_simulation.launch.py` 里的 `_gazebo_model_path_setup()`（`OpaqueFunction`，**必须排在 include gzserver/gzclient 之前**），用 `AppendEnvironmentVariable('GAZEBO_MODEL_PATH', …)` | `<install>/robot11/share`（= `os.path.dirname(get_package_share_directory('robot11'))`） | 只有 `robot:=robot11`（真带 `<mesh>` 视觉的槽位）会执行；默认模型 / `hzmirm` 一条都不加 ⇒ 它们的 env / 日志 / 时序**逐字节不变**；追加不覆盖用户原值；用户已手工 export 过同一目录时幂等跳过 |
+| (b) **包侧** | `src/rm_simulation/robot11_description/package.xml`：`<export><gazebo_ros gazebo_model_path="${prefix}/.."/></export>` | `<install>/robot11/share/robot11/..`（同一个目录，字面量带 `..`） | **任何** gazebo 入口都吃得到：本仓 launch、裸 `ros2 launch gazebo_ros gzserver.launch.py` / `gzclient.launch.py`、`gz sim`（实现：`/opt/ros/humble/lib/gazebo_ros/gazebo_ros_paths.py` 扫描各包 package.xml 后把 `${prefix}` 换成本包 share，再拼进 `ExecuteProcess` 的 `additional_env`） |
+
+**哪条在实际运行里干活？** 实测（§5.1.3 的 env dump）一次 `robot:=robot11` 的 launch 跑起来后，
+gzserver/gzclient 的 env 是：
+
+```
+GAZEBO_MODEL_PATH=/…/install/robot11/share/robot11/.. : /…/install/hzmi_rm_simulation/share/hzmi_rm_simulation/meshes : /…/install/robot11/share
+                  └────── (b) 包 export 贡献 ──────┘   └──────── 改造前就有（world/obstacle 的 model://）────────┘   └── (a) launch 贡献 ──┘
+```
+
+* gazebo 是按 `modelPaths` 顺序找的 ⇒ **先命中的是 (b) 那条**（`boost::filesystem::exists()` 会把字面量里的 `..` 解开，实测可用）；
+* 但 **(a) 才是"本仓 launch 一定可用"的保证**：它不依赖那份 package.xml 是否重建过、能不能被
+  `catkin_pkg` 解析，只要 `install/robot11/share` 在就一定加进去；把 package.xml 拿开（模拟"没重建过的旧 install"）
+  后 (a) 单独实测同样 0 错误、12 个 mesh 全部读进来（§5.1.2 的 P2）；
+* (b) 的价值在"**我们 launch 之外的 gazebo 入口**"：裸 gzserver/gzclient、直接开 world 文件、`gz sim`
+  都只认 package.xml 那条。不设任何环境变量、只留 (b) 时实测同样 0 错误（§5.1.2 的 P3）。
+
+#### 5.1.2 三组对照实测（2026-10-08，Xvfb + 软件 GL，黑洞代理）
+
+协议（= §7 / §6.3 的同一套，**只有这条协议会让 gzclient 去建模型并解析 mesh**）：
+起 gzserver → 等 `Init world` → `spawn_entity.py -file`（`robot11_visual:=decimated`）→ **再起 gzclient**。
+
+| | (a) 启动侧根 | (b) 包 export 根 | 「等在线模型库」 | `No mesh specified` | `SystemPaths.cc:459` | `FuelModelDatabase.cc:313` | gzclient 事件数 | gzclient 读入 `rchar` |
+|---|---|---|---|---|---|---|---|---|
+| `asis`（改造前） | ✗ | ✗ | **出现，stall 13.84 s**（我把黑洞代理拆掉它才结束，**不设上限**） | **24** | **36** | **36** | **184** | 3.90 MB（只有世界资产，**没读** robot11 的 mesh） |
+| **只有 (a)** | ✓ | ✗ | 没有 | **0** | 0 | 0 | **21** | **12.16 MB**（+8.26 MB） |
+| **只有 (b)** | ✗ | ✓ | 没有 | **0** | 0 | 0 | **21** | **12.16 MB**（+8.26 MB） |
+
+读法（重要）：
+
+* `No mesh specified = 0` **只有在"确实读了 mesh"的前提下才是证据** —— 加载成功时 gazebo
+  **一个日志都不打**，所以必须同时看"客户端到底读进来多少字节"。上表：12.16 − 3.90 =
+  **8.26 MB ≈ 12 个 decimated mesh 的 8.20 MB**（`stat` 求和 = 8,200,758 B），且 0.1 s 一次的
+  fd 扫描抓到了正在打开的 `…/meshes/decimated/l5.stl` / `l11.stl` ⇒ 这是**正证据**，不是"没报错"。
+* `asis` 那行的 **24 / 36 / 36 / 184** 与 §6.3（2026-10-07 量的 24 / 36 / 36 / 183）**逐项相同**
+  ⇒ 两组日期的复现口径一致（事件数差 1 是收尾时多一条 `Event.cc` 告警）。
+* 两条根**各自单独就够**，所以 §5.1.1 的"哪条在干活"不是"二选一"，而是"先命中 (b)，缺 (b) 时 (a) 顶上"。
+* 代价（诚实说明）：两个解析根是**等价目录**，`InsertModelWidget` 扫 `GAZEBO_MODEL_PATH` 时会各扫一遍
+  ⇒ 带 GUI 的 robot11 跑，`Missing model.config` 这类**噪音**从 3 行变 6 行（gzclient 事件数
+  21 → 27，见 §5.1.3）。它只是"插入模型"面板扫目录时的告警，**不影响加载/渲染**。
+
+#### 5.1.3 用户那条命令（`robot:=robot11`，无任何手工环境变量）实测
+
+| 项 | 实测值 |
+|---|---|
+| 命令 | `ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 gui:=True gazebo_offline:=False robot:=robot11 mode:=nav lio:=small_point_lio localization:=gicp nav:=mppi planner:=smac2d nav_rviz:=True spin_speed:=0.0` |
+| launch 日志里那一行 | `[gzmodel] robot:=robot11 需要 robot11 的本地解析根：GAZEBO_MODEL_PATH 追加 /…/install/robot11/share（追加，不覆盖原值：<空>；…）` |
+| gzserver / gzclient 的 `GAZEBO_MODEL_PATH` | 三条（见 §5.1.1 的展开），**两条 robot11 根都在** |
+| launch → spawn | **8.06 s / 8.81 s / 9.08 s**（三次；launch 自己的 `spawn_entity.py` 成功） |
+| `Waiting for model database update to complete...` | **没有出现**（黑洞代理仍然挂着 ⇒ 与网络无关） |
+| `No mesh specified` / `SystemPaths.cc:459` / `FuelModelDatabase.cc:313` | **0 / 0 / 0** |
+| gzclient 事件数 | **27**（含 8 行 `Missing model.config` 噪音；改造前同一条命令是 **275**，且含 stall） |
+| `/odom` | 34 条/20 s（1.7 Hz；另一次 72 条/30 s = 2.39 Hz）—— 速率的限制是 **RTF 0.17**（软件 GL + 30000 条 ODE 射线），不是里程计本身 |
+| `/segmentation/ground` | 6640 pts/帧（中位；另一次 6648） |
+| `/scan` | 1462 波束/帧，其中有限值 510（另一次 504），最远 7.9 m |
+| 节点集合 | 完整且与改造前**逐个相同**（`small_point_lio`、`gicp_registration`、`map_server`、`controller_server`、`planner_server`、`bt_navigator`、`rviz`…；只有 rviz 内部 `transform_listener_impl_<随机 hex>` 这种带随机后缀的伪节点名不同） |
+
+**同一条命令的 before/after 对照（改造前那侧 = HEAD 的 launch + 拿掉包 export，其余逐项相同）：**
+
+| | 改造前（`A1b`） | 现在（`F1b`） |
+|---|---|---|
+| launch → spawn | 8.57 s | 9.08 s |
+| 「等在线模型库」 | **出现，stall = 51.64 s**（我把黑洞拆了它才结束） | 没有 |
+| `No mesh specified` / `SystemPaths` / `Fuel` | **34 / 56 / 56** | **0 / 0 / 0** |
+| gzclient 事件数 | **275** | **27** |
+
+**轻量入口（`rm_simulation.launch.py`，同一条 robot11 路径）也有同一组对照**，
+而且这一组抓到了**正面证据**（`gzclient` 真的把 12 个 mesh 读进来了）：
+
+| | 改造前（`L1r`） | 现在（`L4r`） |
+|---|---|---|
+| 「等在线模型库」 | **出现，stall = 35.46 s** | 没有 |
+| `No mesh specified` / `SystemPaths` / `Fuel` | **45 / 78 / 78** | **0 / 0 / 0** |
+| gzclient 事件数 | **374** | **28** |
+| gzclient `rchar`（全程） | 4.21 MB（只有世界资产） | **12.47 MB**（+8.26 MB ≈ 12 个 mesh 的 8.20 MB） |
+| fd 扫描抓到的 `.stl` | 无 | `…/robot11_description/meshes/decimated/l9.stl`（T+4.60 s） |
+
+> ⚠️ **一处必须知道的口径**：`No mesh specified` 的次数**不是一个固定常数**
+> （2026-10-07 那次 24、本次 before 侧 34 / 45），它 = "客户端处理了多少轮场景消息 × 12 个 mesh × 2"，
+> 随窗口长度/时机变；**判据是"是不是 0"**，不是"等不等于 24"。
+> 同理，"修好之后 0 错误"**只有在同时看到 mesh 被读进来时才构成正面证据** ——
+> 本沙箱里 gzclient 对"运行期插入的模型"处理**不稳定**（同样配置的几次跑里，有的会去建模型、
+> 有的整个窗口都不建；改造前后都有这个现象）⇒ 上表 `L4r` 那一列（12.47 MB + fd 命中）才是
+> "解析链真的通了"的证据，`F1b` 那一列只是"**没有**再出现那条回落路径"。
+> 这属于 gazebo classic 客户端在本沙箱的行为，与本次修法无关（同一个不确定性在 `asis` 上也存在）。
+
+#### 5.1.4 手工做法（fallback，仍然有效）
+
+**(a) 启动时追加一个 `GAZEBO_MODEL_PATH` 解析根**（不改任何文件）
 
 ```bash
 GAZEBO_MODEL_PATH="$GAZEBO_MODEL_PATH:$PWD/install/robot11/share" \
 ros2 launch rm_nav_bringup bringup_sim.launch.py robot:=robot11 world:=RMUC2026 ...
 ```
 
-**(b) 在 `src/rm_simulation/robot11_description/package.xml` 的 `<export>` 里加一行**（持久）
-（`${prefix}` = 该包的 share 目录 = `install/robot11/share/robot11`，所以解析根要往上一级）
+（launch 侧的 `_gazebo_model_path_setup` 认得这个目录：已经在 `GAZEBO_MODEL_PATH` 里就**不重复追加**，
+日志里会打 `[gzmodel] … 已存在（无需追加）`。）
+
+**(b) 包侧 export**（持久，已经进了仓库）
 
 ```xml
 <gazebo_ros gazebo_model_path="${prefix}/.."/>
 ```
 
+`${prefix}` = 该包的 share 目录 = `<install>/robot11/share/robot11`，所以解析根 = `${prefix}/..`
+= **`<install>/robot11/share`**（要往上一级，因为 `model://robot11/meshes/…` 要求解析根 R 满足
+`R/robot11/meshes/…` 存在）。这条**已实测**（§5.1.2 的 P3：拿掉 (a) 后仅靠它，0 错误 + mesh 全读进来）。
+
 **(c) 一条命令无头跑，完全不碰 GUI** ⇒ 见 §5.3 的 `gui:=False`。
 
-**验证（不用起 Gazebo，三行）：**
+#### 5.1.5 静态验证（不用起 Gazebo，三行）
 
 ```bash
-# ① 本地解析应当命中
+# ① 本地解析应当命中（两个拼法都指同一个目录）
 ls -l install/robot11/share/robot11/meshes/decimated/l2.stl
-# ② 确认 sdformat 确实把 package:// 改写成了 model://
+ls -l install/robot11/share/robot11/../robot11/meshes/decimated/l2.stl
+# ② 确认 sdformat 确实把 package:// 改写成了 model://（应当数出 12 条）
 xacro src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro robot11_visual:=decimated > /tmp/r11.urdf
-gz sdf -p /tmp/r11.urdf | grep -m3 'uri>model://robot11'
-# ③ 起 GUI 后应当**看不到**这两行
+gz sdf -p /tmp/r11.urdf | grep -c 'uri>model://robot11'
+# ③ 包侧的 export 是否真的进了 install/（重建后才会有）
+grep gazebo_model_path install/robot11/share/robot11/package.xml
+# ④ 起 GUI 后应当**看不到**这两行
 grep -c "No mesh specified\|Waiting for model database" ~/.gazebo/client-*/default.log
 ```
 
-**实测对照（§6.3 的原始数据）**：`asis` ⇒ 出现 `Waiting for model database update to complete...`、
-stall **99.67 s**、`No mesh specified` **24 次**、36 个 `model://robot11/meshes/decimated/*.stl`
-解析失败；`fixed` ⇒ **全部为 0**，日志从 183 个事件降到 **20 个**。
+#### 5.1.6 无头二次独立复核（2026-10-08 接手复核；**不开 Xvfb、不开 GUI**）
+
+上面 §5.1.2/§5.1.3 走的是"Xvfb + 软件 GL + 黑洞代理"那条协议（因为要复现 **gzclient** 的卡顿）。
+复核只需要回答"**裸命令能不能解析到 mesh**"与"**哪条机制在干活**"⇒ 无头 `gui:=False` 就够，
+而且更干净：没有 gzclient 的事件数/字节数这类不稳定量，`No mesh specified` 直接看 gzserver。
+
+一条命令（新工具，只清**本 master URI** 上的 gazebo 进程）：
+
+```bash
+tools/scripts/regress/verify_gzmodel_autopath.sh obj1_plain --settle 50 -- \
+    world:=RMUC2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0
+```
+
+| 项 | `robot:=robot11`（裸命令，`GAZEBO_MODEL_PATH` 启动前**未设置**） | 默认模型（`robot` 留空） |
+|---|---|---|
+| `gzserver` 真身的 `GAZEBO_MODEL_PATH` | `…/install/robot11/share/robot11/..` **:** `…/install/hzmi_rm_simulation/share/hzmi_rm_simulation/meshes` **:** `…/install/robot11/share`（**三项，robot11 根出现 2 次**） | `…/install/robot11/share/robot11/..` **:** `…/install/hzmi_rm_simulation/share/…/meshes`（**两项**） |
+| 条目 [0] 的来源 | (b) 包 export（`${prefix}/..`，**排在 modelPaths 最前 ⇒ 先被命中**） | 同左（(b) 对**所有** gazebo 入口都生效） |
+| 最后一项的来源 | (a) launch 的 `AppendEnvironmentVariable` | **没有**（(a) 只对 `robot:=robot11` 执行） |
+| `[Err] … No mesh specified` | **0**（日志里另一处 "No mesh specified" 是我们自己 `[gzmodel]` 说明文字，见下） | **0** |
+| `Waiting for model database update` / `SystemPaths.cc:459` / `FuelModelDatabase` | **0 / 0 / 0** | **0 / 0 / 0** |
+| `SpawnEntity: Successfully spawned entity [robot]` | **1** | **1** |
+| `ros2 node list` | **33** 个 | **33** 个，与左列**逐个相同**（只差 `transform_listener_impl_<随机 hex>` 这种 ROS 内部伪节点名） |
+| `[gzmodel]` 日志行 | **2** 条（解释见下） | **0** 条 |
+
+**关于"日志应当只有一条"**：`robot:=robot11` 时确实会打印 **2** 条 `[gzmodel]`，
+但**只有一条真的追加**：
+* 第 1 条（`bringup_sim.launch.py`，日志第 4 行）= "**追加** …/install/robot11/share"；
+* 第 2 条（日志第 5 行）= 紧跟其后被 include 的 **`hzmi_rm_simulation/rm_simulation.launch.py`**
+  自己那份 `_gazebo_model_path_setup()`，它看到的 env **已经**有这条根 ⇒ 打印
+  "**已存在（无需追加）**"并不动 env（幂等分支，这正是设计要的行为；
+  `bringup_sim.launch.py:2371` 的 `OpaqueFunction` 与 `:2372` 的
+  `ld.add_action(start_rm_simulation)` 相邻，而 `start_rm_simulation` 就是那个 include）。
+* 证据（可复算）：**单独**跑轻量入口 `ros2 launch hzmi_rm_simulation rm_simulation.launch.py
+  robot:=robot11 world:=RMUC2026 gui:=False`（不带 bringup）⇒ `[gzmodel]` **1 条**（"追加"）、
+  `Successfully spawned entity` 1、`No mesh specified` **0**、env 与上表**逐项相同**（三项）。
+  ⇒ 两次打印是"两个入口各说一句话"，不是"同一个入口跑了两遍"。
+
+**包侧 export 在"真构建"之后确实生效（本次补测，之前一直没做）**：
+
+| 测法 | 结果 |
+|---|---|
+| `colcon build --symlink-install --packages-select robot11 rm_nav_bringup` 后直接问 gazebo_ros 自己那个函数（`/opt/ros/humble/lib/gazebo_ros/gazebo_ros_paths.py: GazeboRosPaths.get_paths()` —— `gzserver.launch.py`/`gzclient.launch.py` 用的就是它） | 返回 `…/install/robot11/share/robot11/..`（`${prefix}` 已被替换成本包 share） |
+| **非 symlink** 的真安装（`colcon build --packages-select robot11 --build-base /tmp/rb --install-base /tmp/ri` ⇒ `share/robot11/package.xml` 是**真实拷贝** 3270 B，不是符号链接） | 同样返回 `…/tmp/ri/robot11/share/robot11/..` ⇒ export 是随 `ament_package()` 装进去的，**不是**"只因为 install/ 里是符号链接" |
+| `gz sdf -p` 生成的 SDF | 12 条 `<uri>model://robot11/meshes/decimated/*.stl</uri>`（`<uri>` 总数 25，另外 13 条是 gazebo 材质），`package://` **0** 条 |
+| 逐条 `model://` 落到磁盘 | 12/12 命中（`realpath(root + '/robot11/' + rest)` 存在） |
+| 生成物与 HEAD 的对照（`livox_mount` 默认档） | 去注释后**逐字节相同**（两份都是 35410 B、`sha256` 相同）；显式 `livox_mount:=plugin` 与不传**同一 sha** |
+
+**⇒ 哪条是"权威"？** 不是二选一，但优先级是明确的：**运行的这条命令里是 (b) 先命中**
+（它在 `GAZEBO_MODEL_PATH` 的第 0 项）；**(a) 的价值是"不依赖那份 manifest"**
+（没重建过/解析不了也照样加）；**(b) 的价值是"launch 之外的 gazebo 入口"**。
+
+> ⚠️ **一处必须说的偏离**（§5.1.1 与 `robot_models.md` §14.2 里"一个字节都没动"这句只对 (a) 成立）：
+> (b) 是 `package.xml` 的 export ⇒ **任何** gazebo 入口（含默认模型、其它 world、裸 gzserver）
+> 的 `GAZEBO_MODEL_PATH` 都会多出 `…/install/robot11/share/robot11/..` 这一项 —— 这是
+> "包侧兜底"的必然代价，**不是** 0 改动。实测它的副作用**在无头跑里量不出来**
+> （默认模型跑：`No mesh specified` 0、`Missing model.config` 0、节点集合与 robot11 跑逐个相同）；
+> 有 GUI 时它会让"插入模型"面板多扫一个目录（`Missing model.config` 噪音 3 → 6 行，§5.1.2 尾部）。
+> 想彻底去掉这条：删掉 `package.xml` 的那一行并重建 robot11，此时只剩 (a)，
+> 代价是裸 `gzserver`/`gz sim` 入口又会回落在线模型库。
 
 ### 5.2 【修法·环境】不要再让 gzclient 等在线模型库
 

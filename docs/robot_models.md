@@ -31,6 +31,7 @@
 | **`robot11` 的足印/高度/轴距/雷达离地** | §9.4 |
 | 雷达 30° 到底是 roll 还是 pitch | §9.5（**仰角测不出来**，只有方位能区分）+ §10.5 实测 |
 | **怎么试 `robot:=robot11` / 它跑得怎么样** | §10.1（命令）+ §10.4（实测表）+ §10.8（结论）|
+| **`robot:=robot11` 要不要手工设 `GAZEBO_MODEL_PATH`** | **§14：不用了**（2026-10-08 起 launch/包两侧都自动；实测见 `docs/gazebo_gui_troubleshooting.md` §5.1）|
 | 它能不能当默认模型 | §10.8（**现在还不是**，三条实测理由）| 
 
 ---
@@ -1990,3 +1991,154 @@ tools/scripts/regress/run_robot_model_probe.sh r11p5 --duration 30 --drive-secon
     完全复现只需 `python3 tools/scripts/regress/robot11_decimate_visuals.py`（约 6 分钟）。
     若将来不想入库，把它改成构建期生成即可（**未做**：那会给构建加 pyvista/VTK 依赖）。
 11. **`/scan` 的自障碍（§13.9）没有修**，也没有验证"它是不是 nav 不走的根因"。
+12. **`robot11` 的 `model://` mesh 解析**（= "Gazebo 里车没有视觉 / GUI 卡住"那条）在 Phase 5 时
+    还是"手工前缀 `GAZEBO_MODEL_PATH`"的 workaround —— **已由 §14（2026-10-08）自动化并实测**。
+
+---
+
+## 14. 2026-10-08：`robot:=robot11` 的 `model://` mesh 解析已**自动化**（不再需要手工 `GAZEBO_MODEL_PATH`）
+
+> 一句话：**用户那条命令现在直接跑就行**，不用再前缀环境变量；**launch 侧那条腿**对默认模型 /
+> 其它世界**一个字节都没动**（0 动作、0 日志；⚠️ 包侧那条腿是 env 上的一项增量，见 §14.6）。
+> 机理、取证、三组对照实测的完整版在 **`docs/gazebo_gui_troubleshooting.md` §5.1**（本节只放结论与回滚）。
+
+### 14.1 为什么需要（一句话机理）
+
+URDF 的 `package://robot11/meshes/decimated/<link>.stl`（12 个 `<visual>`）会被 sdformat 在
+URDF→SDF 时改写成 `model://robot11/meshes/decimated/<link>.stl`，而 gazebo 的 `model://` 解析根
+只有 `$HOME/.gazebo/models` + `GAZEBO_MODEL_PATH`；解析不到时 `SystemPaths::FindFileURI()`
+**无条件**回落到在线模型库并**同步阻塞**（实测 stall 48.03 / 76.34 / 99.67 s，不设上限），
+随后 12 个 mesh 全部 `No mesh specified` ⇒ **车在 Gazebo 里没有视觉**。
+RViz 不受影响（它走 `package://` + ament 索引）。详见 §13.9 与那份文档的 §3。
+
+### 14.2 现在是什么机制（两条腿；文件 + 键 + 具体路径）
+
+| 机制 | 文件 / 键 | 追加进 `GAZEBO_MODEL_PATH` 的目录 | 作用域 |
+|---|---|---|---|
+| **(a) 启动侧（本仓 launch）** | `rm_nav_bringup/launch/bringup_sim.launch.py` 与 `hzmi_rm_simulation/launch/rm_simulation.launch.py` 里的 `_gazebo_model_path_setup()`（`OpaqueFunction` + `AppendEnvironmentVariable`，**排在 include gzserver/gzclient 之前**） | `<install>/robot11/share` | 只有 `robot:=robot11` 才执行 ⇒ 默认模型 / `hzmirm` 的 env、日志、时序**逐字节不变**；追加不覆盖用户原值；用户已手工 export 过同一目录时幂等跳过 |
+| **(b) 包侧（package.xml）** | `src/rm_simulation/robot11_description/package.xml` 的 `<export><gazebo_ros gazebo_model_path="${prefix}/.."/></export>` | `<install>/robot11/share/robot11/..`（同一目录） | 任何 gazebo 入口（含裸 gzserver/gzclient）都吃得到；由 gazebo_ros 的启动脚本扫描得到 |
+
+**哪条在实际运行里干活**：两条都会出现在 gzserver/gzclient 的 env 里（实测见那份文档 §5.1.3），
+gazebo 按顺序**先命中 (b)**；但 **(a) 是"本仓 launch 一定可用"的保证**（不依赖 package.xml 是否重建过），
+**(b) 负责我们 launch 之外的入口**。两者**各自单独就够**（隔离实测：只有 (a) → 0 错误 + 12 个 mesh
+全部读进来；只有 (b) → 同样）。
+
+**★ 2026-10-08 接手复核（无头、`gui:=False`、**不设任何** `GAZEBO_MODEL_PATH`）**：
+`robot:=robot11` 时 gzserver 真身的 env 是**三项**（`…/share/robot11/..` **:** `…/hzmi…/meshes` **:**
+`…/install/robot11/share`）—— 第一项来自 (b)、最后一项来自 (a)，`[Err] … No mesh specified` **0**、
+`Waiting for model database update` **0**、spawn 成功、33 个节点；**单独**跑轻量入口只打印 1 条
+`[gzmodel]`（"追加"）⇒ bringup 那条命令里第 2 条 `[gzmodel]`（"已存在，无需追加"）是**被 include 的
+轻量入口**打印的幂等确认，**不是**同一入口跑了两遍。包侧 export 也补做了"真构建"验证
+（含**非 symlink** 的独立 install 前缀）。完整表格与工具：那份文档 **§5.1.6**。
+
+**★ 唯一的偏离（env 不是"零改动"，必须知道）**：(a) 只对 `robot:=robot11` 执行（其它槽位 0 动作、
+0 日志）；但 (b) 是 `package.xml` 的 export ⇒ **任何** gazebo 入口（默认模型、其它 world、裸 gzserver）
+的 `GAZEBO_MODEL_PATH` 都会多出 `…/install/robot11/share/robot11/..` 这一项。实测副作用：
+无头跑**量不出来**（默认模型跑：`No mesh specified` 0、`Missing model.config` 0、节点集合与 robot11 跑
+**逐个相同**）；有 GUI 时"插入模型"面板会多扫一个目录（`Missing model.config` 噪音 3 → 6 行）。
+不想要这一项：删掉 `package.xml` 那一行并重建 robot11（§14.5），代价是裸 `gzserver`/`gz sim`
+入口又会回落在线模型库。取证：那份文档 §5.1.6 与本仓 `docs/tilted_lidar_fidelity.md` §H。
+
+### 14.3 实测（本次，隔离 + 黑洞代理 + Xvfb 软件 GL）
+
+| 场景 | 「等在线模型库」 | `No mesh specified` | gzclient 事件数 | gzclient 读入（rchar） |
+|---|---|---|---|---|
+| 改造前（同一条命令，HEAD launch + 无 export） | **出现，stall 51.64 s**（拆掉黑洞才结束） | **34** | **275** | 5.67 MB（世界资产） |
+| 现在（同一条命令，无任何手工环境变量） | **没有** | **0** | **27** | 5.67 MB（世界资产） |
+| 改造前（轻量入口 `rm_simulation.launch.py`，同协议） | **出现，stall 35.46 s** | **45** | **374** | 4.21 MB |
+| 现在（轻量入口，同协议） | **没有** | **0** | **28** | **12.47 MB**（+8.26 MB ≈ 12 个 mesh 的 8.20 MB；fd 扫描抓到 `…/decimated/l9.stl`） |
+| 只有 (a) / 只有 (b)（隔离，正证据） | 没有 | 0 / 0 | 21 / 21 | **12.16 MB**（+8.26 MB） |
+
+用户那条命令现在的实测：launch→spawn **8.06 s / 8.81 s**、`/odom` 34 条/20 s（RTF 0.17 限制）、
+`/segmentation/ground` **6640 pts/帧**、`/scan` **1462 波束**（有限值 510，最远 7.9 m）、
+节点集合与改造前**逐个相同**。
+
+> ⚠️ `No mesh specified` 的次数不是常数（24 / 34 / 45），判据是"**是不是 0**"；
+> 而"0 错误"**只有在同时看到 mesh 被读进来时**才算正面证据 —— 本沙箱里 gzclient 对
+> "运行期插入的模型"处理不稳定（改造前后都有"整窗不建模型"的情况）⇒ 上表第 4/5 行的
+> `rchar +8.26 MB` 才是"解析链真的通了"的证据。
+
+### 14.4 用户那条命令（`robot:=robot11`，**不需要**任何环境变量前缀）
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 mode:=nav lio:=small_point_lio \
+  localization:=gicp nav:=mppi planner:=smac2d spin_speed:=0.0 robot:=robot11 nav_rviz:=True
+```
+
+### 14.5 回滚
+
+* 只想回退"启动侧"：删掉两个 launch 里的 `ld.add_action(OpaqueFunction(function=_gazebo_model_path_setup))`
+  那一行（+ 可选删掉函数定义）⇒ 回到"必须手工前缀环境变量"的老状态（其余一切不变）。
+* 只想回退"包侧"：删掉 `package.xml` 里的 `<gazebo_ros gazebo_model_path="${prefix}/.."/>` 一行，
+  重新 `colcon build --symlink-install --packages-select robot11`。
+* 两条都回退后，手工 workaround 依旧可用：
+  `GAZEBO_MODEL_PATH="$GAZEBO_MODEL_PATH:$PWD/install/robot11/share" ros2 launch …`。
+
+### 14.6 本节未验证（诚实清单）
+
+1. **真 GPU / 真显示器没跑过**：本沙箱只有 Xvfb + llvmpipe，"mesh 加载"是用**文件级证据**
+   （`/proc/<gzclient>/io` 的 `rchar` 增量 8.26 MB + fd 扫描抓到 `.stl`）证的，不是看渲染像素
+   ⇒ "车在真机屏幕上好不好看"仍未验证。
+2. **本沙箱的 gzclient 对"运行期插入的模型"处理不稳定**：同样配置的多次跑里，有的会去建模型
+   （于是能看到 12.47 MB 的 mesh 读入），有的整个窗口都不建（`rchar` 只有世界资产）。
+   改造前后都有这个现象 ⇒ 它属于 gazebo classic 客户端在本沙箱的行为，**与本次修法无关**；
+   但也因此，"**没有** `No mesh specified`"这句话只有在同一次跑里同时看到 mesh 读入时才成立
+   （§14.3 第 4/5 行就是这种完整证据）。
+3. **两个等价解析根会让 `InsertModelWidget` 多报 3 行 `Missing model.config` 噪音**
+   （gzclient 事件数 21 → 27/28）：不影响加载/渲染，**没有**去消（要消得给 `install/robot11/share/robot11/`
+   补 `model.config`，而那会让"不是模型目录"的语义变含糊）。
+4. **`robot11_visual:=full` 档没有单独复测**解析链：两档只差 `<visual>` 的文件名/后缀，
+   解析机制完全相同（`model://robot11/meshes/<link>.STL` vs `…/decimated/<link>.stl`），
+   本次只对 `decimated`（默认档）做了端到端实测。
+
+---
+
+## 15. 2026-10-08：`robot11_mount:=plugin|urdf`（"斜 30° 到底斜在哪儿"）—— 指针
+
+> 一句话：**默认没变**（`plugin` = §11 起的行为，去注释后生成物逐字节相同）；
+> 新增一个 opt-in 档 `robot11_mount:=urdf`，把 30° 倾角**放回 URDF 关节**
+> （= 上游/CSV 的字面值、**画出来的雷达 mesh 一起斜** = 实物的物理安装姿态），
+> 插件 `<tilt_rpy>` 变单位阵。**该档不动任何感知参数** —— 就是为了看"倾斜放置最原始的效果"。
+
+完整取证（A 什么斜了/什么没斜 · B 逐帧点账本与"有没有被裁"的定论 · C 开关用法 +
+`urdf` 档实测与**坏在哪儿** · D 代价图/膨胀半径归因 · E 建议 · F 复现 · G 未验证）见
+**`docs/tilted_lidar_fidelity.md`**。四条与本文件关系最大的结论：
+
+1. **§11.3 第 3 项（`body_to_livox` 的 rpy 改成 `0 0 0`）仍然成立**，只是现在**可以按需切回**
+   上游字面值（`robot11_mount:=urdf`）。两档的**世界射线方向逐条相同**（逐点差 ≤5×10⁻⁵ m）。
+2. **§13.9 的"`/scan` 里恒有一圈自身障碍"有了归因**：它确实在 `/scan` 里（<1 m ≈ 一半波束），
+   但它**不是**把车包住的那一圈 —— 实测代价图里 **离雷达 0.25 m / 离车心 0.39 m 以内
+   没有任何 lethal 格**（自击团被 `obstacle_min_range: 0.1` 挡掉）。
+3. **§11.8 第 1 项（"目标被接受但车 90 s 没动"）有了直接证据**：控制器
+   `RegulatedPurePursuitController detected collision ahead` → `Controller patience exceeded`
+   → 自旋恢复；真值 30 s 只走 0.18 m。根因是 **车被膨胀层包住**（车半径圆内 513/996 格 ≥99、
+   free 仅 6 格），而"包住它的 lethal 格"来自 **0.26~0.40 m 的近场地面残留（经 `p2l` 的 2D 投影
+   被标在雷达高度）+ 0.5~1.0 m 处 ~0.15 m 高的场地低矮件**，再乘上本槽位的
+   `robot_radius 0.3565` + `inflation_radius 0.70/0.75`。**默认模型在同一场地是 free(0)、圆内 0/996。**
+4. **§13.2/§12.7 的"点云少了很多"不是被裁**：一帧 30000 条射线里只有 **11960 条有回波（39.9%）**，
+   其余在插件里就丢了；`/livox/lidar`、`/livox/lidar/pointcloud`、`/cloud_registered`
+   **每帧点数一致**（11960 / 11960 / 11968）⇒ 下游一级都没裁（`small_point_lio` 发布的云用的是
+   `dense_point_deque`，不受 `min_distance 0.5`/`space_downsample` 影响）。
+
+回退：去掉 `robot11_mount:=urdf`（默认就是 `plugin`）；`robot11_mount` 只对 `robot:=robot11`
+生效，取值只能是 `plugin|urdf`（选错直接报错）。工具：
+`tools/scripts/regress/run_robot11_mount_probe.sh` + `robot11_mount_probe.py`（本轮新增）。
+
+### 15.1 ★ 2026-10-08 接手复核的补充（上面四条结论全部复现）
+
+第二个人用新跑的数据重算了一遍（`.tmp_robotslot/r11m_plugin5`（静止）/`r11m_plugin6`（driven）/
+`r11m_urdf4`（driven）/`r11m_urdf5`（静止）），并补了原文标"未验证"的两项 —— 完整表格见
+**`docs/tilted_lidar_fidelity.md` §H**：
+
+* 点云/平面拟合**逐位复现**（`(-0.01376, 0.0122, 0.99983)`、`d=0.26038`、夹角 1.054°、自击 3294、
+  低于水平面 1770、`/cloud_registered` 0/11620）；`urdf` 档 `/cloud_registered` 地面 **30.618°**、
+  低于水平面 **7511/11622 = 64.6%**；车半径圆内 `≥99` **453/1000**（原文 513/997、435/1001）
+  ⇒ **"车一开始就在 inscribed 团里"三次独立复现**。
+* **"画出来的雷达 mesh 平/斜"从推论升级为直接读数**：`gz model -m robot -i`（Gazebo transport，
+  **不经 ROS/TF**）里被 lump 的视觉 `…fixed_joint_lump__livox_frame_visual_1`（mesh `l12.stl`）
+  默认档 **roll 0.000°**、`urdf` 档 **roll −30.000°**。
+  （原文说的 `/get_entity_state` 其实**在本仓 launch 里不存在** —— gzserver 没加载
+  `libgazebo_ros_api_plugin.so`，不是"grep 过滤掉了"。）
+* **LIO 漂移同协议 A/B 做了**（新增 `--drive`：直行 10 s ↔ 原地转 10 s）：driven 窗
+  `plugin` 0.0094 m / `urdf` 0.0483 m，静止窗 0.0264 / 0.0134 m ⇒ **两种协议下排序相反，
+  仍在噪声量级内**，不主张"哪个档漂得多"。
