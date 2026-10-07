@@ -2121,8 +2121,17 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 mode:=nav lio:=
    `dense_point_deque`，不受 `min_distance 0.5`/`space_downsample` 影响）。
 
 回退：去掉 `robot11_mount:=urdf`（默认就是 `plugin`）；`robot11_mount` 只对 `robot:=robot11`
-生效，取值只能是 `plugin|urdf`（选错直接报错）。工具：
+生效，取值只能是 `plugin|urdf|sensor`（选错直接报错）。工具：
 `tools/scripts/regress/run_robot11_mount_probe.sh` + `robot11_mount_probe.py`（本轮新增）。
+
+> ★ **2026-10-09：新增第三档 `robot11_mount:=sensor` + 修掉两个 LIO 侧 bug** —— 详见
+> **`docs/tilted_lidar_fidelity.md` §J**（施工记录 / A-B 表 / 配方 / 回退 / 未验证）：`sensor` = 与
+> `urdf` 档逐字节相同的关节/插件渲染 + 插件 `<cloud_frame>sensor</cloud_frame>`（点云表达在
+> **真·传感器系**、与 `frame_id` 自洽），且 launch **只在这一档**给 linefit 加
+> `gravity_aligned_frame: base_link`、给 p2l 加 `target_frame: base_link`；同时修掉
+> `/cloud_registered` 多乘一次 `T(base_link←livox_frame)`（bug ②：`urdf` 档 **30.970° → 1.054°**）
+> 与 `odom→base_link` 的**假俯仰**（bug ③：**4.890° → 0.317°**，真值 0.003°）。
+> `plugin`（默认）与其它模型/槽位的渲染、参数、行为**逐字节不变**（§J.3 静态证据 + §J.2 逐项 diff）。
 
 ### 15.1 ★ 2026-10-08 接手复核的补充（上面四条结论全部复现）
 

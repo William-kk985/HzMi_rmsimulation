@@ -1004,3 +1004,422 @@ g++ -O0 -o /tmp/tf2order tools/scripts/tiltmount/tf2_compose_order_test.cpp \
 | 本节的工具 | `rm -rf tools/scripts/tiltmount/`（只被上面 §I.9 的命令引用；不进任何 launch/节点） |
 | 本节的文档与工具（整节） | `git revert <本节 commit>`：只动 `docs/tilted_lidar_fidelity.md` 与新目录 `tools/scripts/tiltmount/`，**不动任何默认值/参数/生成物** |
 | 本节的原始数据 | `.tmp_tiltmount/**`（未入库） |
+
+---
+
+## J. 2026-10-09：两个 LIO bug 的修复 + `robot11_mount:=sensor`（"物理斜装 + 账也对"）实测 A/B
+
+> 触发 = 用户 2026-10-09 的下一条指令（父任务原文）：**先无条件修 §I.5.3 里那两个 LIO 侧 bug，
+> 再把 §I.8 的"斜装正确改法"真正实现成一档 opt-in**（默认与其它槽位逐字节不变），
+> 并用无头隔离跑把整条链**逐级 + 端到端**量一遍（ground / scan / 代价图 / 车动不动 / LIO 漂移 / RTF / 契约）。
+>
+> 本节与 §I 的关系：**§I 是诊断（谁斜了、账错在哪）**；**§J 是施工（改了哪几行、改完的数字是多少）**。
+> §I 的所有内容**逐字保留**；本节只**追加**，并在 §J.1 里登记 §I.9/§I.8(f) 一处**记法更正**。
+>
+> 全部无头隔离跑（`HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、专用 `GAZEBO_MASTER_URI`、
+> `unset DISPLAY`、只按 `/proc/<pid>/environ` 清本 master URI 的 gazebo），
+> 原始数据 `.tmp_tiltmount/j2_*/`（**改后**）与 `.tmp_tiltmount/{tm_plugin,tm_urdf}/`（**改前**，§I 那一轮）。
+
+### J.0 一句话结论
+
+1. **bug ②（`/cloud_registered` 多转一次）已修**：点云不再被乘 `T(base_link←livox_frame)`；发布的坐标与
+   `frame_id=odom` 自洽。`urdf` 档的验收数字从 **30.970°** 回到 **1.054°**（§I 的判据"反变换后 1.041°"），
+   默认档（`plugin`）**帧内几何逐项不变**、只把整朵云搬回真正的 odom 坐标（−t = −0.2044 m）。
+2. **bug ③（`odom→base_link` 用共轭发姿态）已修**：姿态改成**合成** `T_ol·T_bl`，
+   `urdf` 档的**假俯仰从 4.890° 降到 0.317°**（真值 0.003°；`sensor` 档的 rpy pitch **−4.9°** 不是假俯仰，
+   而是"绕斜 30° 的 odom 转 yaw"在 ZYX 下的**正确分解** —— 判据要用矩阵/一致性，见 §J.4 的"读表两个坑"），
+   默认档姿态**逐位不变**（单测 §J.3 的 ⑤ 断言 + 实跑对照）。
+   ⚠️ **平移故意保留旧值**（不是漏改）：见 **§J.5**（把平移也改成物理真值会让**默认模型与 robot11 的
+   局部代价图整张变空**：lethal 471→0 / 445→0，而那条 `min_obstacle_height` 在**本任务禁改**的目录里）。
+3. **新增第三档 `robot11_mount:=sensor`**：关节/插件与 `urdf` 档**逐字节相同**，只多一个
+   `<cloud_frame>sensor</cloud_frame>`（插件把点表达在**真·传感器系**），并由 launch **只在这一档**
+   给 linefit 加 `gravity_aligned_frame: base_link`、给 p2l 加 `target_frame: base_link`
+   ⇒ **帧与数据自洽 + 下游重力对齐**。默认档 `plugin` 与其它模型/槽位的渲染与行为**逐字节不变**（§J.3 证据）。
+4. **A/B（`plugin` / 旧 `urdf` / 新 `sensor`）**见 §J.4；**这条链仍然解决不了什么**见 §J.7。
+
+---
+
+### J.1 两个 bug 的修复（文件:行 / 改法 / 判决性数字）
+
+#### J.1.1 bug ②：`/cloud_registered` 对"已经在 odom 的点"又乘了一次 `T(base_link←livox_frame)`
+
+| 项 | 内容 |
+|---|---|
+| 文件:行 | `src/rm_localization/small_point_lio/src/small_point_lio_node.cpp`（改前 `:139-156` 的 `lookupTransform("base_link", lidar_frame)` + `:191` 的 `R*p+T`；`frame_id="odom"` 在 `:159`） |
+| 改法 | **删掉那次 TF 查询与逐点刚体变换**，直接把回调里的点写进消息（`*pointer = point.x()/y()/z()`）；`frame_id` 仍是 `odom`。文件里留了日期 + 机制 + 影响面的中文注释 |
+| 为什么这样对 | 回调收到的点来自 `small_point_lio.cpp` 的 `p_odom = R_ol·(extrinsic_R·p_lidar + extrinsic_T) + t_ol` —— **已经是 odom 系**，与 `frame_id="odom"` 一致 ⇒ 再乘一次就是"多转/多移一次" |
+| 判决性数字（`urdf` 档） | 改前：`/cloud_registered` 地面倾角 **30.970°**（按同一条 TF 反变换回去 = **1.041°**）；改后：**1.054°** ⇒ 就是那个"反变换后的值"本身 |
+| 默认档（`plugin`）差多少 | 那条 TF 是**纯平移** ⇒ 改前只把整朵云平移了 t = (0.000562, 0.130916, 0.157028) m（|t| = 0.2044 m）；改后这朵云回到真正的 odom 坐标。**帧内几何（点数/地面倾角/扇区/自仰角谱）逐项不变**，见 §J.2 的 before/after 表 |
+| 副作用检查 | `/global_costmap/voxel_grid` 每帧点数 **761 → 791.0**（不变，量级内）；`/segmentation/*`、`/scan` 的点数不变 |
+
+#### J.1.2 bug ③：`odom→base_link` 的姿态是**共轭**而不是**合成**
+
+| 项 | 内容 |
+|---|---|
+| 文件:行 | 同文件（改前 `:99` 的 `lookupTransform(lidar_frame, "base_link")` + `:109` 的 `T_ob = T_bl⁻¹·T_ol·T_bl`） |
+| 改法 | 姿态取**合成** `tf_odom_to_base_link = tf_lidar_odom_to_lidar_frame * tf_base_link_to_lidar_frame`（= `T_ol · T_bl`，`T_bl = lookupTransform(livox_frame←base_link)`）；⚠️ 平移保留旧值（§J.5） |
+| 为什么这样对 | 坐标映射链式法则：`p_odom = T_ol·p_livox = T_ol·(T_bl·p_base)` ⇒ `T_odom←base = T_ol·T_bl`。等价说法：位姿一致性 `T_ol = T_ob·T_bl⁻¹` ⇒ `T_ob = T_ol·T_bl`。**共轭只在 `T_bl` 是纯平移时"姿态碰巧对"** |
+| 判决性数字（`urdf` 档） | 改前：发布的 `odom→base_link` rpy = `[0.383, **4.890**, 7.701]°`（`/odom` 窗口内 pitch 跨度 4.924°，真值 `/odom_ground_truth` 0.003°）；改后：**rpy = [[30.060, 0.317, 9.162]]°**、**假俯仰 0.317°**（< 0.5° 验收线；那个 30° 出现在 **roll** 上，= `odom` 定义在斜的初始传感器系，物理事实，见 §I.8 原则 4） |
+| 默认档（`plugin`）差多少 | `T_bl` 的旋转 = 单位阵 ⇒ 合成与共轭的**姿态逐位相同**；平移也**逐位相同**（因为平移显式取旧值）⇒ **默认档的 TF/`/Odometry` 逐位不变**（单测 ⑤ + 实跑 §J.2 对照） |
+
+> **记法更正（对 §I.8(f)/§I.9 的一句话）**：§I.9 的 C++ 单测原来把"正确合成"写成 `T_ol·T_bl⁻¹`；
+> 在 `T_bl := lookupTransform(livox_frame, "base_link") = T(livox←base)` 这个（与代码一致的）记法下，
+> 它是**差一次求逆**的写法 —— 本节的 `tools/scripts/tiltmount/tf2_compose_order_test.cpp`
+> 已改成由**链式法则**推出 `T_ob = T_ol·T_bl` 并断言（非单位 `T_bl` 下 rpy = (30, 0, 9)°、假俯仰 0）。
+> §I.8(f) 的"会给出 rpy (30°, 0, yaw)"这一句是**对的**；§I.9 的那行公式与它自相矛盾，以本节为准。
+
+---
+
+### J.2 默认路径的回归证据（改动前 vs 改动后，逐项 diff）
+
+口径：同一世界/同一出生点/同一 LIO/同一条命令（`world:=RMUL2026 mode:=slam_nav lio:=small_point_lio
+robot:=robot11 spin_speed:=0.0`），改前 = `.tmp_tiltmount/tm_plugin`（§I 那一轮，旧二进制），
+改后 = `.tmp_tiltmount/j2_plugin`。表由 `tools/scripts/tiltmount/tilt_ab_table.py --diff` 生成：
+
+（差 = 改动后 − 改动前；`—` = 该跑没采到这个量）
+| 量 | before（改动前） | after（改动后） | 差 |
+|---|---|---|---|
+| TF base_link→livox_frame rpy(度) | [0.000, -0.000, 0.000] | [0.000, -0.000, 0.000] | — |
+| TF odom→base_link rpy(度) | [0.217, 0.047, 9.667] | [0.259, 0.404, 9.503] | — |
+| TF odom→base_link xyz(m) | [0.000, 0.009, -0.094] | [-0.003, 0.185, -0.097] | — |
+| 原始云地面倾角 vs 自己帧(度) | 1.035 | 0.957 | -0.077237 |
+| 原始云地面平面高(m) | 0.248 | 0.250 | 0.001424 |
+| 原始云点数(中位) | 11944.500 | 11945.000 | 0.500000 |
+| /cloud_registered 点数(中位) | 11953.000 | 11954.000 | 1.000000 |
+| /cloud_registered 地面倾角(度) | 0.742 | 0.545 | -0.197536 |
+| /cloud_registered 低于水平面点数 | 5967 | 6768 | 801 |
+| /segmentation/ground 点数(中位) | — | 5710.000 | — |
+| /segmentation/obstacle 点数(中位) | 6221.000 | 6223.000 | 2.000000 |
+| /scan 有限波束 | 949 | 948 | -1 |
+| /scan 超出高度带比例 | 0.000 | 0.000 | 0.000000 |
+| local costmap lethal | 471 | 461 | -10 |
+| local costmap inscribed | 15909 | 16937 | 1028 |
+| 车那格的值 | — | 80 | — |
+| 车半径圆内 ≥99 格 | — | 440 | — |
+| 车半径圆内 free 格 | — | 26 | — |
+| 到最近 lethal 格(m) | 0.387 | 0.391 | 0.003317 |
+| RTF | — | 0.428 | — |
+
+**读法（五条）**：
+1. **代码级的不变性有单测**：默认档（`T_bl` 纯平移）下，新的写法与旧写法**姿态与平移都逐位相同**
+   （§J.3 第 7 行的 tf2 单测断言 ⑤）——这是"默认档不变"的**构造性**保证。
+2. **实跑对照的读法**：表里 `TF odom→base_link rpy` 的差（roll 0.04°、pitch 0.36°、yaw 0.16°）与
+   `原始云地面倾角`（1.035 → 0.957°）、`/cloud_registered 地面倾角`（0.742 → 0.545°）都落在
+   **跑间噪声**里：本仓"出生后落定"（车生成在 `z=0.2`、随后下沉 0~0.15 m，LIO 在坠落中做重力初始化）
+   让**每一次跑**的 odom 原点高度、车的静止姿态都略不同 ⇒ 姿态估计的 roll/pitch 跑间差可达 **0.4°**、
+   代价图计数跑间差可达 **±30%**（§D.2 的 lethal 340/471/462/423 就是同一量级的跑间散布）。
+   ⇒ 这一张表的正确结论是"**没有超出跑间噪声的系统性变化**"，而不是"每个数都逐位相同"。
+3. **帧内几何逐项不变**：原始云点数（11944.5 → 11945）、`/cloud_registered` 点数（11953 → 11954）、
+   `/scan` 有限波束（949 → 948）、`/segmentation/*` 点数（6221 → 6223）都在 ±2 点内 ——
+   因为 bug ② 在默认档只是一次**纯平移**（旋转是单位阵）。
+4. **代价图仍然"能被看见"**：局部代价图 lethal **471 → 461**、inscribed 15909 → 16937、
+   车那格仍非 free（80）、车半径圆内 `≥99` 440 格 —— 与改动前**同量级**（这一条是本轮最关键的回归点：
+   §J.5 里"平移取真值"的那一版会把它们**全部清零**）。
+5. **默认模型对照**：**本轮没有单独跑默认模型对照**（预算）；可用的最强证据是：默认模型与 robot11 共用同一份 nav2 公共参数（`nav2_params_sim_base.yaml`），而 bug ② 在默认档只是"整朵云平移 0.2044 m"、bug ③ 在默认档**逐位不变**（`T_bl` 纯平移）⇒ 默认模型的 TF/`/Odometry`/点云几何都与改动前一致。另外 `.tmp_tiltmount/j1_default`（= 平移取真值的那一版）量到默认模型的局部代价图同样会变空（lethal 0 / inscribed 0），这正是 §J.5 保留旧平移的直接原因。
+
+### J.3 静态证据：`sensor` 档是**纯增量**，`plugin`/`urdf` 与其它模型逐字节不变
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 生成物 = 生成器输出 | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --upstream … --assets … --out .tmp_tiltfix/static/xacro_regen_final.xacro` | `diff` 为空 ⇒ **生成器与入库的 xacro 逐字节一致** |
+| `plugin` / `urdf` 两档的渲染 | `xacro sentry_robot_robot11_sim.xacro [livox_mount:=urdf] livox_tilt_rpy:="-0.523598775598293 0 0"`，改前 vs 改后 | **去注释后逐字节相同**（两份都是 **35410 B**）；原始 diff 只有注释行（我加的说明）与 xacro 文件名那一行 |
+| `sensor` 档的渲染 | 同上 + `livox_mount:=sensor` | 与 `urdf` 档**只差 3 处**：`body_to_livox` 的 `origin rpy`（= 倾角）、插件的 `<tilt_rpy>`（= 单位阵）、**新增** `<cloud_frame>sensor</cloud_frame>`（35410 → 35452 B） |
+| 其它模型 | `grep -rln cloud_frame src/rm_nav_bringup/urdf/*.xacro` | **只有** `sentry_robot_robot11_sim.xacro`（其它模型的 xacro 里没有这个元素、也没有 `tilt_rpy`） ⇒ 插件走的是"逐字节不变"那条分支（缺省 = 父 link 系） |
+| 插件语义 | `livox_points_plugin.cpp` 的三元表达式 | `cloud_frame` 缺省/`parent` ⇒ `axis = sensor_rot·mount_rot·ray`（**与 2026-10-07 起逐字节相同的代码路径**）；只有 `sensor` 才走 `axis = mount_rot·ray` |
+| launch 侧 | `robot11_mount:=sensor` 时才多两份**增量覆盖**参数文件 | 其它档递进节点的参数文件列表**逐个不变**；节点集合不变（同一节点名、互斥条件） |
+| 契约 | `ros2 topic info -v`（每个 tag 跑完都测，见 `mount_evidence.txt`） | `/livox/lidar{,/pointcloud}`、`/cloud_registered`、`/segmentation/{ground,obstacle}`、`/scan`、`/odom`、`/local_costmap/costmap`、`/global_costmap/voxel_grid` **每个话题恰好 1 个发布者**（三档都测了） |
+| tf2 语义单测 | `.tmp_tiltfix/tf2order`（= `tools/scripts/tiltmount/tf2_compose_order_test.cpp`） | **exit 0**：① 乘法序；② 旧写法的假俯仰 4.486° 且**违反一致性**（= bug）；③ 现在的写法假俯仰 0.000°、姿态满足一致性；④ 逐点恒等式 <1e-15 m；⑤ 默认档姿态**与平移都与旧写法逐位相同** |
+
+### J.4 A/B 三方表：`plugin`（默认，今天）vs `urdf`（"物理保真、账不对"诊断档）vs `sensor`（新，正确链）
+
+**表 A：三档静止**（同一世界/出生点/命令；`.tmp_tiltmount/j2_{plugin,urdf,sensor}`）
+
+| 量 | plugin | urdf | sensor |
+|---|---|---|---|
+| 安装档 variant | plugin | urdf | sensor |
+| TF base_link→livox_frame rpy(度) | [0.000, -0.000, 0.000] | [-30.000, 0.000, 0.000] | [-30.000, 0.000, 0.000] |
+| TF odom→base_link rpy(度) | [0.259, 0.404, 9.503] | [30.060, 0.317, 9.162] | [29.957, -4.874, 8.520] |
+| TF odom→base_link xyz(m) | [-0.003, 0.185, -0.097] | [-0.014, 0.058, -0.141] | [0.006, -0.025, -0.087] |
+| 原始云 frame_id | livox_frame | livox_frame | livox_frame |
+| 原始云地面法向 vs **自己的 frame_id** z(度) | 0.957 | 1.023 | 29.092 |
+| 原始云地面法向 vs **base_link** z(度)（账对不对） | 0.957 | 30.920 | 1.035 |
+| 原始云地面平面高(m) | 0.250 | 0.248 | 0.248 |
+| /cloud_registered frame_id | odom | odom | odom |
+| /cloud_registered 地面倾角（odom 里，度） | 0.545 | 1.054 | 29.135 |
+| /cloud_registered 低于水平面点数 | 6768 | 6770 | 4093 |
+| odom 帧相对真实重力倾角(度) | 0.376 | 30.116 | 30.359 |
+| /odom 窗口内 rpy 跨度(度) | [0.205, 0.347, 10.127] | [0.213, 0.354, 9.475] | [0.396, 5.167, 8.703] |
+| /scan frame_id | livox_frame | livox_frame | base_link |
+| /scan 有限波束/帧 | 948 | 949 | 755 |
+| /scan 波束在 odom 里超出 [0,2] m 的比例 | 0.000 | 0.000 | 0.404 |
+| /scan 波束 z(odom) min / max (m) | 0.020 / 0.089 | 0.007 / 0.076 | -0.426 / 2.317 |
+| local costmap frame_id | odom | odom | odom |
+| local costmap lethal / inscribed / free | 461 / 16937 / 29478 | 404 / 15349 / 31210 | 518 / 16312 / 32919 |
+| 车那格的值 | 80 | 86 | 86 |
+| 到最近 lethal 格距离(m) | 0.391 | 0.352 | 0.328 |
+| 车半径圆内格数 / ≥99 / free | 1000 / 440 / 26 | 999 / 360 / 26 | 997 / 509 / 4 |
+| lethal 方位（前后左右） | {front=119, left=205, back=137, right=0} | {front=159, left=113, back=132, right=0} | {front=236, left=206, back=76, right=0} |
+| RTF（记录窗） | 0.428 | 0.428 | 0.412 |
+| /cmd_vel 条数 / 非零 | {n=0, max_abs_vx_plus_wz=0.000, nonzero=0} | {n=0, max_abs_vx_plus_wz=0.000, nonzero=0} | {n=0, max_abs_vx_plus_wz=0.000, nonzero=0} |
+| /plan 帧数 / 每条位姿数(中位) | {n_frames=0, pts_median=—} | {n_frames=0, pts_median=—} | {n_frames=0, pts_median=—} |
+| --drive 漂移 vs 真值(m) / yaw(度) | — | — | — |
+| --goal 真值位移(m) / 目标后残余(m) | — | — | — |
+| 每帧点数（中位） | 原始云=11945.0, /scan 输入(obstacle)=6223.0, /segmentation/ground=5710.0, /cloud_registered=11954.0, voxel_grid=791.0 | 原始云=11947.0, /scan 输入(obstacle)=6225.0, /segmentation/ground=5704.0, /cloud_registered=11955.0, voxel_grid=145.0 | 原始云=11947.0, /scan 输入(obstacle)=6223.0, /segmentation/ground=5705.0, /cloud_registered=11955.5, voxel_grid=776.5 |
+
+**表 B：三档 + 短目标**（`--goal-forward 1.5 --goal-wait 30`；`.tmp_tiltmount/j2_*_goal`）
+
+| 量 | plugin-goal | urdf-goal | sensor-goal |
+|---|---|---|---|
+| 安装档 variant | plugin | urdf | sensor |
+| TF base_link→livox_frame rpy(度) | [0.000, -0.000, 0.000] | [-30.000, 0.000, 0.000] | [-30.000, 0.000, 0.000] |
+| TF odom→base_link rpy(度) | [0.016, 0.119, 37.015] | [30.209, -0.003, 12.219] | [29.228, -8.568, 14.997] |
+| TF odom→base_link xyz(m) | [0.182, 0.173, -0.090] | [-0.009, -0.034, -0.088] | [0.013, -0.026, -0.087] |
+| 原始云 frame_id | livox_frame | livox_frame | livox_frame |
+| 原始云地面法向 vs **自己的 frame_id** z(度) | 0.893 | 0.893 | 29.217 |
+| 原始云地面法向 vs **base_link** z(度)（账对不对） | 0.893 | 30.790 | 0.893 |
+| 原始云地面平面高(m) | 0.255 | 0.255 | 0.255 |
+| /cloud_registered frame_id | odom | odom | odom |
+| /cloud_registered 地面倾角（odom 里，度） | 0.956 | 1.119 | 29.148 |
+| /cloud_registered 低于水平面点数 | 6770 | 8450 | 4086 |
+| odom 帧相对真实重力倾角(度) | 0.110 | 30.209 | 30.308 |
+| /odom 窗口内 rpy 跨度(度) | [0.226, 0.471, 37.129] | [0.167, 0.214, 16.895] | [1.156, 8.527, 14.603] |
+| /scan frame_id | livox_frame | livox_frame | base_link |
+| /scan 有限波束/帧 | 938 | 949 | 755 |
+| /scan 波束在 odom 里超出 [0,2] m 的比例 | 0.000 | 0.000 | 0.433 |
+| /scan 波束 z(odom) min / max (m) | 0.056 / 0.072 | 0.113 / 0.140 | -0.517 / 2.190 |
+| local costmap frame_id | odom | odom | odom |
+| local costmap lethal / inscribed / free | 571 / 17617 / 27677 | 418 / 16895 / 29697 | 432 / 15087 / 32885 |
+| 车那格的值 | 86 | 84 | 90 |
+| 到最近 lethal 格距离(m) | 0.386 | 0.341 | 0.324 |
+| 车半径圆内格数 / ≥99 / free | 997 / 429 / 24 | 998 / 375 / 25 | 1000 / 500 / 7 |
+| lethal 方位（前后左右） | {front=177, left=185, back=209, right=0} | {front=137, left=121, back=160, right=0} | {front=187, left=188, back=57, right=0} |
+| RTF（记录窗） | 0.419 | 0.390 | 0.402 |
+| /cmd_vel 条数 / 非零 | {n=497, max_abs_vx_plus_wz=3.000, nonzero=352} | {n=400, max_abs_vx_plus_wz=3.000, nonzero=76} | {n=315, max_abs_vx_plus_wz=3.000, nonzero=44} |
+| /plan 帧数 / 每条位姿数(中位) | {n_frames=17, pts_median=66.000} | {n_frames=10, pts_median=62.000} | {n_frames=9, pts_median=64.000} |
+| --drive 漂移 vs 真值(m) / yaw(度) | — | — | — |
+| --goal 真值位移(m) / 目标后残余(m) | 0.1388 / 1.3598 | 0.0015 / 1.5069 | 0.0015 / 1.4931 |
+| 每帧点数（中位） | 原始云=11972.0, /scan 输入(obstacle)=6245.0, /segmentation/ground=5733.0, /cloud_registered=11980.0, voxel_grid=781.5 | 原始云=11958.0, /scan 输入(obstacle)=6226.0, /segmentation/ground=5720.0, /cloud_registered=11960.5, voxel_grid=161.0 | 原始云=11963.0, /scan 输入(obstacle)=6231.0, /segmentation/ground=5724.0, /cloud_registered=11971.0, voxel_grid=773.0 |
+
+**表 C：三档 + 固定动作**（`--drive`：直行 10 s `vx=0.30` ↔ 原地转 10 s `wz=0.60`；`.tmp_tiltmount/j2_*_drive`）
+
+| 量 | plugin-drive | urdf-drive | sensor-drive |
+|---|---|---|---|
+| 安装档 variant | plugin | urdf | sensor |
+| TF base_link→livox_frame rpy(度) | [0.000, -0.000, 0.000] | [-30.000, 0.000, 0.000] | [-30.000, 0.000, 0.000] |
+| TF odom→base_link rpy(度) | [0.107, 0.429, -0.111] | [30.036, 0.371, -0.297] | [30.310, 0.324, 0.526] |
+| TF odom→base_link xyz(m) | [0.389, 0.225, -0.094] | [0.386, 0.142, -0.190] | [0.397, 0.089, -0.086] |
+| 原始云 frame_id | livox_frame | livox_frame | livox_frame |
+| 原始云地面法向 vs **自己的 frame_id** z(度) | 0.893 | 0.893 | 29.215 |
+| 原始云地面法向 vs **base_link** z(度)（账对不对） | 0.893 | 30.790 | 0.893 |
+| 原始云地面平面高(m) | 0.255 | 0.255 | 0.255 |
+| /cloud_registered frame_id | odom | odom | odom |
+| /cloud_registered 地面倾角（odom 里，度） | 1.027 | 0.957 | 29.287 |
+| /cloud_registered 低于水平面点数 | 6768 | 6770 | 370 |
+| odom 帧相对真实重力倾角(度) | 0.174 | 30.046 | 30.264 |
+| /odom 窗口内 rpy 跨度(度) | [0.192, 0.547, 14.293] | [0.227, 0.456, 14.958] | [0.803, 7.603, 12.822] |
+| /scan frame_id | livox_frame | livox_frame | base_link |
+| /scan 有限波束/帧 | 949 | 949 | 755 |
+| /scan 波束在 odom 里超出 [0,2] m 的比例 | 0.000 | 0.031 | 0.396 |
+| /scan 波束 z(odom) min / max (m) | 0.040 / 0.076 | -0.012 / 0.020 | -0.464 / 2.464 |
+| local costmap frame_id | odom | odom | odom |
+| local costmap lethal / inscribed / free | 420 / 16297 / 32964 | 364 / 16640 / 32548 | 443 / 16447 / 33895 |
+| 车那格的值 | 91 | 93 | 95 |
+| 到最近 lethal 格距离(m) | 0.379 | 0.341 | 0.321 |
+| 车半径圆内格数 / ≥99 / free | 999 / 560 / 1 | 998 / 554 / 0 | 996 / 606 / 0 |
+| lethal 方位（前后左右） | {front=57, left=216, back=147, right=0} | {front=95, left=102, back=167, right=0} | {front=124, left=164, back=155, right=0} |
+| RTF（记录窗） | 0.390 | 0.392 | 0.396 |
+| /cmd_vel 条数 / 非零 | {n=0, max_abs_vx_plus_wz=0.000, nonzero=0} | {n=0, max_abs_vx_plus_wz=0.000, nonzero=0} | {n=0, max_abs_vx_plus_wz=0.000, nonzero=0} |
+| /plan 帧数 / 每条位姿数(中位) | {n_frames=0, pts_median=—} | {n_frames=0, pts_median=—} | {n_frames=0, pts_median=—} |
+| --drive 漂移 vs 真值(m) / yaw(度) | 0.0198 / -0.441 | 0.0225 / -0.518 | 0.0517 / 0.041 |
+| --goal 真值位移(m) / 目标后残余(m) | — | — | — |
+| 每帧点数（中位） | 原始云=12360.0, /scan 输入(obstacle)=7161.0, /segmentation/ground=5278.0, /cloud_registered=12392.0, voxel_grid=670.0 | 原始云=12370.0, /scan 输入(obstacle)=7150.0, /segmentation/ground=5282.0, /cloud_registered=12391.0, voxel_grid=122.0 | 原始云=12332.0, /scan 输入(obstacle)=7098.5, /segmentation/ground=5321.0, /cloud_registered=12364.0, voxel_grid=661.0 |
+
+> ⚠️ **读表两个坑（都是"rpy 分量会骗人"的老问题）**：
+> **(a)** `sensor` 档 `TF odom→base_link` 的 rpy 里有一个 **−4.9° 的 pitch**、`/odom` 窗口内 pitch 跨度
+> **5.17°** —— 它**不是** bug ③ 那个假俯仰。那一档的 odom **真的斜了 30°**（表里
+> `odom 帧相对真实重力倾角 = 30.359°`），而"绕斜帧的 z 轴转 yaw"用 ZYX 展开**必然**出现 pitch 项；
+> 矩阵本身是对的（`R_ob == R_x(30)·Rz(Δ)` 与 `R_ob·R_bl⁻¹ == R_ol` 两条恒等式见 §J.3 的单测与 §J.4.1）。
+> **判据要用矩阵/一致性，不要用 rpy 分量。**
+> **(b)** `urdf` 档的 `odom 帧相对真实重力倾角 30.116°` 也**不是**"odom 真的斜了" —— 那一档点云是水平的、
+> odom 其实是重力对齐的；这个 30° 是**发布出去的 TF 自带的 roll**（§I.2 的"账不对"）。⇒ 它在表里要
+> **按"账"读**（读作"nav2 以为车斜了 30°"），不要按"物理"读。
+
+#### J.4.1 逐级坐标系自检（`tools/scripts/tiltmount/tilt_chain_check.py`）
+
+| 档 | raw 点数 | 地面法向 vs **自己 frame_id** z | 经 TF 转到 base_link 后 | frame_id | TF base_link←livox rpy | 自击掩膜命中（旋转后） | p2l 高度带内（旋转后） |
+|---|---|---|---|---|---|---|---|
+| plugin(改前) | 11568 | 1.004° | 1.004° | `livox_frame` | [0.0, -0.0, 0.0] | 29.210% | 1.0000 |
+    · bug ② 判决性判据（同一次跑的 raw 云按两种发布假设预测**地面法向角**）：实测发布 = 0.918° ；H_fixed(现在的代码) = 0.782° ；H_old(旧代码) = 0.782°（反解 T_ol(=LIO 状态) rpy = [0.217, 0.047, 9.667]；两条假设的平移差 = |t| = 0.2044 m）
+| plugin(改后) | 11568 | 1.004° | 1.004° | `livox_frame` | [0.0, -0.0, 0.0] | 29.210% | 1.0000 |
+    · bug ② 判决性判据（同一次跑的 raw 云按两种发布假设预测**地面法向角**）：实测发布 = 0.834° ；H_fixed(现在的代码) = 0.730° ；H_old(旧代码) = 0.730°（反解 T_ol(=LIO 状态) rpy = [0.259, 0.404, 9.503]；两条假设的平移差 = |t| = 0.2044 m）
+| urdf(改前) | 11568 | 1.004° | 30.974° | `livox_frame` | [-29.99999999999969, 0.0, 0.0] | 29.210% | 0.8778 |
+    · bug ② 判决性判据（同一次跑的 raw 云按两种发布假设预测**地面法向角**）：实测发布 = 30.911° ；H_fixed(现在的代码) = 30.900° ；H_old(旧代码) = 60.900°（反解 T_ol(=LIO 状态) rpy = [-29.617, 4.89, 7.701]；两条假设的平移差 = |t| = 0.2044 m）
+| urdf(改后) | 11568 | 1.004° | 30.974° | `livox_frame` | [-29.99999999999969, 0.0, 0.0] | 29.210% | 0.8778 |
+    · bug ② 判决性判据（同一次跑的 raw 云按两种发布假设预测**地面法向角**）：实测发布 = 0.965° ；H_fixed(现在的代码) = 0.915° ；H_old(旧代码) = 30.912°（反解 T_ol(=LIO 状态) rpy = [0.06, 0.317, 9.162]；两条假设的平移差 = |t| = 0.2044 m）
+| sensor(新) | 11568 | 29.028° | 1.004° | `livox_frame` | [-29.99999999999969, 0.0, 0.0] | 29.210% | 1.0000 |
+    · bug ② 判决性判据（同一次跑的 raw 云按两种发布假设预测**地面法向角**）：实测发布 = 29.145° ；H_fixed(现在的代码) = 29.400° ；H_old(旧代码) = 0.693°（反解 T_ol(=LIO 状态) rpy = [-0.043, -4.874, 8.52]；两条假设的平移差 = |t| = 0.2044 m）
+
+### J.5 ⚠️ bug ③ 的**平移**：为什么本次**保留旧值**（实测 + 完整修法 + 后续项）
+
+**结论先说**：bug ③ 有**两半** —— **姿态**（用户实测到的那个 bug：假俯仰 4.890°）**已修**；
+**平移**（`t_ol + (I − R_ol)·p` vs 物理真值 `t_ol − R_ol·p`，差**恰好 −p = 0.2044 m**）
+**本次故意保留旧值**，因为它牵动的是**另一份目录**里的东西，而且实测代价很明确：
+
+| 口径（`robot:=robot11` 或默认模型，静止，`lio:=small_point_lio`） | 平移 = **旧值**（今天 / 本次修完） | 平移 = **物理真值**（`T_ol·T_bl` 的平移） |
+|---|---|---|
+| `/scan` 盘面在 odom 里的 z（p50） | **+0.063 m**（robot11）/ +0.065（§I 那轮） | **−0.091 m**（robot11）/ **−0.092 m**（默认模型） |
+| 落在 `obstacle_layer` 高度带（nav2 默认 `min_obstacle_height 0.0`，量在**代价图帧 odom**）之外的波束 | **0 / 948** | **950 / 950**（robot11）、**1239 / 1239**（默认模型） |
+| 局部代价图 lethal / inscribed | **461 / 16937**（改前 §I 那轮 471 / 15909） | **0 / 0**（整张图 62500 格全 free） |
+| 默认模型对照 | **445 / 11029**（§D.2 的 regress 探针） | **0 / 0**（同一探针，`j1_default`） |
+
+**机理**（三句话，都有源码/参数出处）：
+1. `/scan` 是一张**二维平盘**，盘面过它自己的帧原点（`plugin`/`urdf` 档 = `livox_frame`）⇒ 它在 odom 里的
+   z 就等于"那一帧的 odom z"；nav2 的 `laserScanCallback` 先 `projectLaser`（z=0）再用 TF 搬到代价图帧，
+   带子是在**代价图帧**里量的（`obstacle_layer.scan` **没有**配 `min_obstacle_height`
+   ⇒ nav2 默认 **0.0**；`src/rm_navigation/rm_navigation/params/nav2_params_sim_base.yaml:128`
+   `global_frame: odom`，同文件 `:187` 的注释写明设计假设："odom 的 z=0 ≈ base_link 起始高度（地面约 −0.05）"）。
+2. 本仓的 odom **不满足**这条假设：`rm_simulation.launch.py` 把车生成在 `z=0.2`（轮半径 0.06、落定后
+   `base_link` 在 0.11~0.15），**LIO 在坠落中就做了重力初始化**（那句注释是明写的）⇒ odom 的 z=0 比
+   "落定后的地面基准"高 **0.2~0.35 m**。旧的共轭平移**恰好**把这 0.2044 m 的一部分补了回去
+   （"歪打正着"），所以今天的默认路径"能用"。
+3. ⇒ 任何"只改 LIO 一行"的方案（无论是本文件的合成，还是把 odom 原点挪到地面）都会**同时**打断
+   robot11 **与默认模型**的局部代价图；而那条 `min_obstacle_height`（以及代价图帧的选择）在
+   **`src/rm_navigation/**/params`（本任务禁改）**。⇒ 必须**分两步**：先修姿态（本提交，默认档逐位不变），
+   平移 + 高度带重新定基**登记为后续项**。
+
+**平移的完整修法（后续项，两个候选，都要单独评估）**：
+* **(a) 在 LIO 侧**：把 odom 的 z 基准钉到"初始化那一刻的 `base_link` 高度"（即发布
+  `T_ob = T_ol·T_bl` 的真值 + 一个**常量** z 偏置，让 `base_link` 起始 ≈ 0）—— 语义上正是
+  `nav2_params_sim_base.yaml:187` 那条假设；代价：odom 不再是"纯净的 LIO 输出"，要用参数门控。
+* **(b) 在代价图侧**：把 `obstacle_layer.scan.min_obstacle_height`（local 与 global 两处）改成覆盖
+  `/scan` 盘面实际落点（本轮实测：odom 里 −0.15 m 即可覆盖 −0.091；留 0.06 m 余量），
+  或者把两张图的 `global_frame` 换成重力对齐帧（`sensor` 档下更有必要，见 §J.7 第 3 条）。
+  代价：这两处都在**别的任务的参数目录**里，且会改变默认路径的"什么算障碍"口径 ⇒ 必须单独 A/B。
+* 本节给出的**可直接复算的量**：`python3 tools/scripts/tiltmount/tilt_ab_table.py --diff before:.tmp_tiltmount/tm_plugin after:.tmp_tiltmount/j2_plugin`
+  与 `.tmp_tiltmount/j1_plugin/probe.json`（= 平移取真值的那一跑，保留为反例证据）。
+
+
+### J.6 「斜装怎么处理」的配方（**现在已经真的实现了**：`robot11_mount:=sensor`）
+
+#### J.6.1 一档到底改了什么（逐级 + 精确参数）
+
+| 级 | 文件 / 键 | `plugin`（默认，今天） | **`sensor`（新，正确链）** |
+|---|---|---|---|
+| ① 物理安装姿态 | `sentry_robot_robot11_sim.xacro`（生成器 `tools/scripts/regress/robot11_make_sim_xacro.py` 拥有）：`joint body_to_livox` 的 `origin rpy` | `0 0 0` | `$(arg livox_tilt_rpy)` = `-0.523598775598293 0 0`（= 上游/CSV 字面值，**mesh 一起斜**） |
+| ② 射线方向 | 插件 SDF `<tilt_rpy>` | `-0.523598775598293 0 0` | `0 0 0`（倾角已由 link 姿态承担；**世界射线两档逐条相同**） |
+| ③ 点云表达在哪个系 | 插件 SDF `<cloud_frame>`（**本轮新增的键**） | 元素不存在 ⇒ `parent`（父 link 系） | `<cloud_frame>sensor</cloud_frame>` ⇒ **真·传感器系**（`axis = mount_rot·ray`） |
+| ④ 地面分割 | `linefit_ground_segmentation_ros/config/segmentation_sim_robot11_sensor.yaml`（**本轮新增的增量文件**）：`gravity_aligned_frame` | `""`（点云在源头已对齐） | `base_link`（节点先按 TF **只旋转**到 base_link 再分割） |
+| ⑤ 分割器其它键 | `segmentation_sim_robot11.yaml`（**不动**）：`sensor_height` | `0.2595` | `0.2595`（"只旋转、不平移"⇒ 地面仍在 z=−0.2595 ✓） |
+| ⑥ scan 化 | `pointcloud_to_laserscan/config/laserscan_params_sensor_frame.yaml`（**本轮新增的增量文件**）：`target_frame` | `""`（不做 TF，连 MessageFilter 都不建） | `base_link`（完整 TF，含平移）⇒ `/scan` 是"水平面里的一圈"、高度带恢复"离地"语义 |
+| ⑦ p2l 其它键 | `laserscan_params.yaml`（**不动**）：`min/max_height` | `-1.0 / 1.0`（在 `livox_frame` 里量） | `-1.0 / 1.0`（在 `base_link` 里量 ⇒ 变成真正的"相对车体原点的高度"） |
+| ⑧ 自击掩膜 | `traversability_self_mask_robot11.yaml`（**不动**，113 个 AABB） | 命中 29.2% | **不用重烘**：掩膜作用在 linefit 内部**旋转之后**的 `cloud_proc` 上，而那一份坐标与 `plugin` 档**逐点相同**（离线实测见 §J.4 的 `tilt_chain_check` 行） |
+| ⑨ 杆臂（只在 `lio:=fastlio\|pointlio` 时生效） | launch 的 `_lio_adapter_robot11(...)` | 纯平移 | 带 30° 旋转（`sensor` 与 `urdf` 同处理；`lio:=small_point_lio` 时该节点不启动） |
+| ⑩ odom 的重力对齐 | — | odom ≈ 初始身体系（**恰好**水平，因为点云是平的） | odom = **斜 30° 的初始传感器系**（`fix_gravity_direction` + 初始 `R=I`，§I.8 原则 4）⇒ 本档**选择"下游全部在 base_link 里"**（④⑥），odom 的斜由 TF 如实表达、**没有**去改 LIO 的初始化 |
+
+#### J.6.2 复制即可跑
+
+```bash
+# 构建（插件 + LIO + 两个新增覆盖文件所在包）
+colcon build --symlink-install --packages-select rm_nav_bringup small_point_lio \
+    ros2_livox_simulation linefit_ground_segmentation_ros pointcloud_to_laserscan
+
+# 正确链（物理斜装 + 账也对）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=slam_nav \
+    lio:=small_point_lio robot:=robot11 robot11_mount:=sensor spin_speed:=0.0
+
+# 一条命令量齐（隔离无头 + 参数/TF 回读 + 契约 + 逐帧账本）
+tools/scripts/tiltmount/run_tilt_mount_probe.sh j2_sensor --variant sensor --settle 25 \
+    --duration 45 --frames 3 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gui:=False
+```
+
+#### J.6.3 30 秒自检清单（跑起来之后）
+
+```bash
+ros2 param get /ground_segmentation  gravity_aligned_frame   # 期望 "base_link"
+ros2 param get /pointcloud_to_laserscan target_frame         # 期望 "base_link"
+ros2 run tf2_ros tf2_echo base_link livox_frame              # 期望 rpy = -30.000 0 0
+python3 tools/scripts/tiltmount/tilt_chain_check.py --dir sensor:.tmp_tiltmount/j2_sensor
+#   → "地面法向 vs 自己 frame_id z" ≈ 30°（**数据真的在斜的传感器系里**）
+#     "经 TF 转到 base_link 后" ≈ 1°（**账也对**）；自击掩膜命中 ≈ 29.2%（不用重烘）
+grep -m1 "cloud_frame = sensor" .tmp_tiltmount/j2_sensor/launch.log   # 插件侧收据
+```
+
+### J.7 这条"正确链"**仍然解决不了**什么（诚实清单）
+
+1. **"车一开始就在膨胀团里"没被这一档解决**：它的真因是 §D.3 的三件事（近场地面残留 + 场地低矮件 +
+   本槽位 `robot_radius 0.3565 / inflation 0.70|0.75`），与"点云表达在哪个系"无关。A/B 表里的
+   `车半径圆内 ≥99 / free` 一列就是这条的量。
+2. **自击环仍在**：`r<0.12 m` 的点是**物理真实回波**（28~29%/帧），本档一个都没删；它仍然靠
+   `self_mask_*`（判据层）与 `obstacle_min_range` 处理。
+3. **代价图那一层仍然是 odom 帧**（§J.5 的同一根因）：`sensor` 档下 odom 斜 30°，`obstacle_layer.scan`
+   的高度带把"过 base_link 原点的水平盘"在 odom 里看成斜面 ⇒ **一半以上的波束按高度被丢**
+   （§I.7 量过旧 `urdf` 档的 71.4%）。修它要动**代价图帧/高度带**（另一份参数目录）或改 LIO 的
+   odom 重力对齐 —— **本档没做**，只在 §J.4 如实登记。
+4. **插件 `point = range·axis` 漏了 `+ 0.1·axis`**（§12.3.1 的系统内移 0.1 m）**仍然在**：它属"共享代码、
+   会改所有模型"，本轮不动。
+5. **`odom` 帧不保证重力对齐**这条**结构性事实**没有变：本档只是"下游全用 base_link"绕开它。
+
+### J.8 回退与未验证
+
+#### 回退
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| `sensor` 档 → 今天的行为 | 去掉 `robot11_mount:=sensor`（默认 `plugin`） |
+| 两个 LIO bug 修复 | `git revert <J 的 LIO commit>`（默认档**逐位不变**，revert 后与 §I 那一轮等价） |
+| 只退"点云表达在传感器系" | 去掉 xacro 里的 `<cloud_frame>`（插件缺省即父 link 系；两档参数文件同时撤掉） |
+| 整套 `robot11_mount` | `docs/tilted_lidar_fidelity.md` §C.2/§F.4 |
+| 本节新增的工具 | `tools/scripts/tiltmount/`（只有 `tilt_ab_table.py` / `tilt_chain_check.py` 是本轮新增；都不进任何 launch/节点） |
+
+#### 未验证 / 诚实清单（本轮）
+
+1. **没有在真 RViz / 带 GUI 里看一眼**（全部无头跑；§I.10 第 1 项同款限制）。
+2. **`sensor` 档的"整条链端到端好用"没有在任何意义上被证明**：本轮只证明了
+   **帧 ↔ 数据自洽**（29.028° vs 1.004°）、**下游重力对齐生效**（linefit/p2l 的参数与输出）、
+   **契约单发布者**；代价图那一层（odom 帧的高度带）与"车能不能真的走过去"**都还不行**（§J.7 第 1/3 条）。
+3. **单出生点、单次跑**：三个档各 1 次静止 + 1 次目标 + 1 次固定动作，**没有**重复跑；
+   RTF（0.39~0.46）在同一次批里可比，但**没有**做"同时间窗交替"那种严格 A/B（§G 第 3 项）。
+4. **`--drive` 的漂移只有一轮**：口径与本仓惯例一致（odom 位移 − 真值位移），数值 0.02~0.05 m 量级
+   ⇒ 与 §H.5 一样**只能当噪声量级**读，不能主张"哪个档漂得多"。
+5. **`sensor` 档只测了 `lio:=small_point_lio`**：`fastlio`/`pointlio` 走 `lio_tf_adapter` 那条杆臂
+   （本轮只做了几何/单元级验证），**没有**跑过组合。
+6. **没有测 `ground:=patchwork` + `sensor`**（launch 里**直接报错**，是设计选择，不是验证过的组合）。
+7. **没有测 `robot11_mount:=sensor` 与 `--drive` 的目标/控制耦合**：`/cmd_vel` 的恢复行为日志
+   只在 `plugin`/`urdf` 两档采到（`sensor` 档目标跑的日志见 §J.4 表）。
+8. **bug ② 的"绕 odom 原点旋转"这一条**（§I.10 第 3 项）在**默认档**已经不存在了（不再有任何额外旋转），
+   但在 `urdf` 档的**旧**行为里它是真实的 —— 本轮只做了静态（车在原点附近）复测，**没有**跑"车开远"的对照。
+9. **`tilt_chain_check.py` 的 bug ② 判据用"地面法向角"**：在**默认档**（`T_bl` 纯平移）两条假设的
+   法向**相同** ⇒ 那一档的判别靠"平移差 = |t| = 0.2044 m"与跨跑对照，**不是**单跑内的角度判别。
+10. **§J.5 的替代修法（代价图高度带重新定基）没有实现**：只给了两个候选与实测代价，
+    **没有**跑过"改完能不能用"的 A/B。
+
+#### J.4.2 分段读法（六个问题逐一回答）
+
+**(1) 点云的"地面法向 vs 它自称的那个帧的 z"**（§J.4.1 表）：
+`plugin` 1.004° / `urdf` **1.004°（但经 TF 到 base_link 变 30.974°）** / `sensor` **29.028°（经 TF 到
+base_link 回到 1.004°）**。⇒ 只有 `sensor` 档两个数**同时**说明"数据在斜的传感器系里、账也对"；
+`urdf` 档的第 2 列 30.974° 就是 §I.2"帧与数据差 30°"的量化。
+
+**(2) `/segmentation/ground` / `/scan`**：见 A/B 表的两行 + 分带行。要点：
+* `urdf` 档（改后）的 `/scan` **不再**被高度带丢掉 71.4%（改前 §I.7 的数）—— 因为 bug ③ 修好后
+  `odom←livox_frame` 是真正的传感器位姿（盘面落在 +0.05 m 一带）；
+* `sensor` 档的 `/scan` 换成 `frame_id=base_link`、有限波束比 `plugin` 少（`plugin` 档那 950 条里
+  有 ~170 条是 0.05–0.10 m 的自击团，`sensor` 档因为做了完整 TF，自击团的水平距离被正确投影）。
+
+**(3) `obstacle_layer` 高度带存活**：`plugin` **0/948 被丢**、`urdf`（改后）**0/949**、
+`sensor` **41.2% 被丢** —— `sensor` 档这一条**仍然是坏的**，机理是"A/B 表的代价图帧仍是 odom（斜 30°）
+⇒ 过 base_link 原点的水平盘在 odom 里是斜面"（§J.7 第 3 条）。**这是本档唯一没修好的一级。**
+
+**(4) 局部代价图 / 车周围**：三档都采到了 `lethal / inscribed / 车那格 / 车半径圆内 ≥99 / free`
+（见 A/B 表）。`plugin` 与 `urdf` 两档的车那格**仍然不是 free**（86 / 84），车半径圆内 `≥99`
+**429 / 375** 格 —— 与 §D.2/§H.2 的"车一开始就在膨胀团里"**同量级复现**（这一条与安装档无关，§J.7 第 1 条）。
+
+**(5) 短目标下车动不动**（`--goal-forward 1.5`，同一协议）：
+`plugin` **真值位移 0.139 m、目标后仍差 1.36 m**、日志 `detected collision ahead` **139 条**/
+`patience exceeded` 3 条；`urdf` **0.0015 m / 1.51 m / 286 条**⇒ **两档都是"目标被接受但车不走"**
+（§D.4 的复现）。`sensor` 档见 A/B 表（这一档的代价图来源不同，读数要单独看）。
+
+**(6) LIO 漂移与 RTF**（`--drive` 固定动作：直行 10 s `vx=0.30` ↔ 原地转 10 s `wz=0.60`，同一协议）：
+见 A/B 表的最后两行 —— 口径 = "odom 位移 − 真值位移"（本仓惯例），**与 §H.5 同量级（0.01~0.05 m）**，
+RTF 三档在 **0.39~0.46** 之间 ⇒ **不要**据此主张"哪个档更慢/更漂"（§G 第 3 项）。
