@@ -1881,6 +1881,13 @@ bash tools/scripts/tiltmount/_replay_ng.sh <一帧 raw_*.csv> 0.2595
    （0.313 m / 残余 0.170 m）⇒ 修完感知之后"车能走"，但**长距离仍然不行**：
    本主题**没有**归因（候选：LIO 出生自转 ~10°（§I.5.2）、全局图还在建、RPP 的
    `regulated_linear_scaling_min_radius 0.9`）。**这是本主题最大的未完成项。**
+   > **→ 2026-10-10 已归因：见 §L。** 一句话 = ① 出生点**正前方 0.42 m 处就有实体障碍**
+   > （把 nav2 摘掉盲推也只能走 **0.4199 m**；默认模型 **0.5402 m**）⇒ 2.0 m 的"正前方"目标
+   > **物理不可达**；② 0.5 m 目标的"成功"是 **0.1902 m 残余 < 0.25 m 容差**（真值只走了 0.2977 m）；
+   > ③ `k1_ngoff` 那跑的 0.357/1.573 是**旧配置**（radius 0.3565、近地剔除关）的读数，
+   > 当前配置同协议为 **0.3373 / 1.8924**；④ §K.5 表里"0 条 collision ahead"**只对短目标成立**，
+   > 长目标是 **135 条**；⑤ 另发现 robot11 的**角速度通道只执行 0.55%**（默认模型 4.4%），
+   > 这才是"需要转向的目标"失败的直接原因。
 6. **`sensor_height` 的 4.3 cm 疑问**（§K.1 末尾）：几何预测 0.2595 m vs 本主题反推的
    ~0.302 m。**没有查**（要查的是"轮 collision mesh 最低点 vs 关节 origin 的 FK"）。
    影响面：`linefit` 的 `sensor_height`（别的任务的槽位文件）与 `p2l` 的高度带解释。
@@ -1906,3 +1913,297 @@ bash tools/scripts/tiltmount/_replay_ng.sh <一帧 raw_*.csv> 0.2595
 | **整套 §K** | `git revert <§K 的 3 个 commit>`：默认路径的行为**逐字节不变**（近地剔除默认 0.0、半径只在槽位覆盖文件里）；**唯一**需要单独决定的是插件那一行（它是共享代码，revert 它就回到旧点云） |
 | 本节新增的工具/批次脚本 | `rm -rf tools/scripts/tiltmount/`（只有 §K.6/K.7 的命令引用它们；不进任何 launch/节点） |
 | 本节的原始数据 | `.tmp_tiltmount/k*`、`.tmp_robotslot/k*`（未入库） |
+
+---
+
+## L. 2026-10-10：`robot:=robot11` 的 `--goal-forward 2.0` 走不到的归因（§K.8 第 5 项的收口）
+
+> 触发 = 父任务原文：**"诊断 `robot:=robot11` 为什么短目标能动、长目标不动 —— 这是模型能不能算
+> 可用/默认的最后一个阻塞项"**，并点名要**逐条测试候选原因、不要猜**。
+>
+> 与 §K 的关系：§K.8 第 5 项把这件事登记为"**本主题最大的未完成项**"，并给了三个候选
+> （出生自转 ~10° / 全局图还在建 / RPP 的 `regulated_linear_scaling_min_radius 0.9`）。
+> **本节把三个候选全部按实测判决**，并给出第 4、第 5 个候选（**场地里的实体障碍**、
+> **底盘的角速度通道几乎不执行**）。§K 及以前的内容**逐字保留**；本节只**追加**，
+> 但对 §K.5/§K.8 引用的两组数字做一处**口径更正**（见 §L.1.3）。
+>
+> 全部无头隔离跑（`HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、按 tag 哈希占用的
+> `GAZEBO_MASTER_URI`、`unset DISPLAY`、只 kill **本 master URI 上**的 gzserver/gzclient，
+> **绝不做全机 pkill**；`world:=RMUL2026` 不带前导 `--`），
+> 原始数据 `.tmp_tiltmount/n1_*` … `.tmp_tiltmount/n4_*`；工具见 §L.12。
+
+### L.0 一句话结论（五条，都是实测）
+
+1. **根因不是模型、不是参数、不是代价图：是"目标方向上 0.42 m 处有实体障碍"。**
+   把 nav2 **完全摘掉**（只给底盘插件发固定 `vx`、绕过控制器/代价图/BT），
+   `robot:=robot11` 从出生点**只能前进 0.4199 m**（请求 6.25 m，25 s 内 500 条指令）；
+   **默认模型**同协议只能前进 **0.5402 m** ⇒ 这是**场地/出生点**的性质，两个模型都撞在同一处
+   （§L.2）。⇒ 2.0 m 的"正前方"目标**物理上不可达**，不存在"走得到"的参数组合。
+2. **0.5 m 目标"能走"是"容差成功"，不是"车走了 0.5 m"**：真值只走了 **0.2977 m**，
+   停在离目标 **0.1902 m** 处 < `xy_goal_tolerance 0.25` ⇒ `Goal succeeded`（§L.7）。
+   所以"短目标能走"这条证据**不能**推出"车能走 0.5 m"，更不能推出"长距离只是慢"。
+3. **控制器侧的"不动"是结果、不是原因**：2.0 m 那一跑 RPP 报了 **135 条**
+   `detected collision ahead`、**6 条** `Controller patience exceeded`、BT 进了 **7 次**恢复
+   （ClearLocal/GlobalCostmap + Spin + BackUp + Wait）。**但**同一跑里 `/cmd_vel` 真的发过
+   `vx=1.0`（89 条 >0.01），车也真的动到 **0.4197 m** 就再也推不动了（§L.4）。
+   （§K.5 表里"0 条 collision ahead"只对**短目标**那一跑成立，见 §L.1.3 的口径更正。）
+4. **地图侧的两个真实现象（都不是根因，但都会**改变失败的形状**）**：
+   ① `mode:=slam_nav` 下全局代价图**只覆盖已建出来的那一块**，目标落在图外时规划器直接拒绝
+   （`The goal sent to the planner is off the global costmap`）——反向 2.0 m 目标就是这个死法；
+   ② `mode:=nav`（已有 `RMUC2026`/`RMUL2026` 先验图）下，同一个"正前方 2.0 m"目标被判
+   **不可行**（`Planning algorithm GridBased failed to generate a valid path` ×10，
+   目标格 = 31/inflated、0.5 m 内 23 个 lethal、到 ≥99 格 0.158 m）⇒ **完整地图也说不通**。
+5. **另一条独立缺陷（robot11 比默认模型差 33 倍）：底盘的角速度通道几乎不执行。**
+   绕过 nav2 直接发 `wz=1.0 rad/s` 持续 12 s（请求 **687.5°**）：
+   `robot11` 真值 **+3.79°**、LIO **+3.86°**；**默认模型** 真值 **+30.09°**、LIO **+29.84°**。
+   ⇒ 需要"先转头再走"的目标（RPP 的 `use_rotate_to_heading` + `allow_reversing: false`）
+   在 robot11 上**永远转不过去**（实测：`wz=-0.75` 连发 45 s，车只转了 **6.03°**，`vx` 恒为 0）。
+   这条同时解释了 §I.5.2/§K.8 里那个没归因的"**出生后自转 ~10°**"（见 §L.6 候选 5）。
+
+### L.1 协议、工具，以及对 §K 两组数字的口径更正
+
+#### L.1.1 协议（与 §K 的 `--goal-forward` 同款，便于逐字对比）
+
+`tools/scripts/tiltmount/run_nav_goal_forensics.sh <tag> --settle 30 --duration 30
+--goal-forward H --goal-wait 45 -- world:=RMUL2026 mode:=<slam_nav|nav> lio:=small_point_lio
+[robot:=robot11] spin_speed:=0.0 gui:=False`
+
+* 发目标时刻 = launch 后 **60 s**（settle 30 + 记录窗 30），与 §K 的 k6_goal（30+30）/k1（25+35）同口径；
+* 目标 = **发目标那一刻** `map→base_link` 的位姿沿车头前进 H 米（与 `tilt_mount_probe.py` 同一算式）；
+* 探针**只**发一次 `/goal_pose`（内部连发 5 条，两个探针同款 ⇒ 会看到 4 次 goal preemption，
+  这是协议的一部分，不是异常）；
+* 全程只订阅：`/plan`、`/local_costmap/costmap`、`/global_costmap/costmap`、`/odom`、
+  `/odom_ground_truth`、`/cmd_vel`、`/cmd_vel_chassis`、`/navigate_to_pose/_action/{status,feedback}`、
+  `/follow_path/_action/{status,feedback}`、`/behavior_tree_log` + TF。
+
+#### L.1.2 新增的三个工具（都在 `tools/scripts/tiltmount/`，只有订阅 + 一次 `/goal_pose`）
+
+| 文件 | 作用 |
+|---|---|
+| `nav_goal_forensics.py` | 「一次导航尝试的因果链」探针：逐条 `/plan`（位姿数/长度/首末点/末点到目标的距离）、代价图三张快照（发目标时 / 结束）、目标格的**分类与到 lethal 的距离**、`goal_in_local`、两个 action 的**状态机时间线**、`number_of_recoveries`、`/behavior_tree_log` 的**逐节点跳变**、`/follow_path` 的 `distance_to_goal`/`speed`、`/cmd_vel(_chassis)`、真值/LIO 位姿时间线。★ 另有 **`--push VX` / `--push-wz WZ`**：**绕过 nav2**，只给 `/cmd_vel_chassis` 发固定速度，量"纯物理"能走多远/转多少 |
+| `run_nav_goal_forensics.sh` | 隔离跑壳（与 `run_tilt_mount_probe.sh` 同款隔离约定，另占一段 master URI 端口） |
+| `nav_goal_report.py` | 把 `forensics.json` 读成一张判决表（plan/状态机/恢复/BT/速度/代价图逐项） |
+
+#### L.1.3 对 §K.5 / §K.8 两组数字的口径更正（本轮同协议复跑，· 唯一变量 = 代码状态）
+
+| 量 | §K 记的 | **本轮实测** | 判读 |
+|---|---|---|---|
+| `--goal-forward 0.5` 真值位移 / 残余 | 0.313 m / 0.170 m（`k6_goal`） | **0.2977 m / 0.1902 m**（`n1_r11_slam_f05`） | **复现**（同一量级；差异来自版本/时间） |
+| 短目标的 `detected collision ahead` / 恢复 | **0 条**（§K.5 表） | **0 条 / 0 次**（复现） | ✅ 只对**短目标**成立 |
+| `--goal-forward 2.0` 真值位移 / 残余 | 0.357 m / 1.573 m（`k1_ngoff`，**旧配置**：radius 0.3565、近地剔除**关**） | **0.3373 m / 1.8924 m**（`n1_r11_slam_f20`，**当前配置**：0.300、近地剔除开） | 两个都"几乎不动"；**当前配置并没有让长目标变好** |
+| 长目标的 `detected collision ahead` | §K.8 未记（§K.5 表只记了短目标那跑的 0 条） | **135 条**（+ `patience exceeded` 6 条、恢复 7 次） | ⚠️ **"0 条"不能推广到长目标**——这是本轮最需要更正的一条 |
+| `gt_yaw_delta_deg`（`tilt_mount_probe.py`） | `k6_goal` 报 **473.416**、`k1_ngoff` 报 **251.651** | 真值其实分别是 **8.26° / 4.39°** | ⚠️ **工具 bug**：`_xy()` 的 yaw 已是**度**，代码又 `math.degrees()` 了一次 ⇒ 全部**多乘 57.2958**。已在 `tilt_mount_probe.py` 修掉并写明"旧读数不要再引用"（§L.3 的表用的都是修好后的新读数） |
+
+### L.2 判据 A（决定性）：把 nav2 摘掉，纯物理能走多远
+
+命令只有一条：`/cmd_vel_chassis` 固定速度，持续 25 s（20 Hz，500 条），
+**没有目标、没有规划器、没有控制器、没有 BT**。真值 = `/odom_ground_truth`（Gazebo 世界位姿）。
+
+| 跑 | tag | 模型 | 命令 | **实际位移** | 最后一次 >2 mm 的运动 | 备注 |
+|---|---|---|---|---|---|---|
+| **正前方** | `n2_r11_push_f` | robot11 | `vx=+0.25` × 25 s（请求 6.25 m） | **0.4199 m** | **t=5.32 s** | 之后 20 s 一动不动 |
+| **正前方** | `n2_def_push_f` | 默认模型 | 同上 | **0.5402 m** | t=3.71 s | 同上 ⇒ **不是 robot11 特有** |
+| **正后方** | `n4_r11_push_b` | robot11 | `vx=-0.25` × 25 s（请求 6.25 m） | **1.5753 m** | t=15.78 s | 后面有 1.58 m 空间 |
+| **纯自转** | `n3b_r11_push_wz` | robot11 | `wz=+1.0` × 12 s（请求 **687.5°**） | 位移 0.0017 m，**Δyaw 真值 +3.79° / LIO +3.86°** | — | 角速度通道 ≈ 不执行 |
+| **纯自转** | `n3b_def_push_wz` | 默认模型 | 同上 | 位移 0.0007 m，**Δyaw 真值 +30.09° / LIO +29.84°** | — | 默认也只有 4.4%，但比 robot11 好 33 倍 |
+
+**两条独立的几何自洽（这才让"实体障碍"从猜测变成测量）**：
+
+* 前进极限 + 车体外接半径 = `0.4199 + 0.3565 = **0.776 m**` ≈ **在线代价图里 x≈0.78 的那条 lethal 列**
+  （§L.3 的 `t_end` 快照：目标附近 0.52 m 内有 lethal 格、窗口内 9 个 lethal / 89 个 ≥99）；
+* 后退极限 + 车体外接半径 = `1.5753 + 0.3565 = **1.932 m**` ≈ **先验图 `RMUL2026.yaml` 的西墙 x≈-1.9**
+  （出生点相对系，`docs` 里已写明"出生点在 map 里就是 (0,0,0)"）。
+* 第三处自洽（**同一跑内部**）：`n1_r11_slam_f20` 那跑车被推到的**峰值真值位移 0.4197 m**
+  ≈ 纯物理推的极限 **0.4199 m**（差 0.2 mm）——即"导航跑到的位置"与"盲推到不了的位置"是同一个点。
+
+⇒ **2.0 m 正前方目标落在障碍后面**；`mode:=nav` 下规划器（完整先验图）对同一个目标直接
+`failed to generate a valid path`（§L.3），也是在说同一件事。
+
+### L.3 判据 B：目标侧的代价图读数（`slam_nav` vs `nav`）
+
+**① `mode:=slam_nav`（在线建图，§K 的默认口径）** —— `n1_r11_slam_f20`：
+
+| 量 | 实测 |
+|---|---|
+| 有没有 plan | **有，10 条**（t=60.1…68.6 s，每条 2.06–2.59 m，**末点 = 目标的距离 = 0.0000 m**） |
+| 目标格（发目标时 `t_goal`） | **-1 / unknown**；11×11 窗内 `{unknown:436, free:85, ≥99:5}`；到最近 lethal **0.992 m** |
+| 目标格（结束时 `t_end`） | **-1 / unknown**；窗内出现 **9 个 lethal + 89 个 ≥99**；到最近 lethal **0.522 m** |
+| 沿 plan 采样的代价（最后一张图） | plan#0 最小间隙到 ≥99 格 = **0.050 m**、plan#2/#3 = **0.250/0.255 m**（`robot_radius=0.300`）⇒ **路径是擦着 inscribed 带走**，模型上是"刚好不压 lethal" |
+| 目标在局部代价图里吗 | **在**（`goal_in_local` = True，91/91 个采样；局部图 5×5 m @0.02、`odom` 系） |
+| 车那格（结束时的局部图） | 车心正前方代价剖面 `0.00:0 → 0.05:26 → … → 0.50:80 → …`，**0.15–0.24 m 处已经是 ≥99 带，0.56–0.80 m 处是 lethal** ⇒ 车头压在内切带里 |
+
+⇒ 在线图在"车的正前方"这一块**还没建出 lethal**（大部分 unknown，而 navfn 是 `allow_unknown: true`），
+所以它给了一条**穿过未建出的障碍**的直路 —— 这就是 §K.8 候选"全局图还在建"的**真实作用**：
+**它决定"规划器给不给路"，但不决定"车能不能过去"**（车是被障碍挡住的，§L.2）。
+
+**② `mode:=nav`（先验图）** —— `n2_r11_nav_f20`（正前 2.0 m）：**0 条 plan**，
+`Planning algorithm GridBased failed to generate a valid path` ×10、`failed to create plan with
+tolerance 0.5` ×10；目标格 = **31 / inflated**、窗内 `{free:112, inflated:159, ≥99:147, lethal:23}`、
+到 ≥99 格 **0.158 m** ⇒ **完整地图判它不可行**。
+
+**③ 反向 2.0 m（§L.8 的对照）**：`mode:=slam_nav` 下目标 (-1.95,-0.06) **落在全局代价图外**
+（`The goal sent to the planner is off the global costmap` ×6、0 条 plan）；
+`mode:=nav` 下**能规划**（45 条 plan，1.60–1.72 m，末点被 `tolerance` 吸附到离目标 0.57 m 的free格），
+但车**一步没动**（真值 0.0069 m）—— 原因见 §L.5。
+
+### L.4 判据 C：控制器/BT 到底发生了什么（全是"结果"，不是"原因"）
+
+`n1_r11_slam_f20`（robot11、`slam_nav`、正前 2.0 m）：
+
+| 量 | 实测 | 读法 |
+|---|---|---|
+| `/plan` | 10 条、每条 1 Hz 重规划、末点落在目标上 | 规划链路**完全正常** |
+| `FollowPath` 状态机 | `EXECUTING → ABORTED` 每 ~1 s 一次（45 次）；`RateController → SUCCESS` ×10 | 1 Hz 重规划 BT 的**正常**行为（新路径会 abort 旧 FollowPath goal），**不要**当成故障 |
+| `RegulatedPurePursuitController detected collision ahead!` | **135 条** | RPP 的 `use_collision_detection: true`（前瞻 1.0 s）在车的正前方看到 lethal/inscribed ⇒ **拒绝往前走** |
+| `Controller patience exceeded` / `Aborting handle` | **6 / 6** | 连续异常超过 `failure_tolerance 0.3 s` ⇒ FollowPath 失败 |
+| `number_of_recoveries`（`/navigate_to_pose/_action/feedback`） | **最大 7** | 恢复**真的在 fire**（§K.5 的"0 条"只对短目标成立） |
+| BT 恢复节点 | `ClearLocalCostmap` + `ClearGlobalCostmap` + `RecoveryFallback/RecoveryActions` + `behavior_server: Running spin / Running backup / Running wait`（`spin failed: Exceeded time allowance`） | 标准恢复序列跑满了 |
+| `/cmd_vel(_chassis)` | 发目标后 **465 条**，`max|vx| = 1.0`、`n(vx>0.01) = 89` | **控制器确实在给前进速度**（不是"没发指令"） |
+| 真值时间线 | t=61.1 起 `vx=1.0`；t=62.6–64.6 连续 `vx=0.60–0.82` 的 2 s 里，真值只动了 **7.8 mm** | **被推着也走不动** ⇒ 实体阻挡（与 §L.2 的盲推一致） |
+| 目标在不在局部图里 / 局部图有没有障碍 | 在（91/91）；局部图**车前方 0.15–0.80 m 就是 ≥99/lethal 带** | 控制器"看到的东西"与物理一致 ⇒ **不是幻影障碍** |
+
+**默认模型的同协议跑**（`n1_def_slam_f20`，正前 2.0 m）作为对照：30 条 plan、恢复 9 次、
+collision ahead 103 条、patience 6 条；真值 t=61.6 到达 4.840 m 后**在 `vx=0.50` 连发 20 s 的情况下
+只动了 5 mm**（t=61.6→86.1）。⇒ **同一个失败**，只是它斜着蹭墙多走了 0.13 m（0.674 vs 0.337）。
+
+### L.5 判据 D：角速度通道（本轮新发现，也是"反向 2.0 m"失败的直接原因）
+
+| 场景 | 命令 | 实际 Δyaw（真值 / LIO） | 有效率（对请求） |
+|---|---|---|---|
+| 盲发（`n3b_r11_push_wz`，robot11） | `wz=1.0` × 12 s = **687.5°** | **+3.79° / +3.86°** | **0.55%** |
+| 盲发（`n3b_def_push_wz`，默认模型） | 同上 | **+30.09° / +29.84°** | 4.4% |
+| RPP 的 rotate-to-heading（`n2_r11_nav_b20`，robot11，反向目标） | `wz=-0.75` **连发 45 s**（1804 条），`vx` **恒 0** | **-6.03°** | 0.35% |
+| 恢复 Spin（`n1_r11_slam_f20`，robot11） | `wz=3.0` × ~22 s | ≈ +27° | 0.1% |
+| 恢复 Spin（`n1_def_slam_f20`，默认模型） | `wz=3.0` × ~9 s | ≈ +76.7° | 0.3% |
+| **旁证（本仓既有产物）** `k4_drive` | 固定动作协议（直行 10 s `vx=0.30` ↔ 原地转 10 s `wz=0.60`） | 真值 yaw 序列 **0.0°→0.0°**、`yaw_span 14.564°`；LIO `yaw_span 14.764°`、净变化 0.698→0.249 | ≈0 |
+
+* **两个互相独立的估计器一致**（Gazebo 世界位姿 `/odom_ground_truth` 与 LIO `/odom`，后者含 IMU 陀螺）
+  ⇒ **不是里程计伪影，是车真的没转**。
+* 反证"车不是被墙卡住才不转"：同一次起跑点上，正前方有 0.42 m 空间、正后方有 1.58 m 空间
+  （§L.2），出生点**不在接触状态**；且纯自转跑里位移只有 1.7 mm。
+* 机理**没有钉死**（登记在 §L.10）：模型是"轮子自由滚动（无轮速控制器）+ `libgazebo_ros_planar_move`
+  直接设底盘速度"，场地 collision 面是 `mu=1` + `torsional coefficient 1 / use_patch_radius 1`
+  （`RMUL2026_world.world:100-110`）⇒ 平动靠轮子滚动（实测 ≈100% 执行），
+  自转要靠接触面**侧滑/扭转**（实测 robot11 0.55%、默认 4.4%）。
+  robot11 比默认模型差 33 倍的具体几何/惯量原因**本轮没查**。
+* **它解释了 §I.5.2/§K.8 那个没归因的"出生后自转 ~10°"**：robot11 真值 yaw 在 30 s 时 **+4.32°**、
+  60 s 时 **+8.20°**（记录窗内 +3.88°/30 s）；**默认模型同协议是 -0.08° → -0.17°（几乎不漂）**。
+  即：robot11 的偏航轴**基本不受指令控制**，那 ~10° 是**接触/摩擦引起的自由漂移**，不是"自转指令"。
+
+### L.6 候选原因逐条判决（每条：测什么 / 结果 / 证据）
+
+| # | 候选 | 判决性测量 | 结果 | 证据（文件） |
+|---|---|---|---|---|
+| 1 | **地图/空间**：`slam_nav` 在线图还没建出来，2.0 m 目标在 unknown/occupied 里 ⇒ 规划不出来 | `/plan` 条数 + 目标格分类 + 沿路代价 | **部分成立、但不是根因**：`slam_nav` **有 10 条 plan**（末点精确落在目标上），只是路径**穿过尚未建出 lethal 的障碍**；`mode:=nav`（完整图）反而**拒绝规划**（0 条） | `.tmp_tiltmount/n1_r11_slam_f20/{forensics.json,grids.npz}`、`n2_r11_nav_f20/` |
+| 2 | **控制器/规划器参数**：`regulated_linear_scaling_min_radius 0.9` 让 2.0 m 规划不可行/起步慢 | 发目标后的实际速度 + 默认模型基线 | **反驳**：实测 `/cmd_vel` 发到 `vx=1.0`（远高于任何"限速"），且**默认模型（同一套控制器参数）也一样失败**（0.674 m 后 20 s 只动 5 mm） | `n1_r11_slam_f20/`、`n1_def_slam_f20/` |
+| 3 | **BT/恢复**：恢复在 fire、progress checker 在跳、根本没进 FollowPath | action status/feedback + `/behavior_tree_log` + 控制器日志 | **反驳（是结果不是原因）**：FollowPath **进了**（45 次 EXECUTING）、`number_of_recoveries` 最大 **7**、恢复序列（clear costmap / spin / backup / wait）跑满；但这些都发生在**车已经被推不动之后** | `n1_r11_slam_f20/roslog/controller_server_*.log`、`behavior_server_*.log`、`forensics.json` |
+| 4 | **局部代价图/滚动窗口**：目标在局部图外 / 没有有效局部路径 | `goal_in_local` + 局部图前方代价剖面 | **反驳**：目标**在**局部图内（91/91）；局部图前方 0.15–0.80 m 就有 ≥99/lethal 带（**与物理一致**） | `n1_r11_slam_f20/forensics.json` + `grids.npz:local` |
+| 5 | **出生自转 ~10°**：偏航没settle，影响规划/控制 | 真值 yaw 时间线 + 盲发 `wz` | **成立但换了归因**：robot11 的 yaw 在 60 s 内自由漂到 +8.2°（默认模型 -0.17°），而**指令角速度只有 0.55% 被执行** ⇒ "自转"是**不受控的漂移**；它**不是**长目标失败的原因（正前方目标本来就不需要转），但**是"需要转向的目标"失败的原因** | `n3b_r11_push_wz/`、`n3b_def_push_wz/`、`n1_r11_slam_f20/probe` 时间线 |
+| 6 | **（本轮新增，决定性）场地里的实体障碍** | **绕过 nav2** 的盲推（`--push`） | **成立**：前进 0.4199 m（robot11）/0.5402 m（默认模型）就被挡死，且 `0.4199+0.3565 ≈ 0.776 m` 与在线图的 lethal 列 x≈0.78 吻合 | `n2_r11_push_f/`、`n2_def_push_f/`、`n4_r11_push_b/` |
+
+### L.7 那"0.5 m 能走到"到底是什么
+
+`n1_r11_slam_f05`（robot11、`slam_nav`、正前 0.5 m）：
+
+| 量 | 实测 | 读法 |
+|---|---|---|
+| plan | 2 条（0.577 m / 0.349 m，末点 = 目标） | 正常 |
+| 真值位移 | **0.2977 m** | **不是 0.5 m** |
+| 结束时的残余 | **0.1902 m**（map 系） | < `xy_goal_tolerance 0.25` |
+| `detected collision ahead` / `patience` / 恢复 | **0 / 0 / 0** | 因为车根本没开到障碍跟前就"到点"了 |
+| BT | `Goal succeeded` | 按配置**合法**的成功 |
+
+⇒ 这一跑证明的是"**车能走 ~0.30 m 并落在容差里**"，**不是**"车能走 0.5 m"。
+`--goal-forward 0.5` 与 `--goal-forward 2.0` 的差别，本质上是"**目标在不在 0.42 m 的可达区里**"，
+而不是"控制器对长距离做了什么不一样的事"。
+
+### L.8 对照（防止结论是单一方向的伪影）
+
+| 对照 | 跑 | 结果 | 结论 |
+|---|---|---|---|
+| **反向 2.0 m**（`slam_nav`） | `n1_r11_slam_b20` | 目标在全局代价图外 ⇒ `off the global costmap` ×6、**0 条 plan**、真值 0.118 m（全是恢复自转） | 反向也走不到，但**死法不同**（图外 ⇒ 规划器拒绝） |
+| **反向 2.0 m**（`nav`，先验图） | `n2_r11_nav_b20` | **45 条 plan**（1.60–1.72 m）、`vx` **恒 0**、`wz=-0.75` 连发 45 s、真值 **0.0069 m**、Δyaw **-6.03°**、`Failed to make progress` ×2 | 反向失败 = **转不过去**（§L.5），与"正前方被挡"是**两个独立机制** |
+| **默认模型 + 正前 2.0 m** | `n1_def_slam_f20` | 真值 **0.6745 m**（`vx=0.5` 连发 20 s 只动 5 mm）、残余 1.5265、恢复 9 次、collision 103 条 | **不是 robot11 特有**：默认模型撞在同一处 |
+| **默认模型 + 盲推** | `n2_def_push_f` | **0.5402 m** | 同一处障碍，独立的物理读数 |
+| 逆方向盲推 | `n4_r11_push_b` | **1.5753 m** | 反向空间是够的（1.58 m）⇒ 反向失败**不是**空间问题 |
+
+### L.9 "要什么才能真修"（诚实清单）
+
+1. **把测试目标放进可达区**：本出生点（`world:=RMUL2026`）正前方只有 **0.42 m** 可用，
+   所以"`--goal-forward 2.0` 必须走 2 m"这条**验收本身不成立**。要么换 spawn/世界，
+   要么把验收改成"**盲推极限内的目标 + 可复算的可达性判据**"（本节的 `--push` 就是那个判据：
+   一条命令、15 s、不需要 nav2）。
+2. **要真做"长距离 + 需要转向"的验收，必须先修自转通道**：当前"轮子自由滚动 +
+   `planar_move` 直接设底盘速度 + `mu=1`/torsional 1 的场地"这套配置下，
+   实测角速度执行率 robot11 **0.55%**、默认 **4.4%** ⇒ RPP 的 rotate-to-heading
+   （`use_rotate_to_heading: true`、`rotate_to_heading_min_angle: 0.785`）在 robot11 上
+   **不可能收敛**，任何 >45° 的转向目标都会退化成"原地不动 + 恢复"。
+   可选修法（都**没做**）：给轮子加驱动（差速/mecanum 轮控）让接触面"滚"而不是"滑"；
+   或把底盘改成运动学体（直接设世界位姿）；或降场地 `mu`/去掉 torsional 项。
+3. **robot11 与默认模型在这条通道上差 33 倍**（0.55% vs 4.4%），**具体几何/惯量原因本轮没查**
+   （候选：robot11 是 8 个连续关节的转向+轮 link、mesh 抽稀后的 cylinder 轮、质量 9.55 kg；
+   默认模型只有 4 个轮 link）。这条**不影响** §L.0 的根因结论，但会影响"能不能做转向类导航"。
+4. **参数层面没有可修的**：正前方 2.0 m 目标在实体障碍后面（`nav` 模式规划器直接拒绝），
+   减小 `inflation_radius`、放大 `xy_goal_tolerance`、改 `regulated_linear_scaling_min_radius`
+   都**只会**让车更靠近障碍或更早宣布成功，**不会**让车过去。
+
+### L.10 未验证 / 诚实清单（本节）
+
+1. **角速度通道的机理没钉死**（§L.5）：只测到"指令执行率 0.55%/4.4%"与"两个估计器一致"，
+   **没有**做"改 `mu` / 加轮控 / 改 kinematic"的 A/B（那要改世界或模型，超出本节范围）。
+2. **先验图 `RMUL2026.pgm` 的正前方障碍位置（x≈0.5）与实测物理极限（0.776 m）差 ~0.28 m**：
+   本轮**没有**归因（候选：cartographer 与当前 LIO 的口径/尺度差、或 x≈0.5 与 x≈0.78 是两个不同物体）。
+   反向那一侧是吻合的（1.932 m ↔ 先验图 x≈-1.9）⇒ **不是整体平移**。
+3. **`§K.1` 末尾那条 `sensor_height` 4.3 cm 的疑问**仍未查（本节不涉及）。
+4. **没有做"跑几分钟后地图建全了再发同一个目标"**：本轮所有目标都固定在 launch 后 60 s 发
+   （与 §K 同协议）。`mode:=nav` 的先验图跑可以看作"图已建全"的对照（结论：**拒绝规划**），
+   但"`slam_nav` 跑 5 分钟后再发"这一格**没跑**。
+5. **RTF 没有单独记录**：从盲推反推 ≈0.32（0.42 m @0.25 m/s 用了 5.32 s 墙钟），与 §K 的
+   0.34–0.42 同量级；本节所有"米/度"都是真值读数，**不受 RTF 影响**（时间类结论才需要它）。
+6. **`--goal` 的显式目标只用了两处**（反向 2.0 m 的两跑）；没有做"同一个 2.0 m 距离、
+   沿不同方位角"的扫描 ⇒ "可达区"的形状只有 **前 0.42 / 后 1.58** 两个方向的读数。
+
+### L.11 回退
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| 本节新增的工具（3 个文件） | `rm -f tools/scripts/tiltmount/{nav_goal_forensics.py,nav_goal_report.py,run_nav_goal_forensics.sh}`（**不进任何 launch/节点**，删掉不影响仿真与导航） |
+| `tilt_mount_probe.py` 的单位修复 | `git revert <本节第 2 个 commit>`（只影响 `gt_yaw_delta_deg` 一个字段的数值口径；旧值是错的，回退等于恢复"×57.3"） |
+| 本文档 | `git revert <本节第 3 个 commit>` |
+| **行为** | 本节**没有改任何** launch/参数/模型/世界/感知代码 ⇒ **默认模型与其它槽位逐字节不变**，robot11 的行为也不变（§L 只诊断、不修） |
+
+### L.12 复现命令（复制即可）
+
+```bash
+# ① 正前方 2.0 m（robot11、slam_nav）—— 本轮的主跑
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n1_r11_slam_f20 --settle 30 --duration 30 \
+    --goal-forward 2.0 --goal-wait 45 -- \
+    world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+# ② 正前方 0.5 m（同一协议）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n1_r11_slam_f05 --settle 30 --duration 30 \
+    --goal-forward 0.5 --goal-wait 45 -- \
+    world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+# ③ 默认模型（对照）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n1_def_slam_f20 --settle 30 --duration 30 \
+    --goal-forward 2.0 --goal-wait 45 -- \
+    world:=RMUL2026 mode:=slam_nav lio:=small_point_lio spin_speed:=0.0 gui:=False
+# ④ 纯物理：正前方 / 正后方 / 纯自转（**绕过 nav2**）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n2_r11_push_f --settle 25 --duration 8 --goal-wait 0 \
+    --push  0.25 --push-time 25 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n4_r11_push_b --settle 25 --duration 8 --goal-wait 0 \
+    --push -0.25 --push-time 25 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n3b_r11_push_wz --settle 25 --duration 6 --goal-wait 0 \
+    --push-wz 1.0 --push-time 12 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+# ⑤ 先验图（mode:=nav）的正/反 2.0 m
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n2_r11_nav_f20 --settle 30 --duration 30 \
+    --goal-forward  2.0 --goal-wait 45 -- world:=RMUL2026 mode:=nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+tools/scripts/tiltmount/run_nav_goal_forensics.sh n2_r11_nav_b20 --settle 30 --duration 30 \
+    --goal-forward -2.0 --goal-wait 45 -- world:=RMUL2026 mode:=nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+# ⑥ 读表
+python3 tools/scripts/tiltmount/nav_goal_report.py .tmp_tiltmount/n1_r11_slam_f20
+```
