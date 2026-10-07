@@ -120,7 +120,26 @@ void SegmentationNode::scanCallback(
       tf_stamped.transform.translation.x = 0;
       tf_stamped.transform.translation.y = 0;
       tf_stamped.transform.translation.z = 0;
-      Eigen::Affine3d tf;
+      // ★★ 2026-10-07（缺陷 ④，本文件唯一一处行为修复）：`Eigen::Affine3d tf;` 的**默认构造
+      //   不清零**（只把仿射矩阵最后一行置成 (0,0,0,1)，3x3 与平移部分是未初始化的栈垃圾）
+      //   ⇒ 紧接着的 tf.rotate(q) 是在垃圾矩阵上叠一个旋转 ⇒ pcl::transformPointCloud()
+      //   把整帧点云塌到 ~1e-310（denormal）⇒ 分割器一条地面线都拟合不出来。回放实测
+      //   （tools/scripts/regress/linefit_replay_probe.py，同一帧、活的节点、无 Gazebo）：
+      //       gravity_aligned_frame=""          ⇒ /segmentation/ground 3969 点/帧（正常）
+      //       gravity_aligned_frame="base_link" ⇒ /segmentation/ground **恒 0 点**，
+      //                                            且 obstacle = 全部点；把输入点云预先转
+      //                                            −30/+30/−60/+60 全都是 0 ⇒ 与"转多少"无关，
+      //                                            只与"走没走这条分支"有关。
+      //   最小 C++ 复现（g++ + Eigen 3.4）：
+      //       Eigen::Affine3d tf; tf.rotate(q); tf * Vector3d(0.1,0.2,0.3)
+      //           → (7.5e-310, 7.5e-310, 7.5e-310)    ← 垃圾
+      //       Eigen::Affine3d::Identity() 起步 → (0.1, 0.323, 0.160)   ← 正确
+      //   影响面：任何"雷达不是重力对齐"的槽位（斜装 / 云台俯仰）都会踩到；`robot:=hzmirm` 的
+      //   `ground_points_per_frame` 恒为 0 里就有一部分是这个 bug（不全是几何），
+      //   见 docs/robot_models.md §11.4（含更正 + 三条独立证据）。
+      //   修法：显式 Identity() 起步（语义 = 原来想写的"平移清零 + 只旋转"，一字不差）。
+      //   对默认路径（gravity_aligned_frame=""）**逐字节无关**：那条分支根本不进这块代码。
+      Eigen::Affine3d tf = Eigen::Affine3d::Identity();
       tf.translate(Eigen::Vector3d(0, 0, 0));
       tf.rotate(Eigen::Quaterniond(
           tf_stamped.transform.rotation.w, tf_stamped.transform.rotation.x,

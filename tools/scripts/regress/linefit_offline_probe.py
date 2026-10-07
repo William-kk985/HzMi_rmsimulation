@@ -175,6 +175,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('frame', help='robot_model_probe.py --dump-cloud 落下的 cloud_frame_XX.csv')
     ap.add_argument('--sensor-height', type=float, default=0.8)
+    ap.add_argument('--roll-deg', type=float, default=0.0,
+                    help='把点云绕 x 轴转这么多度（模拟 robot11 那种**绕 roll** 的安装：'
+                         'gravity_aligned_frame 生效时等价于先转 −roll 再分割；Phase 3 新增）')
     ap.add_argument('--pitch-deg', type=float, default=0.0,
                     help='把点云绕传感器原点转 -pitch（模拟 gravity_aligned_frame 起作用的姿态）')
     ap.add_argument('--r-min', type=float, default=0.2)
@@ -192,14 +195,18 @@ def main():
 
     d = np.genfromtxt(a.frame, delimiter=',', names=True)
     cloud = np.vstack([d['x'], d['y'], d['z']]).T
+    if a.roll_deg:
+        t = math.radians(a.roll_deg)
+        R = np.array([[1, 0, 0], [0, math.cos(t), -math.sin(t)], [0, math.sin(t), math.cos(t)]])
+        cloud = cloud @ R.T
     if a.pitch_deg:
         t = math.radians(a.pitch_deg)
         R = np.array([[math.cos(t), 0, math.sin(t)], [0, 1, 0], [-math.sin(t), 0, math.cos(t)]])
         cloud = cloud @ R.T
     ground, n_lines, segs_with_lines = Linefit(a).run(cloud)
     z = cloud[:, 2]
-    print('帧: %s  点数=%d  sensor_height=%.3f  pitch=%.1f°'
-          % (a.frame, len(cloud), a.sensor_height, a.pitch_deg))
+    print('帧: %s  点数=%d  sensor_height=%.3f  roll=%.1f°  pitch=%.1f°'
+          % (a.frame, len(cloud), a.sensor_height, a.roll_deg, a.pitch_deg))
     print('  z 范围 %.3f .. %.3f   地面点数（真值，z 最低那层附近）= %d'
           % (z.min(), z.max(), int((np.abs(z + a.sensor_height) < 0.05).sum())))
     print('  拟合出的地面线 %d 条（分布在 %d/%d 个 segment）' % (n_lines, segs_with_lines, a.n_segments))
