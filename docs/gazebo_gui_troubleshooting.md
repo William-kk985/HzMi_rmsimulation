@@ -69,7 +69,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 robot:=robot11 
 **注意两个时间戳只差 8 毫秒**：`spawn_entity` 报"成功生成 robot"是 `…848.741`，
 下一行 `gzclient` 的日志（见下）是 `…848.749`。
 
-### 2.2 `~/.gazebo/client-11345/default.log`（gzclient 自己写的，带微秒时间戳）
+### 2.2 `~/.gazebo/client-11345/default.log`（gzclient 自己写的，时间戳格式 = `(秒 纳秒)`）
 
 ```
 (1791373848 749596472) [Msg] Waiting for model database update to complete...
