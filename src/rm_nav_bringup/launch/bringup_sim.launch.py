@@ -150,25 +150,69 @@ _LIVOX_TILT_RPY = {
 #: docs/robot_models.md §11 的 B 复现步骤）。本 launch **不替你改 YAML**（避免第二个真源）。
 _LIVOX_RAISE_DEFAULT = '0.0'
 
+#: ★ 2026-10-08：robot:=robot11 的**雷达安装方式**（30° 倾角记在哪个坐标系上）。
+#:   · 'plugin'（**默认 = 2026-10-07 起的行为，逐字节不变**）：`body_to_livox` 关节 rpy = 0
+#:     （`livox_frame` 帧**重力对齐**），倾角由插件 `<tilt_rpy>` 承担 ⇒ **射线真的斜 30°**、
+#:     点云表达在水平的父 link 系、`/scan` 的高度带与 linefit 的 sensor_height 语义都对；
+#:     代价：TF 里帧是平的、**画出来的雷达 mesh 也是平的**（用户看到的"URDF/雷达图像是平放的"）。
+#:   · 'urdf'：倾角放回 URDF 关节（rpy = −0.5236 roll = 上游/CSV 的字面值 = **实物的物理安装
+#:     姿态**，连 mesh 一起斜），插件 `<tilt_rpy>` = 单位阵 ⇒ 世界里的射线方向与 plugin 档**逐条
+#:     相同**，但点云表达在**斜的传感器系**里（地面在点云里是 30° 斜面）。
+#:     ⚠️ 本档**不动任何感知参数** —— 就是要看"物理安装保真"的原始后果（哪些语义会跟着变，
+#:     见 docs/tilted_lidar_fidelity.md §C）。
+_LIVOX_MOUNTS = ('plugin', 'urdf')
 
-def _lio_adapter_robot11(axis, raise_m=0.0):
+
+def _validate_livox_mount(value):
+    """把 `robot11_mount` 的取值验成 `plugin|urdf`（惰性；选错给可操作报错，不静默回退）。"""
+    v = (value or '').strip() or 'plugin'
+    if v not in _LIVOX_MOUNTS:
+        raise RuntimeError('[launch] robot11_mount:=%r 不是可用取值（%s）'
+                           % (value, ' | '.join(_LIVOX_MOUNTS)))
+    return v
+
+
+def _rpy_deg_to_R(rpy_rad):
+    """固定关节 rpy（弧度，URDF 的 Rz·Ry·Rx 约定）→ 旋转矩阵（行主序 3x3）。"""
+    import math as _m
+    r, p, y = rpy_rad
+    cr, sr = _m.cos(r), _m.sin(r)
+    cp, sp = _m.cos(p), _m.sin(p)
+    cy, sy = _m.cos(y), _m.sin(y)
+    Rx = [[1, 0, 0], [0, cr, -sr], [0, sr, cr]]
+    Ry = [[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]]
+    Rz = [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]]
+    return [[sum(Rz[i][k] * sum(Ry[k][j] * Rx[j][m] for j in range(3))
+                 for k in range(3)) for m in range(3)] for i in range(3)]
+
+
+def _lio_adapter_robot11(axis, raise_m=0.0, mount='plugin'):
     """robot:=robot11 的 lio_tf_adapter 补偿量（xyz = base_link 原点在 imu 系下的坐标，rpy = 其姿态）。
 
-    纯几何、无魔法：imu_link 的位姿 = body_to_livox(tilt) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
-    固定关节 ⇒ **IMU 跟着雷达一起斜 30°**，这正是让三份 LIO 配置的 extrinsic_T=[0,0,0.05]
-    一个字节都不用改的原因）。T_imu←base_link 就是它的逆。数值：
-      roll ：xyz = [-0.000561701, -0.034862345, -0.151448296]  rpy = [ 0.523598776, 0, 0]
-      pitch：xyz = [-0.079000533, -0.130915824, -0.085709533]  rpy = [ 0,  0.523598776, 0]
-    两种候选下 imu 离地都是 0.216226 m（由几何唯一决定，与轴的选择无关）。
+    纯几何、无魔法：imu_link 的位姿 = body_to_livox(rpy) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
+    固定关节 ⇒ **IMU 跟着雷达一起动**，这正是让三份 LIO 配置的 extrinsic_T=[0,0,0.05]
+    一个字节都不用改的原因）。T_imu←base_link 就是它的逆。
+
+    ★ 2026-10-08：`mount` 决定 `body_to_livox` 的 rpy 取哪个值（与 xacro 里的同一个规则）：
+      · `plugin`（默认）：rpy = 0 ⇒ 与 Phase 3 的返回值**逐位相同**（旋转为单位阵、xyz = −p_imu）；
+      · `urdf`          ：rpy = 倾角（roll/pitch 30°）⇒ **旋转不再是单位阵**，xyz 也要用 Rᵀ 转一次。
+    两种挂法下 imu 的**离地高度**都还是 0.216226 m（30° 只改朝向、不改高度？—— 不：见 §C 实测，
+    `urdf` 档 imu 随雷达一起斜 ⇒ 离地高度由 R 决定；本函数按几何**算**出来，不写死）。
     """
-    # ★ Phase 3 更正：`livox_frame` 的 rpy 现在是 0（点云在源头重力对齐，见 xacro 注释），
-    #   imu_joint 是 rpy=0 的固定关节、沿 body −z 走 0.05 m
-    #   ⇒ T_imu←base_link 的旋转是**单位阵**，xyz = −(雷达位置) + (0,0,+0.05)。
-    #   （30° 只是**射线**的姿态，不再是任何 TF 帧的姿态 ⇒ 与 `livox_tilt_axis` 无关。）
+    import math as _m
+    tilt = [float(v) for v in _LIVOX_TILT_RPY[axis].split()]
+    mount = (mount or 'plugin').strip() or 'plugin'
+    rpy = [0.0, 0.0, 0.0] if mount == 'plugin' else tilt
     p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305 + float(raise_m))
-    p_imu = (p_livox[0], p_livox[1], p_livox[2] - 0.05)
-    t = [-v for v in p_imu]
-    return [round(v, 9) for v in t], [0.0, 0.0, 0.0]
+    R = _rpy_deg_to_R(rpy)                      # R_body←livox
+    # imu 原点在 body 系 = p_livox + R·(0,0,−0.05)；姿态 = R
+    off = [R[i][2] * -0.05 for i in range(3)]
+    p_imu = [p_livox[i] + off[i] for i in range(3)]
+    # T_imu←base_link：xyz = −Rᵀ·p_imu，rpy = R 的逆（= 同一个轴的负角）
+    Rt = [[R[j][i] for j in range(3)] for i in range(3)]
+    t = [-sum(Rt[i][j] * p_imu[j] for j in range(3)) for i in range(3)]
+    rpy_out = [-v for v in rpy]
+    return ([round(v, 9) for v in t], [round(v, 9) for v in rpy_out])
 
 
 class _LioAdapterRobot11(Substitution):
@@ -187,7 +231,8 @@ class _LioAdapterRobot11(Substitution):
         if axis not in _LIVOX_TILT_RPY:
             raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
         raise_m = LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0'
-        xyz, rpy = _lio_adapter_robot11(axis, raise_m)
+        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+        xyz, rpy = _lio_adapter_robot11(axis, raise_m, mount)
         v = xyz if self.__which == 'xyz' else rpy
         return '[%s]' % ', '.join(repr(float(x)) for x in v)
 
@@ -322,6 +367,11 @@ class _RobotXacroCommand(Substitution):
             cmd += [' livox_tilt_rpy:="',
                     _LIVOX_TILT_RPY[LaunchConfiguration('livox_tilt_axis').perform(context).strip()],
                     '"']
+            # ★ 2026-10-08：**安装倾角记在哪儿**（plugin = 今天的行为 / urdf = 实物的物理安装）。
+            #   ⚠️ 与 livox_tilt_rpy 不同，这个值**不带空格**，不需要引号。
+            cmd += [' livox_mount:=',
+                    _validate_livox_mount(
+                        LaunchConfiguration('robot11_mount').perform(context))]
             # ★ Phase 3：B 方案（抬高雷达）的开关。默认 0 ⇒ 与上游几何逐字相同。
             cmd += [' livox_raise_m:=',
                     LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0']
@@ -412,6 +462,33 @@ class _YamlKeysReadout(Substitution):
 
     def describe(self):
         return '%s(keys=%s)' % (type(self).__name__, list(self.__keys))
+
+
+class _MountReadout(Substitution):
+    """robot:=robot11 的**安装方式**在横幅里的收据（运行时按 robot11_mount 给不同的话）。
+
+    ★ 2026-10-08：横幅不能写死"livox_frame 的 rpy=0" —— `robot11_mount:=urdf` 时它是斜的。
+    这里把"当前这一跑到底把倾角记在哪儿、哪些下游语义会跟着变"如实打出来。
+    """
+
+    def perform(self, context):
+        m = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+        if m == 'plugin':
+            return ('  · 雷达安装方式 robot11_mount=plugin（默认，= 2026-10-07 起的行为）：'
+                    '倾角记在插件 `<tilt_rpy>`；`livox_frame` 帧**重力对齐**（TF rpy=0）、'
+                    '点云表达在水平的父 link 系 ⇒ linefit 的 sensor_height / p2l 的高度带 / '
+                    '自击掩膜的 z 门限**语义都对**；代价 = TF 与画出来的雷达 mesh 是平的。'
+                    'lio_tf_adapter 杆臂是**纯平移**（lio:=small_point_lio/cartographer/none 时'
+                    '该节点不启动，由 LIO 用 TF 自己做相似变换）')
+        return ('  · 雷达安装方式 robot11_mount=urdf（**物理安装保真档**）：倾角写在 URDF 关节'
+                '（rpy = −0.5236 roll，上游/CSV 字面值，**画的 mesh 一起斜**）、插件 `<tilt_rpy>` = 单位阵。'
+                '世界里的射线方向与 plugin 档**逐条相同**，但点云表达在**斜的传感器系**（地面在点云里是 '
+                '30° 斜面）⇒ linefit 的 sensor_height / p2l 的 min/max_height / 自击掩膜的 z 门限'
+                '**都还在按"点云是重力对齐"解释**（本档**故意不调**，就是要看原始效果）；'
+                'lio_tf_adapter 杆臂**带 30° 旋转**（已按几何算，不再是纯平移）')
+
+    def describe(self):
+        return '%s()' % type(self).__name__
 
 
 class _SelfMaskReadout(Substitution):
@@ -967,6 +1044,25 @@ def generate_launch_description():
                     '+0.06 m 才把自击从 96.6% 降到 19.8%、**+0.10 m 起才与 A 等价**。'
                     '⚠️ 抬高会改变雷达离地高度 ⇒ linefit 的 sensor_height 必须同步 = 0.2595 + 本值'
                     '（改 config/segmentation_sim_robot11.yaml；见 docs/robot_models.md §11 的复现步骤）')
+
+    # ★ 2026-10-08：robot:=robot11 的**雷达安装方式**开关（opt-in；默认 = 2026-10-07 起的行为）。
+    #   用户诉求原话："我就是要学斜放置怎么处理…雷达给我按我给你的放好，算法不管后面再看怎么调试，
+    #   我要看到倾斜放置最原始的效果"。`plugin` 档把 30° 记在插件参数上（帧重力对齐 ⇒ 下游语义都对，
+    #   但 TF/画的 mesh 是平的）；`urdf` 档把 30° 记回 URDF 关节（**实物的物理安装姿态，mesh 一起斜**）
+    #   ⇒ 点云表达在斜的传感器系里、地面在点云里是 30° 斜面、`/scan` 高度带与 linefit 语义跟着变。
+    #   ⚠️ 本开关**不动任何感知参数** —— 就是要看原始后果。取证与实测见 docs/tilted_lidar_fidelity.md。
+    declare_robot11_mount_cmd = DeclareLaunchArgument(
+        'robot11_mount',
+        default_value='plugin',
+        description='仅 robot:=robot11：30° 安装倾角**记在哪个坐标系上**。'
+                    'plugin（默认，= 2026-10-07 起的行为）= `body_to_livox` 关节 rpy 0（帧重力对齐）'
+                    '+ 插件 `<tilt_rpy>` 承担倾角（射线真的斜 30°，点云表达在水平的父 link 系；'
+                    '代价：TF 与画出来的雷达 mesh 是平的）；'
+                    'urdf = 倾角放回 URDF 关节（rpy = −0.5236 roll = 上游/CSV 字面值 = 实物的物理'
+                    '安装姿态，**连 mesh 一起斜**）、插件 `<tilt_rpy>` = 单位阵 ⇒ 世界射线方向与 '
+                    'plugin 档逐条相同，但点云表达在**斜的传感器系**里（地面是 30° 斜面）。'
+                    '⚠️ urdf 档**不调任何感知参数**，就是要看倾斜放置最原始的效果。',
+        choices=list(_LIVOX_MOUNTS))
 
     # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
     #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
@@ -2061,6 +2157,8 @@ def generate_launch_description():
     # ★ 2026-10-07：robot:=robot11 的雷达安装轴（roll | pitch；上游两份材料矛盾 ⇒ 不猜）
     ld.add_action(declare_livox_tilt_axis_cmd)
     ld.add_action(declare_livox_raise_m_cmd)
+    # ★ 2026-10-08：robot:=robot11 的雷达**安装方式**（倾角记在插件 vs 记在 URDF 关节）
+    ld.add_action(declare_robot11_mount_cmd)
     # ★ Phase 4：robot:=robot11 的视觉 mesh 档位（decimated | full）
     ld.add_action(declare_robot11_visual_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
@@ -2099,8 +2197,8 @@ def generate_launch_description():
              '  · 自击掩膜（只作用于判据/限速，不动点云与 /segmentation/* 标签）：',
              _SelfMaskReadout(self_mask_params),
              '  · lio_tf_adapter：lio:=small_point_lio/cartographer/none 时**不启动**该节点',
-             '（它由 LIO 自己用 TF 做 odom→base_link 的相似变换；本槽位 livox_frame 的 rpy=0 '
-             '⇒ 杆臂是纯平移，不需要外部旋转补偿）']))
+             '（它由 LIO 自己用 TF 做 odom→base_link 的相似变换）。',
+             _MountReadout()]))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)

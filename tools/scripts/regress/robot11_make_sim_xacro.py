@@ -35,9 +35,14 @@
      而是 Phase 2 遗留的帧名问题。上游自己的另一份材料（SolidWorks CSV）里这个 link **就叫**
      `base_link` ⇒ 改名不是我们编的，是回到上游两份材料里与本栈一致的那一份。
      传 `--root-link ''` 可保留 `body`（只用于对照实验）。
-  4. 两处参数化（都不改变默认几何）：
-       · `body_to_livox` 的 `rpy` → `$(arg livox_tilt_rpy)`（**默认 = 上游/CSV 的 roll 形式**；
-         用户 2026-10-07 已按实物确认"是绕 roll"，`livox_tilt_axis:=pitch` 只作对照开关）
+  4. 三处参数化（都不改变默认几何）：
+       · `body_to_livox` 的 `rpy` → 由 `livox_mount` 决定（**默认 plugin ⇒ 渲染成 `0 0 0`**）：
+         `plugin` 档 = 帧重力对齐、倾角在插件 `<tilt_rpy>` 里；`urdf` 档 = 关节 rpy 取
+         `$(arg livox_tilt_rpy)`（= 上游/CSV 的 roll 形式，**实物的物理安装姿态，mesh 一起斜**）、
+         插件 `<tilt_rpy>` = 单位阵。见 docs/tilted_lidar_fidelity.md。
+       · `livox_tilt_rpy`（**默认 = 上游/CSV 的 roll 形式**；用户 2026-10-07 已按实物确认
+         "是绕 roll"，`livox_tilt_axis:=pitch` 只作对照开关）—— 它现在只是"倾角是多少"，
+         不再是"倾角记在关节还是插件上"
        · `body_to_livox` 的 `origin` z → `${0.15702816968305 + livox_raise_m}`（**默认 raise=0**，
          即与上游逐字相同；B 方案"把雷达抬到顶板上方"用它实测，见 docs/robot_models.md §11）
 
@@ -164,6 +169,37 @@ HEADER = '''<?xml version="1.0"?>
        ⇒ 按标准写法先绑成 property 再进表达式。 -->
   <xacro:property name="livox_raise_m_p" value="$(arg livox_raise_m)"/>
 
+  <!-- ==========================================================================
+       【我们加的｜2026-10-08】**雷达安装方式**开关（opt-in；**默认 = 今天的行为**）
+       ==========================================================================
+       `livox_mount:=plugin`（默认）| `urdf`。两者**射线方向完全相同**（都是"物理上真的斜
+       30° 下俯"），差别只在**"这 30° 记在哪个坐标系上"**：
+
+         · plugin（今天）：`body_to_livox` 关节 rpy = **0**（`livox_frame` 帧**重力对齐**），
+           30° 由插件参数 `<tilt_rpy>` 承担 ⇒ 射线由插件旋到斜、点云**表达在水平的父 link 系**。
+           代价：**TF 里帧不斜**（实物是斜的），而且**画出来的雷达 mesh 是平的**。
+         · urdf：30° 放回 **URDF 关节**（rpy = roll −0.5236 = 上游/CSV 的字面值，即**实物的
+           物理安装姿态**，**连画的 mesh 一起斜**），插件 `<tilt_rpy>` = **单位阵** ⇒ 射线由
+           link 姿态带斜（世界里的射线方向与 plugin 档逐条相同），但点云**表达在斜的传感器系**
+           （`frame_id` 仍是 `livox_frame`，只是这个帧自己斜了 30°）。
+
+       ⚠️ 为什么默认仍是 plugin：把倾角留在 URDF 里，`/livox/lidar/pointcloud` 的坐标就变成
+       "斜系"的 ⇒ 所有**假设点云是重力对齐**的下游（linefit 的 sensor_height、p2l 的高度带、
+       self_mask 的 z 门限）语义都会跟着变（这正是 `urdf` 档要让大家**看见**的原始效果，
+       也是 docs/tilted_lidar_fidelity.md 的主题）。本开关**不动任何感知参数**，就是为了
+       把"物理安装保真"与"感知语义"这两件事分开看。
+       ========================================================================== -->
+  <xacro:arg name="livox_mount" default="plugin"/>
+  <xacro:property name="livox_mount_p" value="$(arg livox_mount)"/>
+  <xacro:property name="livox_tilt_rpy_p" value="$(arg livox_tilt_rpy)"/>
+  <xacro:property name="livox_mount_urdf" value="${{livox_mount_p.strip() == 'urdf'}}"/>
+  <!-- 关节 rpy：urdf 档 = 倾角；plugin 档 = 0 -->
+  <xacro:property name="livox_joint_rpy"
+                  value="${{livox_tilt_rpy_p if livox_mount_urdf else '0 0 0'}}"/>
+  <!-- 插件 <tilt_rpy>：plugin 档 = 倾角；urdf 档 = 单位阵（射线已由 link 姿态带斜） -->
+  <xacro:property name="livox_plugin_tilt_rpy"
+                  value="${{'0 0 0' if livox_mount_urdf else livox_tilt_rpy_p}}"/>
+
 '''
 
 MESH_BBOX = {}
@@ -257,8 +293,11 @@ FOOTER = '''
              （frame_id = livox_frame，而 livox_frame 是重力对齐的）⇒ 下游不需要
              gravity_aligned_frame / target_frame，就不会踩到本仓 linefit 那个
              `Eigen::Affine3d tf;` 不清零的 C++ bug（见 docs/robot_models.md §11）。
-             缺省（元素不存在）= 单位阵 ⇒ 其它模型逐字节不变。 -->
-        <tilt_rpy>$(arg livox_tilt_rpy)</tilt_rpy>
+             缺省（元素不存在）= 单位阵 ⇒ 其它模型逐字节不变。
+             ★ 2026-10-08：这个值现在是 `livox_mount` 的函数 —— plugin 档（默认）=
+             $(arg livox_tilt_rpy)（下面这条，与 2026-10-07 逐字节相同）；
+             urdf 档 = `0 0 0`（倾角已经写在关节上，射线由 link 姿态带斜）。 -->
+        <tilt_rpy>${livox_plugin_tilt_rpy}</tilt_rpy>
         <samples>30000</samples>
         <downsample>1</downsample>
         <csv_file_name>$(find ros2_livox_simulation)/scan_mode/mid360.csv</csv_file_name>
@@ -642,8 +681,13 @@ def main():
                      '         结果：`/livox/lidar/pointcloud` 的 frame_id 仍是 livox_frame，但坐标\n'
                      '         已经是重力对齐的 ⇒ linefit/p2l 都不需要开 gravity_aligned_frame/target_frame。\n'
                      '         ⚠️ 代价：TF 里的 base_link→livox_frame 变成 rpy=0（实物是斜 30°），\n'
-                     '            这条偏离逐字登记在 docs/robot_models.md §11 的 provenance 表。 -->\n')
-            rpy = '0 0 0'
+                     '            这条偏离逐字登记在 docs/robot_models.md §11 的 provenance 表。\n'
+                     '       · ★ 2026-10-08：上面的 rpy 现在是 **$(arg livox_mount) 的函数**：\n'
+                     '         `livox_mount:=plugin`（默认）⇒ rpy = 0 0 0（上面这段就是它的理由）；\n'
+                     '         `livox_mount:=urdf` ⇒ rpy = $(arg livox_tilt_rpy)（= 上游/CSV 的字面值，\n'
+                     '         实物的物理安装姿态，**画的 mesh 也一起斜**），插件 <tilt_rpy> 变单位阵。\n'
+                     '         默认档不在 → 生成物与 2026-10-07 逐字节相同。 -->\n')
+            rpy = '${livox_joint_rpy}'
             xyz_override = '%s %s ${%s + livox_raise_m_p}' % tuple(
                 o.get('xyz', '0 0 0').split()[:2] + ['0.15702816968305'])
         else:
