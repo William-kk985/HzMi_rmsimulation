@@ -1868,6 +1868,11 @@ bash tools/scripts/tiltmount/_replay_ng.sh <一帧 raw_*.csv> 0.2595
    但整张图 `unknown` 仍占大头，`map` 还在建）。**没有**做"跑几分钟之后再看"的对照。
 3. **插件 A/B 跑完了默认模型与 `robot11`（plugin 档），`sensor` 档没跑完**（§K.4.2）。
    `k2_sen_{legacy,fixed}` 在**本节交付时还在跑** ⇒ **本节不主张** sensor 档的数字。
+   实测到的现象（供下一个人省时间）：`k2_sen_legacy` 那一跑的 `probe.json` 里
+   **`frames = {}`（一条消息都没收到）**，而 `launch.log` 里 **linefit 与限速都在正常工作**
+   （`[slope_speed] ... why=slope_change`）、TF `base_link→livox_frame` 也是 −30.000°，最后
+   `gzserver ... finished cleanly`。⇒ 这是**取数时机/订阅侧**的问题（探针在这一跑里没订上），
+   **不是** `sensor` 档坏了；`k2_sen_fixed` 那一跑在批次被中断时还没落盘。
    要补：`bash tools/scripts/tiltmount/_batch_k2.sh`（≈15 min，会把三档都重跑一遍）。
 4. **真足印多边形只做到"知道怎么写"**（§K.3.4）：nav2 要**字符串**格式，本仓的运行时深合并
    写嵌套序列会让 `rcl` 报 `Sequences cannot be key` 并把**所有** nav2 节点打死（实测踩到）。
