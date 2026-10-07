@@ -90,6 +90,9 @@ namespace gazebo
 
       boost::shared_ptr<physics::LivoxOdeMultiRayShape> rayShape;
       gazebo::physics::CollisionPtr laserCollision;
+      /// ★ 2026-10-07 Phase 3：传感器**安装倾角**（SDF 的 `<tilt_rpy>`，弧度，缺省单位阵）。
+      ///   只影响射线方向（物理姿态）；点云仍表达在**父 link** 系 ⇒ frame_id 与数据自洽。
+      ignition::math::Quaterniond mount_rot_{ignition::math::Quaterniond::Identity};
       physics::EntityPtr parentEntity;
       transport::PublisherPtr scanPub;
 

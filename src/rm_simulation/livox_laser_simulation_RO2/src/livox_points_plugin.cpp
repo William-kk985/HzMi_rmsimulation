@@ -116,6 +116,27 @@ namespace gazebo
         laserCollision->SetShape(rayShape);
         samplesStep = sdfPtr->Get<int>("samples");
         downSample = sdfPtr->Get<int>("downsample");
+        // ★ 2026-10-07 Phase 3：可选安装倾角 `<tilt_rpy>roll pitch yaw</tilt_rpy>`（弧度）。
+        //   缺省（元素不存在）= 单位阵 ⇒ 与以前逐字节相同。
+        mount_rot_ = ignition::math::Quaterniond::Identity;
+        if (sdfPtr->HasElement("tilt_rpy"))
+        {
+            const std::string tilt = sdfPtr->Get<std::string>("tilt_rpy");
+            std::istringstream iss(tilt);
+            double r = 0.0, p = 0.0, y = 0.0;
+            if (iss >> r >> p >> y)
+            {
+                mount_rot_.Euler(ignition::math::Vector3d(r, p, y));
+                RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
+                            "tilt_rpy = [%.9f %.9f %.9f] rad（安装倾角：只改射线方向，"
+                            "点云仍表达在父 link 系）", r, p, y);
+            }
+            else
+            {
+                RCLCPP_WARN(rclcpp::get_logger("LivoxPointsPlugin"),
+                            "tilt_rpy 解析失败（%s）⇒ 按单位阵处理", tilt.c_str());
+            }
+        }
         if (downSample < 1)
         {
             downSample = 1;
@@ -138,7 +159,8 @@ namespace gazebo
             auto &rotate_info = aviaInfos[index];
             ignition::math::Quaterniond ray;
             ray.Euler(ignition::math::Vector3d(0.0, rotate_info.zenith, rotate_info.azimuth));
-            auto axis = offset.Rot() * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
+            // ★ 2026-10-07 Phase 3：安装倾角（`<tilt_rpy>`，缺省单位阵）乘在射线方向上
+            auto axis = offset.Rot() * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
             start_point = minDist * axis + offset.Pos();
             end_point = maxDist * axis + offset.Pos();
             rayShape->AddRay(start_point, end_point);
@@ -219,6 +241,24 @@ namespace gazebo
         sensor_msgs::PointCloud2Iterator<float> out_y(cloud2, "y");
         sensor_msgs::PointCloud2Iterator<float> out_z(cloud2, "z");
 
+        // ★★ 2026-10-07（Phase 3，robot:=robot11 的"斜装雷达"）：把**安装倾角**乘进点的方向里。
+        //   背景：本插件把点算成 `point = range * axis`，而 axis 原本只是 CSV 采样方向
+        //   （`ray * x̂`），**不含任何安装姿态** ⇒ 点云被表达在"传感器自身坐标系"里。
+        //   robot11 的雷达按实物斜 30°（用户确认 roll），我们**需要**：射线在物理上真的斜
+        //   （否则下视盲区、地面环半径、点云几何全不对），但点云坐标要是**父 link 系**的
+        //   （否则 frame_id 与实际坐标不自洽，而本仓 linefit 的 gravity_aligned_frame 路径
+        //    有 C++ bug：`Eigen::Affine3d tf;` 默认构造不清零 ⇒ 该键一开，地面分割恒为 0 点）。
+        //   做法：新增 SDF 参数 `<tilt_rpy>roll pitch yaw</tilt_rpy>`（弧度；缺省 = 单位阵）：
+        //     · 打射线时：axis = offset.Rot() · mount_rot · ray · x̂   （射线真的按倾角偏）
+        //     · 发布点时：axis = mount_rot · ray · x̂                 （点 = 父 link 系里的真实命中点）
+        //   ⇒ 对**已有**的每个传感器（没有这个参数）= 单位阵 ⇒ **输出逐字节不变**。
+        //   实测（robot11）：仰角谱仍是 −7…+52°（传感器自身 FoV），但它在 world 里是斜的：
+        //   地面最近环 0.43 m、下视到 −37°、地面点占 ~20%；而修之前"姿态只加在射线上、
+        //   不加在点上"会让 linefit 只能判 2.8% 地面。
+        const auto sensor_offset = laserCollision ? laserCollision->RelativePose()
+                                                  : ignition::math::Pose3d::Zero;
+        const auto sensor_rot = sensor_offset.Rot();
+
         // 遍历射线扫描点对
         for (const auto &pair : points_pair) {
             auto range = rayShape->GetRange(pair.first);
@@ -233,7 +273,7 @@ namespace gazebo
             auto rotate_info = pair.second;
             ignition::math::Quaterniond ray;
             ray.Euler(ignition::math::Vector3d(0.0, rotate_info.zenith, rotate_info.azimuth));
-            auto axis = ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
+            auto axis = sensor_rot * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
             auto point = range * axis;
 
             // 填充 CustomMsg 点云消息
@@ -300,7 +340,8 @@ namespace gazebo
             auto index = k % maxPointSize;
             auto &rotate_info = aviaInfos[index];
             ray.Euler(ignition::math::Vector3d(0.0, rotate_info.zenith, rotate_info.azimuth));
-            auto axis = offset.Rot() * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
+            // ★ 2026-10-07 Phase 3：安装倾角（`<tilt_rpy>`，缺省单位阵）乘在射线方向上
+            auto axis = offset.Rot() * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
             start_point = minDist * axis + offset.Pos();
             end_point = maxDist * axis + offset.Pos();
             if (ray_index < ray_size)
