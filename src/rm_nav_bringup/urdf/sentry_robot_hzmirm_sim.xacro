@@ -1,0 +1,398 @@
+<?xml version="1.0"?>
+<!--
+  ============================================================================
+  sentry_robot_hzmirm_sim.xacro —— robot:=hzmirm 槽位的机器人模型（**opt-in，不是默认**）
+  ============================================================================
+  默认模型 = urdf/sentry_robot_sim.xacro（bringup_sim.launch.py 的 robot 参数留空时用它，
+  本文件的存在不影响它一个字节）。本文件只在显式 `robot:=hzmirm` 时被 xacro。
+
+  ── 上游来源（2026-10-07 取，用户指定） ─────────────────────────────────────
+    网页  https://github.com/William-kk985/hzmirmvision-master/blob/main/configs/sentry_robot.urdf
+    原始  https://raw.githubusercontent.com/William-kk985/hzmirmvision-master/main/configs/sentry_robot.urdf
+    大小  3761 B / 156 行
+    sha256 9463265182aa320322996a08dc1cbf4c964a7e1528835f495290f9ea477da98f
+    逐字节副本：urdf/upstream/hzmirm_sentry_robot.urdf（**只读**，不参与运行，只用于核对）
+    核对脚本：tools/scripts/regress/check_hzmirm_urdf_provenance.py
+              （逐 link/joint 断言"名字/类型/父子/xyz/rpy/几何/颜色"与上游**数值相等**，
+                并单独列出我们补了什么）
+    该仓库只有一个分支 main、无 tag；全仓 1082 个文件里**只有这一个** URDF，
+    没有配套 xacro / .gazebo / SDF / world / mesh，也没有 launch 起 Gazebo
+    （simulation/ 目录是"假仿真"：纯 python 打激光+AMCL，与 Gazebo/URDF 无关）。
+    详见 docs/robot_models.md §1。
+
+  ── 本文件里两种标记 ───────────────────────────────────────────────────────
+    【上游原样】 = 与上游 URDF 逐字相同（link/joint 名字、类型、xyz、rpy、几何、颜色）
+    【我们加的】 = 我们为了让它在 **Gazebo Classic + 本栈（Livox 插件 / IMU / 底盘里程计 /
+                  本栈帧名）** 里真的跑起来而补的东西，每条都有日期与理由
+
+  ── 为什么不能直接 <xacro:include> 上游文件（重要） ────────────────────────
+    上游 URDF **所有 link 都没有 <inertial>**。Gazebo Classic 走 sdformat 的 URDF2SDF：
+    没有惯性的 link 会被当成"无质量"而**整条丢掉**。实测（gz sdf -p，2026-10-07 本机）：
+      · 全部 link 无惯性  ⇒ 只剩 `<model name='sentry_robot'/>`（空模型，spawn 出来什么都没有）
+      · 父 link 有惯性、子 link 没有 ⇒ **子 link 连同它的关节一起消失**
+    ⇒ 直接把上游文件 spawn 进 Gazebo 是**跑不起来**的（这是"它缺什么"里最硬的一条）。
+    所以本文件 = 上游内容（逐字）+ 每个 link 一条我们补的 inertial，而不是 include。
+    （"上游无 inertial"已由 tools/scripts/regress/check_hzmirm_urdf_provenance.py 断言，
+      防上游改版后我这条结论悄悄失效。）
+
+  ── 与本仓其它文件的接线（改这里之前先看） ──────────────────────────────────
+    · 帧名契约：base_link → turret_base → turret_head → lidar_link → livox_frame（新增，与
+      lidar_link **重合**）、lidar_link → imu_link（我们加，在雷达下方 0.05 m）；
+      点云 header.frame_id = livox_frame（插件用 <sensor name> 当 frame_id，见
+      livox_points_plugin.cpp:190），与本栈 lio:=small_point_lio/fastlio 的 lidar_frame 一致。
+    · imu_link 故意放在 livox_frame 下方 0.05 m：与**默认模型**的相对关系一致 ⇒
+      small_point_lio/fast_lio 参数里的 extrinsic_T=[0,0,0.05]（雷达在 IMU 系下的位置）**不用改**。
+      但 lio_tf_adapter 的杆臂补偿（T_body←base_link）按模型不同 ⇒ 由 launch 按槽位覆盖，
+      见 bringup_sim.launch.py 里 lio_tf_adapter 的两条互斥分支与本文件末尾的数值注释。
+    · 云台角参数 turret_yaw_deg / turret_pitch_deg 默认 0 = 与上游逐字等价（数值相等，
+      写成 ${0*PI/180} 只为把角度参数化）。**只有 pitch≠0 才会破坏"雷达重力对齐"假设** ——
+      那时 linefit 必须用 gravity_aligned_frame（本槽位的 companion YAML 已经这么配）。
+  ============================================================================
+-->
+<robot name="sentry_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ======================= 【我们加的】参数与宏 ======================= -->
+  <xacro:property name="PI" value="3.1415926"/>
+
+  <!-- 与默认模型同形的占位惯性（上游 URDF 一条 inertial 都没有 ⇒ 只能由我们给。
+       ⚠️ 这些是**占位值**（不是实测的转动惯量），与默认模型用同一套写法，
+       目的是"换模型时只变几何、不引入第二套未知数"。 -->
+  <xacro:macro name="default_inertial" params="mass">
+    <inertial>
+      <mass value="${mass}" />
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0"
+                    iyy="0.01" iyz="0.0" izz="0.01" />
+    </inertial>
+  </xacro:macro>
+
+  <!-- bringup_sim.launch.py 会无条件传 xyz:= / rpy:=（平台的 base_link↔livox 外参）。
+       本模型**不使用**它们：雷达位姿由上游 URDF 的关节链唯一决定（head_to_lidar 等），
+       再叠一个外部平移就等于改上游几何。声明出来只是为了让命令行形状与默认模型一致。 -->
+  <xacro:arg name="xyz" default=""/>
+  <xacro:arg name="rpy" default=""/>
+
+  <!-- 【我们加的】云台角（度）。默认 0 ⇒ 与上游逐字等价；非 0 用于试"雷达斜放/云台转动"假设：
+         turret_yaw_deg   ：绕 z 转（**不破坏重力对齐**，雷达 z 轴仍朝上）
+         turret_pitch_deg ：绕 y 俯仰（**破坏重力对齐** ⇒ linefit 必须配 gravity_aligned_frame）
+       实测与机理见 docs/robot_models.md §3。 -->
+  <xacro:arg name="turret_yaw_deg" default="0"/>
+  <xacro:arg name="turret_pitch_deg" default="0"/>
+
+  <!-- xacro 里 ${} 表达式读不到 $(arg)，必须先落成 property（否则报 name ... is not defined） -->
+  <xacro:property name="turret_yaw_rad" value="${radians($(arg turret_yaw_deg))}"/>
+  <xacro:property name="turret_pitch_rad" value="${radians($(arg turret_pitch_deg))}"/>
+
+  <!-- ==================== 以下到「我们加的配件」之前，全部【上游原样】 ==================== -->
+
+  <!-- 底盘 600x600x300mm -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.6 0.6 0.3"/>
+      </geometry>
+      <material name="dark_gray">
+        <color rgba="0.3 0.3 0.3 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.6 0.6 0.3"/>
+      </geometry>
+    </collision>
+    <!-- 【我们加的】惯性（上游无）：质量取默认模型的底盘 8.2 kg -->
+    <xacro:default_inertial mass="8.2"/>
+  </link>
+
+  <!-- 云台支架 200x200x300mm -->
+  <link name="turret_base">
+    <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.2 0.3"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1"/>
+      </material>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="1.0"/>
+  </link>
+
+  <joint name="base_to_turret" type="fixed">
+    <parent link="base_link"/>
+    <child link="turret_base"/>
+    <!-- 【上游原样】xyz="0 0 0.3" rpy="0 0 0"
+         【我们加的】只把 rpy 的 yaw 参数化（turret_yaw_deg 默认 0 ⇒ 数值与上游相等） -->
+    <origin xyz="0 0 0.3" rpy="0 0 ${turret_yaw_rad}"/>
+  </joint>
+
+  <!-- 云台头部 300x300x200mm -->
+  <link name="turret_head">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.3 0.3 0.2"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.8 0.2 0.2 1"/>
+      </material>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="1.0"/>
+  </link>
+
+  <joint name="turret_to_head" type="fixed">
+    <parent link="turret_base"/>
+    <child link="turret_head"/>
+    <!-- 【上游原样】xyz="0 0 0.3" rpy="0 0 0"
+         【我们加的】只把 rpy 的 pitch 参数化（turret_pitch_deg 默认 0 ⇒ 数值与上游相等） -->
+    <origin xyz="0 0 0.3" rpy="0 ${turret_pitch_rad} 0"/>
+  </joint>
+
+  <!-- 枪管 -->
+  <link name="barrel">
+    <visual>
+      <origin xyz="0.2 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.3"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1"/>
+      </material>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="0.5"/>
+  </link>
+
+  <joint name="head_to_barrel" type="fixed">
+    <parent link="turret_head"/>
+    <child link="barrel"/>
+    <origin xyz="0.15 0 0.1" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 雷达 (顶部) -->
+  <link name="lidar_link">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.05"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.2 0.8 1"/>
+      </material>
+    </visual>
+    <!-- 【我们加的】惯性（上游无）。0.4 kg = 与默认模型 mid360.xacro 里的雷达质量一致 -->
+    <xacro:default_inertial mass="0.4"/>
+  </link>
+
+  <joint name="head_to_lidar" type="fixed">
+    <parent link="turret_head"/>
+    <child link="lidar_link"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 【上游原样·事实更正】上游 head_to_lidar 的 rpy 是 **0 0 0**（雷达不是静态斜装的），
+       而且 base_to_turret / turret_to_head **都是 fixed** ⇒ 在这份 URDF 里雷达是**刚性固定在
+       base_link 上**的，云台不会动。用户说的"斜放"在文件里**没有**；
+       唯一带 1.5708 的是枪管 head_to_barrel 的 rpy（那是炮管，不是雷达）。
+       想试"真斜放/真云台"，用上面的 turret_yaw_deg / turret_pitch_deg 参数（默认 0）。
+       证据与实测后果见 docs/robot_models.md §1.2 / §3。 -->
+
+  <!-- 四个轮子 -->
+  <link name="wheel_fl">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="0.5"/>
+  </link>
+  <joint name="base_to_wheel_fl" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_fl"/>
+    <origin xyz="0.22 0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <link name="wheel_fr">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="0.5"/>
+  </link>
+  <joint name="base_to_wheel_fr" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_fr"/>
+    <origin xyz="0.22 -0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <link name="wheel_rl">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="0.5"/>
+  </link>
+  <joint name="base_to_wheel_rl" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_rl"/>
+    <origin xyz="-0.22 0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <link name="wheel_rr">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <!-- 【我们加的】惯性（上游无） -->
+    <xacro:default_inertial mass="0.5"/>
+  </link>
+  <joint name="base_to_wheel_rr" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_rr"/>
+    <origin xyz="-0.22 -0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <!-- ==================== 【我们加的】配件：IMU / 雷达 / 底盘 ==================== -->
+  <!-- 2026-10-07 加。上游 URDF 里**没有** imu_link、没有 <gazebo>、没有 <sensor>、没有 <plugin>、
+       也没有任何 mesh ⇒ 这些东西全是我们为本栈补的（逐条理由见下）。 -->
+
+  <!-- ① IMU：上游没有 imu_link，而本栈的 LIO（fastlio/pointlio/small_point_lio）与
+        imu_complementary_filter 都要 /livox/imu + 一个 imu_link 帧。
+        位置：挂在 lidar_link 下方 0.05 m（= 默认模型里 imu_link 与 livox_frame 的相对关系，
+        MID360 的 IMU 与雷达本来就在同一个壳里）⇒
+        small_point_lio/fast_lio 的 extrinsic_T=[0,0,0.05]（雷达在 IMU 系下）不用改。
+        绝对高度：base_link+0.75。 -->
+  <joint name="imu_joint" type="fixed">
+    <axis xyz="0 1 0" />
+    <origin xyz="0 0 -0.05" rpy="0 0 0"/>
+    <parent link="lidar_link"/>
+    <child link="imu_link"/>
+  </joint>
+
+  <link name="imu_link">
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.05"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.05"/>
+      </geometry>
+      <material name="green">
+        <color rgba="0 1 0 1"/>
+      </material>
+    </visual>
+    <inertial>
+      <mass value="1e-2" />
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6" />
+    </inertial>
+  </link>
+
+  <!-- ② 雷达本体：上游的 lidar_link 只有一个蓝色小圆柱（纯视觉），没有传感器、没有插件。
+        这里用本仓既有宏 ros2_livox_simulation/urdf/mid360.xacro 挂一台 MID360：
+          · 新帧 livox_frame 与上游 lidar_link **重合**（保持"雷达在哪"= 上游说的位置，
+            又给出本栈要求的帧名：点云 header.frame_id 就是它，插件用 <sensor name> 当 frame_id）
+          · 射线 100(水平) x 360(垂直) / 10 Hz / 量程 0.1~200 m / 高斯噪声 σ=0.002
+          · 话题 /livox/lidar（CustomMsg）与 /livox/lidar/pointcloud（PointCloud2）
+        ⚠️ 宏自带一个 0.1x0.06x0.06 的灰色方块 visual，会与上游的蓝圆柱视觉重叠（只影响观感）。 -->
+  <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro" />
+  <xacro:mid360 name="livox_frame" parent="lidar_link" topic="/livox/lidar">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:mid360>
+
+  <!-- ③ 底盘驱动 + 真值里程计：与默认模型**逐字同款**（libgazebo_ros_planar_move.so）
+        ⇒ 契约不变：只有它订阅 /cmd_vel_chassis；真值里程计发 /odom_ground_truth
+        （/odom 留给 LIO）；不发 odom→base_link TF（T4：那条边归 LIO）。 -->
+  <gazebo>
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel_chassis</remapping>
+        <remapping>odom:=odom_ground_truth</remapping>
+      </ros>
+      <update_rate>100</update_rate>
+      <publish_rate>10</publish_rate>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>false</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <covariance_x>0.0001</covariance_x>
+      <covariance_y>0.0001</covariance_y>
+      <covariance_yaw>0.01</covariance_yaw>
+    </plugin>
+  </gazebo>
+
+  <!-- ④ IMU 传感器：与默认模型同款（gazebo_ros_imu_sensor，100 Hz，帧名 imu_link，
+        话题 /livox/imu）。上游没有任何 <sensor>。 -->
+  <gazebo reference="imu_link">
+    <sensor name="mid360_imu" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+        <ros>
+          <namespace>/</namespace>
+          <remapping>~/out:=/livox/imu</remapping>
+        </ros>
+        <frame_name>imu_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- ⑤ 材质（纯观感，与默认模型同一套写法） -->
+  <gazebo reference="base_link">
+    <material>Gazebo/Orange</material>
+  </gazebo>
+  <gazebo reference="turret_base">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+  <gazebo reference="turret_head">
+    <material>Gazebo/Red</material>
+  </gazebo>
+  <gazebo reference="barrel">
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="wheel_fl">
+    <material>Gazebo/Red</material>
+  </gazebo>
+  <gazebo reference="wheel_fr">
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="wheel_rl">
+    <material>Gazebo/Red</material>
+  </gazebo>
+  <gazebo reference="wheel_rr">
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="imu_link">
+    <material>Gazebo/BuildingFrame</material>
+  </gazebo>
+  <gazebo reference="livox_frame">
+    <material>Gazebo/LightBlueLaser</material>
+  </gazebo>
+
+  <!-- ==================== 几何速查（供 config 对照，数值不给默认值兜底） ====================
+       base_link 原点 = 地面高度（底盘 box z∈[0,0.3]，轮子半径 0.08 心在 z=0.08 ⇒ 最低点都是 z=0）
+       雷达 livox_frame  z = 0.30(支架起点) + 0.30(云台) + 0.20(head_to_lidar) = **0.80 m**
+       IMU  imu_link     z = 0.75 m（雷达下方 0.05）
+       外形 0.6 x 0.6 x 0.3（+ 云台到 0.8）⇒ 外接半径 0.424 m / 内切 0.30 m
+       轮距(track, y) 0.50 m；轴距(wheelbase, x) 0.44 m
+       lio_tf_adapter 需要的 T_body←base_link = -(imu 位置) = [0, 0, **-0.75**]（默认模型是 [-0.12,0,-0.125]）
+       ⇒ 该值由 bringup_sim.launch.py 的 robot:=hzmirm 分支注入，本文件不写死在 YAML 里。 -->
+</robot>

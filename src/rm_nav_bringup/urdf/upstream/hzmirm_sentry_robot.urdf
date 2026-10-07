@@ -1,0 +1,156 @@
+<?xml version="1.0"?>
+<robot name="sentry_robot">
+  
+  <!-- 底盘 600x600x300mm -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.6 0.6 0.3"/>
+      </geometry>
+      <material name="dark_gray">
+        <color rgba="0.3 0.3 0.3 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.6 0.6 0.3"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- 云台支架 200x200x300mm -->
+  <link name="turret_base">
+    <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.2 0.3"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="base_to_turret" type="fixed">
+    <parent link="base_link"/>
+    <child link="turret_base"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 云台头部 300x300x200mm -->
+  <link name="turret_head">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.3 0.3 0.2"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.8 0.2 0.2 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="turret_to_head" type="fixed">
+    <parent link="turret_base"/>
+    <child link="turret_head"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 枪管 -->
+  <link name="barrel">
+    <visual>
+      <origin xyz="0.2 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.3"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="head_to_barrel" type="fixed">
+    <parent link="turret_head"/>
+    <child link="barrel"/>
+    <origin xyz="0.15 0 0.1" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 雷达 (顶部) -->
+  <link name="lidar_link">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.05"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.2 0.8 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="head_to_lidar" type="fixed">
+    <parent link="turret_head"/>
+    <child link="lidar_link"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 四个轮子 -->
+  <link name="wheel_fl">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+  <joint name="base_to_wheel_fl" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_fl"/>
+    <origin xyz="0.22 0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <link name="wheel_fr">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+  <joint name="base_to_wheel_fr" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_fr"/>
+    <origin xyz="0.22 -0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <link name="wheel_rl">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+  <joint name="base_to_wheel_rl" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_rl"/>
+    <origin xyz="-0.22 0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+  <link name="wheel_rr">
+    <visual>
+      <geometry>
+        <cylinder radius="0.08" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+  <joint name="base_to_wheel_rr" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_rr"/>
+    <origin xyz="-0.22 -0.25 0.08" rpy="1.5708 0 0"/>
+  </joint>
+
+</robot>
