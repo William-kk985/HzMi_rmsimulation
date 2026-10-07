@@ -662,3 +662,345 @@ python3 tools/scripts/regress/check_robot11_visual_slot.py           # 21 项断
   现在**仍然成立** —— 只是多了"它也**可以**按需切回上游字面值"这个开关（默认不变）。
 * §13.9 记的"`/scan` 里恒有一圈自身障碍"在本文 §D.3 里有了归因：**它确实在 `/scan` 里，
   但它不是把车包住的那一圈**（0.386 m 内没有 lethal 格）。
+
+---
+
+## I. 2026-10-09 追查：`urdf` 档"物理上到底对不对" + 用户在 RViz 里看到的到底是什么
+
+> 触发 = 用户 2026-10-09 的原话（逐字）：
+> 「车有一侧应该是右侧那个向点云是出不去的…可是…点云看着像平放扫到的东西倾斜了，
+> 不是倾斜放置扫描到的东西」
+>
+> 本节做四件事：**(1)** 用**判决性实测**把三个假设（H1 外参缺一条 / H2 只斜了 label、射线还是平的 /
+> H3 一侧盲区是 roll 的应有几何）各判一次；**(2)** 说清"点云到底表达在哪个系、盖的哪个 `frame_id`"
+> （源码行号 + Gazebo 侧 SDF 静态证据）；**(3)** 给出 RViz 的 `Fixed Frame` 配方与"为什么看起来是
+> 平放被倾斜"；**(4)** 给出"斜装该怎么正确处理"的结论与**精确改法表**（本主题**仍然不改任何
+> 默认值/感知参数**，只加文档 + 新工具目录）。
+>
+> 全部**无头隔离跑**（`HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、专用 `GAZEBO_MASTER_URI`、
+> `unset DISPLAY`、只按 `/proc/<pid>/environ` 清本 master URI 的 gazebo），
+> 原始数据 `.tmp_tiltmount/{tm_plugin,tm_urdf}/`，工具 `tools/scripts/tiltmount/`。
+
+### I.0 一句话判决
+
+**`urdf` 档的"物理"是对的，"账"是错的 —— 而且错在三处（其中两处是本轮新挖出来的 LIO 侧 bug）。**
+
+| # | 判决 | 判决性数字 |
+|---|---|---|
+| **物理（射线/mesh/IMU 安装姿态）** | **对**：射线在世界里真的下俯 30°（地面最近环 **0.3146 m** ⇒ 下俯 **38.27°**，而水平安装的物理下限只有 **7.22°** ⇒ 最近地面环不可能近于 1.96 m）；画的 mesh 也真的斜 −30.000°；IMU 真的斜 29.979° | §I.4 / §I.5 |
+| **点云数据** | **与 `plugin` 档逐点相同**（刚体配准 **0.0004°**、残差 p50 **0.074 mm**）⇒ 倾角**没有进数据**，数据仍在**水平**系里 | §I.4 |
+| **账（帧）** | **不自洽 30°**：`header.frame_id` 写 `livox_frame`，而这个帧在 `urdf` 档真的斜了 30°，数据却是水平的 ⇒ 任何"用 TF 变换这朵云"的消费者都会把**整个场景刚性转 30°**（`/cloud_registered` 实测 **30.970°**；把它按 `T(base_link←livox_frame)` 反变换回去只剩 **1.041°**） | §I.5 |
+| **用户看到的** | **字面正确**："像平放扫到的东西被倾斜了"——`/cloud_registered` 就是"水平的 odom 点云被刚性旋转 −30°"，不是"斜着装扫出来的覆盖图案" | §I.5 / §I.6 |
+
+⇒ **定论：`urdf` 档 = 物理正确 + 帧/label 不一致（bug ①）+ 两个只在"TF 带旋转"时才现形的 LIO 侧 bug（②③）。**
+用户"看着不对"的直觉是**对的**，而且他能一眼看出来，正是因为那是一个**刚性旋转**（地面变成 30° 斜坡、
+环状图案没变），而不是一个**不同的覆盖图案**（那才会表现为"一侧彻底看不见地面/最近地面环半径从
+0.31 m 变到 1.96 m"）。
+
+### I.1 假设判决表（每条假设 → 判它的那一次测量 → 数字 → 判决）
+
+| 假设 | 判决性测量（怎么做） | 实测 | 判决 |
+|---|---|---|---|
+| **H1**：`urdf` 档只斜了帧，而 **LiDAR→IMU 外参仍是单位阵**（LIO 假设雷达是平的）⇒ LIO 重建出来的 **odom 帧被转了 30°** ⇒ 地面在 odom 里是斜面 | ① 读**实际生效**的 LIO 配置（`extrinsic_T/extrinsic_R`）并与 TF 里 `imu_link←livox_frame` 的**真实几何**比；② 量 IMU 自己的重力方向（`/livox/imu` 窗口均值）；③ 把 `/cloud_registered` 按 `T(base_link←livox_frame)` **反变换**回去再拟合地面（若"odom 帧本来就斜"，反变换后会变成 60° 而不是水平）；④ 从发布的 `odom→base_link` **反解 LIO 自己的状态姿态** `R_ol` | ① `extrinsic_T=[0,0,0.05]`/`extrinsic_R=I`；TF 实测 `imu_link←livox_frame` = xyz **(0, 0, 0.05)**、rpy **0** ⇒ **两档都仍然精确成立**（IMU 与雷达同壳同斜）；② IMU 量到的重力与 imu z 夹角：`plugin` **0.017°** / `urdf` **29.979°**（搬到 base_link 后两档都是 **0.017/0.021°**）；③ 反变换后地面 **1.041°**（正变换前 30.970°）；④ 反解 `R_ol` = `plugin` **[0.217, 0.047, 9.667]°** / `urdf` **[0.086, 0.405, 9.105]°**（都是"只有 yaw"的水平姿态） | **不成立**（机制不成立："缺外参"不是原因；odom 帧**没有**被转 30°，它水平到 0.1~0.4°） |
+| **H2**：插件**仍打水平射线**，只有发布出去的 `frame_id` 被斜了（真 bug）⇒ 世界里的场景被转了 | ① 把两档的**传感器系点云**（`/livox/lidar/pointcloud`，`frame_id=livox_frame`）做**刚体配准**（最近邻 + Kabsch）：若"帧真的斜了"的正确实现，应当给出 **R⁻¹ ≈ 30° 绕 x**；② 无帧假设地量**世界射线**：地面最近环半径 + 传感器离地高 ⇒ 反推最陡下俯角（水平安装的物理下限是 7.22°） | ① 配准 **11652 对**：角度 **0.0004°**、平移 **( −2.3e−5, −6.8e−5, 4.4e−6 ) m**、残差 p50 **0.074 mm** / p95 0.50 mm / max 5.3 mm ⇒ **两档点云逐点相同**；② 地面平面高 **0.2482 m**、最近地面点水平半径 **0.3146 m** ⇒ 下俯 **38.27°**（水平安装时该半径不可能 < **1.96 m**） | **前半成立 / 后半不成立**："只有 label 斜了、数据是水平的"**成立**；"射线是平的"**不成立**（射线两档都真的斜 30°） |
+| **H3**：用户看到的"右侧出不去"是 **roll 倾角应有的几何**（左右不对称），不是 bug | 逐 30° 扇区的点数 / 地面点数 / **仰角包络**（实测）与**锥形视场旋转 30° 后的解析下界**对比；四象限点数；最近 200 个地面点的**方位直方图**；以及代价图 lethal 格的方位分布 | 右侧两扇区（−120..−60）**3586 点里 0 个地面点**、最低仰角 **+21.89°/+19.67°**（解析下界 +19.11°）；左侧（60..120）**1642+1634 点里 2694 个地面点**、最低仰角 **−36.87°**（解析下界 −37.22°）；最近 200 个地面点方位 p50 = **89.6°**（全在 60..120 这个 ±30° 楔形里）；代价图 lethal 格方位：`front 127 / left 224 / back 120 / **right 0**` | **成立**（**两档都是这样** —— 与 `robot11_mount` 开关无关） |
+
+### I.2 三个"坐标系"的账：点云到底表达在哪儿、盖的哪个 frame（源码 + Gazebo 侧静态证据）
+
+这一节是本次追查的**根**：本仓有**三个不同的东西**被同一个名字 `livox_frame` 混在一起。
+
+| 东西 | 是什么 | 证据 |
+|---|---|---|
+| ① **物理传感器系**（实物） | 斜 30°（`body_to_livox` 的 rpy） | `urdf` 档 TF `base_link→livox_frame` rpy **−30.000/0/0**；Gazebo 侧被 lump 的视觉 `…fixed_joint_lump__livox_frame_visual_1` 朝向 x=**−0.25881915**（= sin(−15°)，roll **−30.000°**） |
+| ② **点云数据实际表达的系** | **原点 = 传感器原点，朝向 = 父 link（`base_link`）的朝向** ⇒ `plugin` 档"水平 + 传感器居中"，`urdf` 档**仍是水平** | 插件：`laserCollision = physics->CreateCollision("multiray", _parent->ParentName())`（**父 link**）、`SetRelativePose(_parent->Pose())`（**传感器相对父 link 的位姿**）——`livox_points_plugin.cpp:111-114`；出点 `axis = sensor_rot * mount_rot_ * ray`、`point = range*axis`（`sensor_rot = laserCollision->RelativePose().Rot()`）——`:258-260`、`:276-277`。`plugin` 档 `mount_rot=R_x(−30°)` ⇒ `I·R_x(−30°)`；`urdf` 档 `sensor_rot=R_x(−30°)`、`mount_rot=I` ⇒ `R_x(−30°)·I` ⇒ **乘出来同一个矩阵**，点云逐点相同（§I.4 实测 0.0004°） |
+| ③ **`header.frame_id`** | = `<sensor name>`，本仓被**故意**设成字符串 `livox_frame`（`livox_points_plugin.cpp:212,218` 用 `raySensor->Name()`；`sentry_robot_robot11_sim.xacro:1010-1012` 的 `<sensor type="ray" name="livox_frame">`，设计意图写在 `:1006-1007`） | `/livox/lidar/pointcloud`、`/livox/lidar`(CustomMsg)、`/segmentation/*`、`/scan` 的 `frame_id` 实测都是 `livox_frame` |
+
+**② 与 ③ 只有"关节 rpy = 0"时才相等** —— 这正是 `plugin` 档的自洽条件。把倾角搬进关节（`urdf` 档）之后：
+
+* 数据（②）还是水平的；
+* `frame_id`（③）指向的那个 TF 帧（①）斜了 30°；⇒ **"帧与数据差 30°"**，这就是全部问题的来源。
+
+**Gazebo 侧的静态证据（不进仿真也能复算）**：`gz sdf -p` 把渲染出来的 URDF 转成 SDF 后，
+**传感器是挂在 `base_link` 下的**，而且它的 `<pose>` 已经把固定关节的旋转折进去了：
+
+```
+# plugin 档                                  # urdf 档
+<link name='base_link'>                       <link name='base_link'>
+  <sensor name='livox_frame' type='ray'>        <sensor name='livox_frame' type='ray'>
+    <pose>0.000562 0.130916 0.157028            <pose>0.000562 0.130916 0.157028
+          0 -0 0</pose>                                 -0.523599 0 0</pose>
+  <sensor name='mid360_imu' type='imu'>         <sensor name='mid360_imu' type='imu'>
+    <pose>0.000562 0.130916 0.107028 …</pose>     <pose>0.000562 0.105916 0.113727 -0.523599 0 0</pose>
+```
+
+⇒ 插件里的 `laserCollision->RelativePose()`（= `sensor_rot`）在 `urdf` 档**就是** `R_x(−30°)`；
+⇒ 这也解释了为什么 `/gazebo/default/robot/base_link/livox_frame/scan` 这个 scoped name 里
+`base_link` 在 `livox_frame` 前面（固定关节被 lump），以及为什么 `gz topic pose/info` 里找不到 `livox_frame`（§H.4）。
+
+**"画的 mesh 斜不斜"与"射线斜不斜"对不对得上？** 对得上，而且是同一个原因：
+mesh 与射线**都**只经过那一个关节旋转 —— mesh 的 Gazebo 侧直接读数是 roll **−30.000°**（本轮 `gz model -i`
+复现，`x=-0.25881915348021844`），射线（两档逐点相同的那朵云）在世界里下俯 **38.27°**（§I.4）。
+`plugin` 档相反：mesh **roll 0**（`x=0`）而射线照样斜 30° ⇒ 那是"画错了、物理对了"。
+
+### I.3 H3：一侧盲区 = roll 的应有几何（逐扇区数字）
+
+`robot:=robot11` 静止；下表 `A / B` = `plugin` 档 / `urdf` 档 —— **两档逐格相同**（只在帧边界上差个位数点）。方位定义 = REP-103（x 前、y 左），在原云自己的坐标里量（该系水平，见 §I.4）：
+
+| 扇区（°） | 点数 | 其中地面点 | 最低仰角实测 | **解析 FOV 下界** | 地面点最近水平半径 (m) |
+|---|---|---|---|---|---|
+| −180..−150 | 205 | 0 | −4.51 | −8.34 | — |
+| −150..−120 | 219 / 220 | 0 | +61.36 | +8.09 | — |
+| **−120..−90** | **1304** | **0** | **+21.89** | +19.11 | — |
+| **−90..−60** | **1626** | **0** | **+19.67** | +19.11 | — |
+| −60..−30 | 232 | 0 | +21.08 | +8.09 | — |
+| −30..0 | 115 | 8 / 9 | −4.84 | −8.34 | 5.600 |
+| 0..30 | 867 | 51 | −22.44 | −24.12 | 0.624 |
+| 30..60 | 1416 | 713 / 716 | −33.12 | −34.02 | 0.370 |
+| **60..90** | **1642** | **1318 / 1319** | **−36.87** | −37.22 | **0.315** |
+| **90..120** | **1634** | **1376 / 1378** | **−36.87** | −37.22 | **0.315** |
+| 120..150 | 1461 | 1040 / 1042 | −33.10 | −34.02 | 0.370 |
+| 150..180 | 931 / 932 | 400 / 401 | −22.35 | −24.12 | 0.627 |
+
+* "解析 FOV 下界" = 把 MID-360 的锥形视场（垂直 **−7.22°…+55.22°**，`mid360.xacro` 的取值，
+  `sentry_robot_robot11_sim.xacro:1028-1029`）按 **roll −30°** 旋转后，逐方位的**理论最低可见仰角**
+  （`tools/scripts/tiltmount/tilt_mount_compare.py` 里的 `analytic_lower_envelope()`，可复算）。
+  实测最低仰角**处处不低于它、且在被地面/低矮件填满的方向上几乎贴着它**（−36.87 vs −37.22）⇒
+  **盲区的边界就是视场边界**，不是"下游裁掉了点"。
+* **四象限点数（点 / 其中地面点）**：前 2398 / 776，**左 4737 / 3735**，后 931 / 400，
+  **右 3586 / 0** ⇒ **整个右半边一个地面点都没有**。
+* **最近 200 个地面点的方位直方图**：60..90 = **101**、90..120 = **97**、30..60 = 1、120..150 = 1，
+  p50 = **89.6°** ⇒ 地面只在一个**以 +y（左）为中心 ±30° 的楔形**里可见。
+* **仰角谱**（原云，自己的系）：p0 **−36.87°**、p1 −34.14、p5 −29.72、p50 −5.56、p95 +67.57、p100 +82.16
+  ⇒ 与"−7.22°…+55.22° 的视场绕 x 转 −30°"完全一致（下界 −37.22°、上界 +85.22°）。
+* **`/scan` 的有限波束**（`p2l` 输出，`frame_id=livox_frame`）：949（`plugin`）/ 948（`urdf`）条 ——
+  **几乎不变**；四象限：前 261、左 339 / 338、后 121、**右 228**。注意"右侧 228 条"是**近场自击团**
+  （r ≈ 0.05 m，扇区 −120..−30），**不是地面**：同一张表里右半边的地面波束是 0。
+
+⇒ **H3 成立，而且它是 roll 的"应有几何"，不是 bug**：绕 x 轴 roll −30° 后，传感器"看不见的锥"
+（自身下视只到 −7.22°）被转到**右下方** ⇒ 右半边从"地面"到"水平线"整段都进不了视场，
+而左半边能一直看到 −37.2°（地面最近环 0.31 m）。**用户说的"右侧那个方向点云出不去"就是这个**
+（再叠上 §I.7 里代价图"右侧 lethal 格 = 0"的后果）。
+判据留在 §I.6：**"覆盖图案真的变了"（一侧没有地面）与"场景被刚性转过"是两件不同的事**，
+而 `urdf` 档在 RViz 里同时具备这两件事（前者是物理、后者是 bug）。
+
+### I.4 H2：两档的**传感器系点云**逐点相同（本地云刚体配准）
+
+`.tmp_tiltmount/tm_plugin` 与 `.tmp_tiltmount/tm_urdf` 各取一帧 `/livox/lidar/pointcloud`（11652 / 11654 点）：
+
+| 口径 | 结果 |
+|---|---|
+| 最近邻 + Kabsch 刚体配准（11652 对，迭代 3 轮，门限 0.25 m） | 角度 **0.0004°**、轴 `(0.459, −0.248, −0.853)`（无意义，角太小）、平移 **(−2.3e−5, −6.8e−5, 4.4e−6) m** |
+| 配准残差 | p50 **7.4e−5 m（0.074 mm）**、p95 **5.0e−4 m**、max **5.3 mm** |
+| 原始云 RANSAC 地面平面 | `plugin`：n=(−0.00853, 0.01592, 0.99984)、与自身 z 夹角 **1.035°**、平面高 **0.2482 m**；`urdf`：夹角 **1.023°**、平面高 **0.2482 m** |
+| 地面最近环 / 最陡下俯 | `plugin` rxy_min **0.3146 m** ⇒ **38.26°**；`urdf` **0.3146 m** ⇒ **38.27°** |
+| 自击掩膜命中（`r_xy ≤ 0.2416 且 z ≥ −0.2295`） | `plugin` **3402**（29.197%）/ `urdf` **3403**（29.200%） |
+| `p2l` 高度带（`|z| ≤ 1.0`，点云自带帧）内的点占比 | 两档都是 **1.0000** |
+
+**⇒ 两个结论：**
+1. **"斜的只有帧/label、数据没斜"= 成立**：两档点云坐标逐点相同到 0.07 mm（这是配准残差，不是「看起来差不多」）。
+   **这就是用户在 RViz 里看出"像平放扫到的东西被倾斜了"的物理根源** —— 数据真的是"平放"的。
+2. **"插件还在打水平射线"= 不成立**：世界射线在两档里是同一条（点云逐点相同 ⇒ 打的是同一批世界点），
+   而它们**真的下俯 30°**：地面最近环 0.3146 m ÷ 离地 0.2482 m ⇒ **38.27°**，
+   水平安装时（下视只到 7.22°）这个半径**不可能小于 0.2482/tan(7.22°) = 1.96 m**。
+   38.27° − 7.22° ≈ 31° ⇒ 射线物理上就斜了 ~30°。
+
+### I.5 H1：LIO 的 odom 帧**没有**被转 30°；30° 是"发布环节多转的一次"（外加两个新 bug）
+
+#### I.5.1 关键测量：把 `/cloud_registered` 反变换回去
+
+`small_point_lio` 的 `/cloud_registered` 是这么来的（**两处变换**）：
+
+1. `small_point_lio.cpp:92-98`：`p_odom = R_ol · (extrinsic_R·p_lidar + extrinsic_T) + t_ol` —— **已经是 odom 系**，
+   且 `extrinsic_R=I` ⇒ 就是"原云 + (0,0,0.05)"（`config/mid360_sim_tuned.yaml` 的 `extrinsic_T`）。
+2. `small_point_lio_node.cpp:141,159,191`：又做了一次
+   `lookupTransform("base_link", lidar_frame)`，然后 `transformed_point = R(base←livox)·point + t(base←livox)`，
+   最后 `msg.header.frame_id = "odom"` —— **对"已经在 odom 里的点"再乘一次 `T(base_link←livox_frame)`，还盖 odom 的标签**。
+
+所以预测是：**反变换掉那次多余的 `T(base_link←livox_frame)` 之后，`/cloud_registered` 的地面应当回到水平**。
+实测（同一帧、用同一份 TF）：
+
+| 档 | 发布的 `/cloud_registered` 地面倾角 | 按 `T(base_link←livox_frame)` 反变换后 | 该 TF 的旋转 |
+|---|---|---|---|
+| `plugin` | **0.742°** | 0.742°（TF 旋转 = 0°，反变换是恒等） | rpy `[0,0,0]` |
+| `urdf` | **30.970°** | **1.041°** ← **回到水平** | rpy `[−30.000, 0, 0]` |
+
+**同一条判据的两个独立口径也都指向"多余的那一次旋转"：**
+
+* 逐点残差（最近邻配对）：`urdf` 档 **H_a**（`p_pub ≈ R(base←livox)·p_raw + t`）残差 p50 **2.67 cm**、
+  82.4% 的点在 5 cm 内；**H_b**（不转，`p_pub ≈ p_raw + t`）p50 **11.47 cm**、只有 10.2% 在 5 cm 内
+  ⇒ **H_a 赢 4.3 倍**（残差底噪来自"取的两帧不是同一时刻"+ 车的轻微晃动）。
+* 地面法向分量：`R(base←livox)·n_raw` 与实测发布的地面法向夹角 **0.088°**（`urdf`）/ 0.297°（`plugin`）
+  ⇒ 不是"角度差不多"，是**同一个刚体变换**。
+
+#### I.5.2 odom 帧本身：水平（0.2~0.4°）
+
+| 判据 | `plugin` | `urdf` |
+|---|---|---|
+| **反解 LIO 自己的状态姿态 `R_ol`**（从发布的 `odom→base_link` 按代码语义 `R_ob = R_bl·R_ol·R_blᵀ` 反解；tf2 的合成顺序用一个 30 行 C++ 单测钉住了，见 §I.9） | **[0.217, 0.047, 9.667]°**（只有 yaw） | **[0.086, 0.405, 9.105]°**（只有 yaw） |
+| odom 里的地面（把原云用**LIO 自己的 TF** `odom←livox_frame` 搬过去再拟合） | **0.867°** | 30.798°（**这一格是 label 的旋转**，不能当 odom 的倾斜读，见下） |
+| odom 帧相对**真实重力**的倾角（`TF(odom←base_link)` × 真值 `/odom_ground_truth`） | **0.203°** | **5.248°** ← 被 bug ③ 污染（见 §I.5.3），修正后 < 0.5° |
+| 真值里车自己的姿态（`/odom_ground_truth`） | roll 0.016 / pitch −0.003 / yaw 0→10.152° | roll 0.018 / pitch −0.003 / yaw 0→10.019° |
+| `/odom` 窗口内 roll/pitch 跨度 | 0.161° / 0.144° | 0.421° / **4.924°**（← 与 yaw 一起长大，= bug ③） |
+
+> 顺带查清一件**与安装档无关**的事：`RMUL2026` 出生后车会自己转 ~10°
+> （真值 `/odom_ground_truth` 的 yaw **0.000° → 10.152°**，`/odom` **0.473° → 10.199°**，两档都复现）
+> ⇒ 这就是 §I.5.2 里 `R_ol` 那个 ~9° yaw 的来源，**不是 LIO 漂移**（roll/pitch 跨度只有 0.16°）。
+
+**⇒ H1 的机制不成立**：odom 帧是重力对齐的（0.2~1.0° 量级），30° 是在**发布那一刻**被乘上去的。
+**"缺一条外参"也不是原因**：`imu_link←livox_frame` 的真实几何在两档里都是 `(0,0,0.05)`/rpy 0，
+和 `mid360_sim_tuned.yaml` 的 `extrinsic_T=[0,0,0.05]`、`extrinsic_R=I` **逐位一致**（IMU 与雷达同壳、一起斜）。
+真正的错在"点云不在它自称的那个帧里"（§I.2）＋下面两个 LIO 侧 bug。
+
+#### I.5.3 顺带挖出来的两个 LIO 侧 bug（`plugin` 档不可见，`urdf` 档才现形）
+
+| bug | 位置 | 为什么 `plugin` 档看不见 | `urdf` 档实测后果 |
+|---|---|---|---|
+| **② `/cloud_registered` 多转一次** | `small_point_lio_node.cpp:141`（`lookupTransform("base_link", lidar_frame)`）+ `:191`（`R*point + T`）+ `:159`（`frame_id="odom"`） | `T(base_link←livox_frame)` 是**纯平移**（rpy 0）⇒ 只把整朵云平移了 ~0.20 m（(0.00056, 0.13092, 0.15703)，即 y/z 各 0.13/0.16 m）⇒ 看不出转 | 整个 odom 场景被**刚性旋转 −30°**（地面 30.970°）；而且旋转是**绕 odom 原点**做的（`R*p+T`）⇒ 车一旦开出原点，整朵云会绕原点甩（§I.10 未验证项 3） |
+| **③ `odom→base_link` 的姿态是"共轭"不是"合成"** | `small_point_lio_node.cpp:99`（`lookupTransform(lidar_frame, "base_link")`）+ `:109`：`T_ob = T_bl⁻¹ · T_ol · T_bl` | `T_bl` 是纯平移 ⇒ 共轭 = 只挪旋转中心（本来就是想要的），姿态不受影响 | 发布出来的 `odom→base_link` rpy = **[0.383, 4.890, 7.701]°**，而按代码语义反解出的 LIO 状态 `R_ol` = **[0.086, 0.405, 9.105]°**（水平）⇒ **一个随 yaw 长大的假俯仰（4.89°）**；正演 `R_bl·R_ol·R_blᵀ` 与实测 rpy **逐位相同**（0.383/4.890/7.701）⇒ 机理钉死。**在「点云其实表达在水平系」的现状下**，`odom→base_link` 的物理正确值就是 `R_ol`（水平、只有 yaw）；一般写法应是**合成** `T_ob = T_ol · T_bl⁻¹`（而不是相似变换/共轭） |
+
+> ③ 还解释了 §I.5.2 表里"odom 相对真实重力 5.248°"这一格：那不是 odom 斜，是**发布出来的车身姿态**斜。
+> nav2 用的是这条 TF ⇒ **`urdf` 档下 nav2 以为车在 odom 里俯仰 4.9°**（真值 0.003°）。
+
+### I.6 RViz 配方：`Fixed Frame` 选哪个、以及为什么用户看到"平放被倾斜"
+
+`lio_rviz:=True` 起的是 `src/rm_nav_bringup/rviz/pointlio.rviz`（`bringup_sim.launch.py:950,1639`），
+它的 **`Fixed Frame: odom`**（`:255`），显示 `/cloud_registered`（`CloudRegistered`，`Use Fixed Frame: true`，
+按 Z 轴着色，`:158-181`）、TF、`/path`、`/aft_mapped_to_init`、`/Laser_map`、`/cloud_effected` ——
+**没有**原始 `/livox/lidar/pointcloud` 的 display（`nav2.rviz` 更是两个点云都没有，见 §B.3 结尾）。
+
+RViz 干的事：把消息里的点从 `header.frame_id` 用 TF 变到 `Fixed Frame`。把两朵云分别代入：
+
+| `Fixed Frame` | `/livox/lidar/pointcloud`（frame_id=`livox_frame`，**数据水平**） | `/cloud_registered`（frame_id=`odom`，**数字里已经含那次 −30°**） | 机器人/代价图/TF |
+|---|---|---|---|
+| **`livox_frame`** | **水平**（这正是数据的真面目，也恰好等于世界几何） | 被 `T(livox←odom)≈R_x(+30°)` 抵消 ⇒ 也**看起来水平** | 车/代价图**斜 30°**（它们在世界/odom 里是平的） |
+| **`odom` / `map`**（= 用户当时的选择） | **30° 斜坡**（被 `T(odom←livox)≈R_x(−30°)` 转了） | **30° 斜坡**（数字里就带着） | 车看起来正（外加 bug ③ 的 4.9° 假俯仰） |
+| **`base_link`** | **30° 斜坡**（`T(base←livox)=R_x(−30°)`） | **30° 斜坡** | 车正 |
+
+**⇒ 结论（这就是用户看到的）：**
+* 用户看到的是 **`/cloud_registered` + `Fixed Frame: odom`** ⇒ **场景被刚性旋转 −30°**：地面是一个
+  30.97° 的**平面斜坡**，环状扫描图案、近场那团自击、远处结构**都没变**，只是整个场景绕 x 转了 30°。
+  **这正是一朵"水平扫出来的点云被整体倾斜"该有的样子**，用户的原话「点云看着像平放扫到的东西倾斜了，
+  不是倾斜放置扫描到的东西」是**完全准确**的描述 —— 因为数据**真的**是水平的（§I.4 的 0.0004° 配准）。
+* **没有任何一个 `Fixed Frame` 能让"点云"和"车/代价图"同时看起来正** —— 这本身就是"帧与数据差 30°"
+  的定义。要同时正，必须修 §I.8 里那个发布变换（或让点云真的表达在传感器系里）。
+* 判据（下次一眼分辨）：
+  * **刚性转过**（地面是一个平面斜坡、图案不变、环半径不变）= **帧/label 问题**；
+  * **覆盖图案真的变了**（一侧彻底没有地面、最近地面环半径 0.31 m ↔ 1.96 m 的量级差）= **物理倾角**。
+  `urdf` 档**两件事同时存在**：物理倾角是真的（§I.3/§I.4），而 RViz 里显眼的那个 30° 斜坡是**帧的问题**。
+
+### I.7 感知链在 `urdf` 档的实测后果（p2l 高度带 / 自击掩膜 / `/scan` / 代价图）
+
+| 环节 | `plugin` | `urdf` | 判读 |
+|---|---|---|---|
+| `p2l` 输入 `/segmentation/obstacle` 的点（中位/帧） | **6221** | **6222** | 输入是**同一朵云**（§I.4）⇒ 分割本身不变 |
+| `/global_costmap/voxel_grid` 点（中位/帧，STVL 真正标进障碍的三维点） | **761** | **148** | 与 §C.3 的 146（urdf）/ 1091（默认模型）同向；`urdf` 档**少了 5 倍** |
+| **`p2l` 的高度带**（`min/max_height = −1.0/1.0`，`target_frame: ""` ⇒ 作用在**点云自带帧**） | 带内点占比 **1.0000** | **1.0000** | **仍然有效** —— 因为点云坐标没变（这条"歪打正着"§C.4 第 2 条已记） |
+| **自击掩膜**（`r_xy ≤ 0.2416 且 z ≥ −0.2295`，见 `src/rm_nav_bringup/config/traversability_self_mask_robot11.yaml`） | 命中 **3402（29.197%）** | 命中 **3403（29.200%）** | **仍然有效**（掩膜盒子与点云都在同一个水平系里烘的）；**只有**当把插件改成"真·传感器系表达"之后才需要重烘（§I.8） |
+| `/scan` 有限波束 | **949** | **948** | **几乎不变**（`target_frame: ""`，不做 TF） |
+| **`/scan` 每条波束在 odom 里的绝对 z**（`obstacle_layer.min/max_obstacle_height = 0.0/2.0` 就是在这层量的） | `[0.0549, 0.0839]` m、**0/949 被丢** | `[−2.67, +0.40]` m、**677/948 = 71.4% 被丢** | **这才是坏掉的那一级**：`/scan` 是一张"2D 平盘"，它的平面在 `livox_frame` 里；`livox_frame` 在 odom 里斜 30° ⇒ 盘变成斜平面，半圈被抬到 +0.5r、半圈被压到 −0.5r |
+| 被丢波束的方位（`urdf`） | — | `0..30:39, 30..60:160, 60..90:137, 90..120:102, 120..150:126, 150..180:109`，**右半边全 0** | 丢掉的**正是"斜装雷达唯一看得见东西的那半边"**（左侧地面），而本来就没回波的右半边没有可丢的 |
+| local costmap lethal / inscribed | **471 / 15909** | **60 / 3645** | `urdf` 档**代价图几乎空了**（与 §C.3 的 340→75 同向、同量级） |
+| 车心到最近 lethal 格 | **0.387 m** | **0.718 m** | 车周围反而"更自由"（假自由） |
+| lethal 格的方位（**两档都**） | 前 127 / **左 224** / 后 120 / **右 0** | 前 5 / 左 **0** / 后 55 / 右 **0** | `plugin` 档"右侧 0"是**物理盲区**（§I.3）；`urdf` 档连左侧（唯一看得见的那半）也被高度带丢了 |
+
+### I.8 「斜装雷达到底该怎么处理」——本轮学到的（含精确改法表）
+
+**五条原则（都可以从本轮数字反推）：**
+
+1. **先分清三个"livox_frame"**：物理传感器系（斜）／点云数据实际表达的系（本仓 = 父 link 朝向 + 传感器原点）／
+   `header.frame_id`（= `<sensor name>`）。**判据**：对点云做地面平面拟合，法向与 `frame_id` 那个帧的 z
+   夹角应当 ≈0（`plugin`/`urdf` 实测 1.03°/1.02° **但后者那个帧自己斜 30°** ⇒ 这就是不自洽）；
+   真机上点云本来就该在斜的传感器系里，所以真机的判据是"用 TF 把它转到 `base_link` 再量"。
+2. **倾角只能记在一个地方**：记在插件（`plugin` 档：帧正、点云正、射线斜 —— 自洽但与实物不符，
+   而且 mesh 画不出来）**或**记在关节（`urdf` 档：帧斜、mesh 斜、射线斜 —— 但点云还留在水平系）——
+   **选一条，然后把点云的表达与 `frame_id` 一起改到自洽**。
+3. **外参要按"点云实际表达的系"给，不是按"实物几何"给**。本仓 `extrinsic_T=[0,0,0.05]`、
+   `extrinsic_R=I` 在**两档下都与实物几何一致**（§I.5.2 实测 TF `imu_link←livox_frame`）；错的是
+   "点云并不在 `livox_frame` 里"。**光改外参补不了这个错**。
+4. **`odom` 不保证重力对齐**。本仓 `small_point_lio` 是 `fix_gravity_direction: true` + 初始 `R=I`
+   （`eskf.h:30`、`small_point_lio.cpp:54-64`）⇒ **odom ≡ 初始化那一刻的身体系**。
+   仿真里之所以没斜，是因为插件把点云做成水平的（"歪打正着"）；**真机**上如果把"真·传感器系"的
+   点云直接喂进去，`odom` 的 z 就会斜 30°，地面在 odom/地图里就是一个 30° 斜坡 ——
+   那时要么在 LIO 初始化时做重力对齐（把初始 R 设成 `R_x(+30°)`），要么在下游统一用 `base_link` 重力系。
+5. **每个"高度"参数都属于某个具体的帧**：`linefit.sensor_height`（传感器系 z 到地面）、
+   `p2l.min/max_height`（点云自带帧）、`obstacle_layer.min/max_obstacle_height`（**代价图帧**，
+   本轮实测被它丢掉 71.4% 的波束）、自击掩膜的 z 门限（传感器系）。斜装时"点云自带帧 ≠ 重力系"
+   ⇒ 要么在**源头**对齐（本仓 `plugin` 档的做法），要么给这些节点配 `gravity_aligned_frame` /
+   `target_frame`（本仓**代码已支持**：linefit 的 `Eigen::Affine3d` C++ bug 已修，
+   `ground_segmentation_node.cc:142` 用 `Identity()` 起步；`p2l` 支持 `target_frame`，
+   代价 = 会引入 TF/MessageFilter 那一类故障面，见 `laserscan_params.yaml` 顶部注释）。
+
+**如果要让 `urdf` 档真正自洽（本主题**不做**，只登记精确改法）：**
+
+| 目标 | 文件 | 改什么 | 预期效果（可验收） |
+|---|---|---|---|
+| **a. 点云真的表达在传感器系**（真机同款） | `src/rm_simulation/livox_laser_simulation_RO2/src/livox_points_plugin.cpp:276`（并同步 `:164-165` 的射线起点或把 collision 挂到传感器自己的 frame） | `axis = sensor_rot * mount_rot_ * ray` → `axis = mount_rot_ * ray` | `/livox/lidar/pointcloud` 的地面法向与 `livox_frame` 的 z 夹角回到 ~1°，**而这个帧真的斜 30°** ⇒ 数据与帧自洽（"点云里地面是斜的"变成物理事实）；**下游必须做重力对齐**（下表 b/c） |
+| **b. 第一级下游（地面分割）** | `src/rm_perception/linefit_ground_segementation_ros2/linefit_ground_segmentation_ros/config/segmentation_sim_robot11.yaml` | `gravity_aligned_frame: base_link`（该键的 C++ bug 已修） | linefit 在 `base_link` 里量 `sensor_height: 0.2595`，地面分割恢复（此前实测该键一开 = 0 点，是 bug 造成的，已不适用） |
+| **c. 第二级下游（scan 化）** | `src/rm_perception/pointcloud_to_laserscan/config/laserscan_params.yaml` | `target_frame: base_link` | `/scan` 变成"水平面里的一圈"，`min/max_height` 恢复"离地高度"语义；代价 = 引入 TF/MessageFilter（本仓 2026-09-23 刻意避开的那类故障面） |
+| **d. 自击掩膜** | `src/rm_nav_bringup/config/traversability_self_mask_robot11.yaml` + `tools/scripts/regress/robot11_self_mask.py` | **只在 a 做了之后**才需要重烘 113 个 AABB（改成传感器系里算） | 掩膜覆盖不变（本仓现状：掩膜条件与点云同在水平系 ⇒ **不用改**，实测命中 29.20% 两档相同） |
+| **e. bug ②（发布变换）** | `src/rm_localization/small_point_lio/src/small_point_lio_node.cpp:141,159,191` | 删掉那次 `lookupTransform("base_link", lidar_frame)` + `R*p+T`，直接发已经在 odom 的点（`frame_id` 保持 `odom`） | `/cloud_registered` 的地面回到 odom 里的水平（**本轮的验收数字就是"反变换后 1.041°"**）；`plugin` 档的"0.2 m 平移偏差"也一并消失 |
+| **f. bug ③（odom→base TF）** | 同文件 `:99,109` | 改成**合成** `T_ob = T_ol · T_bl⁻¹`（不要 `T_bl⁻¹·T_ol·T_bl` 这个相似变换）。⚠️ 数值取决于 ① 怎么修：· 若按 a 走「真机同款」（点云真的在 `livox_frame` 里）⇒ 会给出 `rpy (30°, 0, yaw)`，**那个 30° 是物理事实**（odom 定义在斜的初始传感器系里，见原则 4），此时必须同时做重力对齐；· 若点云保持水平（现状）⇒ 正确值就是 `R_ol` 本身（水平） | 现状下 `odom→base_link` 的姿态误差从 **4.89° 假俯仰** 回到 <0.5°（nav2 的车身姿态才正确） |
+| **g. 只想"看着对"** | 不改代码 | 保持 `plugin` 档（默认）+ 把 `l12.stl` 的视觉单独挂一个斜 30° 的 visual link | 帧/点云/下游全自洽，且画出来的雷达是斜的（代价：多一个 visual link，与上游 URDF 的 provenance 需要登记） |
+
+### I.9 复现命令（本轮逐字使用的）
+
+```bash
+# ① 两个档各跑一次（隔离无头；工具本轮新增，只有订阅，不发任何东西）
+tools/scripts/tiltmount/run_tilt_mount_probe.sh tm_plugin --variant plugin --settle 25 --duration 45 \
+    --frames 3 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+tools/scripts/tiltmount/run_tilt_mount_probe.sh tm_urdf --variant urdf --settle 25 --duration 45 \
+    --frames 3 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 \
+    robot11_mount:=urdf spin_speed:=0.0 gui:=False
+#   → .tmp_tiltmount/<tag>/{probe.json, clouds.npz, launch.log, mount_evidence.txt, gz_model_info.txt}
+
+# ② 离线对照（H2 本地云配准 / 反变换检验 / 扇区表 / 高度带 / 代价图；纯 numpy+scipy，不用 Gazebo）
+python3 tools/scripts/tiltmount/tilt_mount_compare.py \
+    --a .tmp_tiltmount/tm_plugin --b .tmp_tiltmount/tm_urdf --out .tmp_tiltmount/compare.json
+
+# ③ 渲染 + Gazebo 自己的 SDF（"传感器挂在 base_link 下、pose 折进了关节旋转"的静态证据）
+xacro src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro livox_mount:=plugin > /tmp/r11_plugin.urdf
+xacro src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro livox_mount:=urdf   > /tmp/r11_urdf.urdf
+diff /tmp/r11_plugin.urdf /tmp/r11_urdf.urdf          # 只差 2 行：关节 rpy 与插件 <tilt_rpy>
+mkdir -p /tmp/gzhome-sdf   # gz sdf 要写 $HOME/.gazebo，必须给一个可写的 HOME
+HOME=/tmp/gzhome-sdf gz sdf -p /tmp/r11_urdf.urdf | sed -n '1274,1325p'   # ← 传感器 pose（含 -0.523599）
+
+# ④ tf2 合成顺序单测（bug ③ 的语义钉死；30 行 C++，不进 colcon）
+g++ -O0 -o /tmp/tf2order tools/scripts/tiltmount/tf2_compose_order_test.cpp \
+    -I/opt/ros/humble/include/tf2 -L/opt/ros/humble/lib -ltf2 -Wl,-rpath,/opt/ros/humble/lib && /tmp/tf2order
+#   → ① tf2::Transform 的 `A*B` 就是矩阵序 R_A·R_B（`C*p` 与 `A*(B*p)` 相同）；
+#     ② 代码那行 `T_bl⁻¹*T_ol*T_bl` 对一个「只有 yaw 9° 的水平姿态」给出
+#        (0.306, 4.486, 7.810)°（= 实测那 4.9° 假俯仰的来源，符号/量级都对得上）；
+#     ③ 真机约定下的正确合成 `T_ol*T_bl⁻¹` 给出 (-30.000, 0, 9.000)°（那个 −30° 是物理的，
+#        对应「odom = 斜的初始传感器系」）。
+```
+
+### I.10 未验证 / 诚实清单
+
+1. **没有在真 RViz 里看一眼**：§I.6 的配方是从 `pointlio.rviz` 的配置（`Fixed Frame: odom`、
+   `Use Fixed Frame: true`）+ TF 数学推出来的，本轮全是无头跑（与 §G 第 4 项同款限制）。
+2. **两档 `/cloud_registered` 的跨档配准给出 26.96° 而不是 30.000°**：两档是**两次独立的 Gazebo
+   会话**（出生后的初始姿态/漂移不同），我**没有**做"同一会话内切换"的对照 ⇒ 这个 27° 只能读作
+   "≈30°、绕 −x"，不能当精确值。**逐档内的反变换检验（1.041°/0.742°）不受此影响。**
+3. **bug ② 的"绕 odom 原点旋转"这一条没做实验**：`R*point + T` 里的 `R` 是绕 **odom 原点**（不是绕
+   传感器）转的，理论上"车开出原点后整朵云会绕原点甩"。本轮车静止在原点附近 ⇒ **两种写法数值上分不开**，
+   这一条是**从代码读出来的**，没有开出去验证。
+4. **bug ③ 对 nav2 的实际影响没有单独量化**：只量了 TF rpy（假俯仰 4.89°）与代价图计数，
+   **没有**量"把 4.89° 去掉之后代价图会变多少"。
+5. **"改成真·传感器系表达之后，linefit/p2l/自击掩膜会怎样"没有实测**：§I.8 的 a~d 是**改法**，
+   本轮只测了"现状（点云水平）下这些参数仍然有效"这一半（自击掩膜命中率两档相同、`p2l` 带内 100%）。
+6. **只测了 `lio:=small_point_lio`**：`fastlio` / `pointlio` 的 TF/外参路径不同（`lio_tf_adapter` 那条
+   杆臂的 `urdf` 档数值只在离线算过，§G 第 5 项）⇒ 本节结论**不自动适用**。
+7. **没有测 GUI/带显示器时的 RTF 与显示行为**（全无头）；也没有测"车动起来"时 `/cloud_registered`
+   的甩动（见第 3 项）。
+8. **出生后自转 ~10° 这件事没有归因**（真值 `/odom_ground_truth` 的 yaw 0→10.152°、两档都复现）：
+   它不是 LIO 漂移（roll/pitch 跨度 0.16°），但**为什么**出生后会转 10°（接触/降落/`planar_move` 初值）
+   本轮没查。它不影响本节任何结论，只解释了 `R_ol` 里那个 ~9° 的 yaw。
+
+### I.11 回退
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| `urdf` 档 → 今天的行为 | 去掉 `robot11_mount:=urdf`（默认 `plugin`，本节**没有**改任何默认值） |
+| 本节的工具 | `rm -rf tools/scripts/tiltmount/`（只被上面 §I.9 的命令引用；不进任何 launch/节点） |
+| 本节的文档与工具（整节） | `git revert <本节 commit>`：只动 `docs/tilted_lidar_fidelity.md` 与新目录 `tools/scripts/tiltmount/`，**不动任何默认值/参数/生成物** |
+| 本节的原始数据 | `.tmp_tiltmount/**`（未入库） |
