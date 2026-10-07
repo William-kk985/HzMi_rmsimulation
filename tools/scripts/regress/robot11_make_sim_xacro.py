@@ -132,7 +132,17 @@ HEADER = '''<?xml version="1.0"?>
       · **一有接触** RTF **0.200**、最低 0.04（慢 25–50 倍）；同工况 4 个 box = 1.002
       · 峰值内存恒 **759 MB vs 基线 172 MB**
     ⇒ 替换为：`body` = 4 个 box（DP 最优分段包络，覆盖率 1.000、总体积只比凸包胖 9.4%）；
-      轮 = cylinder；其余 = 抽稀件。**`<visual>` 仍然是原始 mesh，视觉零损失。**
+      轮 = cylinder；其余 = 抽稀件。
+
+  ── Phase 5（2026-10-07）：把 `<visual>` 也换档（**这才是"带 GUI 放得进仿真"的那一步**）──
+    Phase 1~3 只改了**碰撞**侧，**视觉**侧一直是上游原始 STL：整车 2,870,498 面，其中
+    `base_link.STL` 一项 2,078,226 面 / 99 MiB。用户 2026-10-07 带 GUI 跑 ⇒ **gzclient 被内核
+    SIGKILL（exit -9）**、rviz2 黑屏 —— 因为 gzclient 会把每个 `<visual>` 网格整份渲进 OGRE。
+    Phase 5 按公开的标准管线（视觉/碰撞分离 + QEM 抽稀 + 量化验证，引用见 docs/robot_models.md
+    §13.2）生成**视觉 LOD**：每 link ≤ 50k 面、整车 ≤ 200k 面，逐 mesh 量化"包围盒差 /
+    单向表面误差 p99,max / 三视剪影 IoU / 边界边数"，全部落在
+    `robot11_description/inventory/visual_decimation.json`。
+    开关：`robot11_visual:=decimated`（**默认**）| `full`；`<collision>` 与 `<inertial>` 不动。
 -->
 <robot name="sentry" xmlns:xacro="http://ros.org/wiki/xacro">
 
@@ -383,6 +393,12 @@ def main():
     ap.add_argument('--turret-boxes',
                     default='src/rm_simulation/robot11_description/inventory/turret_boxes.json',
                     help='云台 l10/l11 的细碰撞盒清单（robot11_livox_fov.py --emit-turret-boxes）')
+    ap.add_argument('--visual-inventory',
+                    default='src/rm_simulation/robot11_description/inventory/visual_decimation.json',
+                    help='视觉 LOD 的抽稀/验证清单（robot11_decimate_visuals.py 生成）。'
+                         '**Phase 5 新增**：`<visual>` 默认走 `meshes/decimated/<link>.stl`，'
+                         '清单里的三角形数与误差会被写进生成物的文件头（provenance 是构造性的）。'
+                         '清单缺失或 all_ok=false ⇒ 直接报错，不生成"看起来对但没人验证过"的模型。')
     ap.add_argument('--out', default='src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro')
     a = ap.parse_args()
     global args
@@ -410,6 +426,61 @@ def main():
         return root_name if name == up_root else name
 
     L = [HEADER.format(sha=sha, raise_m='%g' % a.livox_raise_m)]
+    # ★ Phase 5：`<visual>` 的档位开关（**生成器发这段，不再由人手改生成物**）。
+    #   `robot11_visual`=decimated(默认)/full 是主开关；`visual_decimated` 是 Phase 4 引入的
+    #   布尔别名（true=decimated / false=full），**非空时它赢** ⇒ 命令行参数优先于默认值。
+    vd_path = os.path.join(REPO, a.visual_inventory)
+    if not os.path.isfile(vd_path):
+        raise SystemExit('[xacro] 缺视觉抽稀清单 %s ⇒ 先跑 '
+                         'python3 tools/scripts/regress/robot11_decimate_visuals.py'
+                         % a.visual_inventory)
+    VD = json.load(open(vd_path))
+    if not VD.get('all_ok'):
+        raise SystemExit('[xacro] 视觉抽稀清单 all_ok=false ⇒ 抽稀件没过容差，拒绝生成模型'
+                         '（清单：%s）' % a.visual_inventory)
+    VT = VD['totals']
+    per_link = ', '.join('%s %d→%d' % (m['link'], m['src_faces'], m['out_faces'])
+                         for m in sorted(VD['meshes'], key=lambda m: -m['src_faces'])[:4])
+    L.append('''  <!-- ==========================================================================
+       【我们加的｜Phase 5（2026-10-07）】`<visual>` 用哪一档 mesh —— **只改渲染代价，不改几何**
+       --------------------------------------------------------------------------
+       `robot11_visual:=decimated`（**默认**）⇒ `package://robot11/meshes/decimated/<link>.stl`
+          = Phase 5 生成的**视觉 LOD**：二次误差边折叠（QEM）抽稀，每 link ≤ 50k 面；
+            整车 %(src)d → **%(out)d** 面（%(src_mb).1f MB → %(out_mb).1f MB，降 %(pct).0f%%）。
+            逐 mesh 的"包围盒差 / 单向表面误差 p99,max / 三视剪影 IoU / 边界边"全部量化入库：
+            `robot11_description/inventory/visual_decimation.json`
+            （生成 + 验证：`tools/scripts/regress/robot11_decimate_visuals.py`，一条命令可复算）。
+            几个大头：%(per_link)s。
+       `robot11_visual:=full` ⇒ 上游原始 STL（`meshes/<link>.STL`；`base_link.STL` 99 MiB /
+          2,078,226 面）—— **只用于 A/B 对照**：带 GUI 跑就是这一档把 `gzclient` 撑到被内核
+          SIGKILL（exit -9）、`rviz2` 黑屏的（docs/robot_models.md §12 的实测表）。
+
+       为什么必须换（标准做法，引用见 docs/robot_models.md §13.2）：Gazebo Classic 的 `gzclient`
+       会把每个 `<visual>` 网格整份塞进渲染器；CAD 导出件（这里是整车 %(src)d 面）是给
+       "看/加工"用的，不是给"每帧渲染"用的。标准管线 = **视觉件与碰撞件分开** +
+       视觉件按每 link ≤ 50k 面（另一档公开口径是 ≤100k）抽稀 + 碰撞件用基本体/凸分解。
+       ⚠️ `<collision>`（%(body_col)s、轮 cylinder、其余解析 box）与 `<inertial>`
+          **一个字节都不动** ⇒ 物理/感知/契约/质量/惯量完全不变。
+       ⚠️ 本段只被 `robot:=robot11` 引用 ⇒ 默认模型/其它槽位逐字节不变。 -->
+  <xacro:arg name="robot11_visual" default="decimated"/>
+  <xacro:arg name="visual_decimated" default=""/>
+  <xacro:property name="robot11_visual_p" value="$(arg robot11_visual)"/>
+  <xacro:property name="visual_decimated_p" value="$(arg visual_decimated)"/>
+  <!-- ⚠️ xacro 会把 `"true"` 这种 arg 转成 **Python bool**（实测 `${vd}` 打出 True）
+       ⇒ 必须 `str(...).lower()` 归一化后再比，不能直接和字符串 'true' 比。 -->
+  <xacro:property name="vd_norm" value="${str(visual_decimated_p).strip().lower()}"/>
+  <xacro:property name="rv_norm" value="${str(robot11_visual_p).strip().lower()}"/>
+  <xacro:property name="visual_full"
+      value="${(vd_norm in ('false', '0', 'no')) if vd_norm != '' else (rv_norm != 'decimated')}"/>
+  <xacro:property name="visual_dir" value="${'meshes' if visual_full else 'meshes/decimated'}"/>
+  <xacro:property name="visual_ext" value="${'.STL' if visual_full else '.stl'}"/>
+
+''' % {'src': VT['src_faces'], 'out': VT['out_faces'],
+       'src_mb': VT['src_bytes'] / 1e6, 'out_mb': VT['out_bytes'] / 1e6,
+       'pct': 100.0 * (1.0 - float(VT['out_faces']) / max(1, VT['src_faces'])),
+       'per_link': per_link,
+       'body_col': a.body_collision + ('（A 方案：DP box 减雷达视锥）'
+                                       if a.body_collision == 'carved' else '')})
     L.append('  <!-- 【我们加的｜改名】上游根 link `%s` → `%s`（原因见文件头第 3 条）：\n'
              '       本栈契约帧名是 base_link；不改名的实测后果 = TF 断树、LIO 发不出 /odom、\n'
              '       p2l 丢光整条点云。上游 SolidWorks CSV 里这个 link 本来就叫 base_link。 -->\n'
@@ -433,9 +504,17 @@ def main():
         if vis is not None:
             mesh = vis.find('geometry/mesh')
             mat = vis.find('material')
-            L.append('    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->\n    <visual>\n')
+            # ★ Phase 5：`<visual>` 的 mesh 文件由 `visual_dir` / `visual_ext` 两个 property 决定
+            #   （decimated = meshes/decimated/<link>.stl ｜ full = meshes/<link>.STL）
+            #   —— 文件名/单位/`<origin>` 的**语义**不变，只有被渲染的那个文件换档。
+            up_uri = mesh.get('filename')
+            stem = os.path.basename(up_uri)
+            stem = stem[:-4] if stem.lower().endswith('.stl') else stem
+            L.append('    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；'
+                     'mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->\n    <visual>\n')
             L.append(fmt_origin(vis.find('origin'), '      '))
-            L.append('      <geometry><mesh filename="%s"/></geometry>\n' % mesh.get('filename'))
+            L.append('      <geometry><mesh filename="package://robot11/${visual_dir}/%s'
+                     '${visual_ext}"/></geometry>\n' % stem)
             if mat is not None and mat.find('color') is not None:
                 L.append('      <material name="%s"><color rgba="%s"/></material>\n'
                          % (mat.get('name', ''), mat.find('color').get('rgba')))

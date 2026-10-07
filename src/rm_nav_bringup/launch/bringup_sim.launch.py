@@ -325,8 +325,12 @@ class _RobotXacroCommand(Substitution):
             # ★ Phase 3：B 方案（抬高雷达）的开关。默认 0 ⇒ 与上游几何逐字相同。
             cmd += [' livox_raise_m:=',
                     LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0']
-            # ★ Phase 4：视觉 mesh 档位（`decimated` | `full`）。只影响 `<visual>`，
-            #   不影响任何 `<collision>`/传感器/插件 ⇒ 物理与契约不变。
+            # ★ Phase 4 新增 / **Phase 5 改指向**：视觉 mesh 档位（`decimated` | `full`）。
+            #   只影响 `<visual>`，不影响任何 `<collision>`/传感器/插件 ⇒ 物理与契约不变。
+            #   Phase 5 起 `decimated` 指的是**专用视觉 LOD**（`meshes/decimated/`，整车 163,995 面），
+            #   不再是 Phase 4 借用的**碰撞档**抽稀件（`meshes/generated/`，整车 9,700 面 ——
+            #   `l11` 只有 1,200 面，拿它当视觉会把云台/发射机构糊成一团）。
+            #   两个 arg 的优先级：`visual_decimated` 非空时赢（= 命令行优先），都为空 ⇒ decimated。
             cmd += [' visual_decimated:=',
                     'true' if LaunchConfiguration('robot11_visual').perform(
                         context).strip() == 'decimated' else 'false']
@@ -928,19 +932,20 @@ def generate_launch_description():
     #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
     #   其中 `base_link.STL` 一项就是 **99 MiB / 2,078,226 三角形**（+ 云台 l11 8.8 MB / 17.6 万面）
     #   ⇒ 带 GUI 跑时 `gzclient` 被 SIGKILL（exit code -9）、`rviz2` 黑屏。
-    #   decimated = 复用 Phase 1 已经生成并入库的抽稀件 `robot11_description/meshes/generated/
-    #   <link>_collision.stl`（VTK quadric decimation；bbox 与原件差 ≤3 mm、单位/原点不变 ⇒
-    #   米制与几何位置**不改**）；full = 上游原始 STL（与 Phase 1~3 逐字节相同）。
+    #   decimated = 本相位的**专用视觉 LOD** `robot11_description/meshes/decimated/<link>.stl`
+    #   （QEM 二次误差边折叠；整车 2,821,320 → **163,995** 面、141.07 → 8.20 MB；逐 mesh 的
+    #   包围盒差/单向表面误差/三视剪影 IoU 全部量化在 inventory/visual_decimation.json）；
+    #   full = 上游原始 STL（与 Phase 1~3 逐字节相同）。
     #   ⚠️ 只换 `<visual>`：`<collision>` 本来就是 76 个 box + 云台细盒 + cylinder（Phase 1/3 实测），
-    #   一个字节都不动 ⇒ **物理/感知/契约完全不变**。
+    #   一个字节都不动 ⇒ **物理/感知/契约完全不变**（`check_robot11_visual_slot.py` 的 A1/G5 断言）。
     declare_robot11_visual_cmd = DeclareLaunchArgument(
         'robot11_visual',
         default_value='decimated',
         description='仅 robot:=robot11：视觉 mesh 用哪一档。'
-                    'decimated（默认）= 抽稀件 generated/*_collision.stl（base_link 2078226→3000 面），'
-                    'GUI 内存/渲染代价降 3 个数量级；'
-                    'full = 上游原始 STL（base_link.STL 99 MiB / 207.8 万面）—— '
-                    '用户 2026-10-07 的 GUI 跑就是这一档被杀掉 gzclient 的（§12 有实测对照）',
+                    'decimated（默认）= **专用视觉 LOD** meshes/decimated/*.stl'
+                    '（整车 2,821,320 → 163,995 面、141.07 → 8.20 MB，每 link ≤50k 面）；'
+                    'full = 上游原始 STL（base_link.STL 103.91 MB / 207.8 万面）—— '
+                    '用户 2026-10-07 的 GUI 跑就是这一档被杀掉 gzclient 的（§12/§13 有实测对照）',
         choices=['decimated', 'full'])
 
     # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。    # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
@@ -2034,8 +2039,10 @@ def generate_launch_description():
              '  · 雷达倾斜轴 livox_tilt_axis=', LaunchConfiguration('livox_tilt_axis'),
              '（roll = SolidWorks CSV 的字面值；两条候选在仰角/盲区上等价，只差最朝下的方位）',
              '  · 视觉 mesh：robot11_visual=', LaunchConfiguration('robot11_visual'),
-             '（decimated = 复用 Phase 1 的抽稀件 generated/*_collision.stl，三角形少 3 个数量级，'
-             'GUI/内存友好；full = 上游原始 STL，与 Phase 1 之前逐字节相同）',
+             '（decimated = **专用视觉 LOD** meshes/decimated/*.stl：整车 2,821,320 → 163,995 面、'
+             '141.07 → 8.20 MB，逐 mesh 的包围盒差/表面误差/剪影 IoU 量化在 '
+             'inventory/visual_decimation.json；full = 上游原始 STL。两者只差 `<visual>` 的 '
+             'mesh 文件名，`<collision>`/`<inertial>` 逐字节相同 ⇒ 物理/感知/契约不变）',
              # ★ Phase 4 更正：上一轮这里写的是"linefit 参数**没有**跟着切" —— 那是**错的**
              #   （Phase 3 已经用 _RobotSlotFile 的 slot_map 切了），横幅在骗人。
              #   现在改为**运行时从真正递给节点的那份 YAML 里读出生效值**，不可能再分叉。

@@ -62,7 +62,17 @@
       · **一有接触** RTF **0.200**、最低 0.04（慢 25–50 倍）；同工况 4 个 box = 1.002
       · 峰值内存恒 **759 MB vs 基线 172 MB**
     ⇒ 替换为：`body` = 4 个 box（DP 最优分段包络，覆盖率 1.000、总体积只比凸包胖 9.4%）；
-      轮 = cylinder；其余 = 抽稀件。**`<visual>` 仍然是原始 mesh，视觉零损失。**
+      轮 = cylinder；其余 = 抽稀件。
+
+  ── Phase 5（2026-10-07）：把 `<visual>` 也换档（**这才是"带 GUI 放得进仿真"的那一步**）──
+    Phase 1~3 只改了**碰撞**侧，**视觉**侧一直是上游原始 STL：整车 2,870,498 面，其中
+    `base_link.STL` 一项 2,078,226 面 / 99 MiB。用户 2026-10-07 带 GUI 跑 ⇒ **gzclient 被内核
+    SIGKILL（exit -9）**、rviz2 黑屏 —— 因为 gzclient 会把每个 `<visual>` 网格整份渲进 OGRE。
+    Phase 5 按公开的标准管线（视觉/碰撞分离 + QEM 抽稀 + 量化验证，引用见 docs/robot_models.md
+    §13.2）生成**视觉 LOD**：每 link ≤ 50k 面、整车 ≤ 200k 面，逐 mesh 量化"包围盒差 /
+    单向表面误差 p99,max / 三视剪影 IoU / 边界边数"，全部落在
+    `robot11_description/inventory/visual_decimation.json`。
+    开关：`robot11_visual:=decimated`（**默认**）| `full`；`<collision>` 与 `<inertial>` 不动。
 -->
 <robot name="sentry" xmlns:xacro="http://ros.org/wiki/xacro">
 
@@ -84,23 +94,39 @@
        ⇒ 按标准写法先绑成 property 再进表达式。 -->
   <xacro:property name="livox_raise_m_p" value="$(arg livox_raise_m)"/>
 
-  <!-- 【我们加的｜Phase 4，默认 false = 与 Phase 1~3 逐字节相同】视觉 mesh 用哪一档。
-       true  = 复用 Phase 1 已经生成并入库的**抽稀件** `meshes/generated/<link>_collision.stl`
-               （VTK quadric decimation：base_link 2,078,226 → 3,000 面、l11 176,459 → 1,200 面；
-                bbox 与原件差 ≤3 mm，单位/原点不变 ⇒ 米制与几何位置都不改）。
-       false = 上游原始 STL（`meshes/<link>.STL`，base_link 那份 99 MiB / 207.8 万面）。
-       为什么需要：用户 2026-10-07 带 GUI 跑 robot:=robot11 时 **gzclient 被 SIGKILL（exit -9）**、
-       rviz2 黑屏 —— 就是这一档的渲染/内存代价（docs/robot_models.md §12 有实测对照）。
-       ⚠️ 只换 `<visual>`：`<collision>`（76 box + 云台细盒 + cylinder）一个字节都不动
-       ⇒ 物理/感知/契约完全不变；`robot:=robot11` 之外的模型根本不引用这两个 property。 -->
-  <xacro:arg name="visual_decimated" default="false"/>
+  <!-- ==========================================================================
+       【我们加的｜Phase 5（2026-10-07）】`<visual>` 用哪一档 mesh —— **只改渲染代价，不改几何**
+       —————————————————————————————————————
+       `robot11_visual:=decimated`（**默认**）⇒ `package://robot11/meshes/decimated/<link>.stl`
+          = Phase 5 生成的**视觉 LOD**：二次误差边折叠（QEM）抽稀，每 link ≤ 50k 面；
+            整车 2821320 → **163995** 面（141.1 MB → 8.2 MB，降 94%）。
+            逐 mesh 的"包围盒差 / 单向表面误差 p99,max / 三视剪影 IoU / 边界边"全部量化入库：
+            `robot11_description/inventory/visual_decimation.json`
+            （生成 + 验证：`tools/scripts/regress/robot11_decimate_visuals.py`，一条命令可复算）。
+            几个大头：base_link 2078226→50000, l11 176458→39999, l4 91234→11998, l5 90250→12000。
+       `robot11_visual:=full` ⇒ 上游原始 STL（`meshes/<link>.STL`；`base_link.STL` 99 MiB /
+          2,078,226 面）—— **只用于 A/B 对照**：带 GUI 跑就是这一档把 `gzclient` 撑到被内核
+          SIGKILL（exit -9）、`rviz2` 黑屏的（docs/robot_models.md §12 的实测表）。
+
+       为什么必须换（标准做法，引用见 docs/robot_models.md §13.2）：Gazebo Classic 的 `gzclient`
+       会把每个 `<visual>` 网格整份塞进渲染器；CAD 导出件（这里是整车 2821320 面）是给
+       "看/加工"用的，不是给"每帧渲染"用的。标准管线 = **视觉件与碰撞件分开** +
+       视觉件按每 link ≤ 50k 面（另一档公开口径是 ≤100k）抽稀 + 碰撞件用基本体/凸分解。
+       ⚠️ `<collision>`（carved（A 方案：DP box 减雷达视锥）、轮 cylinder、其余解析 box）与 `<inertial>`
+          **一个字节都不动** ⇒ 物理/感知/契约/质量/惯量完全不变。
+       ⚠️ 本段只被 `robot:=robot11` 引用 ⇒ 默认模型/其它槽位逐字节不变。 -->
+  <xacro:arg name="robot11_visual" default="decimated"/>
+  <xacro:arg name="visual_decimated" default=""/>
+  <xacro:property name="robot11_visual_p" value="$(arg robot11_visual)"/>
   <xacro:property name="visual_decimated_p" value="$(arg visual_decimated)"/>
-  <!-- ⚠️ xacro 会把 `"true"` 这个 arg **转成 Python 的 bool True**（实测：`${vd_p}` 打印 True），
-       所以这里必须 `str(...).lower()` 归一化，不能直接和字符串 'true' 比。 -->
-  <xacro:property name="visual_dir"
-      value="${'generated' if str(visual_decimated_p).lower() in ('true', '1') else 'meshes'}"/>
-  <xacro:property name="visual_ext"
-      value="${'_collision.stl' if str(visual_decimated_p).lower() in ('true', '1') else '.STL'}"/>
+  <!-- ⚠️ xacro 会把 `"true"` 这种 arg 转成 **Python bool**（实测 `${vd}` 打出 True）
+       ⇒ 必须 `str(...).lower()` 归一化后再比，不能直接和字符串 'true' 比。 -->
+  <xacro:property name="vd_norm" value="${str(visual_decimated_p).strip().lower()}"/>
+  <xacro:property name="rv_norm" value="${str(robot11_visual_p).strip().lower()}"/>
+  <xacro:property name="visual_full"
+      value="${(vd_norm in ('false', '0', 'no')) if vd_norm != '' else (rv_norm != 'decimated')}"/>
+  <xacro:property name="visual_dir" value="${'meshes' if visual_full else 'meshes/decimated'}"/>
+  <xacro:property name="visual_ext" value="${'.STL' if visual_full else '.stl'}"/>
 
   <!-- 【我们加的｜改名】上游根 link `body` → `base_link`（原因见文件头第 3 条）：
        本栈契约帧名是 base_link；不改名的实测后果 = TF 断树、LIO 发不出 /odom、
@@ -113,7 +139,7 @@
       <mass value="6.98390841611154"/>
       <inertia ixx="0.012450840516849" ixy="8.34803982990868E-06" ixz="2.47736216819592E-06" iyy="0.0180415546421503" iyz="6.50018190294825E-06" izz="0.0214898895578463"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/base_link${visual_ext}"/></geometry>
@@ -442,7 +468,7 @@
       <mass value="0.232272967518165"/>
       <inertia ixx="9.38551187090929E-05" ixy="-3.89659064263769E-08" ixz="-4.1188007722221E-07" iyy="0.000108022676479579" iyz="6.52751789180565E-07" izz="9.89453938308141E-05"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l2${visual_ext}"/></geometry>
@@ -464,7 +490,7 @@
       <mass value="0.14656841077267"/>
       <inertia ixx="0.00027895263582235" ixy="4.01635255414384E-11" ixz="-1.35108698277116E-10" iyy="0.000144586311352007" iyz="4.08768977179887E-08" izz="0.000144975173531681"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l6${visual_ext}"/></geometry>
@@ -486,7 +512,7 @@
       <mass value="0.230157374090603"/>
       <inertia ixx="9.38312233563086E-05" ixy="4.11880077230659E-07" ixz="-3.89659072508048E-08" iyy="9.87577896218705E-05" iyz="-6.52751787883143E-07" izz="0.00010783561712015"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l3${visual_ext}"/></geometry>
@@ -508,7 +534,7 @@
       <mass value="0.153493109299713"/>
       <inertia ixx="0.000283619688479151" ixy="4.01635256040596E-11" ixz="-1.35108698263563E-10" iyy="0.000146944991593877" iyz="4.0876897717852E-08" izz="0.00014733385377355"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l7${visual_ext}"/></geometry>
@@ -530,7 +556,7 @@
       <mass value="0.246338313228366"/>
       <inertia ixx="9.77808326150043E-05" ixy="3.89659073115738E-08" ixz="4.11880076872962E-07" iyy="0.000115206733276597" iyz="8.71786533446865E-07" izz="0.000102885906115304"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l4${visual_ext}"/></geometry>
@@ -552,7 +578,7 @@
       <mass value="0.153493109323926"/>
       <inertia ixx="0.000283619688507033" ixy="4.01627190513287E-11" ixz="-1.35103941451045E-10" iyy="0.000146944991623376" iyz="4.08769024931138E-08" izz="0.000147333853773518"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l8${visual_ext}"/></geometry>
@@ -574,7 +600,7 @@
       <mass value="0.242232927657393"/>
       <inertia ixx="9.72362930691966E-05" ixy="-4.11880085194013E-07" ixz="3.89659437807715E-08" iyy="0.000102339058097997" iyz="-8.3745233829181E-07" izz="0.000114151537565015"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l5${visual_ext}"/></geometry>
@@ -596,7 +622,7 @@
       <mass value="0.153493109323925"/>
       <inertia ixx="0.000283619688507032" ixy="4.01627190942481E-11" ixz="-1.35103941448504E-10" iyy="0.000146944991623376" iyz="4.08769024930526E-08" izz="0.000147333853773518"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l9${visual_ext}"/></geometry>
@@ -618,7 +644,7 @@
       <mass value="0.141144182015615"/>
       <inertia ixx="3.8779406325307E-05" ixy="1.66227406397812E-06" ixz="-3.65320210838414E-06" iyy="0.000141699871508992" iyz="-1.82170051595229E-11" izz="0.000141520295602471"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l10${visual_ext}"/></geometry>
@@ -666,7 +692,7 @@
       <mass value="0.729033019617516"/>
       <inertia ixx="0.000577863329904443" ixy="-1.28185778246335E-07" ixz="3.64314989996771E-07" iyy="0.00058773469511404" iyz="-3.89011863670918E-05" izz="0.00023266714750829"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l11${visual_ext}"/></geometry>
@@ -774,7 +800,7 @@
       <mass value="0.13998133026592"/>
       <inertia ixx="4.17032187760686E-05" ixy="-5.98077892665089E-09" ixz="3.05517185056836E-07" iyy="4.50191700802289E-05" iyz="-5.90930308926011E-10" izz="6.87178468496533E-05"/>
     </inertial>
-    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://robot11/${visual_dir}/l12${visual_ext}"/></geometry>
