@@ -2484,7 +2484,7 @@ tools/scripts/tiltmount/run_nav_goal_forensics.sh m8_r11_rev12 --settle 30 --dur
 3. `wz` 剂量-响应（0.3/0.6/1.0/1.5）只做了台架的单点 `wz=1.0` 与整栈的 `wz=1.0`
    （`wz=-0.75` 只由 RPP 在反向目标里给出），**没有**做完整扫描。
 4. 单刚体修法**丢掉了 12 个不受控自由度**（j2…j11）：将来若要给轮子/云台加真控制器，
-   必须回退到 `--chassis articulated` 再改造（生成器留了开关，输出与 HEAD 逐字节相同）。
+   必须回退到 `--chassis articulated` 再改造（生成器留了开关）。
 5. 塌陷后的接触是"4 个 cylinder 刚体接触"（不再是"4 个自由轮"）：所以**平动**的摩擦特性也变了
    （正前方极限 0.4077 → 0.3992 m，−2%；反向 1.4370 m 与 §L 的 1.5753 m 同量级，
    差异来自 25 s 腿的时间上限 + 起始点不同）。这一点**没有**做系统标定。
@@ -2495,7 +2495,7 @@ tools/scripts/tiltmount/run_nav_goal_forensics.sh m8_r11_rev12 --settle 30 --dur
 
 | 想退掉什么 | 怎么做 |
 |---|---|
-| **单刚体底盘**（模型行为） | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --chassis articulated` ⇒ 生成物与 2026-10-09 的 HEAD **逐字节相同**（已核 sha256）；再 `colcon build --packages-select rm_nav_bringup`（install/ 里是逐文件符号链接，通常不用重编） |
+| **单刚体底盘**（模型行为） | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --chassis articulated` ⇒ 生成物的**模型体去注释后与 2026-10-09 的 HEAD 逐字节相同**（实测两份都是 **35025 B**、`diff` 为空；整份文件只多出文件头那段说明 23 行）；install/ 里是逐文件符号链接，通常不用重编 |
 | 塌陷工具本身 | `rm -f tools/scripts/regress/robot11_weld_chassis.py`（生成器只在 `--chassis rigid` 时 import 它；把默认改回 `articulated` 即可） |
 | 新增的验收工具 | `git revert <第 2 个 commit>`：`nav_goal_forensics.py` 的 `--preflight-reach/--reach-gate/--goal-yaw-only-deg/--dump-traces` 都是**新增开关**，默认关 ⇒ 回退不影响 §L 的任何旧命令 |
 | 本文档 | `git revert <第 3 个 commit>` |
@@ -2503,7 +2503,7 @@ tools/scripts/tiltmount/run_nav_goal_forensics.sh m8_r11_rev12 --settle 30 --dur
 ### M.12 复现命令（复制即可）
 
 ```bash
-# ① 生成模型（默认 rigid；articulated = 回退档，输出逐字节等于 2026-10-09）
+# ① 生成模型（默认 rigid；articulated = 回退档，模型体去注释后逐字节等于 2026-10-09）
 python3 tools/scripts/regress/robot11_make_sim_xacro.py                    # rigid
 python3 tools/scripts/regress/robot11_make_sim_xacro.py --chassis articulated
 # ② 只做自证（不写文件）：几何 AABB / 最低点在轮上 / 质量·Izz

@@ -887,5 +887,6 @@
        多刚体 + 关节树时关节约束每步都要把它掰回来，实测角速度只执行 1.03%
        （单刚体 16.5%、默认模型 5.8%）、自由偏航漂移 +18.4°/60 s（单刚体 −0.23°）。
        几何/惯量守恒由 robot11_weld_chassis.py 自证（AABB 逐条相等，-0.10250 m 最低点）。
-       回退：`robot11_make_sim_xacro.py —chassis articulated`（= 原模型，逐字节相同）。
+       回退：`robot11_make_sim_xacro.py —chassis articulated` —— 模型体（去注释）
+       逐字节相同（实测 35025 B vs 35025 B），文件只多出文件头那段说明。
 --></robot>

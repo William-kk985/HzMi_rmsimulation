@@ -170,7 +170,8 @@ HEADER = '''<?xml version="1.0"?>
       · 自证（不通过就**报错不生成**）：碰撞几何 AABB 逐条相等、整车最低点必须落在轮子上
         （−0.10250 m，与 Phase 1 独立量到的"地面平面 z=−0.102499"一致）。
     工具：`tools/scripts/regress/robot11_weld_chassis.py`（可单独跑 `—in/—out/—report-only`）。
-    回退：`robot11_make_sim_xacro.py —chassis articulated`（= 2026-10-09 的原样，逐字节相同）。
+    回退：`robot11_make_sim_xacro.py —chassis articulated` —— **模型体（去注释）逐字节相同**
+    （实测 35025 B vs 35025 B 逐字节相等），文件只多出文件头这段说明。
 -->
 <robot name="sentry" xmlns:xacro="http://ros.org/wiki/xacro">
 
@@ -491,7 +492,8 @@ def main():
                          '只有单刚体自洽；多刚体 + 关节树时实测角速度只执行 1.03%（单刚体 16.2%、'
                          '默认模型 5.8%）、自由偏航漂移 +18.4°/60 s（单刚体 0.02°）。\n'
                          '  articulated= 2026-10-09 之前的原样（13 link / 12 joint）；'
-                         '**回退就用它**，输出与 HEAD 逐字节相同。')
+                         '**回退就用它** —— 模型体（去注释）与 HEAD 逐字节相同'
+                         '（实测 35025 B vs 35025 B），文件只多出文件头那段说明。')
     ap.add_argument('--out', default='src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro')
     a = ap.parse_args()
     global args

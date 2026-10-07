@@ -36,7 +36,8 @@ link 的质心速度本应是 `ω × r_i`，而插件把它写成 v ⇒ 关节�
   5. 自证：塌之前/之后 **碰撞几何的 AABB 逐条集合相等**（min z 等）、总质量与 Izz 相等；
      不相等就**报错不写文件**（这条检查抓到过一次 FK 读错 `<pose>` 的 bug）。
 
-回退：生成器 `robot11_make_sim_xacro.py --chassis articulated`（= 今天的行为，逐字节相同）。
+  6. 回退：生成器 `robot11_make_sim_xacro.py --chassis articulated` —— **模型体去注释后逐字节相同**
+     （实测 35025 B vs 35025 B，`diff` 为空）；整份文件只多出文件头那段说明（23 行）。
 
 用法：
   python3 tools/scripts/regress/robot11_weld_chassis.py --in a.xacro --out b.xacro
@@ -370,7 +371,8 @@ def weld(xacro_text, root='base_link', keep=DEFAULT_KEEP, comment=True, strict=T
                '       多刚体 + 关节树时关节约束每步都要把它掰回来，实测角速度只执行 1.03%%\n'
                '       （单刚体 16.5%%、默认模型 5.8%%）、自由偏航漂移 +18.4°/60 s（单刚体 −0.23°）。\n'
                '       几何/惯量守恒由 robot11_weld_chassis.py 自证（AABB 逐条相等，%.5f m 最低点）。\n'
-               '       回退：`robot11_make_sim_xacro.py --chassis articulated`（= 原模型，逐字节相同）。\n'
+               '       回退：`robot11_make_sim_xacro.py --chassis articulated` —— 模型体（去注释）\n'
+               '       逐字节相同（实测 35025 B vs 35025 B），文件只多出文件头那段说明。\n'
                % (len(weldable), ', '.join(sorted(weldable)), M, Itot[2][2],
                   len(weld_joints), '/'.join(keep), rep['min_z_after'] or 0.0))
         rroot.append(ET.Comment(hdr.replace('--', '\u2014')))
