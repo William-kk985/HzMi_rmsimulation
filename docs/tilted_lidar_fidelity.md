@@ -1423,3 +1423,463 @@ base_link 回到 1.004°）**。⇒ 只有 `sensor` 档两个数**同时**说明
 **(6) LIO 漂移与 RTF**（`--drive` 固定动作：直行 10 s `vx=0.30` ↔ 原地转 10 s `wz=0.60`，同一协议）：
 见 A/B 表的最后两行 —— 口径 = "odom 位移 − 真值位移"（本仓惯例），**与 §H.5 同量级（0.01~0.05 m）**，
 RTF 三档在 **0.39~0.46** 之间 ⇒ **不要**据此主张"哪个档更慢/更漂"（§G 第 3 项）。
+
+---
+
+## K. 2026-10-09：代价图侧的收尾（高度带定基 / 近地剔除 / `robot_radius`・足印 / 插件 0.1 m 偏移）
+
+> 触发 = 父任务原文：**"`robot:=robot11` 端到端可用的最后一个阻塞项 —— §J 留下的代价图侧尾巴"**。
+> §J 明确登记了三件"本档没做/做不到"的事（§J.5 的高度带定基、§J.7 第 1 条的"车一开始就在膨胀团里"、
+> §J.7 第 4 条的插件 `point = range·axis` 漏了 `0.1 m`）。本节就是把这三件做完（或证明为什么不做）。
+>
+> 与 §I/§J 的关系：**§I 是诊断、§J 是"把账做对"（帧/数据自洽）、§K 是"让代价图这一层也能用"**。
+> §I/§J 的所有内容**逐字保留**；本节只**追加**，并在 §K.1 里登记一处对 §J.5 的**量化更正**
+> （"40.4%"这一条我复现到 39.6%，但**"整张代价图变空"这一条在本工作区复现不出来**，见 §K.1.3）。
+>
+> 全部无头隔离跑（`HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、专用 `GAZEBO_MASTER_URI`、
+> `unset DISPLAY`、收尾只 kill 本调用自己的 PID，**绝不做全机 pkill**），
+> 原始数据 `.tmp_tiltmount/k1_*`、`.tmp_robotslot/k3_*`、`.tmp_robotslot/k4_*`、`.tmp_robotslot/k5_*`、
+> `.tmp_tiltmount/p5_*`；工具见 §K.7。
+
+### K.0 一句话结论（四条，都是实测）
+
+1. **2D 那条链路（`/scan`→`obstacle_layer`）在结构上量不出"逐点高度"**：`/scan` 是**二维平盘**
+   （LaserScan 没有 z），nav2 的 `obstacle_layer` 先 `projectLaser`（**z 强行置 0**）再
+   `transformLaserScanToPointCloud` 搬到代价图帧 ⇒ **每条波束在代价图帧里的 z 恒等于"那一帧
+   点云原点的 odom z"**。实测（robot11 plugin 档、静止）：**950 条波束的 odom z 全部落在
+   [0.0564, 0.0815]、`min_obstacle_height 0.0` 一条都不丢**（§K.1.2）。
+   ⇒ `min_obstacle_height` 在 2D 链路上只是**"传感器自身高度"的常量闸**，不是"障碍物高度闸"。
+   这就是 §D.3 那条归因（"近场地面残留经 `p2l` 的 2D 投影被标在雷达高度上"）的**结构原因**。
+2. **要让"贴地点"不变成 lethal 格，只能在"投影成 2D 之前"动手** ⇒ 新增一级
+   **近地剔除** `obstacle_near_ground_m`（离**局部地面** ≤ 该值的点从 `/segmentation/obstacle`
+   **改判 ground**；`robot:=robot11` 槽位 = **0.05 m**，默认槽位 = **关**）。
+   实测（robot11、静止、近地剔除开/关逐字同协议）：车那格 **42 → 0**、
+   车半径圆内 `≥99` **156 → 0**、圆内 free **239 → 999**、
+   到最近 lethal 格 **0.531 → 1.534 m**；`/scan` 只少了 **53 条/帧**（全是 0.30–0.50 m 的贴地回波），
+   `/segmentation/obstacle` 少 **315 点/帧**（全转到 ground）。
+3. **`robot_radius 0.3565`（外接）改成 `0.300`（内切）后，"车一开始就在膨胀团里"彻底消失**：
+   干净静止三档 A/B（近地剔除都开、唯一变量 = 半径/膨胀）：
+   `0.3565/0.70` → 车那格 **0**、圆内 `≥99` **0**、free **723/1008**；
+   `0.300/0.60` → 车那格 **0**、圆内 `≥99` **0**、free **871/1005**；
+   `0.22/0.50` → 车那格 **0**、圆内 `≥99` **0**、free **979/1007**。
+   三者**局部**都已经是"车那格 free + 圆内 0 个 ≥99"；**全局**图只有 `0.300` 那一档在静止时
+   车那格 = 0（`0.3565` 档是 99、`0.22` 档是 77）——原因见 §K.3.3（全局图还在建、STVL 的
+   时间维 + 地图原点附近还没清干净）。⇒ **本主题把槽位值改成 `0.300 / 0.60 / 0.65`**（理由见 §K.3）。
+4. **插件 `point = range·axis` 漏了射线起点（`0.1 m`）已修**，并给出回退开关
+   `<range_from_origin>false</range_from_origin>`（默认 = 修好的语义）。跨模型 A/B 见 §K.4。
+
+### K.1 阻塞项 1：2D 高度带（`obstacle_layer.scan`）的定基 —— 结论是"在 2D 链路上定不了基"
+
+#### K.1.1 源码级机理（三行，可核对）
+
+1. `nav2_costmap_2d` 的 `laserScanCallback` 走 `projector_.transformLaserScanToPointCloud(header.frame_id, msg, cloud, tf)`
+   —— `laser_geometry` 的 `projectLaser` 对 **LaserScan** 只能产出 **z ≡ 0** 的点（LaserScan 里没有高度），
+   随后那次 TF 把 `(r·cosθ, r·sinθ, 0)` 整体搬到**代价图帧**。
+2. `obstacle_layer.cpp` 的标记循环在**代价图帧**里量高度（本仓 `third_party/nav2/.../obstacle_layer.cpp:470,476`）：
+   ```cpp
+   if (pz < min_obstacle_height_) { continue; }   // 本仓 local `obstacle_layer.scan` **没有**这个键
+   if (pz > max_obstacle_height_) { continue; }   // 本仓 = 2.0
+   ```
+   `min_obstacle_height` 的 nav2 默认是 **0.0**（`nav2_params_sim_base.yaml` 里根本没有这个键 ⇒ 走默认）
+   —— 这一点由运行期回读确认（`/local_costmap/local_costmap obstacle_layer.scan.min_obstacle_height = 0.0`）。
+3. 合起来：**每条波束在代价图帧里的 z = 那一帧"点云原点"的 odom z**（一个常量），
+   与它打到的三维点**无关**。⇒ 2D 这条链路上**没有逐点高度可判**，
+   `min_obstacle_height` 只能当"传感器自身高度"的常量闸用。
+
+#### K.1.2 判决性实测（robot11、`robot11_mount:=plugin`、静止）
+
+`.tmp_tiltmount/p5_base_plugin/probe.json`（探针把每条波束用 TF 搬到 odom 再量）：
+
+| 量 | 实测 |
+|---|---|
+| `/scan` 有限波束/帧 | **950** |
+| 波束在 odom 里的 z：min / p05 / p50 / p95 / max | **+0.0564 / +0.0637 / +0.0652 / +0.0807 / +0.0815 m** |
+| 落在 `[0, 2]` 之外的波束 | **0 / 950 = 0.0000** |
+| 其中落在 `[0, min+0.005]` 这个 5 mm 薄层里的 | 全部（z 的跨度只有 **25 mm**） |
+| 同一跑 TF `odom→livox_frame` 的平移 z | **+0.064 m**（与上面 p50 吻合到 1 mm） |
+
+⇒ **波束的 odom z 就是"传感器原点的 odom z"**，一字不差（25 mm 的跨度来自车体在
+记录窗内的轻微俯仰/升降）。**"高度带按几何重新定基"在 2D 链路上没有可定的对象**：
+把 `min_obstacle_height` 从 0.0 改到任何非 0 值，效果都只是"把整条平盘一起抬高/压低"。
+
+#### K.1.3 对 §J.5 的两处**量化更正**（同一条命令、独立复跑）
+
+| 量 | §J.5 记的值 | **本次复跑（`p5_base_sensor`）** | 判读 |
+|---|---|---|---|
+| `/scan` 波束在 odom 里超出 `[0,2]` 的比例（`sensor` 档） | **0.404** | **0.3960**（269/755 落在 0 以下） | **复现**（差 0.8 个百分点） |
+| 局部代价图 lethal / inscribed（`sensor` 档） | **0 / 0**（"整张图 62500 格全 free"） | **495 / 16511**（free 32480） | ⚠️ **复现不出来** |
+| 车那格 / 车半径圆内 `≥99` / free（`sensor` 档） | 未记 | **88 / 511 / 4** | 与 §J.4 表 A 的 sensor 列（86 / 509 / 4）**逐项一致** |
+| 契约（9 个关键话题的发布者数） | 1 | **逐个 = 1** | 一致 |
+
+**为什么"整张图变空"复现不出来**：§J.5 那张表的 "0 / 0" 来自 `.tmp_tiltmount/j1_default` /
+`j1_plugin` 两跑（= **把 bug ③ 的平移也改成物理真值**的那一版）。本次工作区的代码是 §J 最终
+提交（平移**故意保留旧值**，§J.5 的结论），所以 `sensor` 档的盘面落在 odom z 的
+**p50 = +0.133 m**、**26.9% 在 [0,2] 内** ⇒ 高度带仍然留下一部分波束 ⇒ 图不会空。
+⇒ **"图变空"是"平移取真值"那一版的后果，不是 `sensor` 档本身的后果**；本节据此把
+§J.5 那一行读作"**如果**平移也改成真值 ⇒ 会空"（§J.5 的原文其实也是这个意思，
+但表里与"现状 `sensor` 档"并排放在一起，容易被读成后者）——**这里把口径钉死**。
+
+#### K.1.4 那还要不要动高度带？——**本主题不动**，并把"为什么"写进参数文件
+
+* 对 **`plugin` 档（默认档）**：波束 odom z ∈ [0.056, 0.082]，`[0, 2]` 全收 ⇒ **现状已经正确**，
+  改任何值都只会变坏。
+* 对 **`sensor` 档**：波束 z 跨度 **−0.394 … +2.361 m**（一盘"绕 base_link 原点的水平面"
+  在**斜 30° 的 odom** 里就是斜面）⇒ 单靠一条 `[lo, hi]` **永远**只能救回"半个环"。
+  要真修得改代价图帧（全局 `map` 也仍是 `odom`）或改 LIO 的 odom 重力对齐 —— 两者都超出本主题，
+  且会把**默认模型**一起拖下水（§J.5 实测代价：`j1_default` 的 lethal 445 → 0）。
+  **本主题的替代修法**是把 2D 链路上的"贴地点"在**投影之前**剔掉（§K.2），它对**两档都成立**、
+  且不依赖"odom 的 z 是什么意思"。
+* ⇒ 结论（写进 `nav2_params_sim_robot11_costmap.yaml` 的注释）：**`min/max_obstacle_height` 保持
+  0.0 / 2.0**，并把"这两个键在 2D 链路上的真实语义 = 点云原点的代价图帧 z 的常量闸"写在那里，
+  免得下一个人再按"障碍物高度"去调它。
+
+> **顺带量到一件与本节结论无关、但必须登记的事（sensor_height 的口径）**：
+> 我用 k7 跑（robot11、plugin 档、静止）的原始云做了 z 直方图，**地面峰在 z ≈ −0.155 m**
+> （最低一半的中位 = **−0.1502**）；同跑的 TF 是 `odom→livox_frame` z = **+0.058**、
+> `odom→base_link` z = **−0.097**。⇒ 反推**传感器离地 ≈ 0.302 m**
+> （= 0.1502 + livox 在 base_link 上的 0.157 − 一点姿态修正），
+> 而 `robot11_geometry.json` 的**几何**预测是 **0.2595 m**
+> （= 0.157028 + 0.102499，其中 0.102499 来自"四个轮 mesh 最低点"）。
+> **两者差 ~4.3 cm**，成因（轮 collision mesh 的最低点 vs 关节 origin 的 FK）**本轮没查**，
+> 登记在 §K.8 第 6 项。它**不影响**本节任何结论：
+> · §K.1 的高度带论证只用"波束的 odom z = 点云原点的 odom z"这一条恒等式（与 h 无关）；
+> · §K.2 的近地剔除判据用的是 `dz = z − 局部地面`（**同一个量在同一个帧里相减** ⇒ 与 h 无关），
+>   实测 `dz` 在水平 0.30–0.40 的点上 = **+0.0035/+0.0057/+0.0095**（p05/p50/p95）、
+>   0.40–0.50 = **+0.0018/+0.0089/+0.0125** ⇒ 0.05 m 的闸有 **>2×** 余量。
+> ⚠️ 但 `linefit` 的 `sensor_height: 0.2595`（那份文件属于别的任务）**确实是按几何值配的** ——
+> 若那 0.2595 真的偏了 4 cm，地面线会被整体抬高 4 cm，这在 0.05 m 的 `max_dist_to_line`
+> 上是同一量级。**登记为待查**，不改（本主题禁改 `rm_perception/**/config` 里的槽位文件）。
+
+### K.2 阻塞项 2："车一开始就在膨胀团里" —— 近地剔除 + 半径/几何（两件独立的事）
+
+#### K.2.1 先给"贴地点"一个判据（在投影成 2D **之前**）
+
+新增一级（**默认关**、按槽位开）：
+
+| 项 | 内容 |
+|---|---|
+| 参数 | `obstacle_near_ground_m`（米；**0.0 = 关**）。`robot:=robot11` 槽位 = **0.05**（§K.2.4）；默认/其它槽位 = **0.0** |
+| 谁读它 | `rm_ground_traversability`（两个地面分割节点共用的那一层）。参数文件按 robot 槽位选：`config/traversability_near_ground.yaml`（0.0）/ `..._robot11.yaml`（0.05），机制与 `traversability_self_mask*.yaml` **同款** |
+| 语义 | 用**本判据本来就有**的局部地面 `g(x,y)`（同一份公式：0.20 m 粗格 → 4×4 个 0.05 m 细格"最低点"的 p05）算 `dz = z − g`；`dz ≤ obstacle_near_ground_m` 的点由**地面分割节点**从 `/segmentation/obstacle` **改判成 ground** |
+| 为什么必须在这一级 | `p2l` 输出的是 **LaserScan（没有高度）**，nav2 侧又 `projectLaser`（z 置 0）⇒ 一旦跨过 `p2l`，"这个回波是地面还是障碍"这个信息**永久丢失**（§K.1）。⇒ 唯一能在"投影之前"用上高度的地方就是这里 |
+| 与 `self_mask` 的区别 | `self_mask` = "机器人自己的 collision 几何 / 近场死区"里的点（**与地面无关**）；本键 = "确实贴着地面"的点（**与车体几何无关**）。两者可同时开（robot11 就是） |
+| 与台阶判据的关系 | **结构上互斥、且不影响台阶**：台阶闸 `step_height_threshold = 0.15 m` ⇒ 任何被判成"台阶/边沿"的点 `dz > 0.15 > 0.05` ⇒ 不可能被本键剔掉。**回放台实测（§K.2.2 最后一行）**：`step_edge` 中位点数在 `near_ground_m = 0.0 / 0.05 / 0.10` 三档下**逐字相同（2011）** |
+
+**实现要点（一行一句，都在 §K.7 的文件里）**：
+* 判据类（`low_terrain_classifier.hpp`）只**多填一个掩码** `near_ground_flags`，**不改**建格/分类/限速任何一步；
+  它原有的"只降不升"（ground→obstacle）语义**不变**。
+* "升"（obstacle→ground）**显式写在两个节点里**（`ground_segmentation_node.cc`、
+  `patchwork_ground_segmentation_node.cc`），并且**只在 `nearGroundEnabled()` 为真时**执行
+  ⇒ 默认路径（0.0）连掩码都不填，行为**逐字节不变**。
+* `~/traversability_stats` 多两个字段（`near_ground` / `near_ground_m`）——是**私有**诊断话题，
+  不参与 `/segmentation/*` 契约。
+
+#### K.2.2 离线回放 A/B（**同一帧**、唯一变量 = 阈值）
+
+`tools/scripts/tiltmount/near_ground_replay_probe.py` + `_replay_ng.sh`：
+把 k7 跑的一帧**真点云**（11568 点）回放给**活的** `ground_segmentation_node`，
+只换 `obstacle_near_ground_m`：
+
+| `obstacle_near_ground_m` | `/segmentation/ground` 中位 | `/segmentation/obstacle` 中位 | ground+obstacle | **`step_edge` 中位** |
+|---|---|---|---|---|
+| **0.00（关）** | 4683 | 6885 | **11568** | **2011** |
+| **0.05（robot11 取值）** | **5985** | **5583** | **11568** | **2011** |
+| 0.10 | 7286 | 4282 | **11568** | **2011** |
+
+读法：**同一帧上**，0.05 把 **1302 点**从 obstacle 改判成 ground（= 0.35 m 环那一圈的贴地回波），
+**总点数不变**（不丢点），而 **`step_edge` 一个点都不变** ⇒ "台阶仍然是障碍"在**离线同帧**上已经是构造性的。
+
+#### K.2.3 在线 A/B（真跑：同一命令、唯一变量 = 阈值）
+
+`.tmp_robotslot/k3_ngoff_geo1` vs `.tmp_robotslot/k3_ngon_geo1`
+（`robot:=robot11`、plugin 档、静止、近地剔除 0.0 / 0.05，两次都用 `--goal-forward 1.0`）：
+
+| 量（局部代价图） | 近地剔除 **关**（0.0） | 近地剔除 **开**（0.05） |
+|---|---|---|
+| `/segmentation/obstacle` 中位点/帧 | 6178.5 | **5851** |
+| `/segmentation/ground` 中位点/帧 | 5754 | **6199** |
+| `/scan` 有限波束/帧 | 784 | 775 |
+| lethal / inscribed / free（整张图） | 324 / 13710 / 36737 | 501 / 12361 / 38488 |
+| **车那格的值** | **42（非 free）** | **0（FREE）** |
+| 车半径圆内格数 / `≥99` / free（半径 0.3565） | 992 / **156** / **239** | 999 / **0** / **999** |
+| 到最近 lethal 格（车心） | **0.531 m** | **1.534 m** |
+| 到最近 `≥99` 格 | 0.175 m | 1.178 m |
+| 径向剖面（0–0.3565 m 内 `≥99` 格数） | 0 / 8 / 32 / 43 / 73（0.15→0.36 m 各环） | **全 0** |
+
+⇒ **"车那格非 free + 整个足迹圆里几乎没有 free 格"这一条，在近地剔除打开后消失**
+（0.175 m 那个 `≥99` 环就是 §K.1 里那条"贴地点被投成 lethal 格"的直接后果）。
+
+#### K.2.4 那 0.05 m 是怎么定的（三个数，都是实测）
+
+| 量 | 实测 | 与 0.05 m 的关系 |
+|---|---|---|
+| 近场地面环（水平 0.30–0.40 m，220 点/帧）的 `dz` p05/p50/p95 | **+0.0035 / +0.0057 / +0.0095** | **100% ≤ 0.05**（余量 >5×） |
+| 水平 0.40–0.50 m（630 点）的 `dz` | **+0.0018 / +0.0089 / +0.0125** | **100% ≤ 0.05** |
+| 真障碍（场地 ~0.15 m 低矮件）在水平 0.50–0.75 m 的 `dz` p95 | **+0.1408** | 只剔掉贴地那一层（`frac dz≤0.05 = 0.775`，即剔 77.5% 的点，**留下的正是 0.10–0.17 m 的本体**） |
+| 0.75–1.00 m 的 `dz` p95 | **+0.1725** | 同上（`frac dz≤0.05 = 0.781`） |
+| 台阶闸 `step_height_threshold` | **0.15 m** | **> 0.05** ⇒ 台阶点结构上不可能被剔（§K.2.2 的 `step_edge` 逐字相同是它的在线证据） |
+
+保守方向：**只少标障碍**（代价：可能漏掉一个 <5 cm 的矮物），不会多标 ⇒ 不会凭空断路。
+`dz` 是"同一个量在同一个帧里相减"⇒ 与 `sensor_height` 标定、与 odom 的原点都无关（§K.1 末尾那条登记）。
+
+### K.3 `robot_radius` / footprint 的决定
+
+#### K.3.1 干净静止三档 A/B（近地剔除都开、**唯一变量 = 半径/膨胀**；`.tmp_robotslot/k5_geov{1,2,4}`）
+
+| 量（静止、同一世界/出生点/命令） | ① **外接 0.3565 + 0.70/0.75**（Phase 3 旧值） | ② **内切 0.300 + 0.60/0.65**（**本次采用**） | ③ 0.22 + 0.50/0.55（默认模型那组，只为分离变量） |
+|---|---|---|---|
+| `/segmentation/{obstacle,ground}` 中位点/帧 | 5810.5 / 6125 | 5810 / 6125 | 5814 / 6119 |
+| **局部** lethal / inscribed / free | 224 / 10117 / 40240 | 227 / 8668 / 43825 | 231 / 6316 / 47147 |
+| **局部** 车那格 | **0（FREE）** | **0（FREE）** | **0（FREE）** |
+| **局部** 车半径圆内 / `≥99` / free | 1008 / **0** / 723 | 1005 / **0** / 871 | 1007 / **0** / 979 |
+| **局部** 到最近 lethal / `≥99` | 0.801 / 0.445 m | 0.802 / 0.505 m | 0.803 / 0.580 m |
+| 局部径向剖面 0–0.3565 m 的 `≥99` 格 | **全 0** | **全 0** | **全 0** |
+| **全局** 车那格 | **99** | **0（FREE）** | **77** |
+| **全局** 车半径圆内 `≥99` / free | **137 / 0** | **0 / 123** | 52 / 0 |
+| 全局 到最近 lethal | 0.135 m | **0.804 m** | 0.238 m |
+
+**读法（三条）**：
+1. **"车那格非 free"在局部图上已经被§K.2 的近地剔除解决**（三档都是 0，圆内 `≥99` 都是 0）
+   ⇒ 它**不是**半径造成的（这条纠正了 §D.3 的归因顺序：**先**是贴地点被标成 lethal 格，
+   **再**被大 `inscribed_radius` 放大成"整个足迹非 free"）。
+2. 但**半径仍然要改**：在**全局**图上（STVL 3D 那条路，图还在建），外接 0.3565 档在静止时
+   就给车那格 **99**、圆内 **0 格 free** —— 这正是"车一开始就在膨胀团里"在全局图上的形态
+   （全局图上离车最近的 lethal 只有 **0.135 m**：那不是感知噪声，是本仓**局部图 raytrace
+   还没清到**的残留 + 地图原点附近的建筑）。改成内切 0.300 后同一时刻车那格 **0**、圆内 **123 free**。
+3. ③ 那一档（0.22，= 默认模型半径）**更好一点**，但 0.22 < 真车内切半径 0.300
+   ⇒ 会**允许规划器把车带进"真车过不去"的缝**（0.22 是默认模型的几何，不是本车的）。
+   ⇒ 取 **②（0.300 / 0.60 / 0.65）**：等于"**能走多窄**"的几何下界，且把"软带"保持在
+   默认模型同量级（0.30 / 0.35 m）。
+
+#### K.3.2 采用的数值与理由（写进 `nav2_params_sim_robot11_costmap.yaml` 的注释）
+
+| 键 | 旧值（Phase 3） | **新值** | 理由 |
+|---|---|---|---|
+| local/global `robot_radius` | 0.3565（外接） | **0.300（内切）** | 本仓没有 footprint 多边形 ⇒ 它就是 `inscribed_radius`；用外接值会把"车那格"在**全局**图上判成 99（§K.3.1），而这个判据的物理含义是"**能走多窄**"⇒ 应当用内切 |
+| local `inflation_layer.inflation_radius` | 0.70 | **0.60** | ≥ inscribed（0.300）；软带 0.30 m，与默认模型（0.5 − 0.22 = 0.28 m）同量级 |
+| global 同上 | 0.75 | **0.65** | 软带 0.35 m（默认模型 0.55 − 0.22 = 0.33 m） |
+| `cost_scaling_factor` | 不动 | 不动 | 与半径无关（默认模型 3.0/2.5） |
+
+#### K.3.3 折中（**必须知道**）：内切圆会让四个角在转弯时"扫到"障碍
+
+底盘凸包是"600×600 底板切角"，**角点在 0.3565 m**、边到原点最近 **0.300 m**。
+用 0.300 的圆代替它 ⇒ 站姿没问题，**但转弯时角可能扫过 0.300–0.3565 m 这一圈里的障碍**。
+本仓的兜底：① 场地上没有比这更贴的窄缝（过不去的缝本来也不该过）；
+② `inflation_radius` 的软带（0.30 m）仍在 ⇒ 撞上前先掉速；③ 前瞻限速与碰撞监控仍在链路上。
+**要彻底消掉这个折中 ⇒ 用真足印多边形**，见下。
+
+#### K.3.4 真足印多边形：**本主题试了，没采用**（两个实测原因）
+
+* **原因 1（nav2/`rcl` 的口径）**：`nav2_costmap_2d` 的 `footprint` 参数声明成 **`std::string`**
+  （`nav2_costmap_2d/src/costmap_2d_ros.cpp:79`）⇒ 它期待 `"[[x,y],[x,y],...]"` 这种**字符串**。
+  本仓的 `_Nav2ParamsForSlot` 是**运行时深合并 YAML**，写嵌套序列会被 `rcl` 当成
+  **`double_array` / 更糟：把序列当 key** ⇒ 实测（`.tmp_robotslot/k3_ngon_geo3`）：
+  ```
+  [ERROR] [rcl]: Failed to parse global arguments
+  Couldn't parse params file: '--params-file /tmp/tmpXXXX'. Error:
+  Sequences cannot be key at line 127, at ./src/parse.c:816
+  ```
+  **所有** nav2 节点（controller/planner/behavior/velocity_smoother/waypoint_follower）
+  一起 exit ⇒ 整条导航链起不来。（正确写法必须是把多边形**转成一个字符串**再写进 YAML。）
+* **原因 2（量到的收益不明显）**：内切圆那一档在**局部**图上已经做到"车那格 free + 圆内 0 个 ≥99
+  + 0–0.3565 m 内没有 `≥99` 格"；而**全局**图那一档（0.300）也已经把车那格变成 0。
+  ⇒ 换成多边形能多拿到的只有"转弯时角不扫障碍"这一条（真实但难量化），
+  代价是"多一个必须与 `robot11_description` 的碰撞 mesh 同步的几何真源"。
+  **本主题把这条登记为后续项**（做法：`robot11_make_collision_assets.py` 的凸包顶点 →
+  转成 nav2 要的**字符串**格式 → 在 `nav2_params_sim_robot11_costmap.yaml` 里
+  `footprint: "[[...]]"`（注意：**必须是字符串**），并把 `robot_radius` 那条同时撤掉）。
+
+### K.4 阻塞项 3：插件 `point = range·axis` 漏了射线起点（0.1 m）—— 共享代码修复 + 回退开关
+
+#### K.4.1 修什么（源码级，一行）
+
+`src/rm_simulation/livox_laser_simulation_RO2/src/livox_points_plugin.cpp`：
+
+```cpp
+// 射线起点（InitializeRays()）：start = minDist·axis + offset.Pos()
+//   minDist = SDF <range><min>（本仓所有模型 = 0.1 m）
+//   offset.Pos() = 传感器在父 link 里的位置（livox_frame = (0.00056, 0.1309, 0.1570)）
+// 而 range 是**从射线起点**量的距离 ⇒ 命中点 = range·axis + minDist·axis + offset.Pos()
+- auto point = range * axis;                       // 旧：既漏 minDist·axis、也漏 offset.Pos()
++ auto point = range_from_origin_
++     ? (range * axis + minDist * axis + sensor_offset.Pos())   // 新（默认）
++     : (range * axis);                                        // 旧（逐字节回退）
+```
+
+回退开关：SDF `<range_from_origin>false</range_from_origin>`（**缺省 = 修好的语义**）。
+`plugin` / `urdf` / `sensor` 三档**都**走这一行（与 `<cloud_frame>` 正交）。
+启动日志会打一行 `range_from_origin = true ⇒ 点 = ...`，用来确认加载的是哪一版二进制。
+
+#### K.4.2 跨模型 A/B（默认模型：旧行为 vs 新行为）
+
+`.tmp_robotslot/k2_def_{legacy,fixed}`（同世界/同出生点/同命令；两次编译**只差那一行**）：
+
+| 量 | 旧行为（`range·axis`） | 新行为（含起点） | 差 |
+|---|---|---|---|
+| 原始云点数（中位/帧） | — | — | 同量级（点只沿射线挪，不增不减） |
+| **原始云的"地面峰"（z 直方图在 1–4 m 环上的峰值）** | **−0.120 m** | **（见 §K.4.3）** | 这就是那个 0.1 m 内移 |
+| `/segmentation/obstacle` 中位点/帧 | 3716 | 3782 | **+66** |
+| `/segmentation/ground` 中位点/帧 | 2605 | 2562 | **−43** |
+| `/scan` 有限波束/帧 | 1160 | 1182.5 | **+22.5** |
+| `/global_costmap/voxel_grid` 中位点/帧 | 1129 | 1303 | **+174** |
+| 局部 lethal / inscribed / free | 446 / 10129 / 37883 | 454 / 9549 / 39477 | 同量级 |
+| 车那格 / 车半径圆内 `≥99` / free | 0 / **0** / **1000** | 0 / **0** / **1007** | 无变化 |
+| 到最近 lethal 格 | 0.972 m | 1.078 m | 同量级 |
+| 契约（9 个关键话题的发布者数） | 逐个 1 | **逐个 1** | — |
+
+**判读**：默认模型上没有任何一项变坏（`obstacle` +66 / `voxel_grid` +174 是"贴地噪声被正确
+挪到地面上"的方向，`inscribed` 反而降了 580）；点数、契约、代价图都在跑间噪声内。
+⇒ **不是回归**。（`robot11` 的 `plugin` / `sensor` 两档同款 A/B 见 §K.8 第 3 项：本节交付时
+那两跑的原始数据已落盘但**没有跑完**，登记为未完成 —— 不主张它们的数字。）
+
+#### K.4.3 这个修复的**独立**证据（与掩膜/dz 判据都无关）
+
+1. **地面不再是"随距离变化的斜面"**：旧行为下地面点 z 随水平距离单调变化
+   （`docs/robot_models.md` §12.3.1 的独立实测：r 0.25–0.35 → −0.208、r 2–4 → −0.253），
+   正是"沿射线内移 0.1 m"应有的样子；新行为下同一朵云的**地面峰是一个尖峰**
+   （本主题 k7 跑的 z 直方图：`z ∈ [−0.16, −0.15]` 单桶 3283 点，占 1–4 m 环的 76%）。
+2. **`point = range·axis` 与 `InitializeRays()` 的 `start = minDist·axis + offset.Pos()`
+   在源码里是同一个 `axis`** ⇒ 这一条是**可核对**的代数事实，不依赖任何测量。
+3. **它同时解释了 §D.3 的第 2 条**（"插件 0.1 m 系统内移把近处地面整体抬高"）——
+   §D.3 当年只能从"地面 z 随距离变化"反推，现在有了机制与修法。
+
+#### K.4.4 为什么敢把它设成**默认**（而不是只给 robot11）
+
+* 它**只让坐标回到几何真值**：`range` 的定义、射线起点、`offset.Pos()` 三者都在源码里，
+  修复后 `point` 与 `start + range·axis` **逐位相等**（同一个 `axis`，同一次乘法）。
+* 实测默认模型**没有任何一项变坏**（§K.4.2 的表）。
+* 代价（必须知道）：**它改的是所有模型的点云** ⇒ 任何"按旧点云烘出来的东西"都要重新核对：
+  `traversability_self_mask_robot11.yaml` 的 113 个 AABB 与近场死区（`r ≤ 0.2416`、`z ≥ −0.2295`）
+  **都是按旧点云烘的**。实测（本主题所有跑都已经是新插件）`self_mask_enable=true` 下
+  `/scan` 的 0.05–0.10 m 自击带仍然是 326~332 条/帧（旧插件 330~332）⇒ **掩膜的命中率没有塌**
+  （自击团本身离传感器只有 0.02~0.05 m，0.1 m 的内移对它的**相对**位置影响最小）。
+  ⚠️ 但如果将来把 `minDist` 改大（>0.1 m），掩膜必须重烘（`robot11_self_mask.py --emit`）。
+* 回退：`<range_from_origin>false</range_from_origin>`（在 `sentry_robot_robot11_sim.xacro`
+  的 `<plugin>` 里加一行；其它模型在其 xacro 的 `<plugin>` 里加）—— **逐字节回到今天的行为**。
+
+### K.5 验收表（无头、标准隔离、逐项实测）
+
+跑法（每行一条命令；`robot:=robot11` 的槽位覆盖 = 近地剔除 0.05 + 内切 0.300/0.60/0.65）：
+
+```bash
+# ① 槽位档（近地剔除 0.05 + 半径 0.300）：静止 + 短目标
+tools/scripts/tiltmount/run_tilt_mount_probe.sh k6_goal --variant plugin --settle 30 \
+    --duration 30 --frames 3 --goal-forward 0.5 --goal-wait 45 -- \
+    world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+# ② 干净静止三档几何 A/B（近地剔除都开）
+bash tools/scripts/tiltmount/_batch_k5.sh
+# ③ 近地剔除 关/开（带栅格落盘 + 目标）
+bash tools/scripts/tiltmount/_batch_k3.sh
+# ④ 同一帧回放 A/B（近地剔除 0.0/0.05/0.10）
+bash tools/scripts/tiltmount/_replay_ng.sh .tmp_tiltmount/k7_geo/dump/raw_0.csv 0.2595
+# ⑤ `sensor` 档的带宽复现（§K.1.3）
+tools/scripts/tiltmount/run_tilt_mount_probe.sh p5_base_sensor --variant sensor --settle 25 \
+    --duration 30 --frames 4 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gui:=False
+```
+
+| 验收项 | 要求 | **实测** | 判读 |
+|---|---|---|---|
+| `/scan` 出带比例（`sensor` 档） | ~0 | **0.3960**（269/755）—— §J.5 记 0.404 | ❌ **未达成**；成因与替代修法见 §K.1（2D 链路结构上定不了基；`sensor` 档的盘面在斜 odom 里就是斜面） |
+| 局部代价图**不为空**（`sensor` 档） | 非空 | lethal **495** / inscribed 16511 / free 32480 | ✅（§J.5 的"0/0"是"平移取真值"那一版的后果，§K.1.3） |
+| 局部代价图不为空（robot11 槽位档） | 非空 | lethal **330** / inscribed 12139 / free 39260（k6） | ✅ |
+| 局部代价图不为空（默认模型） | 非空 | lethal 454 / inscribed 9549 / free 39477（k2_def_fixed） | ✅ |
+| **车那格 free** | 是 | robot11 槽位档：**0（FREE）**（k6 / k5 三档都是 0）；默认模型：0 | ✅ |
+| **车半径圆内 free 格**（半径 0.300） | 与默认模型可比 | robot11：**871/1005**（0.300 档）/ 723/1008（0.3565 档）；默认模型（半径 0.22）：**1007/1007** | ✅ 同量级（剩下的差来自"真车的圆更大"这一件事本身） |
+| 车半径圆内 `≥99` | ~0 | robot11：**0**（0.300 / 0.3565 两档都是 0）；默认模型：0 | ✅（对比：修之前 §D.2 是 **435~513/996**） |
+| **短目标真的让车动** | 位移 ≫ 0.0015 m | `--goal-forward 0.5`：真值位移 **0.313 m**、目标后残余 **0.170 m**（= 从 0.5 m 走到 0.17 m 内）；`--goal-forward 2.0`：**0.357 m** / 残余 1.573 m | ✅ **0.313 m ≈ 旧的 209 倍** |
+| `detected collision ahead` 条数 | 报数 | 槽位档（k6）：**0** 条；近地剔除**关**的同协议跑：**163** 条、`patience exceeded` **8** 条、`Running spin` 2 次 | ✅ 修完不再"判前方碰撞" |
+| 恢复行为 | 报"有没有 fire" | k6：0 条 spin / 0 条 patience；`/cmd_vel` 非零 31 条（`max(|vx|+|wz|) = 0.849`，**不是** 3.0 的恢复自旋） | ✅ |
+| **限速器在真特征上仍触发** | 触发 | `/speed_limit` 每帧都发（n = 394，`frac_limited = 1.0`），lim `0.917~1.0 m/s`；日志逐条给出理由：`why=slope_change ... Δ坡=36.3° 坡=5.5° d=0.80 m`、`why=slope ... Δ坡=22.4° d=0.80 m`（`--drive` 跑：`why=slope_change` 52 条 / `why=slope` 1 条） | ✅ |
+| **护栏/真障碍仍是障碍** | 是 | k6 局部图 lethal **330** 格、方位分布 `{前 47+58, 左 18+21, 后 97+74, 右 0}`、最近 **0.565 m**、p50 **2.272 m**；`/scan` 的 0.50–1.00 m 带 **73 条/帧**（贴地那一层被剔之后**仍有**回波） | ✅ |
+| 台阶仍是障碍（**构造性 + 离线同帧**） | 是 | 台阶闸 0.15 m > 0.05 m；回放台 A/B：`step_edge` 中位 **2011 / 2011 / 2011**（`near_ground_m = 0/0.05/0.10`）**逐字相同** | ✅ |
+| 9 个关键话题各 1 个发布者 | 都是 1 | 每一跑都测：`/livox/lidar`、`/livox/lidar/pointcloud`、`/cloud_registered`、`/segmentation/{ground,obstacle}`、`/scan`、`/odom`、`/local_costmap/costmap`、`/global_costmap/voxel_grid` = **1** | ✅ |
+| `plugin`/`urdf` 档与默认模型"不变" | 逐字节/同量级 | 默认模型：本主题**没有**改它的任何参数路径（近地剔除读的是 `..._near_ground.yaml` = 0.0）；`robot_radius` 等键只在本槽位覆盖文件里 ⇒ 默认路径**逐字节不变**。插件那一行是**共享代码**且默认改成新语义（§K.4.2 的 A/B：默认模型没有一项变坏） | ✅（附数字） |
+| RTF | 报数 | 槽位档 k6：**0.339**；k5 三档 0.385/0.416/…；§J 那一轮 0.39~0.46 ⇒ **同一量级**（本沙箱偏载时 RTF 不可比，§G 第 3 项） | 登记 |
+| 内存 | 报数 | 本沙箱此前实测 **Livox ray sensor = 2.74 GiB of gzserver**（§G/§J 的同一台机）。本主题**没有**新增常驻节点/话题（只有两个**私有诊断字段**与一个**参数**）⇒ 不改变这条 | 登记 |
+
+### K.6 用户命令（复制即可）
+
+```bash
+# ① 构建（改了：插件 + 判据层 + 两个分割节点 + launch/参数）
+colcon build --symlink-install --packages-select ros2_livox_simulation rm_ground_traversability \
+    linefit_ground_segmentation_ros patchwork_ground_segmentation rm_nav_bringup
+
+# ② 今天的行为（默认档：近地剔除关、半径 0.300/0.60/0.65、插件已修）
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUL2026 mode:=slam_nav \
+    lio:=small_point_lio robot:=robot11 spin_speed:=0.0
+#   · 想看斜装"物理保真 + 账也对"：追加 robot11_mount:=sensor
+#   · 想看"倾角记在关节上"的诊断档：追加 robot11_mount:=urdf
+
+# ③ 30 秒自检（跑起来之后，另开一个终端）
+ros2 param get /ground_segmentation obstacle_near_ground_m      # 期望 0.05（robot11）
+ros2 param get /local_costmap/local_costmap robot_radius        # 期望 0.3
+ros2 param get /local_costmap/local_costmap obstacle_layer.scan.min_obstacle_height  # 期望 0.0
+ros2 topic echo /segmentation/obstacle --field width -n 1       # 期望 ~5500-5800（不是 ~6100-6900）
+ros2 topic echo /speed_limit -n 3                               # 期望非 0（有上限）或 0.0（= 不限速）
+# 近地剔除的收据（每帧一行 JSON，私有话题）：
+ros2 topic echo /ground_segmentation/traversability_stats -n 1 | grep -o '"near_ground":[0-9]*'
+
+# ④ 一条命令量齐（隔离无头 + 参数/TF 回读 + 契约 + 代价图圆 + 短目标）
+tools/scripts/tiltmount/run_tilt_mount_probe.sh my_goal --variant plugin --settle 30 \
+    --duration 30 --frames 3 --goal-forward 0.5 --goal-wait 45 -- \
+    world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+
+# ⑤ 只量近地剔除（同一帧回放，秒级，不用 Gazebo）
+bash tools/scripts/tiltmount/_replay_ng.sh <一帧 raw_*.csv> 0.2595
+```
+
+### K.7 复现用到的工具（都在 `tools/scripts/tiltmount/`，只有订阅/只有参数）
+
+| 文件 | 作用 |
+|---|---|
+| `costmap_input_dump.py` + `run_costmap_input_dump.sh` | 一次隔离无头跑里把 `/livox/lidar/pointcloud`、`/segmentation/{ground,obstacle}`、`/scan` **逐帧落 CSV**，并把**每帧的 TF**（`odom←base_link`、`base_link←点云帧`、以及两段合成的 `odom←点云帧`）写进 `meta.json`。⚠️ 两个坑都写在文件里：① 节点**必须**声明 `use_sim_time=true`（否则 TF 查询用墙钟、数据是仿真钟 ⇒ 全查不到）；② 点云 `stamp` 比 TF 缓存最新一条**新一点** ⇒ 直接按 stamp 查 `odom←livox_frame` 会失败，必须**先取最新** |
+| `near_ground_replay_probe.py` + `_replay_ng.sh` | 把**一帧真点云**回放给**活的** `ground_segmentation_node`，只换 `obstacle_near_ground_m` ⇒ 同帧 A/B（§K.2.2）。⚠️ `input_topic` 的默认值是 `input_cloud`（相对名）⇒ 命令行必须显式给 `-p input_topic:=/livox/lidar/pointcloud` |
+| `ground_leak_probe.py` | 离线：对一朵云用**与 C++ 同一条公式**算局部地面 `g` 与 `dz = z − g`，报各距离带/方位带的 `dz` 分位与"被各种离地闸剔掉多少"（§K.2.4 的表就是它出的） |
+| `p2l_forecast.py` | 离线：用**同一帧 raw 云**逐字复算 `pointcloud_to_laserscan`（z 带 / `range_min` / 每 bin 取最近）与 `obstacle_layer` 的"标格"（`projectLaser` ⇒ z 置 0 ⇒ 搬到代价图帧 ⇒ 高度带），回答"近地剔除会少哪几条波束 / 少哪些格" |
+| `_costmap_variant.sh` | 在 `0.3565/0.70`、`0.300/0.60`、`0.22/0.50` 三个候选之间切换 `nav2_params_sim_robot11_costmap.yaml`（A/B 用；**跑完自动还原**并用 sha256 校验） |
+| `_batch_k1.sh` … `_batch_k7.sh` | 本节的批次脚本（每个都是一串"改一个参数 → 跑 → 还原"的 A/B；**不是**通用工具，留在仓库里只为可复算） |
+| `tilt_mount_probe.py`（改） | ① `--z-band-lo/-hi`（高度带**做成探针参数**，并按**节点侧回读的生效值**自动覆盖）；② 新增 `/speed_limit` 的订阅与统计（`n_limited / frac_limited / limit_p05 / n_at_floor`）；③ 报告里落 `costmap_params_effective`（本次运行**生效**的 `robot_radius` / `footprint` / 高度带）⇒ "这张表是按哪组参数读的"不再靠人记 |
+
+### K.8 未验证 / 诚实清单（本轮）
+
+1. **`sensor` 档的 `/scan` 出带比例仍然是 0.396**（§K.1.3）：2D 链路**结构上**定不了基，
+   真要修得改代价图帧或 LIO 的 odom 重力对齐 —— 本主题**没做**，只把它从"改高度带能救"
+   纠正成"改高度带救不了"。
+2. **全局代价图在静止时仍然偏脏**（§K.3.1：0.300 档车那格 0、圆内 123 free；
+   但整张图 `unknown` 仍占大头，`map` 还在建）。**没有**做"跑几分钟之后再看"的对照。
+3. **插件 A/B 只跑完了默认模型**（§K.4.2）。`robot11` 的 `plugin` / `sensor` 两档同款 A/B
+   （`k2_r11_*` / `k2_sen_*`）在**本节交付时还在跑**（数据目录已建、`probe.json` 未落盘）
+   ⇒ **本节不主张**它们的数字。要补：`bash tools/scripts/tiltmount/_batch_k2.sh`（≈15 min）。
+4. **真足印多边形只做到"知道怎么写"**（§K.3.4）：nav2 要**字符串**格式，本仓的运行时深合并
+   写嵌套序列会让 `rcl` 报 `Sequences cannot be key` 并把**所有** nav2 节点打死（实测踩到）。
+   **没有**跑通"字符串格式的 footprint"那一版。
+5. **`--goal-forward 2.0` 仍然走不到**（真值 0.357 m / 残余 1.573 m）。0.5 m 的目标**能走到**
+   （0.313 m / 残余 0.170 m）⇒ 修完感知之后"车能走"，但**长距离仍然不行**：
+   本主题**没有**归因（候选：LIO 出生自转 ~10°（§I.5.2）、全局图还在建、RPP 的
+   `regulated_linear_scaling_min_radius 0.9`）。**这是本主题最大的未完成项。**
+6. **`sensor_height` 的 4.3 cm 疑问**（§K.1 末尾）：几何预测 0.2595 m vs 本主题反推的
+   ~0.302 m。**没有查**（要查的是"轮 collision mesh 最低点 vs 关节 origin 的 FK"）。
+   影响面：`linefit` 的 `sensor_height`（别的任务的槽位文件）与 `p2l` 的高度带解释。
+7. **没有测 `ground:=patchwork` + 近地剔除**：判据层是同一份、参数文件同一路递进
+   ⇒ 代码路径相同，但**没有跑过**那个组合（patchwork 的输入点云由它自己产生，
+   地面估计的**数值**会不同）。
+8. **没有测 `robot11_mount:=urdf` + 近地剔除**：那一档的 `/scan` 在 odom 里是斜面
+   （§I.7 的 71.4% 被丢），近地剔除**只解决"贴地点被标成 lethal"**这一半，
+   另一半（半圈波束被高度带丢掉）在那一档仍然存在。
+9. **RTF/内存没有做"同时间窗交替"的严格 A/B**（§G 第 3 项的老限制）；
+    本节的 RTF 数字（0.339~0.416）只能读作"同一批里可比"。
+10. **`--frames` 与采样时机**：`dump` 那一套在短窗口里只能采到 1~3 帧（`obstacle`/`ground`
+    两朵云是**异步**到的，帧号不同 ⇒ 不能拼成"同一帧"）。本节的离线分析全部只用 `raw` 那一朵
+    （唯一自洽的输入），`ground`/`obstacle` 只用来报**中位点数**。
+
+### K.9 回退
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| **近地剔除**（本主题最大的一处行为改动） | 把 `src/rm_nav_bringup/config/traversability_near_ground_robot11.yaml` 的 `obstacle_near_ground_m` 改成 **0.0**（一个数），或去掉 launch 里 `near_ground_params` 那一路 ⇒ **完全回到今天** |
+| **半径/膨胀**（0.300/0.60/0.65 → 0.3565/0.70/0.75） | 改 `nav2_params_sim_robot11_costmap.yaml` 的两个键（或 `git revert` 本节第 1 个 commit 的该文件） |
+| **插件偏移修复** | 在对应模型的 xacro 的 `<plugin>` 里加 `<range_from_origin>false</range_from_origin>` ⇒ **逐字节**回到旧行为（不需要回滚代码） |
+| **整套 §K** | `git revert <§K 的 3 个 commit>`：默认路径的行为**逐字节不变**（近地剔除默认 0.0、半径只在槽位覆盖文件里）；**唯一**需要单独决定的是插件那一行（它是共享代码，revert 它就回到旧点云） |
+| 本节新增的工具/批次脚本 | `rm -rf tools/scripts/tiltmount/`（只有 §K.6/K.7 的命令引用它们；不进任何 launch/节点） |
+| 本节的原始数据 | `.tmp_tiltmount/k*`、`.tmp_robotslot/k*`（未入库） |

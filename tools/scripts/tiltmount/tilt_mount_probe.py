@@ -56,6 +56,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
+try:
+    from nav2_msgs.msg import SpeedLimit
+except Exception:                                            # pragma: no cover
+    SpeedLimit = None
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import Imu, LaserScan, PointCloud2
 import tf2_ros
@@ -309,10 +313,14 @@ class TiltProbe(Node):
         self.clock = None
         self.clock_t0 = None
         self.costmap = {}
+        # ★ 2026-10-09：节点侧回读的代价图参数（高度带 / robot_radius / footprint）——
+        #   "报告里那张表是按哪一组参数读的"必须落在 JSON 里，否则改了参数还按旧值解释。
+        self.costmap_params = {}
         self.tf = {}
         self.dumps = defaultdict(int)
         # ★ 2026-10-09：A/B 需要的额外量（--drive / --goal-forward）
         self.cmdvel_abs = []                  # /cmd_vel 的 |vx|+|wz|（nav2 侧；恢复行为也在这里）
+        self.speed_limit = []                 # ★ 2026-10-09 /speed_limit 的绝对值（0.0 = 不限速）
         self.clock_marks = []                 # (wall, clock) —— 记录窗首尾 ⇒ RTF
         self.goal_pub = None
         self.vel_pub = None
@@ -345,6 +353,13 @@ class TiltProbe(Node):
                                      lambda m, t=t: self.on_odom(t, m), QOS_RE)
         self.create_subscription(OccupancyGrid, '/local_costmap/costmap',
                                  lambda m: self.on_costmap('local', m), QOS_BE)
+        # ★ 2026-10-09：**前瞻限速**的生效值（`/speed_limit`，nav2 SpeedLimit：绝对值 m/s，
+        #   0.0 = NO_SPEED_LIMIT）。反向验证要用它："真台阶/坡脚仍然触发限速"——
+        #   原来的工具只能从 launch.log 里 grep `[slope_speed]`，那条日志是**节流**的
+        #   （`speed_limit_log_period_s` 默认 2 s、同值不重复打）⇒ 数不出占比。
+        #   只订阅、不发任何东西（不新增任何发布者 ⇒ 契约不变）。
+        if SpeedLimit is not None:
+            self.create_subscription(SpeedLimit, '/speed_limit', self.on_speed_limit, QOS_RE)
 
     # ---------------- 回调
     def on_clock(self, m):
@@ -422,6 +437,12 @@ class TiltProbe(Node):
                 'n_free': int((data == 0).sum()),
                 'n_unknown': int(((data < 0)).sum()),
                 '_data': data}
+
+    def on_speed_limit(self, m):
+        with self.lock:
+            self.frames['speed_limit'] += 1
+            # nav2 语义：0.0 = NO_SPEED_LIMIT；>0 = 绝对上限（m/s）
+            self.speed_limit.append(float(m.speed_limit))
 
     def on_cmdvel(self, m):
         with self.lock:
@@ -527,10 +548,50 @@ def main():
     ap.add_argument('--goal-wait', type=float, default=30.0)
     ap.add_argument('--robot-radius', type=float, default=0.3565,
                     help='local costmap "车半径圆内"统计用的半径（robot11 = 0.3565）')
+    ap.add_argument('--z-band-lo', type=float, default=0.0,
+                    help='obstacle_layer.scan 高度带下界（在代价图帧 odom 里量；现状 0.0）')
+    ap.add_argument('--z-band-hi', type=float, default=2.0,
+                    help='obstacle_layer.scan 高度带上界（在代价图帧 odom 里量；现状 2.0）')
     args = ap.parse_args()
 
     rclpy.init()
     node = TiltProbe(args)
+    # ★ 2026-10-09：高度带的**生效值**从节点侧回读（`--z-band-lo/-hi` 只是"拿不到时的兜底"）。
+    #   为什么：`obstacle_layer.scan.min_obstacle_height` 是 nav2 的**默认 0.0**（本仓
+    #   `nav2_params_sim_base.yaml` 里根本没写这个键），而这个键正是"哪些波束被丢掉"的判据 ⇒
+    #   报告里的 `frac_outside_*` 必须与"这次运行真正生效的带"配套，否则改了参数还按 0/2 读。
+    try:
+        from rclpy.parameter import Parameter
+        from rcl_interfaces.srv import GetParameters
+        for tag, names in (('local', ('obstacle_layer.scan.min_obstacle_height',
+                                      'obstacle_layer.scan.max_obstacle_height',
+                                      'robot_radius', 'footprint')),
+                           ('global', ('obstacle_layer.scan.min_obstacle_height',
+                                       'obstacle_layer.scan.max_obstacle_height',
+                                       'robot_radius', 'footprint'))):
+            cli = node.create_client(GetParameters,
+                                     '/%s_costmap/%s_costmap/get_parameters' % (tag, tag))
+            if not cli.wait_for_service(timeout_sec=3.0):
+                continue
+            req = GetParameters.Request()
+            req.names = ['%s.%s' % (tag, n) for n in names]
+            fut = cli.call_async(req)
+            t_end = time.time() + 5.0
+            while not fut.done() and time.time() < t_end:
+                time.sleep(0.05)
+            if not fut.done():
+                continue
+            for n, v in zip(names, fut.result().values):
+                node.costmap_params['%s.%s' % (tag, n)] = str(v).replace('\n', ' ')
+            lo = fut.result().values[0]
+            hi = fut.result().values[1]
+            if lo.type != Parameter.Type.NOT_SET and hi.type != Parameter.Type.NOT_SET:
+                args.z_band_lo = float(lo.double_value)
+                args.z_band_hi = float(hi.double_value)
+                print('[probe] 高度带生效值（节点侧回读 %s_costmap）: [%g, %g] m'
+                      % (tag, args.z_band_lo, args.z_band_hi), flush=True)
+    except Exception as e:                                    # pragma: no cover
+        print('[probe] 高度带回读失败（用 --z-band-lo/-hi 的兜底值）：%s' % e, flush=True)
     ex = MultiThreadedExecutor(num_threads=3)
     ex.add_node(node)
     spin = threading.Thread(target=ex.spin, daemon=True)
@@ -612,6 +673,9 @@ def main():
     out = {'variant': args.variant, 'frames': dict(node.frames),
            'frame_ids': {k: dict(v) for k, v in node.frame_ids.items()},
            'pts_median': {k: pct(v, 50) for k, v in node.pts.items() if v},
+           # ★ 2026-10-09：本次运行**节点侧生效**的代价图参数（含高度带）——报告的读表前提
+           'costmap_params_effective': dict(node.costmap_params),
+           'z_band_used': {'lo': args.z_band_lo, 'hi': args.z_band_hi},
            'tf': node.tf}
     # ★ 2026-10-09：RTF（记录窗口径：Δ仿真钟 / Δ墙钟；与 /clock 同一条时间轴）
     with node.lock:
@@ -796,6 +860,20 @@ def main():
         'nonzero': int(sum(1 for v in cmd_abs if v > 1e-3))}
     out['plan'] = {'n_frames': len(plan_pts),
                    'pts_median': pct(plan_pts, 50) if plan_pts else None}
+    # ---- ★ 2026-10-09：前瞻限速的**生效值**（反向验证："真台阶/坡脚仍然触发限速"）
+    with node.lock:
+        sl = list(node.speed_limit)
+    if sl:
+        a = np.array(sl, dtype=np.float64)
+        pos = a[a > 0.0]
+        out['speed_limit'] = {
+            'n': int(len(a)), 'n_limited': int((a > 0.0).sum()),
+            'frac_limited': round(float((a > 0.0).mean()), 4),
+            'limit_min': float(pos.min()) if pos.size else None,
+            'limit_p05': pct(pos, 5) if pos.size else None,
+            'limit_p50': pct(pos, 50) if pos.size else None,
+            'limit_max': float(pos.max()) if pos.size else None,
+            'n_at_floor': int((np.abs(a - 0.60) < 1e-3).sum()) if pos.size else 0}
     if args.drive and odom.get('/odom') and odom.get('/odom_ground_truth'):
         def _trip(seq):
             a = np.array([r[:8] for r in seq], dtype=np.float64)
@@ -869,11 +947,18 @@ def main():
             z_rel = Q[:, 2] - t[2]
             z_odom = Q[:, 2]
             lo = np.degrees(np.arctan2(Q[:, 1], Q[:, 0]))
-            dropped = (z_odom < 0.0) | (z_odom > 2.0)
+            # ★ 2026-10-09：高度带的**上下界做成探针参数**（默认 0.0 / 2.0 = 本仓
+            #   `local_costmap.local_costmap.obstacle_layer.scan` 的现状：min 缺省 0.0、max 2.0）。
+            #   原来这两个数硬编码在这里 ⇒ "把 min_obstacle_height 改成 −0.15 能不能救回 sensor 档"
+            #   这类问题不能拿同一次跑的数据回答。口径与 nav2 一致：**在代价图帧（odom）里量**。
+            dropped = (z_odom < args.z_band_lo) | (z_odom > args.z_band_hi)
             h, _ = np.histogram(lo[dropped], bins=np.arange(-180, 181, 30))
             sc['beam_z_odom_absolute'] = {
                 'min': float(z_odom.min()), 'p05': pct(z_odom, 5), 'p50': pct(z_odom, 50),
                 'p95': pct(z_odom, 95), 'max': float(z_odom.max()),
+                'n_below_lo': int((z_odom < args.z_band_lo).sum()),
+                'n_above_hi': int((z_odom > args.z_band_hi).sum()),
+                'band_lo': float(args.z_band_lo), 'band_hi': float(args.z_band_hi),
                 'n_below_0': int((z_odom < 0.0).sum()),
                 'n_above_2': int((z_odom > 2.0).sum()),
                 'frac_outside_0_2': float(dropped.mean()),
