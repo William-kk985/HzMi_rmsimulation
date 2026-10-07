@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robot11</name>
+  <version>0.1.0</version>
+  <description>
+    用户哨兵 robot11（SolidWorks 导出）的描述包：12 个 STL 网格（base_link、l2..l11、
+    l12 = Livox MID-360）与其生成式碰撞替代件。
+
+    ⚠️ 包名**必须**是 robot11：用户的 URDF 里写死了 `package://robot11/meshes/&lt;name&gt;.STL`，
+    而 `package://` 的解析键就是**包名**（与目录名无关）。目录名 `robot11_description/`
+    只表达"这是一个 description 包"，让它在 src/rm_simulation/ 下与其它仿真资产包并列。
+  </description>
+  <maintainer email="lihanchen2004@163.com">Lihan Chen</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 只有在用 urdf/ 里的 xacro 时才需要；本包自身不编译任何代码 -->
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

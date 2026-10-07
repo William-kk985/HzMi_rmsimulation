@@ -1,0 +1,262 @@
+{
+  "tool": "/home/weicheng/HzMi_rmsimulation/tools/scripts/regress/robot11_gz_collision_bench.py",
+  "when": "2026-10-07T14:23:00+0800",
+  "isolation": {
+    "HOME": "/tmp/gzhome-robot11bench",
+    "ROS_DOMAIN_ID": "77",
+    "GAZEBO_MODEL_PATH": "/usr/share/gazebo-11/models",
+    "DISPLAY": "unset"
+  },
+  "world": "ground_plane + sun, ODE quick/50, max_step_size 1 ms, RT update rate 1000",
+  "note": "gzserver --iters 在本机会挂住 ⇒ 用固定墙钟窗口 + gz stats 计时；不用 pkill -f。",
+  "variants": {
+    "A_fullmesh": {
+      "variant": "A_fullmesh",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/A_fullmesh.urdf",
+      "model_bytes": 3496,
+      "pid": 5,
+      "t_world_ready_s": 1.56,
+      "rss_baseline_kb": 155648,
+      "rtf_before": 1.0,
+      "sim_before": 4.07,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.57,
+      "rss_after_spawn_kb": 198252,
+      "rss_peak_kb": 777744,
+      "rtf_after": 1.002,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.26,
+      "window_wall_s": 13.65,
+      "final_pose_xyzrpy": [
+        "0.00029 -0.00055 0.1025 -1e-06 -0 -0.000322"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "B_boxes": {
+      "variant": "B_boxes",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/B_boxes.urdf",
+      "model_bytes": 3857,
+      "pid": 636,
+      "t_world_ready_s": 1.56,
+      "rss_baseline_kb": 155864,
+      "rtf_before": 1.0,
+      "sim_before": 4.08,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.56,
+      "rss_after_spawn_kb": 177792,
+      "rss_peak_kb": 177884,
+      "rtf_after": 1.0,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.34,
+      "window_wall_s": 13.63,
+      "final_pose_xyzrpy": [
+        "0.000331 -0.000553 0.1025 -1e-06 -0 -0.000302"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "C_decimated": {
+      "variant": "C_decimated",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/C_decimated.urdf",
+      "model_bytes": 3516,
+      "pid": 1253,
+      "t_world_ready_s": 1.55,
+      "rss_baseline_kb": 155772,
+      "rtf_before": 1.0,
+      "sim_before": 4.06,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.58,
+      "rss_after_spawn_kb": 176952,
+      "rss_peak_kb": 177060,
+      "rtf_after": 1.003,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.43,
+      "window_wall_s": 13.63,
+      "final_pose_xyzrpy": [
+        "0.000331 -0.000553 0.1025 -1e-06 -0 -0.000302"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "D_decvis_boxes": {
+      "variant": "D_decvis_boxes",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/D_decvis_boxes.urdf",
+      "model_bytes": 3877,
+      "pid": 1900,
+      "t_world_ready_s": 1.56,
+      "rss_baseline_kb": 155620,
+      "rtf_before": 1.0,
+      "sim_before": 4.08,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.56,
+      "rss_after_spawn_kb": 177492,
+      "rss_peak_kb": 177584,
+      "rtf_after": 1.005,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.34,
+      "window_wall_s": 13.63,
+      "final_pose_xyzrpy": [
+        "0.000331 -0.000553 0.1025 -1e-06 -0 -0.000302"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "E_nowheelchassis": {
+      "variant": "E_nowheelchassis",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/E_nowheelchassis.urdf",
+      "model_bytes": 3114,
+      "pid": 2547,
+      "t_world_ready_s": 1.55,
+      "rss_baseline_kb": 155216,
+      "rtf_before": 1.0,
+      "sim_before": 4.06,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.58,
+      "rss_after_spawn_kb": 175904,
+      "rss_peak_kb": 176016,
+      "rtf_after": 1.0,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.33,
+      "window_wall_s": 13.63,
+      "final_pose_xyzrpy": [
+        "0.000331 -0.000553 0.1025 -1e-06 -0 -0.000302"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "A2_contact_fullmesh": {
+      "variant": "A2_contact_fullmesh",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/A2_contact_fullmesh.urdf",
+      "model_bytes": 3492,
+      "pid": 3167,
+      "t_world_ready_s": 1.56,
+      "rss_baseline_kb": 154992,
+      "rtf_before": 1.0,
+      "sim_before": 4.17,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.56,
+      "rss_after_spawn_kb": 191688,
+      "rss_peak_kb": 777096,
+      "rtf_after": 0.2,
+      "rtf_after_min": 0.04,
+      "sim_advance_in_window_s": 0.49,
+      "window_wall_s": 13.98,
+      "final_pose_xyzrpy": [
+        "-0.0001 -0.001111 0.047943 -1.1e-05 -2.3e-05 0.000684"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "B2_contact_boxes": {
+      "variant": "B2_contact_boxes",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/B2_contact_boxes.urdf",
+      "model_bytes": 3853,
+      "pid": 3798,
+      "t_world_ready_s": 1.56,
+      "rss_baseline_kb": 155528,
+      "rtf_before": 1.0,
+      "sim_before": 4.06,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.58,
+      "rss_after_spawn_kb": 177460,
+      "rss_peak_kb": 177572,
+      "rtf_after": 1.002,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.36,
+      "window_wall_s": 13.65,
+      "final_pose_xyzrpy": [
+        "0.000672 0.001514 0.047944 -7e-06 5e-06 -0.009159"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    },
+    "C2_contact_decimated": {
+      "variant": "C2_contact_decimated",
+      "model_file": "/home/weicheng/HzMi_rmsimulation/.tmp_robot11/bench/C2_contact_decimated.urdf",
+      "model_bytes": 3512,
+      "pid": 4439,
+      "t_world_ready_s": 1.56,
+      "rss_baseline_kb": 155540,
+      "rtf_before": 1.0,
+      "sim_before": 4.08,
+      "spawn_rc": 0,
+      "spawn_stderr_tail": [],
+      "spawn_stdout_tail": [],
+      "t_spawn_s": 0.57,
+      "rss_after_spawn_kb": 176792,
+      "rss_peak_kb": 176884,
+      "rtf_after": 1.002,
+      "rtf_after_min": 1.0,
+      "sim_advance_in_window_s": 11.34,
+      "window_wall_s": 13.64,
+      "final_pose_xyzrpy": [
+        "0.004918 -0.202096 0.047704 -0.000872 -3.5e-05 -0.044051"
+      ],
+      "rss_end_kb": null,
+      "gzserver_log_tail": [
+        "\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;32m\u001b[0m\u001b[1;31m[Err] [RenderEngine.cc:749] \u001b[0m\u001b[1;31mCan't open display: \u001b[0m\u001b[1;31m\u001b[0m\u001b[1;31m",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:89] \u001b[0m\u001b[1;33mUnable to create X window. Rendering will be disabled",
+        "\u001b[0m\u001b[1;33m[Wrn] [RenderEngine.cc:292] \u001b[0m\u001b[1;33mCannot initialize render engine since \u001b[0m\u001b[1;33mrender path type is NONE. Ignore this warning if\u001b[0m\u001b[1;33mrendering has been turned off on purpose.",
+        "\u001b[0m"
+      ],
+      "ok": true
+    }
+  }
+}

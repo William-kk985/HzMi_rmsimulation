@@ -1,0 +1,629 @@
+{
+  "tool": "tools/scripts/regress/robot11_make_collision_assets.py",
+  "generated_at": "2026-10-07T14:22:38+0800",
+  "decimator": "pyvista/VTK vtkQuadricDecimation 0.46.4",
+  "note": "meshlabserver 2020.09 在本机无 GL（GLEW initialization failed）⇒ 不可用；fast_simplification / open3d / pymeshlab 未安装；未安装任何新包。",
+  "boxes": {
+    "base_link": {
+      "boxes": [
+        {
+          "center": [
+            0.0,
+            0.0,
+            -0.005444
+          ],
+          "size": [
+            0.6,
+            0.6,
+            0.085
+          ],
+          "z_band": [
+            -0.047944,
+            0.037056
+          ],
+          "span": [
+            0,
+            16
+          ]
+        },
+        {
+          "center": [
+            0.0,
+            0.0,
+            0.072056
+          ],
+          "size": [
+            0.553269,
+            0.549539,
+            0.07
+          ],
+          "z_band": [
+            0.037056,
+            0.107056
+          ],
+          "span": [
+            17,
+            30
+          ]
+        },
+        {
+          "center": [
+            0.0,
+            -0.00634,
+            0.124556
+          ],
+          "size": [
+            0.532413,
+            0.334483,
+            0.035
+          ],
+          "z_band": [
+            0.107056,
+            0.142056
+          ],
+          "span": [
+            31,
+            37
+          ]
+        },
+        {
+          "center": [
+            0.0,
+            -0.014821,
+            0.177528
+          ],
+          "size": [
+            0.285,
+            0.346467,
+            0.070944
+          ],
+          "z_band": [
+            0.142056,
+            0.213
+          ],
+          "span": [
+            38,
+            52
+          ]
+        }
+      ],
+      "n_boxes": 4,
+      "mesh_bbox_z": [
+        -0.047944,
+        0.213
+      ],
+      "fidelity": {
+        "pitch": 0.03,
+        "surface_voxels": 1605,
+        "surface_voxels_inside_boxes": 1605,
+        "coverage": 1.0,
+        "box_grid_points": 3075,
+        "phantom_points_gt_pitch": 503,
+        "phantom_fraction": 0.1636,
+        "box_volume_m3": 0.065121,
+        "max_clearance_in_boxes_m": 0.0693
+      },
+      "band": 0.005,
+      "n_boxes_max": 4,
+      "algorithm": "DP：切成 N 段使各段 XY-AABB 的总体积最小"
+    }
+  },
+  "decimated": {
+    "base_link": {
+      "file": "generated/base_link_collision.stl",
+      "bytes": 150084,
+      "faces_in": 2078226,
+      "faces_out": 3000,
+      "target_faces": 3000,
+      "reduction": 0.99856,
+      "bbox_in": {
+        "min": [
+          -0.3,
+          -0.3,
+          -0.047944
+        ],
+        "max": [
+          0.3,
+          0.3,
+          0.213
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.3,
+          -0.3,
+          -0.047944
+        ],
+        "max": [
+          0.3,
+          0.3,
+          0.213
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.026359,
+        "out_to_ref_p99_m": 0.018321,
+        "ref_to_out_max_m": 0.104454,
+        "ref_to_out_p99_m": 0.088884,
+        "samples": [
+          200000,
+          9000
+        ]
+      },
+      "seconds": 14.8
+    },
+    "l10": {
+      "file": "generated/l10_collision.stl",
+      "bytes": 20084,
+      "faces_in": 37648,
+      "faces_out": 400,
+      "target_faces": 400,
+      "reduction": 0.98938,
+      "bbox_in": {
+        "min": [
+          -0.137,
+          -0.0496,
+          -0.032387
+        ],
+        "max": [
+          0.01,
+          0.0883,
+          0.038178
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.137,
+          -0.0383,
+          -0.032157
+        ],
+        "max": [
+          0.01,
+          0.0863,
+          0.038178
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.032327,
+        "ref_to_out_p99_m": 0.029183,
+        "samples": [
+          112944,
+          1200
+        ]
+      },
+      "seconds": 0.13
+    },
+    "l11": {
+      "file": "generated/l11_collision.stl",
+      "bytes": 60084,
+      "faces_in": 176458,
+      "faces_out": 1200,
+      "target_faces": 1200,
+      "reduction": 0.9932,
+      "bbox_in": {
+        "min": [
+          -0.025999,
+          -0.043663,
+          -0.129139
+        ],
+        "max": [
+          0.106999,
+          0.128724,
+          0.206082
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.015734,
+          -0.041821,
+          -0.128694
+        ],
+        "max": [
+          0.098754,
+          0.128724,
+          0.206009
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.008714,
+        "out_to_ref_p99_m": 0.00175,
+        "ref_to_out_max_m": 0.031346,
+        "ref_to_out_p99_m": 0.017642,
+        "samples": [
+          200000,
+          3600
+        ]
+      },
+      "seconds": 0.52
+    },
+    "l12": {
+      "file": "generated/l12_collision.stl",
+      "bytes": 15084,
+      "faces_in": 68740,
+      "faces_out": 300,
+      "target_faces": 300,
+      "reduction": 0.99564,
+      "bbox_in": {
+        "min": [
+          -0.039862,
+          -0.030345,
+          0.0
+        ],
+        "max": [
+          0.031875,
+          0.034529,
+          0.060097
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.032999,
+          -0.030301,
+          0.0
+        ],
+        "max": [
+          0.031875,
+          0.034485,
+          0.035047
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.028065,
+        "ref_to_out_p99_m": 0.014285,
+        "samples": [
+          200000,
+          900
+        ]
+      },
+      "seconds": 0.24
+    },
+    "l2": {
+      "file": "generated/l2_collision.stl",
+      "bytes": 40084,
+      "faces_in": 89556,
+      "faces_out": 800,
+      "target_faces": 800,
+      "reduction": 0.99107,
+      "bbox_in": {
+        "min": [
+          -0.134201,
+          -0.054479,
+          -0.061135
+        ],
+        "max": [
+          -0.01785,
+          0.049151,
+          0.063458
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.133017,
+          -0.05051,
+          -0.061135
+        ],
+        "max": [
+          -0.01785,
+          0.045287,
+          0.063458
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.020069,
+        "ref_to_out_p99_m": 0.013958,
+        "samples": [
+          200000,
+          2400
+        ]
+      },
+      "seconds": 0.34
+    },
+    "l3": {
+      "file": "generated/l3_collision.stl",
+      "bytes": 40084,
+      "faces_in": 88800,
+      "faces_out": 800,
+      "target_faces": 800,
+      "reduction": 0.99099,
+      "bbox_in": {
+        "min": [
+          -0.134201,
+          -0.063458,
+          -0.054479
+        ],
+        "max": [
+          -0.01785,
+          0.046345,
+          0.049151
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.133017,
+          -0.063458,
+          -0.05051
+        ],
+        "max": [
+          -0.01785,
+          0.046262,
+          0.045287
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.00045,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.020069,
+        "ref_to_out_p99_m": 0.013968,
+        "samples": [
+          200000,
+          2400
+        ]
+      },
+      "seconds": 0.34
+    },
+    "l4": {
+      "file": "generated/l4_collision.stl",
+      "bytes": 40084,
+      "faces_in": 91234,
+      "faces_out": 800,
+      "target_faces": 800,
+      "reduction": 0.99123,
+      "bbox_in": {
+        "min": [
+          -0.135344,
+          -0.049151,
+          -0.063458
+        ],
+        "max": [
+          -0.01785,
+          0.054479,
+          0.046345
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.133017,
+          -0.045287,
+          -0.063458
+        ],
+        "max": [
+          -0.01785,
+          0.05051,
+          0.046262
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.020069,
+        "ref_to_out_p99_m": 0.014025,
+        "samples": [
+          200000,
+          2400
+        ]
+      },
+      "seconds": 0.35
+    },
+    "l5": {
+      "file": "generated/l5_collision.stl",
+      "bytes": 40084,
+      "faces_in": 90250,
+      "faces_out": 800,
+      "target_faces": 800,
+      "reduction": 0.99114,
+      "bbox_in": {
+        "min": [
+          -0.135344,
+          -0.046345,
+          -0.049151
+        ],
+        "max": [
+          -0.01785,
+          0.063458,
+          0.054479
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.133017,
+          -0.046262,
+          -0.045287
+        ],
+        "max": [
+          -0.01785,
+          0.063458,
+          0.05051
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.020069,
+        "ref_to_out_p99_m": 0.014049,
+        "samples": [
+          200000,
+          2400
+        ]
+      },
+      "seconds": 0.34
+    },
+    "l6": {
+      "file": "generated/l6_collision.stl",
+      "bytes": 20084,
+      "faces_in": 24436,
+      "faces_out": 400,
+      "target_faces": 400,
+      "reduction": 0.98363,
+      "bbox_in": {
+        "min": [
+          -0.005,
+          -0.057997,
+          -0.057995
+        ],
+        "max": [
+          0.0402,
+          0.058001,
+          0.058003
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.0025,
+          -0.053239,
+          -0.053237
+        ],
+        "max": [
+          0.0234,
+          0.053243,
+          0.053245
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.031798,
+        "ref_to_out_p99_m": 0.014576,
+        "samples": [
+          73308,
+          1200
+        ]
+      },
+      "seconds": 0.08
+    },
+    "l7": {
+      "file": "generated/l7_collision.stl",
+      "bytes": 20084,
+      "faces_in": 25324,
+      "faces_out": 400,
+      "target_faces": 400,
+      "reduction": 0.9842,
+      "bbox_in": {
+        "min": [
+          -0.0051,
+          -0.057997,
+          -0.057995
+        ],
+        "max": [
+          0.0402,
+          0.058001,
+          0.058003
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.0025,
+          -0.053239,
+          -0.053237
+        ],
+        "max": [
+          0.0234,
+          0.053243,
+          0.053245
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.031798,
+        "ref_to_out_p99_m": 0.014576,
+        "samples": [
+          75972,
+          1200
+        ]
+      },
+      "seconds": 0.08
+    },
+    "l8": {
+      "file": "generated/l8_collision.stl",
+      "bytes": 20084,
+      "faces_in": 25324,
+      "faces_out": 400,
+      "target_faces": 400,
+      "reduction": 0.9842,
+      "bbox_in": {
+        "min": [
+          -0.0051,
+          -0.057997,
+          -0.057995
+        ],
+        "max": [
+          0.0402,
+          0.058001,
+          0.058003
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.0025,
+          -0.053239,
+          -0.053237
+        ],
+        "max": [
+          0.0234,
+          0.053243,
+          0.053245
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.031798,
+        "ref_to_out_p99_m": 0.014576,
+        "samples": [
+          75972,
+          1200
+        ]
+      },
+      "seconds": 0.08
+    },
+    "l9": {
+      "file": "generated/l9_collision.stl",
+      "bytes": 20084,
+      "faces_in": 25324,
+      "faces_out": 400,
+      "target_faces": 400,
+      "reduction": 0.9842,
+      "bbox_in": {
+        "min": [
+          -0.0051,
+          -0.057997,
+          -0.057995
+        ],
+        "max": [
+          0.0402,
+          0.058001,
+          0.058003
+        ]
+      },
+      "bbox_out": {
+        "min": [
+          -0.0025,
+          -0.053239,
+          -0.053237
+        ],
+        "max": [
+          0.0234,
+          0.053243,
+          0.053245
+        ]
+      },
+      "error": {
+        "out_to_ref_max_m": 0.0,
+        "out_to_ref_p99_m": 0.0,
+        "ref_to_out_max_m": 0.031798,
+        "ref_to_out_p99_m": 0.014576,
+        "samples": [
+          75972,
+          1200
+        ]
+      },
+      "seconds": 0.08
+    }
+  }
+}

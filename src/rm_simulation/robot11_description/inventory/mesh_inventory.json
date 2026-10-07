@@ -1,0 +1,1081 @@
+{
+  "tool": "tools/scripts/regress/robot11_mesh_inventory.py",
+  "generated_at": "2026-10-07T14:17:34+0800",
+  "parser": "self-written binary/ASCII STL reader",
+  "cross_check": "trimesh 4.11.0",
+  "unit_rule": "raw max extent > 20 => mm",
+  "meshes": [
+    {
+      "name": "base_link",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/base_link.STL",
+      "bytes": 103911384,
+      "sha256": "3a76fd4269064f62b196ab3ddfe967b0ed20a1d9998d21d3cf2c17a0a3fda5a1",
+      "format": "binary",
+      "triangles": 2078226,
+      "triangles_from_header": 2078226,
+      "triangles_implied_by_size": 2078226,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.30000001192092896,
+          -0.30000001192092896,
+          -0.0479443334043026
+        ],
+        "max": [
+          0.30000001192092896,
+          0.30000001192092896,
+          0.21299999952316284
+        ],
+        "size": [
+          0.6000000238418579,
+          0.6000000238418579,
+          0.26094433292746544
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.30000001192092896,
+          -0.30000001192092896,
+          -0.0479443334043026
+        ],
+        "max": [
+          0.30000001192092896,
+          0.30000001192092896,
+          0.21299999952316284
+        ],
+        "size": [
+          0.6000000238418579,
+          0.6000000238418579,
+          0.26094433292746544
+        ]
+      },
+      "bbox_center_m": [
+        0.0,
+        0.0,
+        0.08252783305943012
+      ],
+      "vertex_mean_m": [
+        -0.0006478948524723052,
+        -0.003876869763254256,
+        0.06499204405490758
+      ],
+      "area_weighted_center_m": [
+        0.004319688293005588,
+        0.000998790795719404,
+        0.05600986264276904
+      ],
+      "surface_area_m2": 3.5688570456671926,
+      "signed_volume_m3": 0.0015953678545909524,
+      "abs_volume_m3": 0.0015953678545909524,
+      "topology_own": {
+        "unique_vertices": 1027078,
+        "unique_edges": 3072623,
+        "boundary_edges": 19432,
+        "nonmanifold_edges": 53378,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "1": 19432,
+          "2": 2999813,
+          "3": 16,
+          "4": 52492,
+          "6": 678,
+          "8": 192
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 7.96,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": 34863,
+        "body_count": 2733,
+        "volume_m3": 0.0006902947982227861,
+        "is_volume": false,
+        "vertex_count": 1030349,
+        "face_count": 2078226
+      }
+    },
+    {
+      "name": "l10",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l10.STL",
+      "bytes": 1882484,
+      "sha256": "701ba5fcc80f2b92f57cb056966c48c8e6ca81dfdb097775031570426b591207",
+      "format": "binary",
+      "triangles": 37648,
+      "triangles_from_header": 37648,
+      "triangles_implied_by_size": 37648,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.13699999451637268,
+          -0.04960000142455101,
+          -0.03238746523857117
+        ],
+        "max": [
+          0.009999999776482582,
+          0.08829999715089798,
+          0.03817839175462723
+        ],
+        "size": [
+          0.14699999429285526,
+          0.137899998575449,
+          0.0705658569931984
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.13699999451637268,
+          -0.04960000142455101,
+          -0.03238746523857117
+        ],
+        "max": [
+          0.009999999776482582,
+          0.08829999715089798,
+          0.03817839175462723
+        ],
+        "size": [
+          0.14699999429285526,
+          0.137899998575449,
+          0.0705658569931984
+        ]
+      },
+      "bbox_center_m": [
+        -0.06349999736994505,
+        0.019349997863173485,
+        0.0028954632580280304
+      ],
+      "vertex_mean_m": [
+        -0.06564194226437471,
+        0.03966878263545392,
+        0.0005486249885335547
+      ],
+      "area_weighted_center_m": [
+        -0.06191292813305229,
+        0.030620627793055882,
+        0.000411441229108684
+      ],
+      "surface_area_m2": 0.12103293347466254,
+      "signed_volume_m3": 0.00014136666086140976,
+      "abs_volume_m3": 0.00014136666086140976,
+      "topology_own": {
+        "unique_vertices": 17828,
+        "unique_edges": 56050,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 422,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 55628,
+          "4": 422
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.11,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -584,
+        "body_count": 13,
+        "volume_m3": 0.0001413666610517124,
+        "is_volume": false,
+        "vertex_count": 17842,
+        "face_count": 37648
+      }
+    },
+    {
+      "name": "l11",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l11.STL",
+      "bytes": 8822984,
+      "sha256": "f4de025b574e240cbb53c2df1d30395c1e333c2ceafc1ff7f87024e007145dd9",
+      "format": "binary",
+      "triangles": 176458,
+      "triangles_from_header": 176458,
+      "triangles_implied_by_size": 176458,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.025999413803219795,
+          -0.04366327449679375,
+          -0.12913858890533447
+        ],
+        "max": [
+          0.10699941217899323,
+          0.12872381508350372,
+          0.20608174800872803
+        ],
+        "size": [
+          0.13299882598221302,
+          0.17238708958029747,
+          0.3352203369140625
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.025999413803219795,
+          -0.04366327449679375,
+          -0.12913858890533447
+        ],
+        "max": [
+          0.10699941217899323,
+          0.12872381508350372,
+          0.20608174800872803
+        ],
+        "size": [
+          0.13299882598221302,
+          0.17238708958029747,
+          0.3352203369140625
+        ]
+      },
+      "bbox_center_m": [
+        0.040499999187886715,
+        0.04253027029335499,
+        0.03847157955169678
+      ],
+      "vertex_mean_m": [
+        0.02365083919137224,
+        0.003944455240010219,
+        -0.028299444240841857
+      ],
+      "area_weighted_center_m": [
+        0.03851298879056269,
+        0.025273068212090785,
+        0.033470676863986304
+      ],
+      "surface_area_m2": 0.38155108980818364,
+      "signed_volume_m3": 0.00072875175536611,
+      "abs_volume_m3": 0.00072875175536611,
+      "topology_own": {
+        "unique_vertices": 86929,
+        "unique_edges": 264275,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 412,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 263863,
+          "4": 412
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.56,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -912,
+        "body_count": 54,
+        "volume_m3": 0.0007287517549336964,
+        "is_volume": false,
+        "vertex_count": 86965,
+        "face_count": 176458
+      }
+    },
+    {
+      "name": "l12",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l12.STL",
+      "bytes": 3437084,
+      "sha256": "13cf2b869428a8db02ca77f7f05c4424f9512ded5cb65b83467c44300d84fd83",
+      "format": "binary",
+      "triangles": 68740,
+      "triangles_from_header": 68740,
+      "triangles_implied_by_size": 68740,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.03986170142889023,
+          -0.030344683676958084,
+          2.1121498994247645e-10
+        ],
+        "max": [
+          0.03187521919608116,
+          0.03452916070818901,
+          0.0600971020758152
+        ],
+        "size": [
+          0.07173692062497139,
+          0.0648738443851471,
+          0.06009710186460021
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.03986170142889023,
+          -0.030344683676958084,
+          2.1121498994247645e-10
+        ],
+        "max": [
+          0.03187521919608116,
+          0.03452916070818901,
+          0.0600971020758152
+        ],
+        "size": [
+          0.07173692062497139,
+          0.0648738443851471,
+          0.06009710186460021
+        ]
+      },
+      "bbox_center_m": [
+        -0.003993241116404533,
+        0.0020922385156154633,
+        0.030048551143515095
+      ],
+      "vertex_mean_m": [
+        -0.008869549393144141,
+        0.002098263097787856,
+        0.014278167373930272
+      ],
+      "area_weighted_center_m": [
+        -0.0007396170558834287,
+        0.00214801382567853,
+        0.01818042053582138
+      ],
+      "surface_area_m2": 0.044389939734168465,
+      "signed_volume_m3": 0.00014021270161258172,
+      "abs_volume_m3": 0.00014021270161258172,
+      "topology_own": {
+        "unique_vertices": 34634,
+        "unique_edges": 103360,
+        "boundary_edges": 500,
+        "nonmanifold_edges": 0,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "1": 500,
+          "2": 102860
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": true,
+      "parse_seconds": 0.26,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": 14,
+        "body_count": 16,
+        "volume_m3": 0.00013990433626963968,
+        "is_volume": false,
+        "vertex_count": 34634,
+        "face_count": 68740
+      }
+    },
+    {
+      "name": "l2",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l2.STL",
+      "bytes": 4477884,
+      "sha256": "a3f5a04054e2d4788cb547c39d3016a585055b53d1bbb2581494adb2695a94cf",
+      "format": "binary",
+      "triangles": 89556,
+      "triangles_from_header": 89556,
+      "triangles_implied_by_size": 89556,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.13420096039772034,
+          -0.05447869002819061,
+          -0.06113455817103386
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.04915110394358635,
+          0.06345757842063904
+        ],
+        "size": [
+          0.11635095998644829,
+          0.10362979397177696,
+          0.1245921365916729
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.13420096039772034,
+          -0.05447869002819061,
+          -0.06113455817103386
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.04915110394358635,
+          0.06345757842063904
+        ],
+        "size": [
+          0.11635095998644829,
+          0.10362979397177696,
+          0.1245921365916729
+        ]
+      },
+      "bbox_center_m": [
+        -0.07602548040449619,
+        -0.0026637930423021317,
+        0.0011615101248025894
+      ],
+      "vertex_mean_m": [
+        -0.08595224819210226,
+        -0.011979078934921436,
+        -0.0010914755268660002
+      ],
+      "area_weighted_center_m": [
+        -0.06875740789216021,
+        -0.002552222868507027,
+        0.0012199988465014765
+      ],
+      "surface_area_m2": 0.13408400468879567,
+      "signed_volume_m3": 0.00023187063938692257,
+      "abs_volume_m3": 0.00023187063938692257,
+      "topology_own": {
+        "unique_vertices": 44273,
+        "unique_edges": 133983,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 351,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 133632,
+          "4": 351
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.29,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -144,
+        "body_count": 45,
+        "volume_m3": 0.000231870639446204,
+        "is_volume": false,
+        "vertex_count": 44287,
+        "face_count": 89556
+      }
+    },
+    {
+      "name": "l3",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l3.STL",
+      "bytes": 4440084,
+      "sha256": "04d4b1864166a6d1f03d47c0dde4fb153bea88d05b7c5ea71beb9376266bf6c1",
+      "format": "binary",
+      "triangles": 88800,
+      "triangles_from_header": 88800,
+      "triangles_implied_by_size": 88800,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.13420096039772034,
+          -0.06345757842063904,
+          -0.05447869002819061
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.046345364302396774,
+          0.04915110394358635
+        ],
+        "size": [
+          0.11635095998644829,
+          0.10980294272303581,
+          0.10362979397177696
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.13420096039772034,
+          -0.06345757842063904,
+          -0.05447869002819061
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.046345364302396774,
+          0.04915110394358635
+        ],
+        "size": [
+          0.11635095998644829,
+          0.10980294272303581,
+          0.10362979397177696
+        ]
+      },
+      "bbox_center_m": [
+        -0.07602548040449619,
+        -0.008556107059121132,
+        -0.0026637930423021317
+      ],
+      "vertex_mean_m": [
+        -0.08639317556919233,
+        0.000885974382488578,
+        -0.012331750994822765
+      ],
+      "area_weighted_center_m": [
+        -0.06918269529266627,
+        -0.0012118401665376654,
+        -0.003021952567583844
+      ],
+      "surface_area_m2": 0.1321485817905348,
+      "signed_volume_m3": 0.0002297475030460498,
+      "abs_volume_m3": 0.0002297475030460498,
+      "topology_own": {
+        "unique_vertices": 43913,
+        "unique_edges": 132849,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 351,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 132498,
+          "4": 351
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.26,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -132,
+        "body_count": 44,
+        "volume_m3": 0.00022974750310507277,
+        "is_volume": false,
+        "vertex_count": 43921,
+        "face_count": 88800
+      }
+    },
+    {
+      "name": "l4",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l4.STL",
+      "bytes": 4561784,
+      "sha256": "e021577401b047d6b034c4588fe59b49fec15811f5977a4b819631ea8327d1a5",
+      "format": "binary",
+      "triangles": 91234,
+      "triangles_from_header": 91234,
+      "triangles_implied_by_size": 91234,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.13534417748451233,
+          -0.04915110394358635,
+          -0.06345757842063904
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.05447869002819061,
+          0.046345364302396774
+        ],
+        "size": [
+          0.11749417707324028,
+          0.10362979397177696,
+          0.10980294272303581
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.13534417748451233,
+          -0.04915110394358635,
+          -0.06345757842063904
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.05447869002819061,
+          0.046345364302396774
+        ],
+        "size": [
+          0.11749417707324028,
+          0.10362979397177696,
+          0.10980294272303581
+        ]
+      },
+      "bbox_center_m": [
+        -0.07659708894789219,
+        0.0026637930423021317,
+        -0.008556107059121132
+      ],
+      "vertex_mean_m": [
+        -0.08665468447590266,
+        0.011443127334580333,
+        0.0007286946574807166
+      ],
+      "area_weighted_center_m": [
+        -0.07209808865666781,
+        0.0006439670001013149,
+        -0.0015096169446372155
+      ],
+      "surface_area_m2": 0.14733271221736735,
+      "signed_volume_m3": 0.00024590649645995214,
+      "abs_volume_m3": 0.00024590649645995214,
+      "topology_own": {
+        "unique_vertices": 45100,
+        "unique_edges": 136500,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 351,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 136149,
+          "4": 351
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.27,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -156,
+        "body_count": 46,
+        "volume_m3": 0.000245906496518975,
+        "is_volume": false,
+        "vertex_count": 45114,
+        "face_count": 91234
+      }
+    },
+    {
+      "name": "l5",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l5.STL",
+      "bytes": 4512584,
+      "sha256": "1d903bdd0f2125f61dc2e1a6dc102fb4164955be14d110240283e8bc7f516ca5",
+      "format": "binary",
+      "triangles": 90250,
+      "triangles_from_header": 90250,
+      "triangles_implied_by_size": 90250,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.13534417748451233,
+          -0.046345364302396774,
+          -0.04915110394358635
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.06345757842063904,
+          0.05447869002819061
+        ],
+        "size": [
+          0.11749417707324028,
+          0.10980294272303581,
+          0.10362979397177696
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.13534417748451233,
+          -0.046345364302396774,
+          -0.04915110394358635
+        ],
+        "max": [
+          -0.01785000041127205,
+          0.06345757842063904,
+          0.05447869002819061
+        ],
+        "size": [
+          0.11749417707324028,
+          0.10980294272303581,
+          0.10362979397177696
+        ]
+      },
+      "bbox_center_m": [
+        -0.07659708894789219,
+        0.008556107059121132,
+        0.0026637930423021317
+      ],
+      "vertex_mean_m": [
+        -0.08648900727327785,
+        -0.0007554174225748177,
+        0.011847128665994635
+      ],
+      "area_weighted_center_m": [
+        -0.07147547997624451,
+        0.0015051894712295177,
+        0.0011931535044384597
+      ],
+      "surface_area_m2": 0.14431272617560506,
+      "signed_volume_m3": 0.00024181286978335338,
+      "abs_volume_m3": 0.00024181286978335338,
+      "topology_own": {
+        "unique_vertices": 44608,
+        "unique_edges": 135024,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 351,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 134673,
+          "4": 351
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.27,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -156,
+        "body_count": 45,
+        "volume_m3": 0.0002418128698423763,
+        "is_volume": false,
+        "vertex_count": 44622,
+        "face_count": 90250
+      }
+    },
+    {
+      "name": "l6",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l6.STL",
+      "bytes": 1221884,
+      "sha256": "c5ccab5c8e6a12fdb2e710942d01eb0130b657cae6275071dcf6f70524019190",
+      "format": "binary",
+      "triangles": 24436,
+      "triangles_from_header": 24436,
+      "triangles_implied_by_size": 24436,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.004999999888241291,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045199998654425144,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.004999999888241291,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045199998654425144,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_center_m": [
+        0.01759999943897128,
+        2.037733793258667e-06,
+        3.7848949432373047e-06
+      ],
+      "vertex_mean_m": [
+        0.008611418280252784,
+        -9.850752017167064e-05,
+        -0.00039948787879255133
+      ],
+      "area_weighted_center_m": [
+        0.01031573451113177,
+        2.9475178863516597e-06,
+        4.885143873819841e-07
+      ],
+      "surface_area_m2": 0.1068247632132846,
+      "signed_volume_m3": 0.00014711742593033903,
+      "abs_volume_m3": 0.00014711742593033903,
+      "topology_own": {
+        "unique_vertices": 11780,
+        "unique_edges": 36446,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 208,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 36238,
+          "4": 208
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.07,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -230,
+        "body_count": 3,
+        "volume_m3": 0.0001471174259303391,
+        "is_volume": false,
+        "vertex_count": 11780,
+        "face_count": 24436
+      }
+    },
+    {
+      "name": "l7",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l7.STL",
+      "bytes": 1266284,
+      "sha256": "39ffdecc71735a91af8d50ac4b71deda9f7df8709cde648cef78da3a0fdf8a26",
+      "format": "binary",
+      "triangles": 25324,
+      "triangles_from_header": 25324,
+      "triangles_implied_by_size": 25324,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.005100000184029341,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045299998950213194,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.005100000184029341,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045299998950213194,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_center_m": [
+        0.017549999291077256,
+        2.037733793258667e-06,
+        3.7848949432373047e-06
+      ],
+      "vertex_mean_m": [
+        0.008253349276593786,
+        -9.496974987038602e-05,
+        -0.00038535858997270793
+      ],
+      "area_weighted_center_m": [
+        0.009828329255874135,
+        2.910249897429689e-06,
+        6.233418121387988e-07
+      ],
+      "surface_area_m2": 0.11138071792565388,
+      "signed_volume_m3": 0.00015403086891659,
+      "abs_volume_m3": 0.00015403086891659,
+      "topology_own": {
+        "unique_vertices": 12224,
+        "unique_edges": 37778,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 208,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 37570,
+          "4": 208
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.07,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -230,
+        "body_count": 4,
+        "volume_m3": 0.00015403086891659,
+        "is_volume": false,
+        "vertex_count": 12224,
+        "face_count": 25324
+      }
+    },
+    {
+      "name": "l8",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l8.STL",
+      "bytes": 1266284,
+      "sha256": "b6dbcd1e17621bfdbe94e51a097bfbebd79e0b581b4a7ca9ba3ff4688152668e",
+      "format": "binary",
+      "triangles": 25324,
+      "triangles_from_header": 25324,
+      "triangles_implied_by_size": 25324,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.005100000184029341,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045299998950213194,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.005100000184029341,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045299998950213194,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_center_m": [
+        0.017549999291077256,
+        2.037733793258667e-06,
+        3.7848949432373047e-06
+      ],
+      "vertex_mean_m": [
+        0.008253349276593786,
+        -9.496974987038602e-05,
+        -0.00038535858997270793
+      ],
+      "area_weighted_center_m": [
+        0.00982832925587413,
+        2.9102498974300007e-06,
+        6.233418121391713e-07
+      ],
+      "surface_area_m2": 0.1113807179256539,
+      "signed_volume_m3": 0.00015403086891659017,
+      "abs_volume_m3": 0.00015403086891659017,
+      "topology_own": {
+        "unique_vertices": 12224,
+        "unique_edges": 37778,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 208,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 37570,
+          "4": 208
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.07,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -230,
+        "body_count": 4,
+        "volume_m3": 0.00015403086891659017,
+        "is_volume": false,
+        "vertex_count": 12224,
+        "face_count": 25324
+      }
+    },
+    {
+      "name": "l9",
+      "file": "/home/weicheng/HzMi_rmsimulation/src/rm_simulation/robot11_description/meshes/l9.STL",
+      "bytes": 1266284,
+      "sha256": "9258bd59e7109528d71f7d995b171b191af498d6c485f5091ef93c4c60e786e1",
+      "format": "binary",
+      "triangles": 25324,
+      "triangles_from_header": 25324,
+      "triangles_implied_by_size": 25324,
+      "attribute_bytes_nonzero": 0,
+      "size_check_ok": true,
+      "unit_guess": "m",
+      "bbox_raw": {
+        "min": [
+          -0.005100000184029341,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045299998950213194,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_m": {
+        "min": [
+          -0.005100000184029341,
+          -0.05799681320786476,
+          -0.05799505487084389
+        ],
+        "max": [
+          0.04019999876618385,
+          0.05800088867545128,
+          0.05800262466073036
+        ],
+        "size": [
+          0.045299998950213194,
+          0.11599770188331604,
+          0.11599767953157425
+        ]
+      },
+      "bbox_center_m": [
+        0.017549999291077256,
+        2.037733793258667e-06,
+        3.7848949432373047e-06
+      ],
+      "vertex_mean_m": [
+        0.008253349276593786,
+        -9.496974987038602e-05,
+        -0.00038535858997270793
+      ],
+      "area_weighted_center_m": [
+        0.00982832925587413,
+        2.9102498974297156e-06,
+        6.233418121392119e-07
+      ],
+      "surface_area_m2": 0.11138071792565389,
+      "signed_volume_m3": 0.00015403086891659006,
+      "abs_volume_m3": 0.00015403086891659006,
+      "topology_own": {
+        "unique_vertices": 12224,
+        "unique_edges": 37778,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 208,
+        "degenerate_tris": 0,
+        "edge_count_hist": {
+          "2": 37570,
+          "4": 208
+        }
+      },
+      "watertight_own": false,
+      "manifold_own": false,
+      "parse_seconds": 0.07,
+      "trimesh": {
+        "watertight": false,
+        "winding_consistent": true,
+        "euler_number": -230,
+        "body_count": 4,
+        "volume_m3": 0.00015403086891659006,
+        "is_volume": false,
+        "vertex_count": 12224,
+        "face_count": 25324
+      }
+    }
+  ]
+}
