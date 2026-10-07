@@ -320,7 +320,11 @@ class Forensics(Node):
         c, s = math.cos(yaw), math.sin(yaw)
         return (t.x + c * x - s * y, t.y + s * x + c * y)
 
-    def send_goal(self, x, y):
+    def send_goal(self, x, y, yaw=None):
+        """yaw=None ⇒ 四元数 w=1（= 目标朝向 0°，历史行为）；给弧度值 ⇒ 按它设四元数。
+
+        ★ 2026-10-10：`--goal-yaw-only-deg` 用它做"**原地转**"目标（位置 = 当前位姿、
+        朝向 = 当前 + D）—— 这是验收"角速度通道修好没有"最直接的一条 nav2 目标。"""
         if self.goal_pub is None:
             self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         p = PoseStamped()
@@ -328,10 +332,50 @@ class Forensics(Node):
         p.header.stamp = self.get_clock().now().to_msg()
         p.pose.position.x = float(x)
         p.pose.position.y = float(y)
-        p.pose.orientation.w = 1.0
+        if yaw is None:
+            p.pose.orientation.w = 1.0
+        else:
+            p.pose.orientation.z = math.sin(yaw / 2.0)
+            p.pose.orientation.w = math.cos(yaw / 2.0)
         for _ in range(5):
             self.goal_pub.publish(p)
             time.sleep(0.2)
+
+
+def push_leg(node, vx, wz, seconds, rate=20.0):
+    """一条"盲推腿"：绕过 nav2 只发 /cmd_vel_chassis，返回位移/转角/最后一次运动的时刻。
+
+    与 `--push` 是同一套做法（同一个话题、同样的 20 Hz、同样以**真值**计量），
+    只是拆成可重复调用的一段，供 `--preflight-reach` 做"正推 + 反推"两腿。"""
+    pub = node.create_publisher(Twist, '/cmd_vel_chassis', 10)
+    w0, s0 = time.time(), node.t()
+    t0 = node.truth[-1] if node.truth else None
+    last_move, prev = 0.0, None
+    while time.time() - w0 < seconds:
+        tw = Twist()
+        tw.linear.x = float(vx)
+        tw.angular.z = float(wz)
+        pub.publish(tw)
+        if node.truth:
+            cur = node.truth[-1]
+            if prev is not None and math.hypot(cur[1] - prev[1], cur[2] - prev[2]) > 0.002:
+                last_move = time.time() - w0
+            prev = cur
+        time.sleep(1.0 / max(1.0, rate))
+    pub.publish(Twist())
+    time.sleep(0.3)
+    t1 = node.truth[-1] if node.truth else None
+    d = None if (t0 is None or t1 is None) else math.hypot(t1[1] - t0[1], t1[2] - t0[2])
+    dyaw = None if (t0 is None or t1 is None) else math.degrees(t1[3] - t0[3])
+    if dyaw is not None:
+        dyaw = (dyaw + 180.0) % 360.0 - 180.0
+    return {'vx': float(vx), 'wz': float(wz), 'wall_s': round(time.time() - w0, 3),
+            'sim_s': round(node.t() - s0, 3),
+            'requested_m': round(abs(vx) * seconds, 4),
+            'disp_m': None if d is None else round(d, 4),
+            'd_yaw_deg': None if dyaw is None else round(dyaw, 3),
+            't_last_motion_s': round(last_move, 2),
+            'truth_end': None if t1 is None else [round(v, 4) for v in t1[1:]]}
 
 
 def main():
@@ -342,6 +386,9 @@ def main():
     ap.add_argument('--duration', type=float, default=30.0)
     ap.add_argument('--goal-forward', type=float, default=None)
     ap.add_argument('--goal', nargs=2, type=float, default=None)
+    ap.add_argument('--goal-yaw-only-deg', type=float, default=None,
+                    help='★ 原地转目标：位置 = 发目标那一刻的 map 位姿，朝向 = 当前朝向 + 该角度（度）。'
+                         '与 --goal/--goal-forward 互斥（给了它就用它）')
     ap.add_argument('--goal-wait', type=float, default=45.0)
     ap.add_argument('--push', type=float, default=None,
                     help='★ 不经 nav2：直接给 /cmd_vel_chassis 发 vx=该值（±）持续 --push-time 秒，'
@@ -349,6 +396,25 @@ def main():
     ap.add_argument('--push-wz', type=float, default=None,
                     help='★ 与 --push 同款但发角速度（纯自转）——量"底盘到底转不转"')
     ap.add_argument('--push-time', type=float, default=12.0)
+    ap.add_argument('--preflight-reach', type=float, default=None,
+                    help='★ 可达性前置判据（§L/§M 建议的新验收口径）：在**发目标之前**先用'
+                         '绕过 nav2 的盲推量一次"这个出生点物理上能走多远"——先按该 vx 正推'
+                         '--preflight-time 秒（量 fwd_m），再反推同样时长（量 back_m）。'
+                         '结果写进 JSON 的 reach，并可用 --reach-gate 卡住不可达的目标。')
+    ap.add_argument('--preflight-time', type=float, default=25.0,
+                    help='每条腿的时长（墙钟秒）。默认 25 s 与 §L 的 --push-time 同口径'
+                         '（12 s 只够量"挡没挡住"，量不到"空间有多少"）')
+    ap.add_argument('--dump-traces', action='store_true',
+                    help='把 /odom_ground_truth 与 /odom 的完整时间线写进 JSON（默认只写摘要）。'
+                         '长窗口的"自由偏航漂移"（无指令）只能从这条时间线读出来 —— timeline 只在'
+                         '发目标/push 时才采样')
+    ap.add_argument('--reach-gate', default='',
+                    help='★ 目标可达性闸门：读一份带 reach 的 forensics.json（= --preflight-reach '
+                         '那一跑的输出），若目标距离超出实测可达区（留 --reach-margin）⇒ '
+                         '**不发目标**，并在 JSON 里记 goal_gate（sent=false, reason=…）。'
+                         '为什么要有它：§L 的 `--goal-forward 2.0` 在出生点物理上不可达，'
+                         '不发目标才能把"控制器不工作"与"目标在墙后面"分开。')
+    ap.add_argument('--reach-margin', type=float, default=0.05)
     ap.add_argument('--push-rate', type=float, default=20.0)
     a, _ = ap.parse_known_args()
 
@@ -372,8 +438,35 @@ def main():
 
     pre_map = node.map_pose()
     pre_truth = node.truth[-1] if node.truth else None
+    # ★ 可达性前置判据（在**发目标之前**、绕过 nav2）：正推 + 反推各 --preflight-time 秒
+    reach = None
+    if a.preflight_reach is not None:
+        log('★ 可达性前置判据：盲推 vx=%+.3f 各 %.0f s（绕过 nav2；§L/§M 的口径）'
+            % (a.preflight_reach, a.preflight_time))
+        leg_f = push_leg(node, a.preflight_reach, 0.0, a.preflight_time,
+                         rate=max(1.0, a.push_rate))
+        leg_b = push_leg(node, -a.preflight_reach, 0.0, a.preflight_time,
+                         rate=max(1.0, a.push_rate))
+        reach = {'vx': a.preflight_reach, 'leg_s': a.preflight_time,
+                 'fwd_m': leg_f['disp_m'], 'back_m': leg_b['disp_m'],
+                 'fwd_dyaw_deg': leg_f['d_yaw_deg'], 'back_dyaw_deg': leg_b['d_yaw_deg'],
+                 'fwd_t_last_motion_s': leg_f['t_last_motion_s'],
+                 'back_t_last_motion_s': leg_b['t_last_motion_s'],
+                 'fwd_sim_s': leg_f['sim_s'], 'back_sim_s': leg_b['sim_s'],
+                 'leg_fwd': leg_f, 'leg_back': leg_b}
+        log('★ 可达区（真值）：前方 %.4f m / 后方 %.4f m（同一次起跑点；正推时 Δyaw %s°、'
+            '反推时 Δyaw %s°）' % (leg_f['disp_m'] or 0.0, leg_b['disp_m'] or 0.0,
+                                leg_f['d_yaw_deg'], leg_b['d_yaw_deg']))
+
     goal_xy = None
-    if a.goal_forward is not None and pre_map is not None:
+    goal_yaw = None
+    if a.goal_yaw_only_deg is not None and pre_map is not None:
+        goal_xy = (pre_map[0], pre_map[1])
+        goal_yaw = pre_map[2] + math.radians(a.goal_yaw_only_deg)
+        log('原地转目标：位置不动（%.3f, %.3f），朝向 %.1f° → %.1f°（Δ%.1f°）'
+            % (pre_map[0], pre_map[1], math.degrees(pre_map[2]),
+               math.degrees(goal_yaw), a.goal_yaw_only_deg))
+    elif a.goal_forward is not None and pre_map is not None:
         goal_xy = (pre_map[0] + a.goal_forward * math.cos(pre_map[2]),
                    pre_map[1] + a.goal_forward * math.sin(pre_map[2]))
         log('车在 map 系 (%.3f, %.3f, %.1f°)，目标 = 车头前 %.2f m → (%.3f, %.3f)'
@@ -384,6 +477,36 @@ def main():
         log('显式目标 (%.3f, %.3f)（车在 map 系 %s）' % (goal_xy[0], goal_xy[1], pre_map))
     else:
         log('** 没发目标（goal-forward 拿不到位姿 或 没给 --goal）')
+
+    # ★ 可达性闸门：目标超出实测可达区 ⇒ 不发目标（把"目标在墙后面"与"控制器不动"分开）
+    goal_gate = None
+    if goal_xy is not None and a.reach_gate:
+        env = {}
+        try:
+            env = (json.load(open(a.reach_gate)) or {}).get('reach') or {}
+        except Exception as exc:                                        # noqa: BLE001
+            log('⚠️ 读不到 --reach-gate %s：%s（本次不做闸门）' % (a.reach_gate, exc))
+        if env and pre_map is not None:
+            need = math.hypot(goal_xy[0] - pre_map[0], goal_xy[1] - pre_map[1])
+            fwd = ((goal_xy[0] - pre_map[0]) * math.cos(pre_map[2]) +
+                   (goal_xy[1] - pre_map[1]) * math.sin(pre_map[2]))
+            avail = env.get('fwd_m') if fwd >= 0 else env.get('back_m')
+            ok = avail is not None and need <= max(0.0, float(avail) - a.reach_margin)
+            goal_gate = {'gate_file': a.reach_gate, 'dir': 'fwd' if fwd >= 0 else 'back',
+                         'needed_m': round(need, 4),
+                         'available_m': None if avail is None else round(float(avail), 4),
+                         'margin_m': a.reach_margin, 'in_reach': bool(ok)}
+            log('★ 可达性闸门（%s 方向）：目标 %.4f m / 实测可达 %.4f m（余量 %.2f）⇒ %s'
+                % (goal_gate['dir'], need, avail if avail is not None else float('nan'),
+                   a.reach_margin, '在可达区内，发目标' if ok else '**超出可达区，不发目标**'))
+            if not ok:
+                goal_gate['sent'] = False
+                goal_gate['reason'] = ('目标 %.3f m 超出实测可达区 %.3f m（§L/§M：这种目标物理上'
+                                       '不可达，问题是目标而不在控制器）' % (need, float(avail)))
+                goal_xy = None
+                goal_yaw = None
+            else:
+                goal_gate['sent'] = True
 
     def sample():
         rec = {'t': round(node.t(), 2)}
@@ -412,11 +535,13 @@ def main():
     if goal_xy is not None:
         node.goal_xy = goal_xy
         log('发 /goal_pose %.3f %.3f' % goal_xy)
-        node.send_goal(*goal_xy)
+        node.send_goal(goal_xy[0], goal_xy[1], goal_yaw)
         t_send = node.t()
         with node.lock:
             node.events.append((round(t_send, 2), 'goal_sent',
                                 {'goal': [round(goal_xy[0], 4), round(goal_xy[1], 4)],
+                                 'goal_yaw_deg': (None if goal_yaw is None
+                                                  else round(math.degrees(goal_yaw), 3)),
                                  'pre_map_pose': None if pre_map is None else
                                  [round(v, 4) for v in pre_map],
                                  'pre_truth': None if pre_truth is None else
@@ -553,7 +678,16 @@ def main():
            'cmd_vel_stats': {},
            'global_grids': {k: g.metrics() for k, g in grids.items()},
            'local_grid': None if local_grid is None else local_grid.metrics(),
-           't_send_rel': t_send, 'push': push}
+           't_send_rel': t_send, 'push': push,
+           'reach': reach, 'goal_gate': goal_gate}
+    if a.dump_traces:
+        with node.lock:
+            out['traces'] = {
+                'truth': [[round(t, 3), round(x, 4), round(y, 4), round(math.degrees(yaw), 4)]
+                          for (t, x, y, yaw) in node.truth],
+                'odom': [[round(t, 3), round(x, 4), round(y, 4), round(math.degrees(yaw), 4)]
+                         for (t, x, y, yaw) in node.odo],
+            }
 
     for tag in ('cmd_vel', 'cmd_vel_chassis'):
         rows = [c for c in cmd if c[1] == tag]

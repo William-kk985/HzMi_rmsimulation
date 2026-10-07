@@ -10,6 +10,15 @@
 #       --goal-forward 2.0 --goal-wait 45 -- \
 #       world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
 #
+# ★ 2026-10-10 新增的三个开关（探针参数直接透传本脚本，见 docs/tilted_lidar_fidelity.md §M.8）：
+#   --preflight-reach VX [--preflight-time T]   发目标**之前**先用绕过 nav2 的盲推量"这个出生点
+#       物理上能走多远"（正推 + 反推各 T 秒）⇒ 写进 forensics.json 的 reach
+#   --reach-gate <带 reach 的 forensics.json>   目标超出实测可达区（留 --reach-margin）就**不发目标**，
+#       记 goal_gate（sent=false, reason=…）⇒ 把"目标在墙后面"与"控制器不动"分开
+#   --goal-yaw-only-deg D                       原地转目标（位置 = 当前位姿、朝向 = 当前 + D 度）
+#       ⚠️ 本仓 controller 用的是 PositionGoalChecker（不查朝向）⇒ 这类目标会立即 SUCCEEDED
+#   --dump-traces                               把真值/里程计完整时间线写进 JSON（无指令漂移只能从它读）
+#
 # 隔离约定（与 run_tilt_mount_probe.sh / run_robot11_mount_probe.sh 同款）：
 #   HOME=/tmp/gzhome-<tag>、非默认 ROS_DOMAIN_ID、先探测再占用 GAZEBO_MASTER_URI、unset DISPLAY、
 #   跑前/跑后只清**本 master URI 上**的 gzserver/gzclient（按 /proc/<pid>/environ 核对，
