@@ -1,0 +1,15 @@
+# =============================================================================
+# traversability_self_mask.yaml —— 自击掩膜的**默认（关闭）**参数文件
+#
+# 为什么存在这份文件：launch 用与 linefit 的 `segmentation_sim_<slot>.yaml` **同款的槽位机制**
+#   给地面分割节点选参数文件（`_RobotSlotFile`），需要一个"默认路径"。
+#   默认 = **关**（`self_mask_enable: false`）⇒ 与 C++ 里 `SelfMask::enable{false}` 的兜底默认一致，
+#   也与本判据引入掩膜之前的行为**逐字节相同**。
+# 只有 `robot:=robot11` 会切到 `traversability_self_mask_robot11.yaml`（= 开 + 点表）。
+# 生成/验证：python3 tools/scripts/regress/robot11_self_mask.py --emit|--check
+# 关联文档：docs/robot_models.md §12。
+# =============================================================================
+ground_segmentation:
+  ros__parameters:
+    # false ⇒ `LowTerrainClassifier::buildGrid()` 完全不走掩膜分支（旧的建格行为）。
+    self_mask_enable: false

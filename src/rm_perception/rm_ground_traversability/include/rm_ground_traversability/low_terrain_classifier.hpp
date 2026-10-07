@@ -126,6 +126,148 @@ struct Criteria
   }
 };
 
+/// **自击掩膜**（self-hit mask）：把"近场自身回波"的点从**建格**里剔掉。
+///
+/// 为什么需要（robot:=robot11 实测，docs/robot_models.md §12）：本模型雷达装在底盘凹槽里，
+/// 360° 视场里最近的部件是**云台** l10/l11。Gazebo 实测 **26.9~28.1% 的点落在 r ≤ 0.09 m**
+/// （不是 0.116~0.139 —— 见下面"实测更正"）。这些近场点落在前瞻走廊的粗格 d=0 里 ⇒
+/// 把"格内最高点 − 局部地面"抬到 **0.076~0.095 m** ⇒ 限速器判成台阶（> `step_deadband` 0.06）
+/// ⇒ **车停着也被压到速度表地板 0.60 m/s**。
+///
+/// 掩膜由**两部分**组成（并集；默认两部分都关）：
+///
+/// **(a) 自身 collision 包络** `boxes`：本模型 12 个 link 的 `<collision>` 在传感器系下的 AABB。
+///   Gazebo 的 ray sensor 走 ODE、只与 `<collision>` 求交 ⇒ 落在 collision 表面上的回波必在盒内。
+///
+/// **(b) 近场死区** `radius_m` + `z_min_m`：`r_xy ≤ radius_m 且 z ≥ z_min_m` 的点整片剔掉。
+///   为什么 (a) 不够（Phase 4 实测更正）：本槽位近场那 27% 的点**不在任何 collision 几何上**
+///   （逐点验：113 个盒只覆盖其中 3 个）。它们是**射线插件把点重建成 `range·axis`**
+///   造成的系统内移：射线实际从 `minDist·axis`（=0.1 m）出发，而点按 `range·axis` 发布
+///   ⇒ **每个点都朝传感器方向内移 0.1 m**。独立证据（与掩膜无关）：地面点的高度随距离单调变化
+///   （r 0.25–0.35 → z −0.208；r 2–4 → z −0.253；几何真值 −0.2595），正是"沿射线内移 0.1 m"
+///   应有的样子。修那个插件会改变**所有模型**的点云（默认模型也移了 0.1 m）⇒ 不属本主题、
+///   且违反"默认逐字节不变"，所以这里只在**判据层**把这团近场剔掉。
+///   `radius_m` 的上界是**几何硬约束**：本槽位雷达下俯 30°、离地 0.2595 m
+///   ⇒ 最低那条射线的地面交点在 **0.3416 m**，即 **r < 0.3416 m 内不可能有地面回波**；
+///   取 `radius_m = 0.3416 − 0.10 = 0.2416`（留 10 cm 余量）。
+///   离线/在线双重验证：地面带（z < −0.20）被掩 **0 点**；近场那团点在 r ≤ 0.09 内、之后到
+///   0.25 m 是**空的**（实测直方图 0.09–0.15 / 0.15–0.20 / 0.20–0.25 三档都是 0 点）。
+///
+/// 代价：`r_xy ≤ 0.2416 m` 或落在自身 collision 体内的**真障碍**会被一起掩掉 ——
+/// 该区域整个在车体足印（外接半径 0.3565 m）之内 ⇒ 对静止障碍等价于"已经撞上了"。
+///
+/// 默认 `enable=false` ⇒ `buildGrid()` 完全不走这段代码（默认模型/其它槽位逐字节行为不变）。
+struct SelfMask
+{
+  bool enable{false};
+  /// 扁平数组，每个盒子 6 个数：xmin,ymin,zmin,xmax,ymax,zmax（**传感器系**，米）。
+  std::vector<double> boxes;
+  /// 近场死区半径（m，传感器系 XY 平面）。≤0 = 关闭这一部分。
+  double radius_m{0.0};
+  /// 近场死区的 z 下限（m，传感器系）。默认 −∞ ⇒ 不设 z 门（生成器会给"地面以上 clearance"）。
+  double z_min_m{-std::numeric_limits<double>::infinity()};
+
+  /// 参数不合法的**原因**（空串 = 合法）。节点在构造期调用 ⇒ "参数写错 = 掩膜静默不生效" 不可能。
+  std::string reason_invalid() const
+  {
+    std::ostringstream os;
+    if (boxes.size() % 6 != 0) {
+      os << "self_mask_boxes 的长度必须是 6 的整数倍（每组 xmin,ymin,zmin,xmax,ymax,zmax），当前 "
+         << boxes.size() << "；";
+    }
+    for (std::size_t i = 0; i + 5 < boxes.size(); i += 6) {
+      if (boxes[i] > boxes[i + 3] || boxes[i + 1] > boxes[i + 4] || boxes[i + 2] > boxes[i + 5]) {
+        os << "第 " << (i / 6) << " 个盒子的 min > max；";
+        break;
+      }
+    }
+    if (radius_m < 0.0) {
+      os << "self_mask_radius_m 必须 >= 0；";
+    }
+    if (enable && boxes.empty() && radius_m <= 0.0) {
+      os << "self_mask_enable=true 但 self_mask_boxes 与 self_mask_radius_m 都是空的/0"
+            "（掩膜会静默不生效）；";
+    }
+    return os.str();
+  }
+
+  std::size_t n_boxes() const {return boxes.size() / 6;}
+
+  std::string describe() const
+  {
+    std::ostringstream os;
+    if (!enable) {
+      os << "关（默认；建格不看自击点）";
+      return os.str();
+    }
+    os << "开：(a) " << n_boxes() << " 个自身 collision AABB（传感器系）";
+    if (has_global_) {
+      os << "，联合 AABB=[" << global_lo_[0] << "," << global_lo_[1] << "," << global_lo_[2]
+         << " .. " << global_hi_[0] << "," << global_hi_[1] << "," << global_hi_[2] << "]";
+    }
+    os << " + (b) 近场死区 r_xy<=" << radius_m << " m";
+    if (std::isfinite(z_min_m)) {
+      os << " 且 z>=" << z_min_m << " m";
+    }
+    return os.str();
+  }
+
+  /// 预计算"联合 AABB"（每点先过这一关 ⇒ 99.9% 的点一次比较就被排除，逐盒循环几乎不跑）。
+  void build()
+  {
+    has_global_ = false;
+    if (boxes.size() < 6) {
+      return;
+    }
+    for (int k = 0; k < 3; ++k) {
+      global_lo_[k] = std::numeric_limits<double>::infinity();
+      global_hi_[k] = -std::numeric_limits<double>::infinity();
+    }
+    for (std::size_t i = 0; i + 5 < boxes.size(); i += 6) {
+      for (int k = 0; k < 3; ++k) {
+        global_lo_[k] = std::min(global_lo_[k], boxes[i + k]);
+        global_hi_[k] = std::max(global_hi_[k], boxes[i + 3 + k]);
+      }
+    }
+    has_global_ = true;
+  }
+
+  /// 点是否落在掩膜里（传感器系，米）。先过 (b) 近场死区（一次比较），再过 (a) 的联合 AABB。
+  bool contains(double x, double y, double z) const
+  {
+    if (!enable) {
+      return false;
+    }
+    // (b) 近场死区：r_xy ≤ radius_m 且 z ≥ z_min_m。默认 radius_m = 0 ⇒ 这一段恒假。
+    if (radius_m > 0.0 && z >= z_min_m && (x * x + y * y) <= radius_m * radius_m) {
+      return true;
+    }
+    // (a) 自身 collision 包络。
+    if (!has_global_) {
+      return false;
+    }
+    if (x < global_lo_[0] || x > global_hi_[0] || y < global_lo_[1] || y > global_hi_[1] ||
+      z < global_lo_[2] || z > global_hi_[2])
+    {
+      return false;
+    }
+    for (std::size_t i = 0; i + 5 < boxes.size(); i += 6) {
+      if (x >= boxes[i] && x <= boxes[i + 3] &&
+        y >= boxes[i + 1] && y <= boxes[i + 4] &&
+        z >= boxes[i + 2] && z <= boxes[i + 5])
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+private:
+  double global_lo_[3]{0.0, 0.0, 0.0};
+  double global_hi_[3]{0.0, 0.0, 0.0};
+  bool has_global_{false};
+};
+
 /// 前瞻走廊查询参数（**只描述"往哪看、看多远"，不含任何速度映射** —— 速度那一步在
 /// slope_speed_limit.hpp 里，见该文件头注）。
 ///
@@ -195,6 +337,8 @@ struct FrameStats
   std::size_t coarse_cells{0};     ///< 有点的粗格数
   std::size_t coarse_cells_no_ground{0};
   double classify_ms{0.0};
+  /// ★2026-10-07 Phase 4：被**自击掩膜**剔出建格的点数（掩膜关时恒 0）。
+  std::size_t self_masked{0};
   // ---- 前瞻走廊（describeCorridor() 填；不在 apply() 里算，见节点调用顺序） ----
   std::size_t corridor_cells{0};           ///< 走廊内可用粗格数
   double corridor_max_slope_deg{0.0};      ///< 走廊内最大局部坡度
@@ -213,6 +357,16 @@ public:
   const Criteria & criteria() const {return criteria_;}
   void setCriteria(const Criteria & c) {criteria_ = c;}
   const FrameStats & stats() const {return stats_;}
+
+  /// ★2026-10-07 Phase 4：装/卸**自击掩膜**（默认关 ⇒ 不在场时建格行为逐字节不变）。
+  void setSelfMask(const SelfMask & m)
+  {
+    self_mask_ = m;
+    self_mask_.build();
+  }
+  const SelfMask & selfMask() const {return self_mask_;}
+  /// 本帧被掩膜剔掉的点数（诊断用；掩膜关时恒 0）。
+  std::size_t selfMaskedPoints() const {return self_masked_;}
 
   /// 主入口。
   /// @param cloud          输入点云（帧与 labels 同序）
@@ -250,6 +404,7 @@ public:
     classify(cloud, ground_flags, step_edge_flags);
     const auto t1 = std::chrono::steady_clock::now();
     stats_.classify_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    stats_.self_masked = self_masked_;   // ★ Phase 4：掩膜剔掉的点数（关=0）
     stats_.coarse_cells = ground_cache_.size();
     stats_.coarse_cells_no_ground = 0;
     for (const auto & kv : ground_cache_) {
@@ -406,6 +561,10 @@ public:
   }
 
 private:
+  // ---- 自击掩膜的状态（见 SelfMask 的头注；默认关） -------------------------
+  SelfMask self_mask_;
+  std::size_t self_masked_{0};
+
   // ---- 细格 / 粗格 ---------------------------------------------------------
   struct FineCell
   {
@@ -447,11 +606,20 @@ private:
     ground_cache_.clear();
     slope_cache_.clear();
     fine_.reserve(cloud.size() * 2);
+    self_masked_ = 0;
     const double inv_fine = 1.0 / criteria_.fine_cell_m;
     for (std::size_t i = 0; i < cloud.size(); ++i) {
       const float x = cloud[i].x, y = cloud[i].y, z = cloud[i].z;
       if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
         continue;   // NaN/inf：不参与建格；标签保持上一级分割器的判定
+      }
+      // ★ Phase 4：自击掩膜（默认关 ⇒ 这一行不改变任何行为）。
+      //   被掩掉的点**不进任何细格** ⇒ 既不参与"局部地面高度"，也不参与"格内最高点 − 地面"，
+      //   也不进前瞻走廊。**只影响判据/限速**：点云与 /segmentation/* 的标签完全不变
+      //   （自击是物理真实的回波，真机 360° 雷达也会照到云台）。
+      if (self_mask_.contains(x, y, z)) {
+        ++self_masked_;
+        continue;
       }
       const int64_t ix = static_cast<int64_t>(std::floor(x * inv_fine));
       const int64_t iy = static_cast<int64_t>(std::floor(y * inv_fine));

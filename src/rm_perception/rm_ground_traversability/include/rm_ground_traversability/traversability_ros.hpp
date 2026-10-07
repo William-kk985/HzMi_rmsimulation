@@ -76,6 +76,17 @@ public:
     const std::string step_topic =
       node_->declare_parameter("step_edge_output_topic", std::string("segmentation/step_edge"));
 
+    // ---- ★2026-10-07 Phase 4：自击掩膜（**默认关**；只有 robot 槽位的参数文件会打开它） ----
+    //   为什么放在"判据层"而不是"点云层"：自击是**物理真实**的回波（真机 360° 雷达同样照到云台），
+    //   不该从点云/`/segmentation/*` 里删掉；要修的是"它被当成台阶/坡度"这件事。
+    //   参数文件按 robot 槽位选（`config/traversability_self_mask[_robot11].yaml`，
+    //   机制与 linefit 的 `segmentation_sim_<slot>.yaml` 同款）⇒ 默认槽位读到的永远是
+    //   `self_mask_enable: false`，与引入掩膜之前的行为逐字节相同。
+    self_mask_.enable = node_->declare_parameter("self_mask_enable", self_mask_.enable);
+    self_mask_.boxes = node_->declare_parameter("self_mask_boxes", self_mask_.boxes);
+    self_mask_.radius_m = node_->declare_parameter("self_mask_radius_m", self_mask_.radius_m);
+    self_mask_.z_min_m = node_->declare_parameter("self_mask_z_min_m", self_mask_.z_min_m);
+
     // ---- ★2026-10-07：前瞻限速参数（同一份 YAML 的 speed_limit_* 键） ----
     speed_.enable = node_->declare_parameter("speed_limit_enable", speed_.enable);
     speed_.vx_max = node_->declare_parameter("speed_limit_vx_max", speed_.vx_max);
@@ -149,7 +160,16 @@ public:
         " 物理推导与校验脚本：docs/slope_speed_limiting.md §2、"
         "tools/scripts/regress/check_slope_speed_table.py");
     }
+    const std::string why_mask = self_mask_.reason_invalid();
+    if (!why_mask.empty()) {
+      throw std::invalid_argument(
+        "自击掩膜参数不合法 ⇒ 拒绝启动（避免'参数写错 = 掩膜静默不生效/静默乱掩'）：" +
+        why_mask + " 参数文件（按 robot 槽位选）："
+        "src/rm_nav_bringup/config/traversability_self_mask[_robot11].yaml；"
+        "生成/自检：tools/scripts/regress/robot11_self_mask.py --emit|--check|--verify");
+    }
     classifier_ = std::make_unique<LowTerrainClassifier>(criteria_);
+    classifier_->setSelfMask(self_mask_);   // ★ Phase 4（默认 enable=false ⇒ 建格行为不变）
     // "可行驶坡度上限"只有一份（Criteria 的 drivable_slope_deg，同一个 YAML 键）：
     // 限速器用它区分"可行驶坡面/坡脚"（要限速）与"陡面/墙"（交给规划器，不限速）。
     speed_.drivable_slope_deg = criteria_.drivable_slope_deg;
@@ -193,6 +213,9 @@ public:
       node_->get_logger(), "可通行性判据（坡度/台阶）：%s | step_edge 话题=%s",
       criteria_.describe().c_str(),
       (step_pub_ != nullptr) ? step_topic.c_str() : "(关闭)");
+    // ★ Phase 4：把掩膜**生效值**打进日志（不是"配了没配"，而是"这次运行到底开没开、几个盒"）
+    RCLCPP_INFO(
+      node_->get_logger(), "自击掩膜（self_mask）：%s", self_mask_.describe().c_str());
     if (speed_.enable && speed_.direction_aware && !have_vx_) {
       RCLCPP_WARN(
         node_->get_logger(),
@@ -326,6 +349,8 @@ public:
        << ",\"corridor_cells\":" << s.corridor_cells
        << ",\"corridor_max_slope_deg\":" << s.corridor_max_slope_deg
        << ",\"corridor_max_step_m\":" << s.corridor_max_step_m
+       << ",\"self_masked\":" << s.self_masked
+       << ",\"self_mask_on\":" << (self_mask_.enable ? "true" : "false")
        << ",\"classify_ms\":" << s.classify_ms << "}";
     std_msgs::msg::String msg;
     msg.data = os.str();
@@ -485,6 +510,7 @@ private:
 
   rclcpp::Node * node_{nullptr};
   Criteria criteria_;
+  SelfMask self_mask_;   // ★ Phase 4（默认 enable=false）
   SpeedLimitCriteria speed_;
   std::unique_ptr<LowTerrainClassifier> classifier_;
   std::unique_ptr<SlopeSpeedLimiter> limiter_;
