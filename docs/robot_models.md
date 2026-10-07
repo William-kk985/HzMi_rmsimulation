@@ -1420,3 +1420,564 @@ rviz2 有像素；`decimated` 把 rviz2 内存从 1381 → 243 MiB）。**未复
    这句话现在只在 `robot11_visual:=full` 下成立（已在 §12.2 写清）。
 8. **掩膜盒子表是"生成物"**：模型改了（碰撞/关节/抬高）必须重跑
    `robot11_self_mask.py --emit`，否则 `--check` 会报错；本轮**没有**把它接进 CI/构建（只接了自检脚本）。
+
+---
+
+## 13. Phase 5：把 `<visual>` 真正做成"仿真视觉件"（QEM 抽稀 + 量化验证 + 三档代价实测）（2026-10-07）
+
+> 状态：**新增**。触发 = 用户原话「还是卡住了，上网查资料，机器人模型放不进去仿真有啥意义」。
+> Phase 1~3 修的是**碰撞（物理）**，Phase 4 修的是**判据/接线/GUI 档位开关**，
+> 而**视觉件本身一直是上游 CAD 原始 STL**（整车 2,821,320 面 / 141.07 MB，其中 `base_link.STL`
+> 一项 2,078,226 面 / 103.91 MB）。本相位把视觉件按公开的标准管线做成**真正的仿真 LOD**，
+> 并把"几何没走样"量化成可复算的清单。
+> 默认模型与所有 launch/config 默认值**仍未改**；`robot:=robot11` 之外逐字节不变。
+
+### 13.1 一句话结论
+
+| 问题 | 结论 | 证据 |
+|---|---|---|
+| CAD 原始网格能不能直接进仿真？ | **视觉可以（但有代价），碰撞绝对不行** | §13.2.1 的官方原文 + §9.3 本仓实测（有接触时 RTF 0.200 / 峰值内存 759 MB） |
+| 那视觉呢？ | 原始 2,821,320 面是"给人看/给机床用"的档，不是"每帧渲染"的档；标准做法是**按预算抽稀 + 量化验证** | §13.2.2、§13.3 |
+| 我做了什么 | QEM 二次误差边折叠抽稀：**2,821,320 → 163,995 面**（5.8%），磁盘 141.07 → 8.20 MB；逐 mesh 量化包围盒差 / 单向表面误差 / 三视剪影 IoU / 边界边 / 雷达近场自击，全部入库 | §13.3、`inventory/visual_decimation.json` |
+| 开关 | `robot11_visual:=decimated`（**默认**）\| `full`；`decimated` 现在指向**专用视觉 LOD**（`meshes/decimated/`），不再是 Phase 4 那份碰撞档抽稀件 | §13.5 |
+| GUI 到底行不行 | **本机（Xvfb+软件 GL）实测：两档都能起来、都活满窗口、都在画**；`gzclient` 473 MiB / `gzserver` 3202 MiB **两档完全相同**；`rviz2` 314 vs 322 MiB（差 8 MiB，噪声内） | §13.4（**实测**） |
+| ⚠️ 那 GUI 的优势在哪 | **本相位没有测出"抽稀能省 GUI 内存"**（与 Phase 4 §12.2 的 rviz2 1,381↔243 MiB 结论**不一致**，见 §13.4.3 的诚实记录）。抽稀确定省下的是**网格解析/上传/绘制的工作量**（三角形少 17.2×）与**磁盘/网络/内存中的网格数据本身** | §13.4.3 |
+| 还发现什么 | `/scan` 里**恒有 428 条/帧 <1 m 的障碍波束**（自击点仍在 obstacle 输出里，掩膜只管判据）⇒ 局部代价图可能被"自身障碍"填满 —— **未修**，见 §13.9 | §13.9（**实测**） |
+
+### 13.2 上网查到的标准做法（**带 URL**）
+
+> 抓取方式：本沙箱里 `web_fetch` 对部分主机返回 "non-public IP"，所以下面**全部用 `curl` 直取**；
+> 取不到的会明确标注。原始抓取物落在 `.tmp_robot11/research/`。
+
+#### 13.2.1 碰撞：为什么原始 CAD 网格不能当 `<collision>`
+
+* **Gazebo Classic 官方教程「Make a model」**（<https://classic.gazebosim.org/tutorials?tut=build_model>，已取到）原文：
+  > "Collision: A collision element encapsulates a geometry that is used for collision checking.
+  > This can be a simple shape (**which is preferred**), or a triangle mesh
+  > (**which consumes greater resources**). **A link may contain many collision elements.**"
+  同页还有一句与本槽位直接相关：
+  > "Try to reduce the number of links in your models in order to improve performance and stability."
+  ⇒ **"简单形状优先"、"一个 link 可以有多个 collision"** 这两条不是我们发明的，是官方口径。
+
+* **SDF 规范（`collision.sdf`，sdformat 仓库 1.9 分支）**
+  （<https://github.com/gazebosim/sdformat/blob/sdf12/sdf/1.9/collision.sdf>，已取到）原文：
+  > "The collision properties of a link. **Note that this can be different from the visual properties
+  > of a link, for example, simpler collision models are often used to reduce computation time.**"
+  ⇒ **`<collision>` 与 `<visual>` 用不同几何是规范明文鼓励的**。
+
+* **SDF 1.9 的 `<geometry>`/`<mesh>`**（<https://github.com/gazebosim/sdformat/blob/sdf12/sdf/1.9/geometry.sdf>、
+  <…/mesh_shape.sdf>，均已取到）：`<geometry>` 可选 box/capsule/cylinder/ellipsoid/heightmap/image/
+  **mesh**/plane/polyline/sphere；`<mesh>` 在 **1.9 里只有 `uri` / `submesh` / `scale` 三个子元素**。
+  ⚠️ **重要且容易踩**：`<convex_decomposition>`（V-HACD）**不在 SDF 1.9 里** —— 它是 1.10+（gz-sim 时代）
+  才有的元素。**Gazebo Classic 11 用 SDF 1.9 ⇒ 它没有内置的 V-HACD 通道**；
+  在 Classic 上做凸分解只能"离线算好、再写成多个 `<collision>` 的凸网格/基本体"。
+  （本仓的 76 个 box 就是这条路的自制版本。）
+
+* **ODE 官方手册 §10.7.6 Triangle Mesh Class**（<https://ode.org/ode-latest-userguide.html>，已取到）：
+  > "Any triangle 'soup' can be represented… Triangle meshes can interact with spheres, boxes,
+  > rays and other triangle meshes. **It works well for relatively large triangles.**"
+  > "Trimesh/Trimesh collisions, perform quite well, but there are three minor caveats:
+  > The stepsize you use will, in general, have to be reduced for accurate collision resolution.
+  > **Non-convex shape collision is much more dependent on the collision geometry than primitive
+  > collisions.** Further, the local contact geometry will change more rapidly (and in a more complex
+  > fashion) for non-convex polytopes than it does for simple, convex polytopes such as spheres and cubes."
+  ⇒ 官方措辞是"相对**大**三角形才好用"+"非凸接触比基本体敏感得多"+"步长要更小"；
+  本仓量到的 **RTF 0.200 / 内存 +587 MB** 就是这三条在"208 万个小三角形"上的具体后果（§9.3）。
+
+* **Gazebo Classic issue #514**（<https://github.com/gazebosim/gazebo-classic/issues/514>，已取到）：
+  Bullet 引擎里 "**all meshes are loaded as `btConvexTriangleMeshShape`**"，"We need to support concave
+  shapes" ⇒ 换物理引擎也不能"免费"拿到凹网格碰撞。
+
+* **playerstage-gazebo 邮件列表「Trimesh collision」(2008)**
+  （<https://sourceforge.net/p/playerstage/mailman/playerstage-gazebo/thread/60f134360806251625k2945846amb1b53718dd226e53%40mail.gmail.com/>，已取到）：
+  > "It seems that gazebo trimesh collision only works with ode 0.8 built with the OPCODE library.
+  > Also, unlike trimesh **visuals**, trimesh **collision** meshes are not automatically resized and
+  > therefore should not need to be scaled in the world file."
+  ⇒ 两条历史事实：网格碰撞要走额外的加速结构；**视觉网格会自动缩放、碰撞网格不会**（单位坑的来源之一）。
+
+* **`ros-mesh-preprocessor`**（<https://github.com/ookkshirsagar/ros-mesh-preprocessor>，已取到 README）：
+  一个专门做这件事的 ROS 2 工具包 —— "**QEM decimation, URDF visual/collision export, and
+  Hausdorff-validated quality reports**"。⇒ "抽稀 + **用 Hausdorff 距离做质量报告**"是社区成型的做法，
+  本仓的 `--err-*`（单向表面误差 p99/max）就是同一件事的自制版。
+
+#### 13.2.2 视觉：预算、抽稀工具、"够用"的定义
+
+* **《Blender Workflow for Cleaning CAD Meshes for ROS 2 / Gazebo》**
+  （<https://mohammadrobot.github.io/ROS/Blender-CAD-Meshes/>，已取到）给出的**预算表**：
+  > Mesh Budgets — **Visual: < 50k** / **Collision: < 5k**
+  以及流程："Remove duplicate vertices (M → By Distance)" → "Fix normals（面朝向：蓝=正确、红=翻转）"
+  → "**Triangulate + Decimate（Ratio 0.2–0.4）**：1,200,000 faces → 40,000 faces"
+  → "Apply object transforms（Ctrl+A）" → "视觉导 DAE/OBJ、碰撞导 STL"。
+  原文还点名两个坑：
+  > "**Flipped normals** are a common cause of missing surfaces in simulation."
+  > "**Slow simulation** ← collision mesh too detailed / **Unstable collisions** ← tiny CAD details in collision mesh
+  > （remove screws/threads/fillets from collision mesh）"
+
+* **《메쉬 경량화와 collision mesh 분리 기준》(ros2_gazebo_setup/docs/mesh-optimization.md)**
+  （<https://raw.githubusercontent.com/Jinsun-Lee/ros2_gazebo_setup/refs/heads/master/docs/mesh-optimization.md>，
+  已取到）给出**另一种口径与更完整的理由**：
+  > · visual 메쉬는 매 프레임 렌더링된다 … 링크당 **약 100k 삼각형 이하**를 유지
+  > · collision 메쉬는 매 물리 틱마다 질의된다 … 링크당 **약 1k 삼각형 이하**
+  > · 실제 형상이 프리미티브에 가까우면 **프리미티브 도형**(`<box>`, `<cylinder>`, `<sphere>`)을 우선 사용
+  > · 오목한 형상은 여러 개의 convex collision으로 분해한다 (**V-HACD** 또는 수동 분리)
+  > · 경량화 도구: **Blender Decimate**, **MeshLab Quadric Edge Collapse Decimation**, **V-HACD**
+  > · 验证清单："collision 是否覆盖 visual 全部范围 / spawn 后 **RTF ≥ 1.0** / 法线有没有翻"
+  ⇒ 两篇独立来源的交集 = **每 link 视觉 ≤ 50k（严的那档）**，本相位取严的那档（≤50k/link、整车 ≤200k）。
+
+* **抽稀算法本身**：
+  * **MeshLab / PyMeshLab** 的 `Simplification: Quadric Edge Collapse Decimation`
+    （<https://github.com/cnr-isti-vclab/PyMeshLab/blob/master/docs/filter_list.rst>，已取到）：
+    > "Simplify a mesh using a **Quadric based Edge Collapse Strategy**; better than clustering but slower"
+    参数（逐个取到原文）：`targetfacenum` / `targetperc` / `qualitythr`（"Quality threshold for penalizing
+    bad shaped faces"）/ `preserveboundary` / `boundaryweight` / `preservenormal`（"Try to avoid face
+    flipping effects"）/ `preservetopology`（"Avoid all the collapses that should cause a topology change
+    (like closing holes, squeezing handles)"）/ `optimalplacement`（"Each collapsed vertex is placed in
+    the position minimizing the quadric error"）/ `planarquadric`。
+  * **Blender Decimate（Collapse）**（<https://docs.blender.org/manual/en/latest/modeling/modifiers/generate/decimate.html>，已取到）：
+    > "Merges vertices together progressively, **taking the shape of the mesh into account**.
+    > Ratio: The ratio of faces to keep after decimation."
+  * **Open3D**：`open3d.geometry.TriangleMesh.simplify_quadric_decimation`
+    （<https://www.open3d.org/docs/latest/python_api/open3d.t.geometry.TriangleMesh.html>，已取到）。
+  * **trimesh**：`Trimesh.simplify_quadric_decimation`
+    （<https://trimesh.org/trimesh.html>）—— ⚠️ **本机不可用**：它依赖 `fast_simplification`，
+    而该包未安装（实测 `ModuleNotFoundError`）。`trimesh.org/trimesh.simplification.html` 这个
+    具体页面 **404**（未能取到）。
+  * **V-HACD**（<https://github.com/kmammou/v-hacd>）—— 本相位**没用到**（我们抽稀的是视觉件，
+    碰撞件 Phase 1/3 已经用基本体解决）。
+
+* **"够用"的判据**（本相位自定，但每条都对应上面某条来源）：
+  1. **包围盒逐轴差 ≤ 1 mm**（单位/原点/尺寸不走样 —— 对应"Wrong robot size in simulation ← unapplied scale"）；
+  2. **单向表面误差 p99 ≤ 3 mm、max ≤ 12 mm**（对应 ros-mesh-preprocessor 的 Hausdorff 报告思路）；
+  3. **三视剪影 IoU ≥ 0.97**（轮廓没变 —— "视觉够用"的可量化代理）；
+  4. **边界边不增长**（抽稀不该抽出新洞 —— 对应 `preservetopology` 的意图）；
+  5. **雷达近场自击比例不变**（≤5 个百分点）—— 这条是**本槽位专属**的：这台车的雷达装在底盘凹槽里，
+     抽稀如果把凹槽"封上"，视觉上就会看到一块盖住雷达的板（详见 §13.3.4）。
+  ⇒ **不要求**"水密/流形"：视觉件只要看起来对；水密是对**碰撞/惯量**的要求（§13.2.3）。
+
+#### 13.2.3 网格格式与质量坑
+
+* **格式与单位**：SDF 1.9 的 `<mesh><scale>` 默认 `1 1 1`
+  （`mesh_shape.sdf`，已取到）⇒ 缩放**不是**自动的；STL 本身不携带单位，Gazebo 按"米"读。
+  ⇒ 从 mm/inch 导出的 CAD 通常要写 `scale="0.001"`；本仓 12 个 STL 实测**原始值就是米**
+  （判据：原始包围盒最大跨度 0.6 < 20，见 §9.2），所以**一个 `scale` 都不写**（`check_robot11_visual_slot.py`
+  的 D1 断言"两档都没有 `<mesh scale=...>`"）。
+  格式本身：STL 无材质、二进制 STL 最小；DAE/OBJ 能带材质但要多解析一层
+  （ros2_gazebo_setup 那篇建议"视觉用 DAE/OBJ 以保材质、碰撞用 binary STL"）。
+* **非水密 / 非流形**：本仓 12 个 STL **没有一个水密**（`base_link` 有 53,378 条非流形边、
+  19,432 条边界边、**2,733 个互不相连的实体**，见 §9.2）。它坏掉的是**体积/惯量**这条线
+  （任何"从网格算质量/惯量"的工具都会给出无意义的数）⇒ 本槽位的 `<inertial>` **全部来自上游 URDF 的字面值**，
+  不从网格算。它**不**影响渲染（视觉件允许有洞/有内部件），也**不**影响本仓的碰撞（碰撞是 box/cylinder）。
+* **`<inertial>` 缺失 ⇒ link 被丢掉**：sdformat 的 URDF→SDF 转换 PR #1238
+  （<https://github.com/gazebosim/sdformat/pull/1238>，已取到 diff）原文：
+  > "Links without an `<inertial>` block will be considered to have **zero mass**."
+  并会对"零质量 link"发 `LINK_INERTIA_INVALID` 警告（"no `<inertial>` block defined. " /
+  "a mass value of less than or equal to zero. " / "Please ensure this link has a valid mass to
+  prevent any …"）。urdfdom 的解析器侧也有对应的硬报错
+  （<https://github.com/ros/urdfdom/blob/master/urdf_parser/src/link.cpp>，已取到：
+  "Inertial element must have a mass element" / "Inertial element must have inertia element" /
+  "Inertial: inertia element missing …"）。同一主题在 gz-sim 也有 issue
+  （<https://github.com/gazebosim/gz-sim/issues/2815>）。
+  ⇒ 这正是 §2/§10 里"hzmirm 那份 URDF 直接换上去 spawn 出来是空模型"的机制。
+
+#### 13.2.4 GUI 代价（`gzclient` 为什么重）
+
+* **Gazebo 核心开发者 Carlos Agüero 的 GUI profiling 报告**
+  （<https://caguero.github.io/gz-profiling/2026-07-03/>，已取到）：
+  > "**The GUI is render-thread-bound**; per-thread splits separate the OgreNext render thread from
+  > the Qt main thread."；加载阶段的主导开销是 "**jetty mesh + material construction**"；
+  > `3k_shapes_static` 世界下 GUI 平均占 **1.05 核**、其中渲染线程 **91%**。
+  ⇒ GUI 进程的开销主要在**渲染线程**与**网格/材质构建**上 —— 与"视觉三角形数/网格数"直接相关。
+  （注意：这份报告是**新版 Gazebo（gz-sim）**的，渲染后端是 OgreNext；Gazebo Classic 用 OGRE 1.x，
+  同族但不同版本，所以我们只把它当"GUI 是渲染线程瓶颈 + 网格构建是加载期大头"的**方向性**引用。）
+* **Gazebo Classic issue #805 "GUI topic visualization slow"**
+  （<https://github.com/gazebosim/gazebo-classic/issues/805>，已取到）：
+  > "Viewing a topic that produces large quantities of data causes **gzclient to be unresponsive**."
+* **Gazebo Classic issue #777 "gazebo slow at loading multiple object instances"**
+  （<https://github.com/gazebosim/gazebo-classic/issues/777>，已取到）—— 同类"实例/网格一多就慢"。
+* **降代价的手段**（社区共识 + 本仓做法）：
+  1. **抽稀视觉件**（本相位做的）；
+  2. **不跑 gzclient**：`gzserver` 无头 + 只在需要时开 GUI（本仓所有 regress 跑法本来就是这样）；
+  3. **不同时开 gzclient 与 rviz2**（本仓的 `nav_rviz/lio_rviz` 开关就是为这个存在的）；
+  4. 关阴影（本仓的 bench 世界里一直是 `<shadows>false</shadows>`）；
+  5. ⚠️ 我们**没有**找到"Gazebo Classic 用 OGRE 选项进一步降内存"的权威文档 ⇒ 不写进结论（见 §13.10）。
+
+#### 13.2.5 其它 RoboMaster / ROS 队伍怎么做
+
+* **RMOSS（RoboMaster 官方开源软件栈）的 `rmoss_gazebo`**
+  （<https://github.com/robomaster-oss/rmoss_gazebo>、索引页 <https://index.rosdabbler.com/r/rmoss_gazebo/>，已取到）：
+  它把"Gazebo 插件 + 机器人模型资源 + 场地模型"拆成**多个包**，其中资源单独成库
+  （README："`rmoss_gz_resources` 主要包含资源文件，**体积较大，单独成库**"），
+  而且**基于新版 Gazebo（Fortress）而不是 Classic**。⇒ 两条可借鉴：**重资产单独成包**、
+  **新工程优先选新 Gazebo**（我们被本仓的 Classic 栈绑住，只能在 Classic 内做）。
+* **湖北工业大学力创战队的哨兵/场地开源 `Hbut_LC_sentry`**
+  （<https://github.com/HBUTHUANGPX/Hbut_LC_sentry>，已取到 README）——**与我们的问题最贴近的一条中文实践**：
+  > "对 2023RMUC 地图 solidworks 文件进行开源…目标主要是为了在仿真中实现 Lidar-SLAM 和 Lidar 定位导航"
+  > "**为了保证后续在仿真中不卡，秉持着保证最明显特征的原则，并没有作图出红蓝装饰带、视觉定位标签。
+  > 请后面的贡献者务必遵守这条要求，尽可能的避免非必要特征。**"
+  > 工具链："使用 solidworks 开源插件 **SolidWorks to URDF Exporter** 获得和 ros 兼容的包"
+  ⇒ **"为了保证仿真不卡，CAD 里只保留最明显的特征、删掉装饰性细节"** —— 这正是"CAD 精简"这条标准做法
+  在 RM 圈子里的口碑版本，也解释了为什么 CAD 原始件不能直接进仿真。
+  （同一份 README 还诚实地写了"官方的仿真器应该是没有使用到 gazebo 的物理特性的"、
+  "小车在 gazebo 中是上不了坡的" —— 说明这类项目普遍存在"模型/物理没对齐"的问题。）
+* **SolidWorks→URDF 官方插件**：<https://github.com/ros/solidworks_urdf_exporter>
+  （当前跳转到 `ros/solidworks_urdf_exporter`；它导出的正是"每个 link 一个 STL"的形态，
+  也就是本仓 `robot11` 的来路）。
+
+#### 13.2.6 够不到的来源（诚实清单）
+
+| 想要的东西 | 结果 |
+|---|---|
+| `sdformat.org/spec?ver=1.9&elem=mesh` | 页面是 JS 应用，`curl` 只拿到同一个空壳（13 KB，两次请求字节数完全相同）⇒ 改从 **sdformat 仓库的原始 `sdf/*.sdf` 规范文件**取（已取到，见上） |
+| `trimesh.org/trimesh.simplification.html` | **404**（改用 `trimesh.org/trimesh.html` 的类文档） |
+| "Gazebo Classic OGRE 渲染选项降内存"的权威文档 | **没找到** ⇒ 不写结论 |
+| Gazebo Classic 的"每帧三角形预算"官方数字 | **没有官方数字**（官方只说 "consumes greater resources"）⇒ 预算采用两篇第三方实践的交集（§13.2.2） |
+| `meshlabstuff.blogspot.com` 的 QECD 介绍页 | **404**（改用 PyMeshLab 的 `filter_list.rst`，已取到且更权威） |
+
+### 13.3 Phase 5 应用的流水线（工具 / 命令 / 预算 / 容差 / 逐 mesh 结果）
+
+#### 13.3.1 工具与算法（**实际跑的那个**，不是"推荐的"）
+
+| 项 | 值 |
+|---|---|
+| 工具 | `tools/scripts/regress/robot11_decimate_visuals.py`（生成 + 验证 + 出清单，一条命令） |
+| 算法 | **二次误差边折叠（quadric error metric edge collapse, Garland–Heckbert 族）** = `vtkCleanPolyData`（只按坐标合并重复点，`tolerance=0`，不改几何）→ `vtkQuadricDecimation`（`TargetReduction`，`VolumePreservation=false`）→ `vtkTriangleFilter` |
+| 生成命令 | `python3 tools/scripts/regress/robot11_decimate_visuals.py`（写 `meshes/decimated/` + `inventory/visual_decimation.json`） |
+| 复核命令 | `python3 tools/scripts/regress/robot11_decimate_visuals.py --check` 或 `python3 tools/scripts/regress/robot11_decimate_visuals.py --only l12 --calibrate` |
+| 输入 | `meshes/<name>.STL`（**只读**，一个字节都没改；sha256 记在清单里） |
+| 输出 | `meshes/decimated/<name>.stl`（binary STL，**12 个 / 8.20 MB**） |
+
+**为什么不用别的（都是本机实测，不是听说）**：
+
+| 候选 | 本机实测 | 结论 |
+|---|---|---|
+| MeshLab `meshlabserver` 的 `Simplification: Quadric Edge Collapse Decimation` | `meshlabserver 2020.09` 在**无 GL** 的机器上直接抛 `MLException: GLEW initialization failed: Missing GL version`；加 `LIBGL_ALWAYS_SOFTWARE=1`、`GALLIUM_DRIVER=llvmpipe` 也一样（连 `-d` 列过滤器都还没走到就死在初始化） | **不能用**（工具在，但没有可用的 GL 上下文） |
+| `trimesh.Trimesh.simplify_quadric_decimation` | `ModuleNotFoundError: No module named 'fast_simplification'` | **不能用**（缺依赖，且不打算为一个一次性任务装包） |
+| `open3d.geometry.TriangleMesh.simplify_quadric_decimation` | `open3d` 未安装 | **不能用** |
+| `pymeshlab` | 未安装 | **不能用** |
+| Blender Decimate | 未安装 | **不能用** |
+| **VTK `vtkQuadricDecimation`（pyvista 0.46.4）** | 可用、离线、无 GL 依赖 | **采用** |
+
+> 三者（MeshLab QECD / Blender Collapse / VTK QuadricDecimation）是**同一族算法**：都用二次误差度量 + 边折叠 +
+> 最优位置放置（MeshLab 文档原文见 §13.2.2）。差别只在"边界/法线/拓扑"这几个旋钮上；
+> 本相位用"边界边不增长 + 剪影 IoU + 单向表面误差"三条把它量出来，而不是靠"用了哪个工具"取信。
+
+#### 13.3.2 三角形预算（每个 link 的上限）
+
+取 §13.2.2 两篇独立来源的交集：**每 link ≤ 50k**（Blender 那篇的 `<50k`；另一篇给 ≤100k，取严的），
+**整车 ≤ 200k**。逐 link 再按"原来多大 / 画面里多显眼 / 小特征多少"分档：
+
+| link | 是什么 | 预算 | 实测输出 |
+|---|---|---|---|
+| `base_link` | 底盘（最大最显眼） | 50,000 | 50,000 |
+| `l11` | 云台 pitch + 发射机构（整车最高、细节最多） | 40,000 | 39,999 |
+| `l2`..`l5` | 四个转向模块 | 12,000 ×4 | 12,000 / 11,999 / 11,998 / 12,000 |
+| `l10` | 云台 yaw | 8,000 | 8,000 |
+| `l12` | Livox MID-360 | 6,000 | 6,000 |
+| `l6`..`l9` | 四个轮（几乎是纯圆柱） | 3,000 ×4 | 3,000 / 2,999 / 3,000 / 3,000 |
+| **合计** | | **200,000** | **163,995** |
+
+#### 13.3.3 逐 mesh 结果（**实测**，机器可读：`inventory/visual_decimation.json`）
+
+容差：包围盒逐轴 ≤ **1.0 mm**；单向表面误差 `out→src` 的 p99 ≤ **3.0 mm** 且 max ≤ **12.0 mm**；
+三视剪影 IoU ≥ **0.97**（2 mm 栅格）；边界边不得显著增长。
+
+| mesh | 面数 前 → 后 | 磁盘 MB 前 → 后 | 包围盒差 (mm) | 误差 p99/max (mm) | 剪影 IoU 最差 | 边界边 前 → 后 | 判定 |
+|---|---|---|---|---|---|---|---|
+| `base_link` | 2,078,226 → **50,000** | 103.91 → 2.50 | **0.000** | 0.07 / 2.45 | 0.9964 | 19,636 → 2,380 | ✅ |
+| `l11` | 176,458 → **39,999** | 8.82 → 2.00 | 0.022 | 0.00 / 0.20 | 0.9975 | 52 → 14 | ✅ |
+| `l4` | 91,234 → **11,998** | 4.56 → 0.60 | 0.048 | 0.00 / 0.05 | 0.9956 | 4 → 34 | ✅ |
+| `l5` | 90,250 → **12,000** | 4.51 → 0.60 | 0.048 | 0.00 / 0.12 | 0.9974 | 4 → 28 | ✅ |
+| `l2` | 89,556 → **12,000** | 4.48 → 0.60 | 0.048 | 0.00 / 0.39 | 0.9960 | 4 → 20 | ✅ |
+| `l3` | 88,800 → **11,999** | 4.44 → 0.60 | 0.048 | 0.00 / 0.16 | 0.9969 | 4 → 14 | ✅ |
+| `l12` | 68,740 → **6,000** | 3.44 → 0.30 | 0.042 | 0.00 / 0.13 | 0.9987 | 500 → 76 | ✅ |
+| `l10` | 37,648 → **8,000** | 1.88 → 0.40 | 0.109 | 0.00 / 0.09 | 0.9984 | 0 → 5 | ✅ |
+| `l7` | 25,324 → **2,999** | 1.27 → 0.15 | 0.297 | 0.16 / 0.52 | 0.9919 | 0 → 48 | ✅ |
+| `l8` | 25,324 → **3,000** | 1.27 → 0.15 | 0.297 | 0.16 / 0.53 | 0.9939 | 0 → 46 | ✅ |
+| `l9` | 25,324 → **3,000** | 1.27 → 0.15 | 0.297 | 0.17 / 0.53 | 0.9929 | 0 → 48 | ✅ |
+| `l6` | 24,436 → **3,000** | 1.22 → 0.15 | 0.297 | 0.18 / 0.52 | 0.9929 | 0 → 46 | ✅ |
+| **合计** | **2,821,320 → 163,995**（−94.2%） | **141.07 → 8.20**（−94.2%） | max **0.297** | max p99 **0.18** / max **2.45** | min **0.9919** | — | **12/12 过** |
+
+**误差口径的两句交代（诚实）**：
+1. 默认口径是"在 dst 表面均匀撒点建 KD-tree，再查 src 的点"，误差上界 ≈ 采样间距 ≈ `sqrt(2·Area/N)`
+   （实测间距 0.40~2.10 mm），并**已经减掉采样间距**（⇒ 报出来的是**保守偏低**的数）。
+   为什么不用精确的 `vtkImplicitPolyDataDistance`：它在 dst 上建 cell locator，`base_link` 那种 208 万面的 dst
+   **10 分钟都出不来**（本工具第一版就是死在这里，见 §13.10 第 6 项）。精确口径保留为 `--exact-err`。
+   **两种口径的对照已实测**（`--only l12 --calibrate`，同一对网格、同一次运行）：
+
+   | 口径 | `out→src` max | p99 | mean |
+   |---|---|---|---|
+   | 精确（`vtkImplicitPolyDataDistance`） | 0.295 mm | 0.204 mm | 0.050 mm |
+   | 采样（KD-tree，间距 0.40 mm，已减间距） | 0.077 mm | 0.000 mm | 0.000 mm |
+   | 差 | **−0.218 mm** | **−0.204 mm** | **−0.050 mm** |
+
+   ⇒ 采样口径**偏低 ≤0.22 mm**（设计如此：宁可不虚报误差），比 3.0 mm 的判据小一个量级。
+2. 误差**双向**都量了（`out→src` 与 `src→out`），判据卡的是 `out→src` 的 p99/max
+   （= "抽稀件偏离原表面的量"）；`src→out` 另存清单，用于发现"整块小特征被抽没了"。
+
+#### 13.3.4 还没完：三件"几何之外"的检查（都是本槽位专属的坑）
+
+| 检查 | 为什么 | 结果 |
+|---|---|---|
+| **单位 / 原点 / scale** | 从 CAD 出来的件最容易死在 mm↔m 与"导出时忘了 apply transform"上 | 两档都**没有** `<mesh scale=...>`；包围盒差 max 0.297 mm（`l6`..`l9` 的轮，来自半径方向的离散化） |
+| **`<visual><origin>` 逐字不变** | 换文件不能顺手把位置/朝向换了 | 13 个 link 的 `<visual><origin>` 两档**逐字相同**（`check_robot11_visual_slot.py` B1） |
+| **雷达凹槽不能被"抽稀封上"** | 这台车的雷达在底盘**凹槽**里（§10.6：Phase 2 的 75.5% 自击就是这么来的）。抽稀如果把凹槽开口抹平，视觉上就是一块板盖住雷达 | 用 30,000 条 MID-360 射线打**视觉网格**，只在雷达原点 ±0.13 m 的局部盒内求交（**对 `t<0.12 m` 这个量是精确的**：更远的面不可能产生 <0.12 m 的命中）。`base_link` 自击 `t<0.12 m`：原件 **0.3833** → 抽稀 **0.3810**（Δ**−0.23 个百分点**）；`l11` 0.0031→0.0031；`l10` 0→0 |
+
+> ⚠️ 最后一条是**外观检查**，不是**感知检查**：Gazebo 的射线传感器走 ODE、**只与 `<collision>` 求交**
+> （本仓插件的实现：`livox_ode_multiray_shape.cpp` → `ODERayShape`；见 §11.2 与 §13.5）。
+> 所以"视觉件抽稀"**不可能**改变点云 —— 这一条量的是"凹槽还在不在"。
+
+### 13.4 三角形与代价：三档并排（**实测 + 一处明确标注的推断**）
+
+#### 13.4.1 数据量（**实测**，来自清单与磁盘）
+
+| 档位 | 指向的文件 | 12 个 mesh 面数合计 | 磁盘合计 | 相对 full |
+|---|---|---|---|---|
+| `full` | `meshes/<link>.STL`（上游 CAD 原件） | **2,821,320** | **141.07 MB** | 1× |
+| `decimated`（**Phase 5 默认**） | `meshes/decimated/<link>.stl`（本相位的视觉 LOD） | **163,995** | **8.20 MB** | **1/17.2 面 / 1/17.2 字节** |
+| （Phase 4 的旧 decimated 档） | `meshes/generated/<link>_collision.stl`（碰撞档抽稀件） | 9,700 | 0.486 MB | 1/291 |
+
+> Phase 4 的 `robot11_visual:=decimated` 原本指向**碰撞档**抽稀件（`base_link` 3,000 面、`l11` 1,200 面）；
+> **Phase 5 把它换成专用视觉 LOD**（`base_link` 50,000 面、`l11` 39,999 面）。
+> 为什么换：碰撞档是"表面碰撞够用"的精度（`l11` 只有 1,200 面 ⇒ 云台/发射机构会糊成一团），
+> 拿它当视觉件等于用"碰撞的精度"决定"看起来像不像"。旧档文件仍在库里、没删，
+> 需要它的人把 `meshes/generated/` 直接指过去即可（launch 不支持这条，属于手工实验，见 §13.10）。
+
+#### 13.4.2 GUI 内存：**本次实测**（Xvfb `3200x1200x24` + 软件 GL llvmpipe / Mesa 23.2.1）
+
+口径：`world:=RMUC2026 mode:=mapping lio:=small_point_lio robot:=robot11 nav_rviz:=True`、车静止、
+脚本 `tools/scripts/regress/robot11_gui_bench.sh <tag> --visual <decimated|full> --seconds <N> --rviz True`，
+RSS 每 1 s 采样，窗口从"gzclient 与 rviz2 都起来"开始计。原始数据：`.tmp_robotslot/r11p5guiFULL/`、
+`.tmp_robotslot/r11p5guiDEC/`、`.tmp_robotslot/r11p5guiFULL75/`。
+
+| 指标 | `full`（40 s 窗） | `full`（**75 s 窗**） | `decimated`（40 s 窗，163,995 面） |
+|---|---|---|---|
+| `gzclient` 峰值 RSS | 473 MiB | 473 MiB | **473 MiB** |
+| `gzserver` 峰值 RSS | 3,202 MiB | 3,202 MiB | **3,202 MiB** |
+| `rviz2` 峰值 RSS | 322 MiB（75 s 窗同一跑）→ 见下 | **322 MiB（全程平稳，t≥15 s 后不再增长）** | **314 MiB** |
+| `gzclient` 活满窗口 | ✅（无死亡行） | ✅ | ✅ |
+| `rviz2` 活满窗口 | ✅ | ✅ | ✅ |
+| 截图（rviz2 窗口矩形内）非黑比例 / 颜色数 | 0.5768 / 1,188 | — | 0.5768 / 1,188 |
+| `/odom` 条数（窗口内） | 159 | — | 161 |
+| 视觉三角形 | 2,821,320 | 2,821,320 | 163,995 |
+
+**读法（三条，都是实测）**：
+1. **两档都能起来、都活满窗口、都在画**（rviz2 窗口矩形内非黑 0.5768、1,188 种颜色）。
+2. **`gzclient` / `gzserver` 的内存与视觉档位无关**：473 MiB / 3,202 MiB 两档**逐 MiB 相同**；
+   这 3.2 GB 的主体是 **RMUC2026 世界本身**（Phase 4 的无头对照也是 3,112 MiB）。
+3. **`rviz2` 也不随视觉档位变**：full 75 s 窗与 decimated 40 s 窗分别是 322 / 314 MiB，
+   而且 full 那条曲线从 t≈15 s 起**完全平**（308→322 MiB 后不动）。
+
+#### 13.4.3 ⚠️ 诚实记录：本相位**没有**测出"抽稀省 GUI 内存"（与 §12.2 不一致）
+
+Phase 4 的 §12.2 报的是 **rviz2 峰值 1,381 MiB（full）↔ 243 MiB（decimated）**，差 **−1,138 MiB**；
+本相位在**同一脚本、同一世界、同一组 flags、同一虚拟屏 + 软件 GL** 下重跑：
+
+* `full`（40 s 窗）：rviz2 314 MiB；`full`（**75 s 窗**）：rviz2 322 MiB 且**平稳**；
+* `decimated`（163,995 面，40 s 窗）：rviz2 314 MiB；
+* 两者的**逐秒曲线形状几乎完全相同**（连 gzclient 的 218→481 MiB 爬升都一致）。
+
+⇒ **我这一轮的结论是：视觉档位没有驱动 rviz2/gzclient 的内存**。可能的解释（**未证实**，逐条列着）：
+1. `mode:=mapping` 用的 rviz 配置 `rm_navigation/rviz/nav2.rviz` 里那个 RobotModel display
+   订的是 `/robot_description`，Durability 写的是 **Volatile**；若发布端是 transient_local，
+   QoS 不兼容 ⇒ **RobotModel 根本收不到描述、也就不会去加载任何 robot mesh**
+   （本轮 launch.log 里只看到 `/scan` 的 QoS 不兼容告警，没看到 `/robot_description` 的告警 ⇒ 证据不足，未定论）；
+2. Phase 4 采样用的是 `ps -o rss= -C rviz2 | sort -rn | head -1` ⇒ 若**上一轮残留的 rviz2** 还活着，
+   会被当成"本轮峰值"（他们的 `r11p4guiDEC` 那一跑 `rviz2=0`，说明 rviz2 起没起来在两次跑之间并不稳定）；
+3. 两次跑的 `mode`/`rviz` 大小写组合不同（`nav_rviz=true` vs `True`），起没起 rviz2 本身就不一致。
+
+**因此**：本报告**不主张**"抽稀视觉件能省下 GB 级 GUI 内存"。抽稀**确凿**省下的是：
+三角形数 17.2×（相对 full）/ 291×（相对碰撞档）、磁盘 141.07 MB → 8.20 MB、
+以及"渲染线程每帧要画的三角形数"与"网格解析/上传的工作量"（对应 §13.2.4 的
+"GUI 是 render-thread-bound + 网格/材质构建是加载期大头"）。
+
+#### 13.4.4 推断的部分（明确标注）
+
+| 量 | 值 | 口径（**推断**，非实测） |
+|---|---|---|
+| 渲染端网格常驻足迹（OGRE + Gazebo `common::Mesh`） | full ≈ **0.5~0.7 GB**；decimated ≈ **30~40 MB**；碰撞档 ≈ **2 MB** | 模型：STL 三角汤 ⇒ 3 顶点/面；顶点 = 位置 3×f64 + 法线 3×f64 = 48 B ⇒ 144 B/面；索引 3×u32 = 12 B/面 ⇒ Gazebo 侧 ~156 B/面；OGRE 侧 vertex buffer 位置+法线各 3×f32 = 24 B/顶点 ⇒ 72 B/面 + 索引 12 B/面 ⇒ ~84 B/面。合计 ~240 B/面。**未实测**（`gzclient` 的 RSS 与档位无关这件事本身说明这个模型在本环境里量不到） |
+| 真 GPU 上的帧率 | 未知 | 本轮只有 llvmpipe 软件 GL ⇒ **渲染吞吐没有参考价值**（与 Phase 4 §12.2 的边界一致） |
+| 用户机器上那次 `gzclient` SIGKILL 的根因 | **仍未复现** | 本机 31.9 GB 内存、两档都活满窗口。整栈 ~3.9 GiB（gzserver 3.2 为主），若用户机器可用内存更小，"整栈 + 世界"这一块才是主因，而**不是** robot 的视觉档位 |
+
+### 13.5 `robot11_visual:=decimated|full` —— 开关的最终语义（**xacro 现在由生成器拥有**）
+
+| 项 | 值 |
+|---|---|
+| 开关 | `robot11_visual:=decimated`（**默认**）\| `full`（launch 侧 Phase 4 已加，本相位**没有改它**） |
+| `decimated` 指向 | `package://robot11/meshes/decimated/<link>.stl` —— **本相位的视觉 LOD**（163,995 面 / 8.20 MB） |
+| `full` 指向 | `package://robot11/meshes/<link>.STL` —— 上游 CAD 原件（2,821,320 面 / 141.07 MB） |
+| 兼容别名 | `visual_decimated:=true|false`（Phase 4 引入的布尔别名）**仍然有效**：非空时它赢（保证"命令行参数优先于默认值"）。两个都不传 ⇒ `decimated` |
+| 只影响 | `<visual>` 的 mesh **文件**。`<collision>`（76 个 carved box + 云台细盒 + 4 个轮 cylinder）、`<sensor>`、`<plugin>`、`<inertial>`、`<visual><origin>`、`<mesh scale>` **全部逐字节不变** |
+| 生成方式 | `tools/scripts/regress/robot11_make_sim_xacro.py`（**生成器拥有**）。Phase 4 的手改块已按同一语义搬进生成器；`sentry_robot_robot11_sim.xacro` 的头部注释里写着"本文件是生成的，不要手改" —— **手改会在下次重跑时被覆盖，这是预期行为** |
+| 生成前置 | 清单缺失或 `all_ok=false` ⇒ 生成器**直接报错**（不生成"看起来对但没人验证过"的模型） |
+| 校验工具 | `tools/scripts/regress/check_robot11_visual_slot.py`（**真的跑 `xacro` 渲染两档**，再逐元素比） |
+
+`check_robot11_visual_slot.py` 的断言（当前**全绿**，21 项；JSON 落 `.tmp_robot11/work/visual_slot.json`）：
+
+| # | 断言 | 结果 |
+|---|---|---|
+| A0 | 两档 xacro 都渲染成功 | ✅ 50,180 B / 50,060 B |
+| A1 | 两档 URDF「除 visual mesh 文件名外」**逐字节相同**（`<visual>` 的 filename 换成占位符后规范序列化比对） | ✅ |
+| B1 | 每个 link 的 `<visual><origin>` 两档逐字相同 | ✅ 13 个 link |
+| C1 | 两档引用的 mesh 文件全部存在 | ✅ |
+| D1 | 没有任何 `<mesh scale=...>`（STL 单位 = 米） | ✅ |
+| E1/E2/E3 | decimated 每 link ≤50k、整车 ≤200k（实测 163,995 = full 的 **5.8%**）；full 档整车 = **2,821,320**（与 §9.2 逐 mesh 清单求和一致） | ✅ |
+| F1 | 清单里的抽稀件与磁盘**逐字节一致**（sha256 + 面数） | ✅ 12/12 |
+| F2/F3/F4/F5 | 每条都过容差；最差 p99 **0.18 mm**、最差包围盒差 **0.297 mm**、最差剪影 IoU **0.9919** | ✅ |
+| G1 | 上游质量合计 **9.5521 kg** | ✅ |
+| G2 | `body_to_livox` 的 xyz 逐字不变（**0.000561701 0.130915824 0.157028170**） | ✅ |
+| G3 | 四个转向关节 origin = ±0.1821345596729（轴距=轮距 0.36427 m） | ✅ j2..j5 |
+| G4 | 四个轮的 `<collision>` 仍是 `cylinder r=0.058 l≈0.0452` | ✅ 4/4 |
+| G5 | 两档 collision 元素个数相同（113 个） | ✅ |
+| H1~H4 | 不传参默认 = decimated；`visual_decimated:=true/false` 分别 = decimated/full；两者冲突时**显式别名赢** | ✅ |
+
+**构建注意**：`install/` 是**逐文件符号链接** ⇒ 新目录 `meshes/decimated/` 必须重新构建才可见：
+
+```bash
+colcon build --symlink-install --packages-select robot11 rm_nav_bringup
+ls -l install/robot11/share/robot11/meshes/decimated/     # 期望 12 个软链
+python3 tools/scripts/regress/check_robot11_visual_slot.py
+```
+
+回退：`robot11_visual:=full`（回到上游原始 STL）；或把生成器的 `visual-inventory` 指向旧清单重跑。
+**删掉 `meshes/decimated/` 也可以**（`full` 档不引用它），但那样 `decimated`（默认）会因文件不存在而加载失败。
+
+### 13.6 自击掩膜：本相位的**独立复测**（Phase 4 的设计见 §12.3，未改一行）
+
+同世界（RMUL2026）、同出生点、`mode:=mapping`、`lio:=small_point_lio`、`nav_rviz:=False`，
+探针 `tools/scripts/regress/slope_speed_probe.py`（114 帧静止 + 75 帧行驶）：
+
+| 指标 | 静止（114 帧） | 行驶（75 帧） | 判据 |
+|---|---|---|---|
+| `self_masked` 点/帧（中位） | **3,374**（min 3,285 / max 3,480） | 4,460（2,915~8,721） | 掩膜真的在跑 |
+| 被掩比例（`cloud_masked_frac`） | 0.2821（自击 `t<0.12 m` 实测 0.2822 —— **两者吻合**） | 0.2949 | — |
+| 走廊最近格 `data_min_d` | **0.20 m（114/114 帧）** | 0.0~0.2 m | 静止时**不再出现 d=0.00** |
+| 近场（d<0.30 m）max 台阶残差 | **0.002~0.005 m** | 0.002~1.695 m（真地形） | 静止时远低于 0.06 死区 ⇒ **无假台阶** |
+| 近场 max 局部坡度 | 2.51~2.85°（= 真地面坡度） | — | 不再被自击格钉成 0.0° |
+| **限速值 `limit`** | **1.0 m/s（114/114 帧）** | 0.6~2.0（中位 0.789） | 静止时**不在地板**（`limit_at_floor` = **0/114**） |
+| 限速原因 `why` | `slope_change` 114 | **`step` 28 / `slope_change` 29 / `slope` 1 / `none` 17** | 行驶时**真台阶照样限速**（最低 0.6 m/s） |
+
+⇒ 两条要求都满足：**静止不误限速**（114/114 帧 1.0 m/s、近场残差 ≤5 mm），
+**真特征仍然限速**（行驶 75 帧里 28 帧因 `step` 限速、限速降到 0.6 m/s，走廊 max 台阶到 1.695 m）。
+
+> ⚠️ 行驶窗口里 `data_min_d` 仍会出现 0.00 —— 那是 Phase 4 §12.7 第 2 项已经登记的**第二个来源**
+> （"承诺距离前推"在车不动/慢速时衰减到 0），**不是**自击（同一帧 `self_masked` 仍有 2,915~8,721 点）。
+> 本轮**没有**改它（不在本主题范围）。
+
+### 13.7 接线证明（`sensor_height` 等**运行期**真值）
+
+Phase 4 已经把"横幅说意图"改成"横幅运行时读真正递给节点的那份 YAML"（§12.4）。
+本相位在**自己重建之后**又独立取证一次（同一次 bash 调用里起栈 + `ros2 param get`）：
+
+| 键 | 运行期真值（`ros2 param get /ground_segmentation <k>`） | 期望 | 结论 |
+|---|---|---|---|
+| `sensor_height` | **0.2595** | 0.2595（雷达离地实测，§9.4） | ✅ **不是 0.226** |
+| `gravity_aligned_frame` | `""` | `""`（点云在源头已重力对齐，§11.5） | ✅ |
+| `max_dist_to_line` | 0.05 | 0.05 | ✅ |
+| `input_topic` | `/livox/lidar/pointcloud` | 同 | ✅ |
+| `self_mask_enable` | `True` | robot11 槽位 = True | ✅ |
+| `self_mask_radius_m` / `self_mask_z_min_m` | 0.2416 / −0.22953 | 同 | ✅ |
+
+launch 横幅（运行时从文件读出来的生效值）同一次跑的原文：
+
+```
+· linefit 参数**已跟着槽位切**（生效值由 launch 运行时读该文件打印）：
+  sensor_height=0.2595, gravity_aligned_frame="", input_topic="/livox/lidar/pointcloud",
+  ground_output_topic="segmentation/ground"
+  ← install/linefit_ground_segmentation_ros/share/.../config/segmentation_sim_robot11.yaml
+· 自击掩膜（只作用于判据/限速，不动点云与 /segmentation/* 标签）：
+  self_mask_enable=true, 近场死区 r<=0.2416 m（z>=-0.2295）, 113 个 collision AABB
+```
+
+### 13.8 无头验收（本相位跑的一次，`robot11_visual` 默认 = decimated）
+
+跑法（一次 bash 调用，隔离同 `run_robot_model_probe.sh`）：
+
+```bash
+tools/scripts/regress/run_robot_model_probe.sh r11p5 --duration 30 --drive-seconds 12 \
+  --dump-cloud .tmp_robot11/work/probe/frames --dump-scan .tmp_robot11/work/probe/scans \
+  --require-scan --require-odom -- \
+  world:=RMUL2026 mode:=mapping lio:=small_point_lio robot:=robot11 \
+  map_autocontinue:=False lio_rviz:=False nav_rviz:=False
+```
+
+| 项 | 期望 | 实测 | 判定 |
+|---|---|---|---|
+| spawn | 模型进世界 | `spawn_entity` 报 "Entity pushed to spawn queue, but spawn service **timed out**…Exiting"，但模型**确实进了世界**（TF/点云/odom 全有） | ⚠️ 已知抖动（超时判定，不是失败） |
+| TF `base_link` | 存在 | ✅ (0,0,0) rpy 0 | ✅ |
+| TF `livox_frame` | 在 body 系 (0.00056, 0.1309, 0.1570) rpy 0 | ✅ **(0.0006, 0.1309, 0.157)** rpy (0,0,0) | ✅ **与约束逐位一致** |
+| TF `imu_link` | (0.0006, 0.1309, 0.107) | ✅ | ✅ |
+| `/odom` | 有、10 Hz | ✅ 210 条 / 46.07 s 墙钟 = **10.0 Hz** | ✅ |
+| `/livox/lidar/pointcloud` | 10 Hz | ✅ 210 帧 / **11,974 点/帧**（中位） | ✅ |
+| `/segmentation/ground` | 有点 | ✅ 210 帧 / **5,689 点/帧**（中位） | ✅ |
+| `/segmentation/obstacle` | 有点 | ✅ 210 帧 / 6,273 点/帧 | ✅ |
+| `/scan` | 有、>4 m 与 <1 m 都有 | ✅ 210 帧 / 有限波束中位 **830**；距离分带（210 帧合计）：<1 m **109,926**、1–2 m 39,500、2–4 m 42,810、4–7 m 16,301、**>7 m 218** ⇒ "既有 >4 m 也有 <1 m"**成立** | ✅（但见 §13.9） |
+| 自击比例 | 与 §11.2 同量级 | ✅ `t<0.12 m` = **28.69%**（`t<0.05 m` = 26.54%） | ✅ |
+| 自击掩膜 | 生效 | ✅ 中位 **3,374 点/帧**被剔（§13.6） | ✅ |
+| 静止假台阶 | 无 | ✅ 近场 max 残差 **0.002~0.005 m**；限速 **1.0 m/s（114/114）** | ✅ |
+| 真台阶仍限速 | 有 | ✅ 行驶 75 帧：`why=step` **28 帧**、限速最低 **0.6 m/s** | ✅ |
+| RTF | — | **0.455**（整栈：感知 + LIO + slam_toolbox + 世界 RMUL2026，墙钟口径 46 s 窗口） | 记录 |
+| 契约：`/segmentation/obstacle` | 1 个发布者 | ✅ 1 发布者 / 1 订阅者 | ✅ |
+| 契约：`/segmentation/ground` | 1 个发布者 | ✅ 1 发布者 | ✅ |
+| 契约：`/odom` | 1 个发布者 | ✅ 1 发布者 | ✅ |
+| 契约：`/cmd_vel_chassis` | 1 个发布者（nav2/velocity_smoother）1 个订阅者（planar_move） | ✅ 1/1 | ✅ |
+| 契约：`/map` | 1 个发布者 | ✅ 1 发布者 | ✅ |
+| `gzclient`（无头跑） | 不参与 | 死亡行 `exit code -6`（无 DISPLAY 时 RenderEngine 起不来 ⇒ abort）—— **无头跑的预期行为**，不是缺陷 | 记录 |
+
+### 13.9 ⚠️ 新发现（**实测，未修**）：`/scan` 里恒有一圈"自身障碍"
+
+`/scan` 由 `pointcloud_to_laserscan` 从 `/segmentation/obstacle` 生成，而**自击点仍然在 obstacle 里**
+（掩膜只在**判据/限速**那一层生效，**没有**动 `/segmentation/*` 的标签 —— 这是有意的：
+近场回波是**物理真实**的，动标签等于改共享契约）。
+
+单帧实测（`.tmp_robot11/work/probe/scans/scan_01.csv`，`robot11_visual:=decimated`）：
+
+| 距离带 | 波束数 | 占该帧有限波束 |
+|---|---|---|
+| **< 0.3 m** | **132** | 19.0% |
+| **0.3 ~ 1.0 m** | **296** | 42.7% |
+| 1 ~ 2 m | 244 | 35.2% |
+| 2 ~ 4 m | 116 | 16.7% |
+| > 4 m | 45 | 6.5% |
+| **< 1 m 合计** | **428** | **61.8%** |
+
+* `nearest_range = **0.05 m**` ⇒ 确认是自击（与插件 `point = range·axis` 的系统内移一致，§12.3.1）。
+* <1 m 的 428 条在方位上**集中在约 120° 的扇区**（30° 分箱：0/0/0/14/9/1/**119/90/91/96**/8/0）
+  ⇒ 形状是"车体自己"，不是一圈均匀的环。
+* 210 帧合计 **109,926** 条 <1 m ⇒ **523 条/帧**（Phase 4 §12.7 第 4 项报的是 **218.7 条/帧**；
+  两次跑的世界/出生点/朝向不同，量级一致，**都是"自障碍"**）。
+
+**风险**：nav2 的局部代价图（STVL / voxel / obstacle 层）会把这一圈 5 cm~1 m 的"障碍"画在车周围
+⇒ 规划器可能认为车被围住（这正是 Phase 4 登记的那个"目标被接受但车不走"的新候选根因）。
+**本轮没有改任何共享语义**（改 `/segmentation/*` 的标签会影响默认模型与其它槽位），
+只把它量清楚、登记在这里。**下一步的候选修法**（未做）：在 `pointcloud_to_laserscan` 侧加
+"自击掩膜"（同一份 `self_mask_*` 参数），或在插件侧修 `point = range·axis` 的内移。
+
+### 13.10 本相位的未验证清单（诚实清单）
+
+1. **`gzclient` 的 SIGKILL 仍未复现**：本机（31.9 GB）两档都活满窗口；本轮 GUI 数字是
+   **Xvfb + 软件 GL（llvmpipe）**上量的 ⇒ 只能证明"进程活着、没黑屏、内存多少"，
+   **不能**代表真 GPU 的渲染吞吐或真机内存压力。
+2. **"抽稀省 GUI 内存"在本机没有被证实**（§13.4.3）：`gzclient` 473 MiB、`gzserver` 3,202 MiB、
+   `rviz2` 314~322 MiB **两档都一样**，且与 Phase 4 §12.2 的 rviz2 1,381↔243 MiB **不一致**。
+   我已把三条可能的原因列在 §13.4.3，但**没有定论** ⇒ 用户机器上的实测才是裁决。
+3. **渲染端足迹（~240 B/面）是推断**，不是实测（§13.4.4）。
+4. **`meshlabserver` 的 QECD 没跑起来**（无 GL）⇒ "两种实现给出同样的抽稀结果"这件事**没有对照过**；
+   本相位只用"量化容差"而不是"工具身份"来取信。
+5. **`--calibrate` 的对照已补做**（`--only l12`，见 §13.3.3 注 1）：精确口径 p99 0.204 mm /
+   采样口径 0.000 mm ⇒ 采样**偏低 ≤0.22 mm**，比 3.0 mm 判据小一个量级。⚠️ 只在 `l12` 上对过
+   （大网格的精确口径跑不出来，见下一条）⇒ "所有 mesh 都校准过"**不成立**。
+6. **`base_link` 的精确误差口径跑不出来**（`vtkImplicitPolyDataDistance` 在 208 万面 dst 上 10 分钟未返回）
+   ⇒ `base_link` 的 p99/max 只有采样口径的数。这是**已知的**方法学缺口。
+7. **抽稀后的视觉在真 GPU 上"看起来够不够"没看过**：本相位只有数字（包围盒/误差/剪影/自击），
+   **没有**一张真渲染截图做视觉确认（软件 GL 下的截图不能当"好不好看"的证据）。
+8. **`l6`..`l9`（轮）的包围盒差 0.297 mm 全部来自半径方向**：3,000 面对一个 r=58 mm 的圆柱
+   ⇒ 内接多边形半径损失 ~0.3 mm。**没有**换成 `<cylinder>` 视觉（那会改变 `<visual>` 的几何类型，
+   超出"只换文件"的范围）。
+9. **`decimated` 档与 `full` 档的物理/感知等价性**：本轮证明了两档 URDF 除 visual 文件名外逐字节相同
+   （A1/G5），但**没有**做"两档各跑一次整栈、逐帧比点云/odom"的端到端对照（成本高；A1 已经在
+   结构上排除了差异来源）。
+10. **`meshes/decimated/` 的入库策略**：12 个文件 **8.20 MB**，已入库（理由：默认档直接依赖它，
+    且原文本仓本来就跟踪 141 MB 的 CAD 原件；`git` 单文件上限 100 MiB，最大者 2.50 MB）。
+    完全复现只需 `python3 tools/scripts/regress/robot11_decimate_visuals.py`（约 6 分钟）。
+    若将来不想入库，把它改成构建期生成即可（**未做**：那会给构建加 pyvista/VTK 依赖）。
+11. **`/scan` 的自障碍（§13.9）没有修**，也没有验证"它是不是 nav 不走的根因"。
