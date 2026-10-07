@@ -148,6 +148,29 @@ HEADER = '''<?xml version="1.0"?>
     单向表面误差 p99,max / 三视剪影 IoU / 边界边数"，全部落在
     `robot11_description/inventory/visual_decimation.json`。
     开关：`robot11_visual:=decimated`（**默认**）| `full`；`<collision>` 与 `<inertial>` 不动。
+
+  ── ★ 2026-10-10：**底盘塌成单刚体**（`—chassis rigid`，本文件默认） ───────────
+    归因与实测见 docs/tilted_lidar_fidelity.md §M。一句话：底盘驱动是
+    `libgazebo_ros_planar_move.so`，而它的实现（`gazebo/physics/Model.cc:746-771`）是
+    **把同一个 (v, ω) 写给模型里的每一个 link**；这对"单刚体"恰好自洽，对"多刚体 + 关节树"
+    则不自洽（绕质心转时第 i 个 link 的质心速度本应是 `ω × r_i`）⇒ 关节约束求解器每步都
+    要把这个错误掰回来，反作用把底盘的角速度吃掉。同一世界/出生点、绕过 nav2 只发
+    `/cmd_vel_chassis` `wz=1.0` 持续 12 s 仿真秒（请求 687.5°）的实测：
+      · 原样（13 link / 12 joint）          真值 **+7.09°**（1.03%），无指令 60 s 自由漂移 **+18.4°**
+      · 全关节改 fixed（`fixall`，对照）    +21.31°（3.10%）
+      · **本档（单刚体）**                  **+111.7…113.3°（16.2~16.5%）**，60 s 漂移 **0.02°**
+      · 默认模型（7 link / 6 joint，对照）  +40.0°（5.8%），60 s 漂移 −0.24°
+      · 极简单 link box（无接触，上限对照） +681.2°（99.9%）
+    同时"正前方被实体障碍挡住"的物理极限保持不变：纯物理盲推正前方 0.3998 m（原样 0.4077 m、
+    §L 记 0.4199 m）。
+    做法（**只改"哪条 link 装哪块几何"，不动任何一块几何、不动总质量/惯量**）：
+      · l2…l11 的 `<collision>` / `<visual>` pose 经 FK 变换到根 link 后**逐条**挂过来；
+      · 它们的 `<inertial>` 用平行轴定理合成到根 link（M=9.4121 kg、Izz=0.12677 kg·m²）；
+      · 删掉 j2…j11；**保留** `livox_frame` / `imu_link` 与它们的固定关节（感知链的帧与传感器）；
+      · 自证（不通过就**报错不生成**）：碰撞几何 AABB 逐条相等、整车最低点必须落在轮子上
+        （−0.10250 m，与 Phase 1 独立量到的"地面平面 z=−0.102499"一致）。
+    工具：`tools/scripts/regress/robot11_weld_chassis.py`（可单独跑 `—in/—out/—report-only`）。
+    回退：`robot11_make_sim_xacro.py —chassis articulated`（= 2026-10-09 的原样，逐字节相同）。
 -->
 <robot name="sentry" xmlns:xacro="http://ros.org/wiki/xacro">
 
@@ -460,6 +483,15 @@ def main():
                          '**Phase 5 新增**：`<visual>` 默认走 `meshes/decimated/<link>.stl`，'
                          '清单里的三角形数与误差会被写进生成物的文件头（provenance 是构造性的）。'
                          '清单缺失或 all_ok=false ⇒ 直接报错，不生成"看起来对但没人验证过"的模型。')
+    ap.add_argument('--chassis', default='rigid', choices=['rigid', 'articulated'],
+                    help='底盘表示（★ 2026-10-10 新增，**默认 rigid**）：\n'
+                         '  rigid      = 把 l2…l11 塌成**一个刚体**（几何/惯量逐项守恒，自证；'
+                         '见 tools/scripts/regress/robot11_weld_chassis.py 与 docs/tilted_lidar_fidelity.md §M）。'
+                         '为什么：planar_move 是 `Model::Set*Vel` = 把同一个 (v,ω) 写给**每一个 link**，'
+                         '只有单刚体自洽；多刚体 + 关节树时实测角速度只执行 1.03%（单刚体 16.2%、'
+                         '默认模型 5.8%）、自由偏航漂移 +18.4°/60 s（单刚体 0.02°）。\n'
+                         '  articulated= 2026-10-09 之前的原样（13 link / 12 joint）；'
+                         '**回退就用它**，输出与 HEAD 逐字节相同。')
     ap.add_argument('--out', default='src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro')
     a = ap.parse_args()
     global args
@@ -731,10 +763,22 @@ def main():
         L.append('  </joint>\n\n')
 
     L.append(FOOTER.replace('__ROOT__', root_name))
+    txt = _sanitize_comments(''.join(L))
+    if a.chassis == 'rigid':
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'scripts', 'regress'))
+        import robot11_weld_chassis as _weld
+        txt, rep = _weld.weld(txt, root=root_name)
+        sys.stderr.write('[weld] %d link -> 1 刚体：M=%.4f kg、Izz=%.5f、碰撞 %d 条'
+                         '（AABB 逐条相等=%s、最低点在轮上=%s）、关节 %d -> %d\n'
+                         % (len(rep['welded_links']), rep['mass_kg'], rep['izz'],
+                            rep['n_collisions_after'], rep['aabb_identical'],
+                            rep['wheels_are_lowest'], len(rep['dropped_joints']),
+                            len(rep['kept_links']) and 2))
     out = os.path.join(REPO, a.out)
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(_sanitize_comments(''.join(L)))
-    sys.stderr.write('[xacro] %s -> %s (%d B)\n' % (a.upstream, a.out, os.path.getsize(out)))
+        f.write(txt)
+    sys.stderr.write('[xacro] %s -> %s (%d B, chassis=%s)\n'
+                     % (a.upstream, a.out, os.path.getsize(out), a.chassis))
     return 0
 
 
