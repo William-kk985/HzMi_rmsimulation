@@ -134,17 +134,24 @@ _ROBOT_SLOTS = {
 }
 
 #: robot:=robot11 的雷达 30° 安装：**上游两份材料自相矛盾**（URDF 原文写 pitch、
-#: SolidWorks CSV 写 roll），所以做成开关而不是猜。取值 → `body_to_livox` 的 rpy：
+#: SolidWorks CSV 写 roll），Phase 2 只能证明"轴看得出来、哪个对文件说了算"。
+#: ★ 2026-10-07 Phase 3：**用户按实物确认 = 绕 roll**（"30° 是绕 roll 轴"）⇒ 默认 roll 从
+#:   "机器导出的 CSV 更可信"升级为"实物判据"；`pitch` 保留为对照开关（几何上等价，只差绕 z 一转）。
 _LIVOX_TILT_RPY = {
-    # 默认：SolidWorks CSV 的 Joint Origin Roll = -0.523598775598293
-    # （机器导出 ⇒ 比手打的一行更可能是字面真相）
+    # 默认：SolidWorks CSV 的 Joint Origin Roll = -0.523598775598293（**用户已按实物确认**）
     'roll': '-0.523598775598293 0 0',
-    # URDF 原文那一行 rpy="0 -0.5236 0"
+    # URDF 原文那一行 rpy="0 -0.5236 0"（保留供对照/回退）
     'pitch': '0 -0.523598775598293 0',
 }
 
+#: robot:=robot11 的 A 方案（碰撞挖视锥）默认抬高量：**0 = 与上游几何逐字相同**。
+#: 非 0 = B 方案（把雷达抬到顶板上方）—— 只是"实测对照"用；抬高会改变雷达离地高度，
+#: linefit 的 sensor_height 必须同步改（见 config/segmentation_sim_robot11.yaml 的 ⚠️ 与
+#: docs/robot_models.md §11 的 B 复现步骤）。本 launch **不替你改 YAML**（避免第二个真源）。
+_LIVOX_RAISE_DEFAULT = '0.0'
 
-def _lio_adapter_robot11(axis):
+
+def _lio_adapter_robot11(axis, raise_m=0.0):
     """robot:=robot11 的 lio_tf_adapter 补偿量（xyz = base_link 原点在 imu 系下的坐标，rpy = 其姿态）。
 
     纯几何、无魔法：imu_link 的位姿 = body_to_livox(tilt) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
@@ -154,23 +161,14 @@ def _lio_adapter_robot11(axis):
       pitch：xyz = [-0.079000533, -0.130915824, -0.085709533]  rpy = [ 0,  0.523598776, 0]
     两种候选下 imu 离地都是 0.216226 m（由几何唯一决定，与轴的选择无关）。
     """
-    import math
-    ang = -0.523598775598293
-    p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305)
-    if axis == 'roll':
-        R = ((1.0, 0.0, 0.0),
-             (0.0, math.cos(ang), -math.sin(ang)),
-             (0.0, math.sin(ang), math.cos(ang)))
-        rpy = [0.523598775598293, 0.0, 0.0]
-    else:
-        R = ((math.cos(ang), 0.0, math.sin(ang)),
-             (0.0, 1.0, 0.0),
-             (-math.sin(ang), 0.0, math.cos(ang)))
-        rpy = [0.0, 0.523598775598293, 0.0]
-    d = (0.0, 0.0, -0.05)
-    p_imu = tuple(p_livox[i] + sum(R[i][j] * d[j] for j in range(3)) for i in range(3))
-    t = [-sum(R[j][i] * p_imu[j] for j in range(3)) for i in range(3)]   # -(R^T · p_imu)
-    return [round(v, 9) for v in t], rpy
+    # ★ Phase 3 更正：`livox_frame` 的 rpy 现在是 0（点云在源头重力对齐，见 xacro 注释），
+    #   imu_joint 是 rpy=0 的固定关节、沿 body −z 走 0.05 m
+    #   ⇒ T_imu←base_link 的旋转是**单位阵**，xyz = −(雷达位置) + (0,0,+0.05)。
+    #   （30° 只是**射线**的姿态，不再是任何 TF 帧的姿态 ⇒ 与 `livox_tilt_axis` 无关。）
+    p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305 + float(raise_m))
+    p_imu = (p_livox[0], p_livox[1], p_livox[2] - 0.05)
+    t = [-v for v in p_imu]
+    return [round(v, 9) for v in t], [0.0, 0.0, 0.0]
 
 
 class _LioAdapterRobot11(Substitution):
@@ -188,12 +186,86 @@ class _LioAdapterRobot11(Substitution):
         axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
         if axis not in _LIVOX_TILT_RPY:
             raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
-        xyz, rpy = _lio_adapter_robot11(axis)
+        raise_m = LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0'
+        xyz, rpy = _lio_adapter_robot11(axis, raise_m)
         v = xyz if self.__which == 'xyz' else rpy
         return '[%s]' % ', '.join(repr(float(x)) for x in v)
 
     def describe(self):
         return '%s(%s)' % (type(self).__name__, self.__which)
+
+
+class _Nav2ParamsForSlot(Substitution):
+    """nav2 的**公共段**参数文件：`robot:=robot11` 时把槽位覆盖层**深合并**进公共段。
+
+    为什么用"运行时合并"而不是多加一份参数文件：`bringup_rm_navigation.py` 只认三个槽
+    （params_file / planner / controller），三份都被占满了；而 `src/rm_navigation/**/params`
+    是别的任务的目录（本主题禁改）。⇒ 在**我们自己的 launch** 里把
+    `rm_nav_bringup/config/nav2_params_sim_robot11_costmap.yaml`（只含几何键）深合并到公共段之上，
+    写成一份临时 YAML 再传下去。
+
+    · 非 robot11 槽位：**原样返回公共段路径**（不合并、不写临时文件 ⇒ 行为与以前逐字节一致）；
+    · robot11：合并（覆盖层的键赢），临时文件落在 `$ROS_LOG_DIR`（拿不到就 /tmp）。
+    · 合并是**深**的（只覆盖叶子键）⇒ 公共段里其它一切（含注释以外的全部键）保持不变。
+    """
+
+    def __init__(self, base_path, override_path):
+        super().__init__()
+        self.__base = base_path
+        self.__override = override_path
+
+    def perform(self, context):
+        import tempfile
+
+        import yaml as _yaml
+        if LaunchConfiguration('robot').perform(context).strip() != 'robot11':
+            return self.__base
+        if not os.path.isfile(self.__override):
+            raise RuntimeError('[launch] robot:=robot11 的 nav2 覆盖层不在：%s' % self.__override)
+        with open(self.__base) as f:
+            base = _yaml.safe_load(f)
+        with open(self.__override) as f:
+            over = _yaml.safe_load(f)
+
+        def deep_merge(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    deep_merge(dst[k], v)
+                else:
+                    dst[k] = v
+
+        deep_merge(base, over)
+        out_dir = os.environ.get('ROS_LOG_DIR') or tempfile.gettempdir()
+        out = os.path.join(out_dir, 'nav2_params_sim_robot11_merged.yaml')
+        with open(out, 'w') as f:
+            _yaml.safe_dump(base, f, allow_unicode=True, sort_keys=False)
+        return out
+
+    def describe(self):
+        return '%s(base=%s, override=%s)' % (type(self).__name__, self.__base, self.__override)
+
+
+class _SlotSpinSpeedDefault(Substitution):
+    """`spin_speed` 的**按槽位**默认值：robot:=robot11 ⇒ 0.0，其余 ⇒ 5.0（旧默认）。
+
+    为什么不用裸 PythonExpression：它的求值时机是"声明这条 launch 参数时"，而 `robot` 这条
+    参数如果声明得更晚（或来自命令行），那个时刻可能还不在 context 里 ⇒ PythonExpression 会抛
+    `SubstitutionFailure`（实测：**整条 launch 起不来**，连默认模型都受影响）。
+    这里显式容错：
+      · `robot` 已在 context 里（= 声明顺序在前，或命令行给了）⇒ 按槽位给值；
+      · 还没有 ⇒ 退回旧默认 5.0（不抛异常；用户仍可显式 `spin_speed:=0.0`）。
+    另外 launch 里已把 `robot` 的声明**挪到 spin_speed 之前**，所以正常情况下走第一条分支。
+    """
+
+    def perform(self, context):
+        try:
+            slot = context.launch_configurations.get('robot', '')
+        except Exception:                                             # noqa: BLE001
+            slot = ''
+        return '0.0' if str(slot).strip() == 'robot11' else '5.0'
+
+    def describe(self):
+        return '%s()' % (type(self).__name__)
 
 
 def _robot_slot_error(value):
@@ -250,6 +322,9 @@ class _RobotXacroCommand(Substitution):
             cmd += [' livox_tilt_rpy:="',
                     _LIVOX_TILT_RPY[LaunchConfiguration('livox_tilt_axis').perform(context).strip()],
                     '"']
+            # ★ Phase 3：B 方案（抬高雷达）的开关。默认 0 ⇒ 与上游几何逐字相同。
+            cmd += [' livox_raise_m:=',
+                    LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0']
         return ''.join(cmd)
 
     def describe(self):
@@ -263,18 +338,20 @@ class _RobotSlotFile(Substitution):
     默认槽位返回的路径与改造前**逐字节相同** ⇒ 默认模型读的还是同一份 YAML。
     """
 
-    def __init__(self, package_name, default_rel, alt_rel, slot='hzmirm', error_hint=''):
+    def __init__(self, package_name, default_rel, alt_rel=None, slot='hzmirm',
+                 error_hint='', slot_map=None):
         super().__init__()
         self.__package_name = package_name
         self.__default_rel = tuple(default_rel)
-        self.__alt_rel = tuple(alt_rel)
-        self.__slot = slot
+        #: 槽位 → 该槽位要用的文件（`alt_rel`/`slot` 是单槽位的旧用法，保留不动）
+        self.__slot_map = {k: tuple(v) for k, v in (slot_map or {}).items()}
+        if alt_rel is not None:
+            self.__slot_map[slot] = tuple(alt_rel)
         self.__error_hint = error_hint
 
     def perform(self, context):
-        rel = (self.__alt_rel
-               if LaunchConfiguration('robot').perform(context).strip() == self.__slot
-               else self.__default_rel)
+        rel = self.__slot_map.get(
+            LaunchConfiguration('robot').perform(context).strip(), self.__default_rel)
         try:
             share_dir = get_package_share_directory(self.__package_name)
         except PackageNotFoundError:
@@ -289,9 +366,10 @@ class _RobotSlotFile(Substitution):
         return path
 
     def describe(self):
-        return '%s(package=%s, default=%s, alt=%s)' % (
+        return '%s(package=%s, default=%s, slots=%s)' % (
             type(self).__name__, self.__package_name,
-            os.path.join(*self.__default_rel), os.path.join(*self.__alt_rel))
+            os.path.join(*self.__default_rel),
+            {k: os.path.join(*v) for k, v in self.__slot_map.items()})
 
 
 # =============================================================================
@@ -490,14 +568,20 @@ def generate_launch_description():
     #                且 gravity_aligned_frame="base_link"）。该模型雷达比默认模型高 ~0.57 m，
     #                照抄 0.226 会让地面线整体偏 0.57 m ⇒ 地面分割近乎全错；
     #                判据/实测见 docs/robot_models.md §3/§5。
+    #   · robot11  → segmentation_sim_robot11.yaml（Phase 3 新增）：sensor_height = 雷达离地
+    #                 **实测 0.2595**（默认模型 0.226 / hzmirm 0.80）、
+    #                 gravity_aligned_frame="base_link"（雷达斜 30° ⇒ 传感器系 z 不再是"高度"）。
+    #                 ⚠️ 若用 livox_raise_m≠0 跑 B 方案，那份 YAML 的 sensor_height 必须同步
+    #                    （0.2595 + raise，实测值），本 launch 不替改（避免第二个真源）。
     segmentation_params = _RobotSlotFile(
         'linefit_ground_segmentation_ros',
         ('config', 'segmentation_sim.yaml'),
-        ('config', 'segmentation_sim_hzmirm.yaml'),
-        error_hint='该文件属于本次新增的 robot:=hzmirm 槽位：'
+        error_hint='该文件属于本次新增的 robot 槽位：'
                    'colcon build --symlink-install --packages-select '
                    'linefit_ground_segmentation_ros 后重试；'
-                   '或去掉 robot:=hzmirm 回到默认模型')
+                   '或去掉 robot:=<模型> 回到默认模型',
+        slot_map={'hzmirm': ('config', 'segmentation_sim_hzmirm.yaml'),
+                  'robot11': ('config', 'segmentation_sim_robot11.yaml')})
     ########################## linefit_ground_segementation parameters end ############################
 
     ########################## 可通行性判据（坡度/台阶）parameters start #############################
@@ -597,8 +681,15 @@ def generate_launch_description():
             "'nav2_params_sim_controller_' + '", LaunchConfiguration('nav'), "' + '.yaml'"])]),
     ]
     # 逐槽位传参（老的入参名 params_file 保留 = 公共段 ⇒ 单文件用法仍然可用）
+    # ★ 2026-10-07 Phase 3：公共段按槽位走一遍**深合并**（只有 robot11 会真的合并出临时文件；
+    #   其它槽位原样返回同一份 base ⇒ 默认模型逐字节不变）。覆盖层只含代价图几何键
+    #   （robot11 足印内切 0.300 / 外接 0.3565）—— 见 rm_nav_bringup/config/
+    #   nav2_params_sim_robot11_costmap.yaml 的文件头与 docs/robot_models.md §11.6/§11.9。
+    nav2_base_params_for_slot = _Nav2ParamsForSlot(
+        os.path.join(nav2_params_dir, 'nav2_params_sim_base.yaml'),
+        os.path.join(rm_nav_bringup_dir, 'config', 'nav2_params_sim_robot11_costmap.yaml'))
     nav2_params_launch_args = {
-        'params_file': nav2_params_file_dir[0],             # 公共段（base）
+        'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）
         'params_file_planner': nav2_params_file_dir[1],     # planner_server 槽
         'params_file_controller': nav2_params_file_dir[2],  # controller_server 槽
     }
@@ -673,10 +764,16 @@ def generate_launch_description():
 
     declare_spin_speed_cmd = DeclareLaunchArgument(
         'spin_speed',
-        default_value='5.0',
+        # ★ 2026-10-07 Phase 3：默认值**按槽位**给（`robot:=robot11` ⇒ 0.0）。
+        #   为什么：robot11 的四个轮子是**真 cylinder 碰撞**、云台 j10/j11 我们没有加控制器
+        #   ⇒ "小陀螺"在仿真里既没有对应的执行机构、也不是这台车的实测行为；开着它只会让
+        #   nav 看到的 base_link_fake 凭空转、而雷达（挂在 body 上）并不跟着转。
+        #   本仓默认模型/其它槽位仍然 5.0（逐字节不变：只有 robot=='robot11' 才是 0.0）。
+        default_value=_SlotSpinSpeedDefault(),
         description='fake_vel_transform 的小陀螺固定角速度 (rad/s)。'
-                    '5.0 = 复现上游哨兵小陀螺行为；0.0 = 角速度直通（等价普通 nav2，'
-                    '仿真里排查导航问题先用 0.0）')
+                    '5.0 = 复现上游哨兵小陀螺行为（默认模型/其它槽位）；'
+                    'robot:=robot11 的默认值 = **0.0**（该模型轮子是真 cylinder、云台无控制器，'
+                    '仿真里既无执行机构也无实测依据）；0.0 = 角速度直通（等价普通 nav2）')
 
     declare_world_cmd = DeclareLaunchArgument(
         'world',
@@ -696,8 +793,9 @@ def generate_launch_description():
                     "robot11 → urdf/sentry_robot_robot11_sim.xacro（用户的哨兵 robot11：真 mesh 视觉、"
                     "真 inertial、雷达在底盘上斜 30° 下俯、离地 0.2595、足印内切 0.30/外接 0.3565；"
                     "碰撞件按实测换过 —— body 用 4 个 box 而不是 208 万面的原网格）。"
-                    "选 robot11 时 launch 会调整 lio_tf_adapter 杆臂（含 30° 旋转补偿）；"
-                    "linefit 的参数**没有**跟着切（该文件属别的任务的目录，见 docs/robot_models.md §10.6）。"
+                    "选 robot11 时 launch 会调整 lio_tf_adapter 杆臂（含 30° 旋转补偿），"
+                    "并切到该槽位专用的 linefit 参数（sensor_height=0.2595 + gravity_aligned_frame"
+                    "=base_link）与 p2l 参数（target_frame=base_link，高度带改在重力系量）。"
                     "范围/数值对照见 docs/robot_models.md",
         choices=['', 'hzmirm', 'robot11'])
 
@@ -713,8 +811,23 @@ def generate_launch_description():
         description='仅 robot:=robot11：雷达 30° 倾斜绕哪个轴（roll=绕 x / pitch=绕 y）。'
                     '默认 roll = SolidWorks CSV 的字面值（URDF 原文写的是 pitch，两者矛盾）。'
                     '⚠️ 对 360° 的 MID-360，两个取值在**仰角/地面可见性/盲区半径上完全等价**，'
-                    '只改变"最朝下的方位"（roll→±y，pitch→±x）；实测见 docs/robot_models.md §10.5',
+                    '只改变"最朝下的方位"（roll→±y，pitch→±x）；实测见 docs/robot_models.md §10.5。'
+                    '★ Phase 3：倾角实现位置 = `<gazebo><sensor><pose>`（射线真的斜），'
+                    '而 livox_frame 这个帧是重力对齐的（理由：linefit 的 gravity_aligned_frame '
+                    '路径在本仓有 C++ bug，见 docs/robot_models.md §11）',
         choices=['roll', 'pitch'])
+
+    # ★ 2026-10-07 Phase 3：robot:=robot11 的 B 方案开关（把雷达整体抬高多少米）。
+    #   默认 0.0 ⇒ 与上游 URDF 几何**逐字相同**（xacro 里 origin z = 0.15702816968305 + 0）。
+    declare_livox_raise_m_cmd = DeclareLaunchArgument(
+        'livox_raise_m',
+        default_value=_LIVOX_RAISE_DEFAULT,
+        description='仅 robot:=robot11：把 livox_frame（连同 imu_link）在 body 系里抬高的米数。'
+                    '0.0 = 上游几何（A 方案：靠碰撞挖视锥让雷达看得见）；'
+                    '非 0 = B 方案（保留 4 个 box，把雷达抬到顶板上方）—— 离线实测：'
+                    '+0.06 m 才把自击从 96.6% 降到 19.8%、**+0.10 m 起才与 A 等价**。'
+                    '⚠️ 抬高会改变雷达离地高度 ⇒ linefit 的 sensor_height 必须同步 = 0.2595 + 本值'
+                    '（改 config/segmentation_sim_robot11.yaml；见 docs/robot_models.md §11 的复现步骤）')
 
     # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。
     # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
@@ -1014,6 +1127,14 @@ def generate_launch_description():
         condition=LaunchConfigurationEquals('ground', 'patchwork'),
     )
 
+    # ★ 2026-10-07 Phase 3：p2l **不需要**槽位专用参数了（默认那份一个字节都没改）。
+    #   为什么曾经想改：p2l 的 min_height/max_height 是在**点云自带帧**里量的高度带，
+    #   而雷达斜 30° ⇒ 那条带子在重力系里是斜的（1 m 处约 ±0.5 m 偏差、随方位变号）。
+    #   最终修法不在 p2l：Phase 3 把**点云本身**做成重力对齐的（livox_frame 的 rpy=0、
+    #   倾角搬到 <sensor><pose>，见 sentry_robot_robot11_sim.xacro 与 docs/robot_models.md §11）
+    #   ⇒ p2l 的高度带自动就是"离传感器的真高度"，且**保住了 target_frame="" 这个加固**
+    #   （不做 TF、不建 MessageFilter —— 2026-09-23 刻意避开的那类故障面）。
+    #   实测：robot:=robot11 的 /scan frame_id = livox_frame、10 Hz、有 >4 m 的波束。
     bringup_pointcloud_to_laserscan_node = Node(
         package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
         remappings=[('cloud_in',  ['/segmentation/obstacle']),
@@ -1763,14 +1884,17 @@ def generate_launch_description():
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_lio_rviz_cmd)
     ld.add_action(declare_nav_rviz_cmd)
+    # ★ 2026-10-07 Phase 3：`robot` 必须**声明在 spin_speed 之前** —— spin_speed 的默认值是
+    #   "按槽位给"的（robot11 ⇒ 0.0），而 launch 的声明动作是**按顺序执行**的：
+    #   声明顺序反了就读不到 robot（实测会退化成旧默认 5.0，甚至抛 SubstitutionFailure）。
+    ld.add_action(declare_robot_cmd)
     ld.add_action(declare_spin_speed_cmd)
     ld.add_action(declare_world_cmd)
-    # ★ 2026-10-07：robot 模型槽位（默认 ''）+ 只对它生效的两个云台角
-    ld.add_action(declare_robot_cmd)
     ld.add_action(declare_turret_yaw_deg_cmd)
     ld.add_action(declare_turret_pitch_deg_cmd)
     # ★ 2026-10-07：robot:=robot11 的雷达安装轴（roll | pitch；上游两份材料矛盾 ⇒ 不猜）
     ld.add_action(declare_livox_tilt_axis_cmd)
+    ld.add_action(declare_livox_raise_m_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
     ld.add_action(LogInfo(
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == ''"])),

@@ -11,7 +11,8 @@
   · /scan：帧数、**有效波束数**、最近回波、最近回波方位、inf 占比（是否"看不到东西"）；
   · 里程计：/odom（LIO）与 /odom_ground_truth（planar_move 真值）的路径长度、终点位置/偏航差（漂移）；
   · RTF：/clock 的仿真时间推进 / 墙钟。
-可选：顺便按 `--drive-*` 发一段 /cmd_vel_chassis（结束**一定**补一段零速）。
+可选：顺便按 `--drive-*` 发一段 /cmd_vel_chassis（结束**一定**补一段零速），
+再按 `--yaw-*` 发一段原地偏航（Phase 3 起：用来分别量"直线"和"偏航"两段相对真值的漂移）。
 
 只订阅 + 只发 /cmd_vel_chassis（该话题的唯一订阅者是 Gazebo 的 planar_move 插件），
 不发 TF、不发 /segmentation/*、不发 /map ⇒ 不动本仓任何契约。
@@ -73,6 +74,9 @@ class Probe(Node):
         self.cloud_z_hist = Counter()   # 传感器系 z 直方图（0.01 m 桶）
         self.cloud_z = []               # 采样下来的原始 z（限幅采样，防内存）
         self.cloud_r_near = []          # 近距点（r<0.5）的水平半径
+        # ★ Phase 3：自击比例的**精确**计数（云点总数 + 各阈值内的点数；不采样、不截断）
+        self.cloud_r_stats = Counter()  # {'total':n, 'lt0.05':n, 'lt0.12':n, 'lt0.2':n, 'lt0.3':n}
+        self.ground_r_hist = Counter()  # /segmentation/ground 的**水平距离**直方图（0.5 m 桶）
         self.scan_beams = []            # 每帧有效波束数
         self.scan_nearest = []          # 每帧最近有效回波
         self.scan_inf_ratio = []
@@ -134,6 +138,10 @@ class Probe(Node):
                     self.cloud_z.append(z)
                 self.cloud_z_hist[round(z / 0.01)] += 1
                 r = math.hypot(x, y)
+                self.cloud_r_stats['total'] += 1
+                for thr, key in ((0.05, 'lt0.05'), (0.12, 'lt0.12'), (0.2, 'lt0.2'), (0.3, 'lt0.3')):
+                    if r < thr:
+                        self.cloud_r_stats[key] += 1
                 if r < 0.5 and len(self.cloud_r_near) < 20000:
                     self.cloud_r_near.append(round(r, 3))
                 if r < 1.5:
@@ -160,6 +168,11 @@ class Probe(Node):
         with self.lock:
             self.n['ground'] += 1
             self.ground_points.append(msg.width * msg.height)
+            # ★ Phase 3：地面点的**距离分布** —— 用来量 `speed_limit_lookahead_m` 是否有效
+            #   （hzmirm 的教训：雷达高、下视窄 ⇒ 前瞻距离内根本没有地面点）。
+            for p in point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True):
+                rr = math.hypot(float(p[0]), float(p[1]))
+                self.ground_r_hist[round(rr / 0.5) * 0.5] += 1
 
     def on_imu(self, msg):
         with self.lock:
@@ -240,6 +253,37 @@ class Probe(Node):
                 self.tf_frames.add((tr.header.frame_id, tr.child_frame_id))
 
     # ---------------- 工具 ----------------
+    def pose_snapshot(self):
+        """取一份 (odom, gt) 位姿快照（相位漂移用）。
+
+        ⚠️ 口径（Phase 3 更正）：**漂移 = 位移之差**，不是 odom 与 gt 的绝对位置之差。
+        原因：两条轨迹的原点不同 —— `/odom` 的原点是 LIO 初始化处（≈出生点）、
+        `/odom_ground_truth` 的原点就是世界原点 ⇒ 绝对差里混着"出生点偏移"（默认模型
+        在 RMUL2026 上是 5.45 m！）。Phase 2 的表里那一列就是这个量，别当漂移读。
+        """
+        with self.lock:
+            o = dict(self.odom_last) if self.odom_last else None
+            g = dict(self.gt_last) if self.gt_last else None
+        return o, g
+
+    @staticmethod
+    def phase_drift(p0, p1):
+        """两段快照之间的相对漂移：|Δxy_odom − Δxy_gt| 与偏航差（度）。"""
+        o0, g0 = p0
+        o1, g1 = p1
+        if not (o0 and g0 and o1 and g1):
+            return None
+        dox, doy = o1['x'] - o0['x'], o1['y'] - o0['y']
+        dgx, dgy = g1['x'] - g0['x'], g1['y'] - g0['y']
+        dyaw_o = wrap(o1['yaw'] - o0['yaw'])
+        dyaw_g = wrap(g1['yaw'] - g0['yaw'])
+        return {'d_odom_xy': [round(dox, 3), round(doy, 3)],
+                'd_gt_xy': [round(dgx, 3), round(dgy, 3)],
+                'drift_xy': round(math.hypot(dox - dgx, doy - dgy), 4),
+                'drift_yaw_deg': round(math.degrees(wrap(dyaw_o - dyaw_g)), 3),
+                'd_odom_yaw_deg': round(math.degrees(dyaw_o), 2),
+                'd_gt_yaw_deg': round(math.degrees(dyaw_g), 2)}
+
     def rate(self, stamps):
         if len(stamps) < 3:
             return 0.0
@@ -296,6 +340,7 @@ class Probe(Node):
         self.get_logger().info('静止窗口 %.1fs …' % a.duration)
         time.sleep(a.duration)
 
+        ph0 = self.pose_snapshot()
         drove = 0.0
         if a.drive_seconds > 0:
             self.get_logger().info('发 /cmd_vel_chassis 前进 %.2f m/s × %.1fs …'
@@ -314,10 +359,30 @@ class Probe(Node):
                 self.cmd_pub.publish(stop)
                 time.sleep(0.05)
             time.sleep(a.settle_after_drive)
+        ph1 = self.pose_snapshot()
 
-        return self.report(drove)
+        yawed = 0.0
+        if a.yaw_seconds > 0:
+            self.get_logger().info('发 /cmd_vel_chassis 原地偏航 %.2f rad/s × %.1fs …'
+                                   % (a.yaw_rate, a.yaw_seconds))
+            tw = Twist()
+            tw.angular.z = a.yaw_rate
+            t_end = time.time() + a.yaw_seconds
+            while time.time() < t_end:
+                self.cmd_pub.publish(tw)
+                time.sleep(1.0 / 20.0)
+            yawed = time.time() - (t_end - a.yaw_seconds)
+            self.get_logger().info('补零速（契约要求）…')
+            stop = Twist()
+            for _ in range(20):
+                self.cmd_pub.publish(stop)
+                time.sleep(0.05)
+            time.sleep(a.settle_after_drive)
+        ph2 = self.pose_snapshot()
 
-    def report(self, drove):
+        return self.report(drove, ph0, ph1, ph2, yawed)
+
+    def report(self, drove, ph0=None, ph1=None, ph2=None, yawed=0.0):
         with self.lock:
             n = dict(self.n)
             cps = list(self.cloud_points)
@@ -393,6 +458,22 @@ class Probe(Node):
             'tf': tfs,
             'tf_frames_seen': ['%s->%s' % f for f in tf_frames],
             'drive_seconds': round(drove, 2),
+            'yaw_seconds': round(yawed, 2),
+            # ★ Phase 3：自击比例（**云点**口径，与 docs §10.6 的 75.5% 同一口径）
+            'cloud_r_stats': dict(self.cloud_r_stats),
+            'cloud_selfhit_frac': {
+                'lt0.05': round(self.cloud_r_stats['lt0.05'] / max(1, self.cloud_r_stats['total']), 4),
+                'lt0.12': round(self.cloud_r_stats['lt0.12'] / max(1, self.cloud_r_stats['total']), 4),
+                'lt0.2': round(self.cloud_r_stats['lt0.2'] / max(1, self.cloud_r_stats['total']), 4),
+            },
+            # ★ Phase 3：地面点的距离分布（0.5 m 桶 → 累计点数）——speed_limit_lookahead_m 的判据
+            'ground_r_hist': sorted((round(float(k), 1), v) for k, v in self.ground_r_hist.items()),
+            # ★ Phase 3：相位漂移（**位移之差**口径）—— 直线段与偏航段分开报
+            'phase_drift': {
+                'straight': self.phase_drift(ph0, ph1) if ph0 and ph1 else None,
+                'yaw': self.phase_drift(ph1, ph2) if ph1 and ph2 else None,
+                'total': self.phase_drift(ph0, ph2) if ph0 and ph2 else None,
+            },
             'tilt_max_deg': {'odom_roll_pitch': round(getattr(self, 'odom_tilt_max', 0.0), 2),
                              'gt_roll_pitch': round(getattr(self, 'gt_tilt_max', 0.0), 2)},
         }
@@ -417,6 +498,9 @@ def main():
     ap.add_argument('--drive-seconds', type=float, default=0.0)
     ap.add_argument('--drive-speed', type=float, default=0.2)
     ap.add_argument('--drive-turn', type=float, default=0.0)
+    ap.add_argument('--yaw-seconds', type=float, default=0.0,
+                    help='直线段之后再发一段**原地偏航**（Phase 3：分别量直线/偏航的漂移）')
+    ap.add_argument('--yaw-rate', type=float, default=0.6, help='原地偏航角速度 (rad/s)')
     ap.add_argument('--require-scan', action='store_true', default=True)
     ap.add_argument('--require-odom', action='store_true', default=True)
     ap.add_argument('--cloud-topic', default='/livox/lidar/pointcloud')

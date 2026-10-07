@@ -881,3 +881,274 @@ MID-360 的方位是 **360°** ⇒ "绕 x 转 30°"与"绕 y 转 30°"给出的*
 7. **`<1 m` 波束里自击与真障碍的占比**没分离（只有总数）；
 8. 大文件（99.10 MiB 的 `base_link.STL`）**已入库并 push 成功**（GitHub 只给了 >50 MiB 的 warning），
    但**没有**用 LFS ⇒ 以后每次 clone 都要拖这 104 MB。
+
+---
+
+## 11. Phase 3：让雷达真的看得见 + 斜置感知链（2026-10-07）
+
+> 状态：**新增**。`robot:=robot11` 从"能跑通但看不见"变成"**雷达看得见、LIO 出 /odom、
+> 地面分割 5637 点/帧**"。默认模型与所有 launch/config 默认值**仍未改**（本节的每一项偏离都逐条登记）。
+> 用户 2026-10-07 的两条判定（本节据此执行）：
+> **(1) 30° 是绕 roll**（用户按实物确认 ⇒ `livox_tilt_axis` 默认 roll 从"CSV 更可信"升级为"实物判据"，
+> 仍保留 `pitch` 开关对照）；**(2) 上游 URDF/mesh"跟实物基本一致、仿真侧可以改"** ⇒ 允许适配，
+> 但每处偏离要写日期 + 中文理由 + provenance（见 §11.3）。
+
+### 11.1 一句话结论
+
+Phase 2 的"雷达在凹槽里 ⇒ 75.5% 自击、地面 529 点/帧、无 `/odom`"有**三个叠在一起的根因**，
+本轮全部定位并解决（**A 方案胜出**）：
+
+| # | 根因 | 证据 | 修法 |
+|---|---|---|---|
+| ① | `body` 的 4 个 DP box 是**实心包络**，而雷达原点 z=0.157 **在第 4 个 box 内部**（box 顶 0.213）⇒ 每条射线先打盒内壁 | 离线 30000 条与 Gazebo 同源射线：**80.5% 落在 <0.12 m**、看见地面 **0%**（Gazebo 实测 75.5% / 529 点每帧，差异 = Gazebo 丢掉 <0.1 m 回波） | **A**：`body` 碰撞 = DP box **减去雷达视锥**（锥半角 100.22°、半径 0.5 m、内清空 0.05 m）后分解成 76 个 box |
+| ② | 模型根 link 叫 **`body`**，而全链路契约帧名是 `base_link`（`small_point_lio` 源码硬编码 `lookupTransform(lidar_frame,"base_link")`）⇒ **TF 断成两棵树** | Gazebo 日志：`Failed to lookup transform from base_link to livox_frame: ... not part of the same tree`（每帧）；`/odom` **0 条**（有发布者、无消息） | 生成时把根 link 改名 `body` → **`base_link`**（上游 SolidWorks CSV 里本来就叫 `base_link`） |
+| ③ | linefit 的 `gravity_aligned_frame` 路径有 **C++ bug**：`Eigen::Affine3d tf;` 默认构造**不清零** | 最小 C++ 复现 + 回放实测（§11.4）；该键="" ⇒ ground 3969 点/帧，="base_link" ⇒ **恒 0 点** | **在源头对齐点云**：`livox_frame` 帧重力对齐（joint rpy=0），30° 倾角放进**插件新增的 `<tilt_rpy>`**（射线真的斜、点云表达在父 link 系）⇒ linefit/p2l 都不用开那个键 |
+
+### 11.2 A / B / C 三条路：实现、实测、选谁
+
+口径：无头隔离跑（`HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、专用 `GAZEBO_MASTER_URI`、`unset DISPLAY`、
+`nav_rviz:=False`）、`world:=RMUL2026 mode:=mapping lio:=small_point_lio`、
+探针窗口 = 静止 20 s + 直行 8 s（0.2 m/s）+ 原地偏航 5 s（0.6 rad/s）。原始数据 `.tmp_robotslot/r11p3{a,b,c,def}/probe.json`。
+
+| 指标 | Phase 2（4 个 box） | **A（挖视锥，采用）** | B（抬高 +0.10 m） | C（抽稀网格碰撞） | **默认模型（对照）** |
+|---|---|---|---|---|---|
+| spawn | ✅ | ✅ | ✅ | ❌ **服务 60 s 超时**（模型没进世界） | ✅ |
+| **`/odom` 消息数** | **0** | **188** | **188** | 0（无数据） | **325** |
+| `/livox/lidar/pointcloud` | 10 Hz | 10 Hz | 10 Hz | **0 Hz** | 10 Hz |
+| 点/帧（中位） | 19717 | **11951** | 9957 | 0 | **6256** |
+| **`/segmentation/ground` 点/帧** | **529** | **5637** | 5435 | 0 | **2739** |
+| `/segmentation/obstacle` 点/帧 | 19232 | 6293 | 4493 | 0 | 3473 |
+| `/scan` 帧数 / 有效波束 | 254 / 1108 | 188 / 833 | 188 / 809 | 0 | 325 / 1174 |
+| **`/scan` >4 m 波束（每帧）** | **0** | **≈81** | ≈220 | 0 | **≈284** |
+| **`/scan` <1 m 波束（每帧）** | 1366 | ≈521 | ≈268 | 0 | ≈145 |
+| `/scan` 最近回波 | 0.05 m | 0.05 m | 0.05 m | — | 0.481 m（Phase 2 口径） |
+| **自击 `r<0.12 m`（云点口径）** | **75.5%** | **29.0%** | 26.2% | — | **0.0%** |
+| 自击 `r<0.05 m` | 48% | 27.4% | 24.8% | — | 0.0% |
+| RTF | 0.747 | 0.459 | 0.456 | — | **0.79** |
+| **LIO 漂移（直线段 8 s，位移差）** | 无 `/odom` | **0.024 m / 0.26°** | 0.027 m / 0.34° | — | **0.006 m / 0.03°** |
+| **LIO 漂移（偏航段 5 s）** | 无 `/odom` | **0.0002 m / 0.004°** | — | — | **0.0008 m / 0.005°** |
+| 车体最大俯仰/侧倾 | 0.11° | 0.28° / 0.12° | — | — | 0.51° / 0.02° |
+| 探测窗口 | 25.4 s | 18.8 s（188 帧） | 18.8 s | — | 32.5 s（325 帧）|
+
+⚠️ 两处读表提醒：① 默认模型的窗口更长（RTF 高 ⇒ 同样墙钟里跑出更多仿真帧），
+所以"累计波束"必须换算成**每帧**再比（上表已换算）；② robot11 的 `r<0.12 m` 自击**不是遮挡**
+（离线射线求交归因：近点 100% 落在**云台** `l10/l11` 上，中位距离 0.14 m —— 那是**真实存在**的
+部件，离雷达只有 0.12~0.17 m；真车 360° 雷达也会照到它），而默认模型的雷达在车顶中间、
+周围 0.3 m 内没有部件 ⇒ 0%。
+
+**A 方案点云的物理复核**（`cloud_frame_01.csv`，11616 点）：body 仰角谱 **−40°…+85°**（= 真的斜 30° 下俯）、
+**地面带（|z+0.2595|<0.06）占 46%**、地面距离 p5/p50/p95 = **0.39 / 0.74 / 2.49 m**（最近地面环 = 0.39 m，
+与几何预言 0.2595/tan37.22° = 0.43 m 一致）、`r>4 m` 的点占 4.5%。
+
+**A 方案的离线—在线一致性**（这是"离线筛方案、Gazebo 复核"这条纪律的验证）：
+离线 30000 条射线预测"自击 <0.12 m = 0%、看见地面 25.2%"；Gazebo 实测自击 **29.0%**、地面 **46%**（云点口径）。
+差异来自离线模型①只算了 `body` 的碰撞（Gazebo 还有云台/轮子）②按**射线**统计而 Gazebo 按**点数**统计。
+
+#### 11.2.1 默认模型对照（同口径）
+
+`.tmp_robotslot/r11p3def2/probe.json`（本轮补跑；`robot` 留空、其余参数与 A/B 完全一致）。
+关键数字已并入 §11.2 主表：**`/odom` 325 条、点/帧 6256、地面 2739 点/帧、自击 0%、RTF 0.79、
+直线漂移 0.006 m / 0.03°、偏航漂移 0.0008 m / 0.005°**。
+⇒ 逐项结论：**A 方案的 robot11 在"看得见"上不输默认模型**（地面 5637 > 2739 点/帧、
+点数/帧 11951 > 6256），代价是 **RTF 0.46 vs 0.79**、自击 29%（云台，物理真实）、
+`/scan` 的远场波束更少（≈81/帧 vs ≈284/帧 —— 因为 360° 下俯 30° 后有相当一部分视场给了地面与自身）。
+
+> ⚠️ 一次踩坑记录：同一 tag 连跑两次时，**上一次被中断的 launch 还在同一 domain/port 上活着**
+> ⇒ 节点清单里同名节点出现两份、`/cmd_vel_chassis` 被两套栈抢、probe 只收到约 1/50 的消息
+> （`counts` 只有 6 帧、漂移恒 0）。判据：`ros2 node list` 里出现重复名字。
+> 处置：**换 tag**（tag 决定 domain/port）+ 跑前确认无同名残留；本次对照跑用的是 `r11p3def2`，有效。
+
+#### 11.2.2 C 到底为什么不可用（根因，不是猜）
+
+Phase 2 记的是"spawn 干净成功但 100 s 内无传感器数据"。本轮在 RMUL2026 里复现：
+**`spawn_entity` 服务 60 s 超时**（`Spawn service failed. Exiting.`），而 `gzserver` 日志里
+**插件该有的初始化全都在**（`LivoxPointsPlugin: load csv ... scan info size: 800000 / sample: 30000 /
+tilt_rpy = ...`），只是**一帧都打不出来**（90 s 内 cloud/imu/scan 全 0）。⇒ 结论：
+**不是"插件没挂上"、也不是"link 被丢掉"、更不是"射线被挡住"**，而是
+**ODE 的 ray-vs-trimesh 求交代价是 O(三角面数)**：30000 条射线 × 3000 面 ≈ **9×10⁷ 次/帧 @10 Hz**，
+Gazebo 在"打一帧射线"里出不来（spawn 阶段的空间重建也一起卡）。这条路**不可用**，且不是"参数问题"。
+
+### 11.3 与上游的偏离清单（provenance：哪些是他们的、哪些是我们改的、为什么）
+
+`src/rm_nav_bringup/urdf/upstream/robot11.urdf` **仍然逐字节未动**（sha256 `e3e322ac…a64fc`）。
+生成物 `sentry_robot_robot11_sim.xacro` 由 `tools/scripts/regress/robot11_make_sim_xacro.py` 从上游 + 清单重算。
+
+| # | 元素 | 上游 | 我们改成 | 日期 | 为什么（判据/实测） |
+|---|---|---|---|---|---|
+| 1 | 12 个 `<collision>` | 全是 mesh（`body` 208 万面） | `body` = 76 个 box（A 方案）；云台 `l10/l11` = 7/22 个 box；轮 = cylinder；其余 = 网格包围盒 box | 10-07 P1/P3 | Phase 1 实测：原网格一接触 RTF 0.20 / RSS +587 MB；Phase 3 实测：4 个实心 box 让 75.5% 的点变自击 |
+| 2 | `body` 的根 link 名 | `body` | **`base_link`** | 10-07 P3 | 全链路契约帧名（LIO 源码硬编码）；**上游 SolidWorks CSV 里本来就叫 `base_link`**；不改名实测 TF 断树、`/odom` 0 条 |
+| 3 | `body_to_livox` 的 `rpy` | `-0.523598775598293 0 0`（CSV 的 roll 形式） | **`0 0 0`**（帧重力对齐），倾角搬到插件参数 `<tilt_rpy>` | 10-07 P3 | linefit 的 `gravity_aligned_frame` 在本仓有 C++ bug（§11.4）；帧正、点云就正（插件把点发布在父 link 系）；**射线仍真的斜 30°** |
+| 4 | `body_to_livox` 的 `origin.z` | `0.15702816968305` | `0.15702816968305 + $(arg livox_raise_m)`（**默认 0**） | 10-07 P3 | 只为 B 方案的实测对照；默认路径与上游逐字相同 |
+| 5 | `imu_link` + `imu_joint` | 上游**没有** | 固定关节、沿 body −z 走 0.05 m（跟随雷达位置） | 10-07 P2 | 三份 LIO 配置的 `extrinsic_T=[0,0,0.05]`、`extrinsic_R=I` **逐字节不用改**；IMU 与雷达"只差 0.05 m 平移"这条几何没变（IMU 的**绝对**姿态从"跟着斜"变成"与 body 同姿态"，LIO 自己会估） |
+| 6 | MID-360 射线传感器 | 上游**没有** | `<sensor type="ray" name="livox_frame">`（参数与 `mid360.xacro` 宏逐字一致）+ **新增 `<tilt_rpy>`** | 10-07 P2/P3 | 本栈需要 ≥10 Hz 的 `/livox/lidar`；`<tilt_rpy>` 装安装倾角（缺省单位阵 ⇒ 其它模型逐字节不变） |
+| 7 | 底盘插件 / IMU 传感器 / 材质 | 上游**没有** | `libgazebo_ros_planar_move.so`（`cmd_vel→/cmd_vel_chassis`、`odom→/odom_ground_truth`、`publish_odom_tf=false`）、`gazebo_ros_imu_sensor`（100 Hz → `/livox/imu`）、13 条材质 | 10-07 P2 | 与默认模型同款 ⇒ 契约不变（单一 `/cmd_vel_chassis` 订阅、单一真值里程计） |
+| 8 | `livox_points_plugin.cpp`（**仿真包，非上游 URDF**） | 发布点时不带安装姿态（`axis = ray·x̂`） | 新增 SDF 参数 `<tilt_rpy>`：射线方向按它偏、点云仍表达在**父 link 系** | 10-07 P3 | 让"物理上斜 30°"与"点云坐标/帧自洽"同时成立（§11.5）；**缺省 = 单位阵 ⇒ 默认模型/hzmirm 输出逐字节不变** |
+| 9 | 云台 `l10/l11` 的碰撞 | mesh | 由网格推出的 7 / 22 个 box（体素 15 mm + 闭运算 + 填孔 + 贪心分解） | 10-07 P3 | 单包围盒离雷达只有 0.099/0.091 m 且**实心**，实测 34.7% 的射线打在它面上；真网格最近 0.116/0.139 m ⇒ 细盒把"碰撞近似造成的自击"降到接近 0 |
+
+### 11.4 ★ linefit 的 `gravity_aligned_frame` 在本仓**不可用**（C++ bug，诚实更正 §3.3/§10.7）
+
+**位置**：`src/rm_perception/linefit_ground_segementation_ros2/linefit_ground_segmentation_ros/src/ground_segmentation_node.cc`
+（该目录属别的任务，本主题**没有改**）：
+
+```cpp
+Eigen::Affine3d tf;                 // ← Eigen 的默认构造**不清零**（只把仿射最后一行置 (0,0,0,1)）
+tf.translate(Eigen::Vector3d(0, 0, 0));
+tf.rotate(Eigen::Quaterniond(...)); // ← 在垃圾矩阵上叠一个旋转
+pcl::transformPointCloud(cloud, cloud_transformed, tf);   // ⇒ 点全被塌到 ~1e-310
+```
+
+**三条独立证据**：
+
+1. **最小 C++ 复现**（`g++ -I/usr/include/eigen3`，Eigen 3.4）：
+   `Eigen::Affine3d tf; tf.rotate(q); (tf * Vector3d(0.1,0.2,0.3))` → `(7.5e-310, 7.5e-310, 7.5e-310)`；
+   把第一行换成 `Eigen::Affine3d::Identity();` → `(0.1, 0.323, 0.160)`（正确）。
+2. **离线复算**（`tools/scripts/regress/linefit_offline_probe.py`，本轮新增 `--roll-deg`）：
+   同一帧、`sensor_height=0.2595`，把点云**先转 −30°**（= 该键生效时应有的效果）
+   ⇒ linefit 判地面 **5100/11711 = 43.5%**，其中 81% 真的是最低那层地面；不转 ⇒ 23%（但那 23% 里只有 0.7% 是真地面）。
+3. **回放活的 linefit 节点**（无 Gazebo：静态 TF + 以 10 Hz 发 dump 的那一帧；脚本 `.tmp_robot11/p3/replay_linefit.py`）：
+   `gravity_aligned_frame=""` ⇒ `/segmentation/ground` **3969** 点/帧；
+   `="base_link"` ⇒ **0** 点/帧（把输入点云预先转 −30/+30/−60/+60 都一样是 0 ⇒ 与"转多少"无关，只与"走没走那条分支"有关）。
+
+**连带更正**：§3.3/§5.1 把 hzmirm 槽位"雷达 0.80 m + 下视 −7.22° ⇒ 地面分割全废"归因于**几何**。
+几何那条**仍然成立**（0.8 m 高、下视 7.22° ⇒ 6.3 m 以内没有地面点），但 hzmirm 的 YAML 同时开了
+`gravity_aligned_frame: "base_link"` ⇒ 它的 `/segmentation/ground` **恒为 0** 里，有一部分是**这个 bug**。
+复现：`hzmirm`/`tilt_pitch10` 的 probe.json 里 `ground_points_per_frame.median` 都是 **0**。
+⇒ **那条归因需要按"几何 + bug"两条并列重读**（本轮只做更正与登记，不改 hzmirm 的配置）。
+
+**状态：已修（2026-10-07，经负责人授权）**。修法（一行 + 一段注释）：
+`src/rm_perception/linefit_ground_segementation_ros2/linefit_ground_segmentation_ros/src/ground_segmentation_node.cc`
+```cpp
+Eigen::Affine3d tf = Eigen::Affine3d::Identity();   // 原来：Eigen::Affine3d tf;（未初始化）
+```
+**回归证据**（`tools/scripts/regress/linefit_replay_probe.py`，同一帧 `f_rot0.csv`、
+同一个活的节点、无 Gazebo；BEST_EFFORT 订阅）：
+
+| 配置 | 修前 | 修后 |
+|---|---|---|
+| `gravity_aligned_frame: ""`（默认路径） | ground **3969** 点/帧 | ground **3969** 点/帧（**逐字节口径一致**） |
+| `gravity_aligned_frame: "base_link"` | ground **0** 点/帧 | ground **3969** 点/帧（obstacle 7742） |
+
+结构性论证（与上面那张表互补）：该修复**只动 `if (!gravity_aligned_frame_.empty())` 分支内部**，
+默认路径根本不进这块代码 ⇒ 默认模型行为不可能变化（用同一帧实测也确认了 3969 → 3969）。
+⚠️ 本节记录这条修复**不改变** §11.3/§11.5 的 robot11 设计选择（点云在源头对齐 + 插件 `<tilt_rpy>`）：
+那条路仍然更干净（p2l 不用建 tf2 MessageFilter）。修好之后"点云留在传感器系 +
+`gravity_aligned_frame: base_link`"这条**更接近真机**的链路**重新可用**（见 §11.8 第 2 项）。
+
+### 11.5 斜置感知链怎么处理的（本槽位专属，默认模型逐字节不变）
+
+| 环节 | 之前（Phase 2） | 现在（Phase 3） | 为什么 |
+|---|---|---|---|
+| 点云坐标系 | 传感器系（斜 30°，`frame_id=livox_frame`） | **重力对齐**（`frame_id` 仍是 `livox_frame`；帧本身 rpy=0） | 本仓 linefit 的 `gravity_aligned_frame` 不可用（§11.4）⇒ 在**源头**对齐，等价于"驱动 + TF 正确投影"后的结果，且保住了 p2l 的 `target_frame=""` 加固（不建 tf2 MessageFilter） |
+| linefit | `sensor_height: 0.226`、`gravity_aligned_frame: ""`（在斜系里拟合 ⇒ 假地面） | **`sensor_height: 0.2595`**（= 雷达离地实测）、`gravity_aligned_frame: ""`（点云已对齐） | `sensor_height` 的语义 = 雷达离地（linefit `segment.cc:30` `cur_ground_height = -sensor_height_`）；0.226 会让地面线整体高 3.35 cm |
+| p2l | `target_frame: ""`、带 `min/max_height` 在**斜系**里量 | **不改**（`target_frame: ""`、`min_height −1.0 / max_height 1.0`） | 点云已重力对齐 ⇒ 高度带 = 真高度；**且不需要 TF**（2026-09-23 刻意避开的故障面保持关闭）。实测 `/scan` `frame_id=livox_frame`、10 Hz、>4 m 波束 15204 条 |
+| LIO 外参 | `extrinsic_T=[0,0,0.05]`、`extrinsic_R=I` | **不改**（三份配置逐字节未动） | IMU 与雷达只差 0.05 m **平移**（`imu_joint` 沿 body −z 0.05 m）⇒ 这条几何本来就成立；30° 由 LIO 自己估（`odom→base_link` 由 `small_point_lio` 用 TF 精确换算） |
+| `lio_tf_adapter` 杆臂 | 由 URDF 几何算出（含 30° rpy） | 由 launch **算出来**（现在是纯平移 `[-0.000562, -0.130916, -0.107028]`、rpy=0） | 帧变成重力对齐后，杆臂里不再有 30°；仍是"从模型几何算"、不是手抄 |
+
+**验证（漂移口径 = 位移差，不是 odom 与真值的绝对差 —— 后者混着出生点偏移）**：
+`tools/scripts/regress/robot_model_probe.py` 本轮新增 `--yaw-seconds/--yaw-rate` 与 `phase_drift`。
+
+| 段 | A（robot11） | 默认模型（同口径） |
+|---|---|---|
+| 直行 8 s（0.2 m/s） | 0.024 m / 0.26° | 见 §11.2.1 |
+| 原地偏航 5 s（0.6 rad/s） | 0.0002 m / 0.004° | 见 §11.2.1 |
+
+### 11.6 `robot:=robot11` 的槽位专用配置增量（默认值一个都没改）
+
+| # | 文件 → 键 | 默认模型 | robot11 | 为什么 | 副作用 |
+|---|---|---|---|---|---|
+| 1 | `linefit …/config/segmentation_sim_robot11.yaml`（**新增**）→ `sensor_height` | 0.226 | **0.2595** | 实测雷达离地（几何：0.157028+0.102499） | 无（逐键副本，只改这一个键） |
+| 2 | 同上 → `gravity_aligned_frame` | `""` | `""`（**不改**） | 点云已在源头对齐；且该键在本仓有 bug | 无 |
+| 3 | `pointcloud_to_laserscan/config/laserscan_params.yaml` | — | **不改** | 高度带随点云一起变成重力对齐 | 无 |
+| 4 | 三份 LIO 配置 → `extrinsic_T/R` | `[0,0,0.05]` / I | **不改** | IMU 与雷达仍是纯平移关系 | 无 |
+| 5 | launch `spin_speed` 默认值 | `5.0` | **`0.0`**（仅当 `robot:=robot11`） | 本模型四个轮子是真 cylinder、云台 `j10/j11` 我们没有加控制器 ⇒ "小陀螺"在仿真里既无执行机构也无实测依据 | 只对 robot11 生效（`--show-args` 可见 `5.0` 仍在其它槽位） |
+| 6 | nav2 `robot_radius` / `inflation_radius` | 0.22 / 0.5(局部)·0.55(全局) | **建议 0.3565（外接）或 footprint 多边形；inflation ≥ 0.65** | 足印内切 **0.300** / 外接 **0.3565**（Phase 1 实测）；0.22 的圈比车小得多 | **未落地**（`src/rm_navigation/**/params` 属别的任务，本主题禁改）⇒ 见 §11.8 未验证清单 |
+| 7 | `traversability_criteria.yaml` → `speed_limit_lookahead_m` | 3.0 | **不改（3.0 够用）** | 实测地面点覆盖 **0.39–5 m**（`ground_r_hist`），3.0 m 前瞻里有充足地面点；hzmirm 那种"雷达高+下视窄 ⇒ 前瞻里没有地面点"的问题在这台车上不存在 | 无 |
+
+### 11.7 怎么试 / 怎么退
+
+```bash
+# ① 构建（install/ 是逐文件符号链接；新 xacro/新 YAML/改过的插件都必须 build）
+colcon build --symlink-install --packages-select robot11 rm_nav_bringup \
+    linefit_ground_segmentation_ros ros2_livox_simulation
+
+# ② 一条命令量齐（隔离无头跑 + 探针 + 契约检查）→ .tmp_robotslot/<tag>/
+tools/scripts/regress/run_robot_model_probe.sh r11 --duration 20 --drive-seconds 8 \
+    --yaw-seconds 5 --yaw-rate 0.6 -- world:=RMUL2026 mode:=mapping \
+    lio:=small_point_lio robot:=robot11 map_autocontinue:=False
+
+# ③ 只看雷达"看得见什么"（离线，秒级，不用 Gazebo）
+python3 tools/scripts/regress/robot11_livox_fov.py --compare          # mesh / 4 box / A 三选一对照
+python3 tools/scripts/regress/robot11_livox_fov.py --emit-carved      # 重算 A 的 box 清单
+python3 tools/scripts/regress/robot11_livox_fov.py --emit-turret-boxes # 重算云台细盒
+
+# ④ 换 30° 绕哪个轴（默认 roll = 用户按实物确认）
+#    ... robot:=robot11 livox_tilt_axis:=pitch ...
+
+# ⑤ B 方案复现（抬高雷达）—— **必须同时改 linefit 的 sensor_height**
+#    python3 tools/scripts/regress/robot11_make_sim_xacro.py --livox-raise-m 0.10   # 生成物
+#    把 config/segmentation_sim_robot11.yaml 的 sensor_height 改成 0.3595（= 0.2595 + 0.10）
+#    ... robot:=robot11 livox_raise_m:=0.10 ...
+
+# ⑥ 退回默认模型：去掉 robot:=robot11 即可（默认路径从未改动）
+```
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| 退回默认模型 | 去掉 `robot:=robot11`（默认路径逐字节未改） |
+| 退回 Phase 2 的"实心 4 box" | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --body-collision boxes` 后重建 |
+| 退回 Phase 2 的"点云在传感器系" | 生成器里把 `body_to_livox` 的 rpy 换回 `$(arg livox_tilt_rpy)` 并去掉插件 `<tilt_rpy>`（**会立刻踩 §11.4 的 bug：地面分割 0 点**） |
+| 整套 robot11 | `git revert <本主题 commit>` + 删 `robot11_description/`、`urdf/upstream/robot11.urdf`、`sentry_robot_robot11_sim.xacro`、`robot11_*.py`、`segmentation_sim_robot11.yaml` |
+
+### 11.9 `robot:=robot11` 的 nav2 几何（槽位覆盖层，默认模型不动）
+
+问题：nav2 的 `robot_radius` 是"实心圈"半径（本仓没有 footprint 多边形），
+默认模型的 0.22 对 robot11 远远不够（足印内切 **0.300** / 外接 **0.3565**）。
+约束：`src/rm_navigation/**/params` 属别的任务，`nav2_params_sim_base.yaml` **不能改**。
+
+修法（**robot 槽位作用域**，与 linefit 的槽位文件同一套机制）：
+新增 `src/rm_nav_bringup/config/nav2_params_sim_robot11_costmap.yaml`（**只含几何键**），
+launch 里新增 `_Nav2ParamsForSlot`：`robot:=robot11` 时把这份覆盖层**深合并**到公共段之上、
+写成一份临时 YAML 传给 nav2；**其它槽位原样返回公共段路径**（不合并、不写临时文件）。
+
+| 键 | 默认模型 | robot11 | 为什么 |
+|---|---|---|---|
+| `local_costmap.robot_radius` | 0.22 | **0.3565** | 凸包外接半径（保证不撞的上界）；取内切 0.30 会让四个角扫到障碍 |
+| `local_costmap.inflation_layer.inflation_radius` | 0.5 | **0.70** | 必须 ≥ robot_radius；软带厚度与默认模型同量级（0.34 m） |
+| `global_costmap.robot_radius` | 0.22 | **0.3565** | 同上 |
+| `global_costmap.inflation_layer.inflation_radius` | 0.55 | **0.75** | 同上（软带 0.39 m） |
+| `cost_scaling_factor` | 3.0 / 2.5 | **不动** | 与半径无关 |
+
+**单元级验证**（同一份代码、三种槽位，`ros2 param` 之外的最小复现）：
+
+| `robot` | 传给 nav2 的公共段 | local `robot_radius` / `inflation` | global 同上 |
+|---|---|---|---|
+| `''`（默认） | `nav2_params_sim_base.yaml`（原路径） | 0.22 / 0.5 | 0.22 / 0.55 |
+| `hzmirm` | 同上（原路径） | 0.22 / 0.5 | 0.22 / 0.55 |
+| `robot11` | 合并后的临时 YAML | **0.3565 / 0.70** | **0.3565 / 0.75** |
+
+⚠️ **实机（Gazebo）nav2 冒烟没跑完**（时间/会话中断）⇒ 见 §11.8 第 1 项：覆盖层的**运行时**效果
+（configure/activate + 一个短目标）**未实测**，只有上面的单元级证据。
+
+### 11.8 未验证清单（Phase 3 新增，诚实清单）
+
+1. **nav2 的运行时验证没跑完**：`robot_radius`/`inflation_radius` 的**槽位覆盖层已落地**
+   （§11.9，单元级验证通过：默认/hzmirm 仍是 0.22，robot11 是 0.3565），但
+   `mode:=slam_nav`/`mode:=nav` 的 configure/activate + 短目标**没有实测**（会话被中断）
+   ⇒ 真跑 nav 前建议先补一次冒烟（`ros2 param get /local_costmap/local_costmap robot_radius`
+   应为 0.3565、再发一个 1.5 m 的目标看能不能走到）；
+2. ~~linefit 的 C++ bug 没有修~~ → **已修并回归**（§11.4 末尾，一行 `Identity()`）。
+   仍**未做**的：把 robot11 切回"点云留在传感器系 + `gravity_aligned_frame: base_link`"这条
+   更接近真机的链路（修好后已具备条件），以及 hzmirm 槽位在新代码下的重跑；
+3. **hzmirm 槽位的结论未重跑**：§11.4 的更正只是"读数据 + 复现 bug"，没有重跑 hzmirm 验证
+   "关掉 `gravity_aligned_frame` 后它的 ground 会不会从 0 变成别的值"（预期仍偏低，因为几何确实差）；
+4. **`<1 m` 的近场点里"云台自击"与"真障碍"仍未分离**（本轮的归因是**离线射线求交**：
+   近点里 100% 落在 `l10/l11` 上，中位距离 0.14 m ⇒ 但那是**零位关节角**下的云台；`j10/j11` 是
+   `continuous`，仿真里没有控制器 ⇒ 云台姿态不会变）；
+5. **`livox_raise_m≠0`（B 方案）与 linefit `sensor_height` 的同步是**手工**的**（launch 不替改 YAML）
+   ⇒ 忘记改就会出现"地面线整体偏 h"的静默错误；本轮 B 的实测就是手工同步后跑的；
+6. **插件 `<tilt_rpy>` 只验证了 roll 一档**（`-0.5236 0 0`）；`pitch` 档没跑 Gazebo（几何上等价，只差绕 z 一转）；
+7. **IMU 的绝对姿态**从"跟着雷达斜 30°"改成"与 body 同姿态"（§11.3 第 5 项）：LIO 实测正常
+   （漂移 0.024 m），但没有单独 A/B"IMU 跟着斜"的对照；
+8. **`/scan` 的 98022 条 <1 m 波束里，云台自击占多少**没有单独统计（只有累计数）；
+9. **插件改动没有跑默认模型/hzmirm 的回归**（论证是"缺省参数 = 单位阵 ⇒ 逐字节不变"，
+   但**没有**实测对照）⇒ 收尾前应补一次默认模型的 A/B（本轮补跑了默认模型对照，见 §11.2.1）。

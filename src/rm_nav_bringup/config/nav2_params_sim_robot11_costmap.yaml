@@ -1,0 +1,37 @@
+# =============================================================================
+# nav2_params_sim_robot11_costmap.yaml —— `robot:=robot11` 槽位专用的代价图几何覆盖（2026-10-07 Phase 3）
+#
+# 这是什么：**只含几何键**的一份覆盖层。launch 在 `robot:=robot11` 时把它
+# **深合并**到公共段 `nav2_params_sim_base.yaml` 之上，生成一份临时参数文件再喂给 nav2；
+# 非 robot11 槽位**原样**用 base（逐字节不变，仍是 robot_radius 0.22）。
+#
+# 为什么必须覆盖（数值来自 Phase 1 的实测，不是拍的）：
+#   · 足印 = 底盘组 XY 凸包（600×600 底板四角被切掉，凸包面积 0.3390 m²）：
+#       **内切半径 0.300 m**（凸包边到原点最近距离）—— 能走多窄的下界；
+#       **外接半径 0.3565 m**（凸包顶点 |xy| 最大）—— 保证不撞的上界。
+#     见 docs/robot_models.md §9.4 / robot11_description/inventory/geometry.json。
+#   · 本仓没有 footprint 多边形 ⇒ nav2 的"实心圈"半径就等于 `robot_radius`。
+#     取 **0.3565（外接）**：圆形近似下这是"绝不比真车小"的那个值；
+#     取 0.30（内切）会让四个角在转弯时扫到障碍（凸包角点在 0.3565 处）。
+#     ⇒ 保守但正确。想要"能钻更窄的缝"就改成 footprint 多边形（本文件不做，
+#       因为那要同时改规划器/控制器两处参数、且属于 nav2 参数目录）。
+#   · `inflation_radius`：必须 ≥ robot_radius（否则 nav2 会告警并夹紧）。
+#     默认模型是 0.22 + 软带 0.28~0.33 m（局部 0.5 / 全局 0.55）⇒ 这里取
+#     **0.70 / 0.75**，保持同样量级的"软带厚度"（0.34 / 0.39 m）。
+#   · `cost_scaling_factor` 不动（默认模型的 3.0/2.5 与半径无关）。
+#
+# 校验/回退：去掉 `robot:=robot11` ⇒ 读的仍是 base（0.22 / 0.5 / 0.55），本文件不参与。
+# 实测（Phase 3 无头 nav2 configure/activate + 一个短目标）见 docs/robot_models.md §11.9。
+# =============================================================================
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      robot_radius: 0.3565
+      inflation_layer:
+        inflation_radius: 0.70
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      robot_radius: 0.3565
+      inflation_layer:
+        inflation_radius: 0.75
