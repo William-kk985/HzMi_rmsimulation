@@ -325,6 +325,11 @@ class _RobotXacroCommand(Substitution):
             # ★ Phase 3：B 方案（抬高雷达）的开关。默认 0 ⇒ 与上游几何逐字相同。
             cmd += [' livox_raise_m:=',
                     LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0']
+            # ★ Phase 4：视觉 mesh 档位（`decimated` | `full`）。只影响 `<visual>`，
+            #   不影响任何 `<collision>`/传感器/插件 ⇒ 物理与契约不变。
+            cmd += [' visual_decimated:=',
+                    'true' if LaunchConfiguration('robot11_visual').perform(
+                        context).strip() == 'decimated' else 'false']
         return ''.join(cmd)
 
     def describe(self):
@@ -370,6 +375,76 @@ class _RobotSlotFile(Substitution):
             type(self).__name__, self.__package_name,
             os.path.join(*self.__default_rel),
             {k: os.path.join(*v) for k, v in self.__slot_map.items()})
+
+
+class _YamlKeysReadout(Substitution):
+    """把"参数文件路径"的 substitution 求值后，读出若干键的**生效值**打成一个字符串。
+
+    ★ 2026-10-07 Phase 4（缺陷 ③ 的修法）：上一轮的横幅写死了"linefit 参数**没有**跟着切"，
+    而代码里其实**已经切了**（`_RobotSlotFile` 的 slot_map）⇒ 横幅在骗人，用户照它排查就查错方向。
+    根因是"横幅说的是**意图**，不是**生效值**"。这里改成：**运行时**把真正要递给节点的那份
+    YAML 读出来、把键值打进日志 ⇒ 横幅与"节点实际读到的文件"不可能再分叉
+    （真正的节点侧运行期证据仍是 `ros2 param get /ground_segmentation sensor_height`）。
+    """
+
+    def __init__(self, path_sub, keys):
+        super().__init__()
+        self.__sub = path_sub
+        self.__keys = tuple(keys)
+
+    def perform(self, context):
+        path = self.__sub.perform(context)
+        vals = {}
+        for line in open(path, encoding='utf-8'):
+            line = line.split('#')[0].rstrip()
+            if ':' not in line:
+                continue
+            k, v = line.split(':', 1)
+            k, v = k.strip(), v.strip()
+            if k in self.__keys:
+                vals[k] = v or '""'
+        got = ', '.join('%s=%s' % (k, vals.get(k, '?')) for k in self.__keys)
+        return '%s  ← %s' % (got, path)
+
+    def describe(self):
+        return '%s(keys=%s)' % (type(self).__name__, list(self.__keys))
+
+
+class _SelfMaskReadout(Substitution):
+    """自击掩膜参数文件的**生效值**：`enable` + 盒子个数（同一份文件，节点读的就是它）。"""
+
+    def __init__(self, path_sub):
+        super().__init__()
+        self.__sub = path_sub
+
+    def perform(self, context):
+        path = self.__sub.perform(context)
+        enable, boxes, radius, zmin = '?', 0, 0.0, None
+        acc = None                 # 点表可能跨多行（生成器按 ~98 列折行）⇒ 攒到 ']' 为止
+        for raw in open(path, encoding='utf-8'):
+            line = raw.split('#')[0]
+            if acc is None:
+                s = line.strip()
+                if s.startswith('self_mask_enable:'):
+                    enable = s.split(':', 1)[1].strip()
+                elif s.startswith('self_mask_radius_m:'):
+                    radius = float(s.split(':', 1)[1])
+                elif s.startswith('self_mask_z_min_m:'):
+                    zmin = float(s.split(':', 1)[1])
+                elif s.startswith('self_mask_boxes:'):
+                    acc = s.split(':', 1)[1]
+            else:
+                acc += ' ' + line.strip()
+            if acc is not None and ']' in acc:
+                boxes = len([x for x in acc.strip().strip('[]').split(',') if x.strip()])
+                acc = None
+        return ('self_mask_enable=%s, 近场死区 r<=%.4f m%s, %d 个 collision AABB  ← %s'
+                % (enable, radius,
+                   ('（z>=%.4f）' % zmin) if zmin is not None else '',
+                   int(boxes / 6), path))
+
+    def describe(self):
+        return '%s()' % type(self).__name__
 
 
 # =============================================================================
@@ -570,7 +645,7 @@ def generate_launch_description():
     #                判据/实测见 docs/robot_models.md §3/§5。
     #   · robot11  → segmentation_sim_robot11.yaml（Phase 3 新增）：sensor_height = 雷达离地
     #                 **实测 0.2595**（默认模型 0.226 / hzmirm 0.80）、
-    #                 gravity_aligned_frame="base_link"（雷达斜 30° ⇒ 传感器系 z 不再是"高度"）。
+    #                 gravity_aligned_frame=""（点云在源头已重力对齐 ⇒ 该键不需要、也不能开）。
     #                 ⚠️ 若用 livox_raise_m≠0 跑 B 方案，那份 YAML 的 sensor_height 必须同步
     #                    （0.2595 + raise，实测值），本 launch 不替改（避免第二个真源）。
     segmentation_params = _RobotSlotFile(
@@ -602,6 +677,26 @@ def generate_launch_description():
               % traversability_params)
         traversability_params_list = []
     ########################## 可通行性判据（坡度/台阶）parameters end #################################
+
+    ########################## 自击掩膜（self_mask）parameters start ##################################
+    # ★ 2026-10-07 Phase 4：**按 robot 槽位**选"自击掩膜"参数文件（同一套 _RobotSlotFile 机制）。
+    #   为什么需要：`robot:=robot11` 的雷达装在底盘凹槽里、360° 视场里最近的部件是云台
+    #   l10/l11（表面离雷达 0.116~0.139 m）⇒ Gazebo 实测 **28.6% 的点 r<0.12 m**（§11.2）。
+    #   这些近场自击点落在前瞻走廊的粗格 d=0 里 ⇒ 台阶残差被抬到 **0.164 m** ⇒ 限速器判成台阶
+    #   ⇒ **车停着也被压到速度表地板 0.60 m/s**（Phase 4 基线实测，§12）。
+    #   修法：判据层在建格**之前**把"落在机器人自己 collision 几何里、且离地 ≥3 cm"的点剔掉
+    #   （几何定义/证据/离线验证见 tools/scripts/regress/robot11_self_mask.py 与 §12）。
+    #   ⚠️ 只影响判据/限速：点云与 /segmentation/* 的**标签一个都不变**（自击是物理真实回波）。
+    #   默认文件 = `traversability_self_mask.yaml`（self_mask_enable: false）⇒ 默认模型/其它槽位
+    #   逐字节行为不变；只有 robot11 读 `traversability_self_mask_robot11.yaml`（开 + 113 个盒）。
+    self_mask_params = _RobotSlotFile(
+        'rm_nav_bringup',
+        ('config', 'traversability_self_mask.yaml'),
+        error_hint='该文件属于 Phase 4 的自击掩膜：'
+                   '`colcon build --symlink-install --packages-select rm_nav_bringup` 后重试；'
+                   '或删掉 launch 里这一路参数（回到"没有掩膜"的行为）',
+        slot_map={'robot11': ('config', 'traversability_self_mask_robot11.yaml')})
+    ########################## 自击掩膜（self_mask）parameters end ####################################
 
     #################################### FAST_LIO parameters start ####################################
     # 参数已回归 fast_lio 包自身 config/（R1）
@@ -829,8 +924,26 @@ def generate_launch_description():
                     '⚠️ 抬高会改变雷达离地高度 ⇒ linefit 的 sensor_height 必须同步 = 0.2595 + 本值'
                     '（改 config/segmentation_sim_robot11.yaml；见 docs/robot_models.md §11 的复现步骤）')
 
-    # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。
-    # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
+    # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
+    #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
+    #   其中 `base_link.STL` 一项就是 **99 MiB / 2,078,226 三角形**（+ 云台 l11 8.8 MB / 17.6 万面）
+    #   ⇒ 带 GUI 跑时 `gzclient` 被 SIGKILL（exit code -9）、`rviz2` 黑屏。
+    #   decimated = 复用 Phase 1 已经生成并入库的抽稀件 `robot11_description/meshes/generated/
+    #   <link>_collision.stl`（VTK quadric decimation；bbox 与原件差 ≤3 mm、单位/原点不变 ⇒
+    #   米制与几何位置**不改**）；full = 上游原始 STL（与 Phase 1~3 逐字节相同）。
+    #   ⚠️ 只换 `<visual>`：`<collision>` 本来就是 76 个 box + 云台细盒 + cylinder（Phase 1/3 实测），
+    #   一个字节都不动 ⇒ **物理/感知/契约完全不变**。
+    declare_robot11_visual_cmd = DeclareLaunchArgument(
+        'robot11_visual',
+        default_value='decimated',
+        description='仅 robot:=robot11：视觉 mesh 用哪一档。'
+                    'decimated（默认）= 抽稀件 generated/*_collision.stl（base_link 2078226→3000 面），'
+                    'GUI 内存/渲染代价降 3 个数量级；'
+                    'full = 上游原始 STL（base_link.STL 99 MiB / 207.8 万面）—— '
+                    '用户 2026-10-07 的 GUI 跑就是这一档被杀掉 gzclient 的（§12 有实测对照）',
+        choices=['decimated', 'full'])
+
+    # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。    # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
     # head_to_lidar 的 rpy 是 0，即**没有**斜装）。pitch≠0 会破坏"雷达重力对齐"，
     # 这时 linefit 必须用 gravity_aligned_frame（该槽位的 YAML 已经配好 base_link）。
     declare_turret_yaw_deg_cmd = DeclareLaunchArgument(
@@ -1105,7 +1218,8 @@ def generate_launch_description():
         # ★ 2026-09-23 修复：原来漏了 use_sim_time ⇒ 这个节点跑在**墙钟**上，而全链路（plugin/scan/
         #   costmap/AMCL/tf）都是仿真钟。它的输出戳虽然抄自输入（所以看起来还好），但任何依赖
         #   "本节点时钟"的逻辑（tf2 Buffer 的缓存窗口、超时判定）都会用错时间轴。
-        parameters=[segmentation_params, *traversability_params_list, {'use_sim_time': use_sim_time}],
+        parameters=[segmentation_params, *traversability_params_list, self_mask_params,
+                    {'use_sim_time': use_sim_time}],
         # ★ 2026-10-06：地面分割槽位 ground（默认 linefit ⇒ 本节点照旧启动，行为不变）。
         condition=LaunchConfigurationEquals('ground', 'linefit'),
     )
@@ -1123,6 +1237,7 @@ def generate_launch_description():
             _PackageShareFile('patchwork_ground_segmentation', 'config',
                               'ground_segmentation_sim.yaml'),
             *traversability_params_list,
+            self_mask_params,
             {'use_sim_time': use_sim_time}],
         condition=LaunchConfigurationEquals('ground', 'patchwork'),
     )
@@ -1895,6 +2010,8 @@ def generate_launch_description():
     # ★ 2026-10-07：robot:=robot11 的雷达安装轴（roll | pitch；上游两份材料矛盾 ⇒ 不猜）
     ld.add_action(declare_livox_tilt_axis_cmd)
     ld.add_action(declare_livox_raise_m_cmd)
+    # ★ Phase 4：robot:=robot11 的视觉 mesh 档位（decimated | full）
+    ld.add_action(declare_robot11_visual_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
     ld.add_action(LogInfo(
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == ''"])),
@@ -1916,9 +2033,21 @@ def generate_launch_description():
              '足印内切 0.300 / 外接 0.3565 m；质量 9.5521 kg。',
              '  · 雷达倾斜轴 livox_tilt_axis=', LaunchConfiguration('livox_tilt_axis'),
              '（roll = SolidWorks CSV 的字面值；两条候选在仰角/盲区上等价，只差最朝下的方位）',
-             '  · lio_tf_adapter 杆臂 = T_imu←base_link（含 30° 旋转补偿，由 URDF 几何算出）',
-             '  · ⚠️ linefit 参数**没有**跟着切（sensor_height 仍是 0.226、gravity_aligned_frame 仍是 ""）',
-             '⇒ 空地分割会被 30° 倾斜打歪；需要改哪两个键见 docs/robot_models.md §10.6']))
+             '  · 视觉 mesh：robot11_visual=', LaunchConfiguration('robot11_visual'),
+             '（decimated = 复用 Phase 1 的抽稀件 generated/*_collision.stl，三角形少 3 个数量级，'
+             'GUI/内存友好；full = 上游原始 STL，与 Phase 1 之前逐字节相同）',
+             # ★ Phase 4 更正：上一轮这里写的是"linefit 参数**没有**跟着切" —— 那是**错的**
+             #   （Phase 3 已经用 _RobotSlotFile 的 slot_map 切了），横幅在骗人。
+             #   现在改为**运行时从真正递给节点的那份 YAML 里读出生效值**，不可能再分叉。
+             '  · linefit 参数**已跟着槽位切**（生效值由 launch 运行时读该文件打印）：',
+             _YamlKeysReadout(segmentation_params,
+                              ('sensor_height', 'gravity_aligned_frame',
+                               'input_topic', 'ground_output_topic')),
+             '  · 自击掩膜（只作用于判据/限速，不动点云与 /segmentation/* 标签）：',
+             _SelfMaskReadout(self_mask_params),
+             '  · lio_tf_adapter：lio:=small_point_lio/cartographer/none 时**不启动**该节点',
+             '（它由 LIO 自己用 TF 做 odom→base_link 的相似变换；本槽位 livox_frame 的 rpy=0 '
+             '⇒ 杆臂是纯平移，不需要外部旋转补偿）']))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)

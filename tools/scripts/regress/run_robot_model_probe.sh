@@ -36,8 +36,26 @@ mkdir -p "$OUT"
 
 # 每个 tag 一套隔离环境（domain id 取 tag 的哈希，落到 30..90）
 HASH=$(printf '%s' "$TAG" | cksum | cut -d' ' -f1)
-export ROS_DOMAIN_ID=$(( 30 + HASH % 61 ))
-export GAZEBO_MASTER_URI="http://127.0.0.1:$(( 11350 + HASH % 500 ))"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$(( 30 + HASH % 61 ))}"
+# ★ 2026-10-07 Phase 4：端口要**先探测再占用**。原实现按 tag 哈希硬算 11350+hash%500，
+#   一旦上一次被中断的 gzserver 还占着那个端口，新 gzserver 会直接 exit 255（实测遇到两次，
+#   表现为"launch 起来了但 /gazebo 不在、探针等不到数据"）。这里从哈希值开始找一个**能 bind**
+#   的端口；显式传了 GAZEBO_MASTER_URI 就完全听调用方的（便于复现别人给的环境）。
+if [ -z "${GAZEBO_MASTER_URI:-}" ]; then
+  PORT=$(python3 -c "
+import socket
+p = 11350 + $HASH % 500
+for _ in range(200):
+    s = socket.socket()
+    try:
+        s.bind(('127.0.0.1', p)); s.close(); print(p); break
+    except OSError:
+        s.close(); p += 1
+else:
+    print(p)
+")
+  export GAZEBO_MASTER_URI="http://127.0.0.1:$PORT"
+fi
 export HOME="/tmp/gzhome-$TAG"
 mkdir -p "$HOME"
 unset DISPLAY
@@ -80,13 +98,31 @@ sleep 3
 echo "=== [run] 关键参数回读（证明 launch 真的把槽位的参数注进去了） ==="
 for kv in "/ground_segmentation sensor_height" "/ground_segmentation gravity_aligned_frame" \
           "/ground_segmentation max_dist_to_line" "/lio_tf_adapter xyz" "/pointcloud_to_laserscan max_height" \
-          "/pointcloud_to_laserscan min_height"; do
+          "/pointcloud_to_laserscan min_height" \
+          "/ground_segmentation self_mask_enable" "/ground_segmentation step_height_threshold"; do
   set -- $kv
   printf '  %-24s %-22s = ' "$1" "$2"
   timeout 15 ros2 param get "$1" "$2" 2>&1 | tail -1
 done
+# ★ 2026-10-07 Phase 4：`self_mask_boxes` 是 678 个数（113 个盒），不整条打印 —— 只报个数 +
+#   头两个盒，证明"参数真的注进去了、而且不是空数组"（空数组会让掩膜静默不生效）。
+printf '  %-24s %-22s = ' "/ground_segmentation" "self_mask_boxes[N]"
+timeout 15 ros2 param get /ground_segmentation self_mask_boxes 2>&1 \
+  | tr -d '\n' | sed 's/.*\[/[/' | awk -F',' '{printf "%d 个数; 前 6 个: %s,%s,%s,%s,%s,%s\n", NF, $1,$2,$3,$4,$5,$6}'
+# ★ Phase 4：杆臂/安装几何的**运行期**证据（独立于离线生成器的 FK）。
+#   本槽位（lio:=small_point_lio）**不启动** lio_tf_adapter（它由 LIO 自己用 TF 做相似变换）
+#   ⇒ 这里直接量 TF 里的 base_link→livox_frame（应为纯平移、rpy=0）与 base_link→l10（云台）。
+echo "=== [run] TF 里的安装几何（robot_state_publisher 发的，独立于离线生成器） ==="
+for lk in livox_frame l10 l6; do
+  printf '  base_link → %-12s ' "$lk"
+  timeout 12 ros2 run tf2_ros tf2_echo base_link "$lk" 2>/dev/null \
+    | grep -m1 -A4 "Translation" | tr '\n' ' ' | sed 's/  */ /g'
+  echo
+done
 echo "=== [run] linefit 上游判据统计（ground_in = linefit 自己判出的地面点数） ==="
 timeout 25 ros2 topic echo --once /ground_segmentation/traversability_stats 2>/dev/null | head -3
+echo "=== [run] 自击掩膜/限速诊断（这一帧：self_masked = 被掩膜剔出建格的点数） ==="
+timeout 25 ros2 topic echo --once /ground_segmentation/slope_speed_stats 2>/dev/null | head -3 | cut -c1-400
 echo "=== [run] 感知插件/节点清单 ==="
 timeout 20 ros2 node list 2>/dev/null | sort | tr '\n' ' '; echo
 python3 "$REPO/tools/scripts/regress/robot_model_probe.py" \
@@ -94,6 +130,11 @@ python3 "$REPO/tools/scripts/regress/robot_model_probe.py" \
 RC=${PIPESTATUS[0]}
 echo "[run] probe rc=$RC"
 
+if [ -n "${SLOPE_PROBE_ARGS:-}" ]; then
+  echo "=== [run] 前瞻限速/自击掩膜的**逐帧**探针（静止 + 可选直行；SLOPE_PROBE_ARGS） ==="
+  python3 "$REPO/tools/scripts/regress/slope_speed_probe.py" --out "$OUT/slope.json" \
+      $SLOPE_PROBE_ARGS 2>&1 | tee "$OUT/slope.log"
+fi
 echo "=== [run] 契约检查（单一发布者/单一订阅者） ==="
 for t in /cmd_vel_chassis /segmentation/obstacle /segmentation/ground /map /odom /livox/imu; do
   info=$(timeout 20 ros2 topic info -v "$t" 2>/dev/null)

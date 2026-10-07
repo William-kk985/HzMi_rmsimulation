@@ -84,6 +84,24 @@
        ⇒ 按标准写法先绑成 property 再进表达式。 -->
   <xacro:property name="livox_raise_m_p" value="$(arg livox_raise_m)"/>
 
+  <!-- 【我们加的｜Phase 4，默认 false = 与 Phase 1~3 逐字节相同】视觉 mesh 用哪一档。
+       true  = 复用 Phase 1 已经生成并入库的**抽稀件** `meshes/generated/<link>_collision.stl`
+               （VTK quadric decimation：base_link 2,078,226 → 3,000 面、l11 176,459 → 1,200 面；
+                bbox 与原件差 ≤3 mm，单位/原点不变 ⇒ 米制与几何位置都不改）。
+       false = 上游原始 STL（`meshes/<link>.STL`，base_link 那份 99 MiB / 207.8 万面）。
+       为什么需要：用户 2026-10-07 带 GUI 跑 robot:=robot11 时 **gzclient 被 SIGKILL（exit -9）**、
+       rviz2 黑屏 —— 就是这一档的渲染/内存代价（docs/robot_models.md §12 有实测对照）。
+       ⚠️ 只换 `<visual>`：`<collision>`（76 box + 云台细盒 + cylinder）一个字节都不动
+       ⇒ 物理/感知/契约完全不变；`robot:=robot11` 之外的模型根本不引用这两个 property。 -->
+  <xacro:arg name="visual_decimated" default="false"/>
+  <xacro:property name="visual_decimated_p" value="$(arg visual_decimated)"/>
+  <!-- ⚠️ xacro 会把 `"true"` 这个 arg **转成 Python 的 bool True**（实测：`${vd_p}` 打印 True），
+       所以这里必须 `str(...).lower()` 归一化，不能直接和字符串 'true' 比。 -->
+  <xacro:property name="visual_dir"
+      value="${'generated' if str(visual_decimated_p).lower() in ('true', '1') else 'meshes'}"/>
+  <xacro:property name="visual_ext"
+      value="${'_collision.stl' if str(visual_decimated_p).lower() in ('true', '1') else '.STL'}"/>
+
   <!-- 【我们加的｜改名】上游根 link `body` → `base_link`（原因见文件头第 3 条）：
        本栈契约帧名是 base_link；不改名的实测后果 = TF 断树、LIO 发不出 /odom、
        p2l 丢光整条点云。上游 SolidWorks CSV 里这个 link 本来就叫 base_link。 -->
@@ -98,7 +116,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/base_link.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/base_link${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -427,7 +445,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l2.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l2${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -449,7 +467,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l6.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l6${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -471,7 +489,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l3.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l3${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -493,7 +511,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l7.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l7${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -515,7 +533,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l4.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l4${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -537,7 +555,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l8.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l8${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -559,7 +577,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l5.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l5${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -581,7 +599,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l9.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l9${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -603,7 +621,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l10.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l10${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -651,7 +669,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l11.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l11${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
@@ -759,7 +777,7 @@
     <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="package://robot11/meshes/l12.STL"/></geometry>
+      <geometry><mesh filename="package://robot11/${visual_dir}/l12${visual_ext}"/></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
     </visual>
     <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
