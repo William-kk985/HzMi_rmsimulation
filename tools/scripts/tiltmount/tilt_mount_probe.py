@@ -647,6 +647,7 @@ def main():
                 cmd1 = len(node.cmdvel_abs)
                 gt1 = list(node.odom.get('/odom_ground_truth', []))
             def _xy(seq):
+                # ⚠️ `R_to_rpy_deg` 返回的是**度**（名字里就有），p[2] = yaw(度)，不是弧度。
                 a = np.array([r[:8] for r in seq], dtype=np.float64) if seq else None
                 return (None if a is None else
                         (float(a[-1, 1]), float(a[-1, 2]), R_to_rpy_deg(quat_to_R(*a[-1, 4:8]))[2]))
@@ -660,8 +661,12 @@ def main():
                 'gt_post': None if p1 is None else [round(v, 4) for v in p1],
                 'gt_moved_m': (None if (p0 is None or p1 is None) else
                                round(math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 5)),
+                # ★ 2026-10-09 修：这里原来写的是 `math.degrees(p1[2] - p0[2])`，而 p0/p1 的 yaw
+                #   **已经是度** ⇒ 报出来的值被多乘了 57.2958（实测：真值 8.26° 被报成 473.416°）。
+                #   旧读数举例（全部 ×57.3，**不要**再引用）：k6_goal 473.416、k1_ngoff 251.651、
+                #   k1_ngon 2593.685。单位也写进键名旁边的注释，免得下一个人再按弧度读。
                 'gt_yaw_delta_deg': (None if (p0 is None or p1 is None) else
-                                     round(math.degrees(p1[2] - p0[2]), 3)),
+                                     round(p1[2] - p0[2], 3)),
                 'plan_frames_during_wait': int(plan1 - plan0),
                 'cmd_vel_n_during_wait': int(cmd1 - cmd0),
                 'dist_to_goal_after_m': (None if post is None else
