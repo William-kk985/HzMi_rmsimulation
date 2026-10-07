@@ -1,37 +1,61 @@
 # =============================================================================
-# nav2_params_sim_robot11_costmap.yaml —— `robot:=robot11` 槽位专用的代价图几何覆盖（2026-10-07 Phase 3）
+# nav2_params_sim_robot11_costmap.yaml —— `robot:=robot11` 槽位专用的代价图几何覆盖
+#
+# 历史：2026-10-07 Phase 3 新增（外接 0.3565 + inflation 0.70/0.75）；
+#       **2026-10-09 改成本文件现在的值（内切 0.300 + 0.60/0.65）**，理由见下（全部实测）。
 #
 # 这是什么：**只含几何键**的一份覆盖层。launch 在 `robot:=robot11` 时把它
 # **深合并**到公共段 `nav2_params_sim_base.yaml` 之上，生成一份临时参数文件再喂给 nav2；
-# 非 robot11 槽位**原样**用 base（逐字节不变，仍是 robot_radius 0.22）。
+# 非 robot11 槽位**原样**用 base（逐字节不变，仍是 robot_radius 0.22 / 0.5 / 0.55）。
 #
-# 为什么必须覆盖（数值来自 Phase 1 的实测，不是拍的）：
-#   · 足印 = 底盘组 XY 凸包（600×600 底板四角被切掉，凸包面积 0.3390 m²）：
-#       **内切半径 0.300 m**（凸包边到原点最近距离）—— 能走多窄的下界；
-#       **外接半径 0.3565 m**（凸包顶点 |xy| 最大）—— 保证不撞的上界。
-#     见 docs/robot_models.md §9.4 / robot11_description/inventory/geometry.json。
-#   · 本仓没有 footprint 多边形 ⇒ nav2 的"实心圈"半径就等于 `robot_radius`。
-#     取 **0.3565（外接）**：圆形近似下这是"绝不比真车小"的那个值；
-#     取 0.30（内切）会让四个角在转弯时扫到障碍（凸包角点在 0.3565 处）。
-#     ⇒ 保守但正确。想要"能钻更窄的缝"就改成 footprint 多边形（本文件不做，
-#       因为那要同时改规划器/控制器两处参数、且属于 nav2 参数目录）。
-#   · `inflation_radius`：必须 ≥ robot_radius（否则 nav2 会告警并夹紧）。
-#     默认模型是 0.22 + 软带 0.28~0.33 m（局部 0.5 / 全局 0.55）⇒ 这里取
-#     **0.70 / 0.75**，保持同样量级的"软带厚度"（0.34 / 0.39 m）。
-#   · `cost_scaling_factor` 不动（默认模型的 3.0/2.5 与半径无关）。
+# ★ 2026-10-09 为什么把 0.3565（外接）改成 0.300（内切）：
+#   · 足印 = 底盘组 XY 凸包：**内切半径 0.300 m**（能走多窄的下界）、
+#     **外接半径 0.3565 m**（保证不撞的上界），凸包面积 0.3390 m²
+#     （docs/robot_models.md §9.4 / robot11_description/inventory/geometry.json）。
+#   · 本仓没有 footprint 多边形 ⇒ nav2 的"实心圈"半径 = `robot_radius`，而它**同时**是
+#     `inscribed_radius`（代价 253 / OccupancyGrid 里的 99）⇒ 车那格要不要被判"非 free"
+#     取决于"车心到最近 lethal 格 ≤ robot_radius"。
+#   · 实测（**干净静止**三档 A/B：近地剔除都开、唯一变量 = 半径/膨胀，见
+#     docs/tilted_lidar_fidelity.md §K.3）：外接 0.3565 档的**全局**代价图在车那格给 **99**
+#     （车半径圆内 137/159 格 ≥99、free 0）；内切 0.300 档同一时刻车那格 **0**、圆内
+#     free 123/160。⇒ "车一开始就在膨胀团里"这一条在 0.300 下消失。
+#   · 代价（**必须知道**）：内切圆是"绝不比真车大"的近似 ⇒ 站姿下**四个角可能扫到障碍**
+#     （凸包角点在 0.3565 处）。本仓的兜底：① 场地上没有比车角更"贴"的窄缝（车过不去的缝
+#     本来也不该过）；② `inflation_radius` 的软带（0.30 m）仍在，撞上前会先掉速；
+#     ③ 前瞻限速（`speed_limit_*`）与碰撞监控仍在链路上。
+#     要彻底消掉这个折中 ⇒ 用**真足印多边形**；本主题试过（nav2 的 `footprint` 参数必须是
+#     **字符串**或**扁平 double 数组**，写成嵌套 YAML 序列会让 rcl 直接报
+#     `Sequences cannot be key at line ...` 并让**所有** nav2 节点起不来 —— 实测踩过），
+#     结论/证据见 §K.3.4。
+#   · `inflation_radius`：必须 ≥ inscribed（0.300），否则 nav2 告警并夹紧。默认模型是
+#     0.22 + 软带 0.28~0.33 m（局部 0.5 / 全局 0.55）⇒ 这里取 **0.60 / 0.65**
+#     （软带 0.30 / 0.35 m，保持同量级）。`cost_scaling_factor` 不动。
+#
+# ★★ 2026-10-09：**`obstacle_layer.scan` 的 `min/max_obstacle_height` 保持 0.0 / 2.0 不动** ——
+#   这是一个**有意的决定**，不是漏掉。机理（源码 + 实测，§K.1）：
+#     `/scan` 是**二维平盘**（LaserScan 没有高度），nav2 的 `obstacle_layer` 先
+#     `projectLaser`（**z 强行置 0**）再 `transformLaserScanToPointCloud` 搬到代价图帧 ⇒
+#     **每条波束在代价图帧里的 z 恒等于"那一帧点云原点的 odom z"**，与它打到的三维点无关。
+#     实测（robot11 plugin 档、静止）：950 条波束的 odom z 全在 **[0.0564, 0.0815]**（跨度 25 mm）、
+#     `[0,2]` 之外 **0 条**。⇒ 这两个键在 2D 链路上**只是"传感器自身高度"的常量闸**；
+#     把它调成任何别的值都只是把整条平盘一起抬高/压低，**不可能**分辨"这个回波是不是地面"。
+#   "地面点被标成 lethal 格"这件事的正确修法在**上游**：`obstacle_near_ground_m`（§K.2，
+#     `src/rm_nav_bringup/config/traversability_near_ground_robot11.yaml`）——
+#     在**投影成 2D 之前**把"离局部地面 ≤ 0.05 m"的点从 `/segmentation/obstacle` 改判 ground。
 #
 # 校验/回退：去掉 `robot:=robot11` ⇒ 读的仍是 base（0.22 / 0.5 / 0.55），本文件不参与。
-# 实测（Phase 3 无头 nav2 configure/activate + 一个短目标）见 docs/robot_models.md §11.9。
+# 实测（本文件三档 A/B 的逐档数字）见 docs/tilted_lidar_fidelity.md §K.3；
+# 历史（Phase 3 的 0.3565 档）见 docs/robot_models.md §11.9。
 # =============================================================================
 local_costmap:
   local_costmap:
     ros__parameters:
-      robot_radius: 0.3565
+      robot_radius: 0.300
       inflation_layer:
-        inflation_radius: 0.70
+        inflation_radius: 0.60
 global_costmap:
   global_costmap:
     ros__parameters:
-      robot_radius: 0.3565
+      robot_radius: 0.300
       inflation_layer:
-        inflation_radius: 0.75
+        inflation_radius: 0.65
