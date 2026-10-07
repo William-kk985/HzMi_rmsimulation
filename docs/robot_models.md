@@ -1126,16 +1126,27 @@ launch 里新增 `_Nav2ParamsForSlot`：`robot:=robot11` 时把这份覆盖层**
 | `hzmirm` | 同上（原路径） | 0.22 / 0.5 | 0.22 / 0.55 |
 | `robot11` | 合并后的临时 YAML | **0.3565 / 0.70** | **0.3565 / 0.75** |
 
-⚠️ **实机（Gazebo）nav2 冒烟没跑完**（时间/会话中断）⇒ 见 §11.8 第 1 项：覆盖层的**运行时**效果
-（configure/activate + 一个短目标）**未实测**，只有上面的单元级证据。
+**运行时验证（Gazebo `mode:=slam_nav`，无头隔离，一次跑；`.tmp_robotslot/r11p3nav/`）**：
+
+| 检查 | 结果 |
+|---|---|
+| `ros2 param get /local_costmap/local_costmap robot_radius` | **0.3565** ✓（覆盖层真的生效） |
+| `ros2 param get /global_costmap/global_costmap robot_radius` | **0.3565** ✓ |
+| `ros2 param get /local_costmap/local_costmap inflation_layer.inflation_radius` | **0.7** ✓ |
+| `/controller_server` / `/planner_server` lifecycle | 都是 **active [3]** ✓（配置+激活通过） |
+| `NavigateToPose`（map 系，车前 1.5 m） | **被接受**（Goal accepted with ID …）✓ |
+| **车有没有真的走过去** | ❌ **没有**：90 s 内真值位置只动了 1.8 cm（4.300→4.305, 3.350→3.368）。疑似"地图还没建起来/规划器没出路径"，本轮**没查到底**（会话被中断）⇒ 见 §11.8 第 1 项 |
+
+⚠️ 也就是说：**覆盖层与栈的配置/激活链路已实测通过**，"能按新半径真的走一段"**尚未验证**。
 
 ### 11.8 未验证清单（Phase 3 新增，诚实清单）
 
 1. **nav2 的运行时验证没跑完**：`robot_radius`/`inflation_radius` 的**槽位覆盖层已落地**
    （§11.9，单元级验证通过：默认/hzmirm 仍是 0.22，robot11 是 0.3565），但
    `mode:=slam_nav`/`mode:=nav` 的 configure/activate + 短目标**没有实测**（会话被中断）
-   ⇒ 真跑 nav 前建议先补一次冒烟（`ros2 param get /local_costmap/local_costmap robot_radius`
-   应为 0.3565、再发一个 1.5 m 的目标看能不能走到）；
+   ⇒ 已补的冒烟证据：`robot_radius` 运行时确实是 0.3565、`controller/planner` active、
+   `NavigateToPose` 被接受；**但车 90 s 内没动**（真值只挪 1.8 cm，疑似"地图/规划"环节，
+   没查到根因）⇒ 真跑 nav 前必须把这一段走通；
 2. ~~linefit 的 C++ bug 没有修~~ → **已修并回归**（§11.4 末尾，一行 `Identity()`）。
    仍**未做**的：把 robot11 切回"点云留在传感器系 + `gravity_aligned_frame: base_link`"这条
    更接近真机的链路（修好后已具备条件），以及 hzmirm 槽位在新代码下的重跑；
