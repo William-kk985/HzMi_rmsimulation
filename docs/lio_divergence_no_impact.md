@@ -5,6 +5,11 @@
 > 目标 `(-12.64,-0.31)`，前瞻限速按 `config/traversability_criteria.yaml`（默认开）。
 > 全部数字来自 `tools/scripts/diag/run_nav_lio_timeline.sh` 的无头整栈跑（隔离见 §6），
 > **不是推算、不是回忆**：每条结论后面都挂着信号名与数值，时间轴文件在 §6 列的产物目录里。
+>
+> ⚠ **2026-10-07 后记**：那次跑用的 `map/RMUC2026_v3_spl.yaml` 已在 2026-10-07 被**提升为默认**
+> `map/RMUC2026.yaml`（两份逐字节相同）⇒ 本文说的那张图现在就是 `mode:=nav` 的默认先验；
+> `RMUC2026_v3_spl.*` 仍留在 `map/`（`tools/scripts/diag/run_nav_lio_timeline.sh` 的 `--map-yaml`
+> 默认值还指着它）。提升依据 / 旧份（`*.bak-20261007`）/ 回滚命令见 `docs/map_assets.md` §3 / §4.4。
 
 ---
 

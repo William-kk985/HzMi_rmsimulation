@@ -26,8 +26,8 @@
 | `src/rm_simulation/hzmi_rm_simulation/meshes/RMUC2026_world/model.{config,sdf}` | `model://RMUC2026_world` 的独立入口（与 world 文件里内联的那份等价） |
 | `src/rm_simulation/hzmi_rm_simulation/world/RMUC2026_world/RMUC2026_world.world` | 世界文件（结构镜像 `RMUL2026_world.world`） |
 | `src/rm_simulation/hzmi_rm_simulation/world/RMUC2026_world/model.{config,sdf}` + `meshes/RMUC2026.stl` | 与上面对称的第二份目录树（镜像 RMUL2026 的既有结构；这份 `meshes/` 目前**不被任何路径引用**，只是照抄结构，占 2.2 MB） |
-| `src/rm_nav_bringup/map/RMUC2026.{pgm,yaml}` | 2D 栅格图（由 STL 几何生成，见 §4） |
-| `src/rm_nav_bringup/PCD/RMUC2026.pcd` | 先验点云（由 STL 几何生成，见 §4） |
+| `src/rm_nav_bringup/map/RMUC2026.{pgm,yaml}` | 2D 栅格图。⚠ **当前这一份不是本文 §4.1 的合成产物** —— 2026-10-06 起换成实跑建图的 `/map`，2026-10-07 又提升到 `RMUC2026_v3` 那次会话的图（`577x326`、`origin [-25.2,-9.09]`）。**当前默认对 / 换图 / 回滚见 `docs/map_assets.md`**；§4.1 描述的那份合成图现在在 `map/attic/RMUC2026.pgm.synth.bak` |
+| `src/rm_nav_bringup/PCD/RMUC2026.pcd` | 先验点云。⚠ 同上：当前是实跑建图产物（2026-10-07 提升，**203,352 点**），§4.2 描述的那份合成点云现在在 `PCD/attic/RMUC2026.pcd.synth.bak` |
 | `src/rm_simulation/hzmi_rm_simulation/launch/rm_simulation.launch.py` | +`WorldType.RMUC2026` 一项（出生点）与对应 GroupAction |
 | `src/rm_nav_bringup/launch/bringup_sim.launch.py` | `amcl_init_x/y` 字典 +`'RMUC2026': 0.0` |
 
@@ -121,9 +121,16 @@ WorldType.RMUC2026: {
 
 ## 4. 地图与 PCD 是怎么产出的
 
-两条路线都试了，**资产用 (a) 从 STL 合成**，(b) 真实建图只作**交叉验证证据**（§5.1）。
+> **⚠ 2026-10-07 现状（先读这一行）**：本章 §4.1/§4.2 记录的是 **2026-10-05 的"由 STL 合成"路线**，
+> 它**已经不是当前默认资产** —— 那两份现在分别在 `map/attic/RMUC2026.pgm.synth.bak`（+`.yaml.synth.bak`）
+> 与 `PCD/attic/RMUC2026.pcd.synth.bak`（`git show 280888e:…` 也有原始版本），可随时用 §4.4 的工具复跑。
+> **当前默认对 = 实跑建图产物**（2026-10-07 提升到 `RMUC2026_v3` 那次会话的 2D + 3D）：
+> 清单、实测对照、换图与回滚全在 **`docs/map_assets.md`**。本章保留原样，作为"合成路线怎么做的"的存档。
 
-### 4.1 `map/RMUC2026.pgm` + `.yaml`（路线 a）
+两条路线都试了：**当初资产用 (a) 从 STL 合成**，(b) 真实建图只作**交叉验证证据**（§5.1）；
+**现在反过来** —— (b) 实跑建图是当前默认资产，(a) 退到 `attic/`（见上面的现状说明）。
+
+### 4.1 `map/RMUC2026.pgm` + `.yaml`（路线 a；**现已在 `map/attic/`，历史存档**）
 
 * 由 §3 的 0.05 m 栅格直接出图：`free → 254`、`occupied/外沿 → 0`，
   **阈值 0.15 m**（相对底板抬升）。取 0.05 m 而不用 0.03：0.03 m 时 free 面积 217.1 m²、
@@ -137,7 +144,7 @@ WorldType.RMUC2026: {
   世界系的话 `initial_pose` 得按 world 注入，而 launch 并不注入它）。
 * 面积：free **237.8 m²**、occupied 229.4 m²、场地外沿 44.4 m²（也标占用 = 围墙）。
 
-### 4.2 `PCD/RMUC2026.pcd`（路线 a）
+### 4.2 `PCD/RMUC2026.pcd`（路线 a；**现已在 `PCD/attic/`，历史存档**）
 
 * 几何：把 STL 采样成"**地面以上薄壳**"（镜像 `PCD/RMUL2026.pcd` 的性格 —— 那份 z 跨度 0.665 m、
   含地面切片 + 低矮障碍），高度带 **`[地面-0.08, 地面+0.60] m`**；

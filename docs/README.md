@@ -22,6 +22,7 @@
 | 排查某个诡异现象 | `issues_and_findings.md` + `smoke_test_runbook.md` §10.1 | 「现象 → 归属」表 |
 | 改感知/代价图层、换 3D→2D 做法 | `3d_to_2d_survey.md` | §二 两种降维哲学 / §三 共性旋钮 / §七 本工程分布 |
 | 想加"坡度 / 落空 / 净空"这类 2D 表示不了的东西（**先看这份**） | `traversability_plan.md` | §1 问题定义 / §2 表示选型 / §3 三个派生层 / §5 STL 真值验证 / §7 分阶段计划（**plan only，未实现**） |
+| 想知道**地图/先验资产哪一份是当前的**，或者要换图 / 回滚 / 清理存档 | `map_assets.md` | §0 速查 / §1 命名规范 / §2 逐个文件清单 / §3 实测对照 / §4 换图与回滚 |
 | 挑算法（选型池） | `rm_algorithm_catalog.md` | §〇.0 前端 vs 系统 / 各章候选 |
 | 想知道"**建图算法会不会用重定位**"、我们缺哪一级（回环 / 地点识别 / 多会话锚定） | `mapping_relocalization_survey.md` | §0 一句话结论 / §2 会用的系统 / §3 不会用的系统（纯 LIO）/ §4 我们栈的现状 / §5 该补什么（排序+成本）/ §6 决策表 |
 | 改 TF/话题契约 | `tf_interface_contract.md` | T1–T5 已实施、T6 撤销 |
@@ -51,6 +52,7 @@
 | `mapping_2d_from_cloud.md` | **2D 先验图改从 3D 点云投影**（+ 建图稳健性 A/B）：`/scan` 丢帧量化与 四个变体 A/B（根因 = slam_toolbox `scan_queue_size=1`）/ `map→odom` 跳变哨兵（alert-only 的理由 + 实测抓到的跳变）/ 坡道段（23° 坡 + 1.05 m 无顶棚走廊）同时间轴证据与判定 / `pcd_to_nav2_map.py` 的判据与用法 / 两张 2D 先验的区域计数 A/B + 回归 / 跑图规程 / 回滚 / 未验证 | **「2D 图从哪来」与「坡道为什么在 2D 图里消失」的唯一真值** |
 | `slam_toolbox_scan_drops.md` | **`/scan` 丢帧（Message Filter … queue is full）的根因考证**（接 `mapping_2d_from_cloud.md` §9 的待做项）：`scan_queue_size` 上游考证（默认 1 / 语义 / #526 引入 / README 口径）、tf2 `MessageFilter` 的 `QueueFull` 源码语义、上游 issue/PR 与**未合入的根治补丁 geometry2#544**、可比项目（COD / TurtleBot4 / uOttawa）配置、**本仓时间戳链实测**（`/scan` 端到端延迟 ~55 ms、LIO TF 有效 8.94 Hz / 跳帧 11.7%、92.6~100% 的扫描"到达时查不到自己那一戳的 TF"、等待分布）、**丢帧影响量化**（58.6% 被处理门证明无害、其余 ≤0.1 s / 2 cm）、**`scan_queue_size` 1/5/10 的 A/B**（4.2% → 0）、结论（**不改默认**）与"要改就改这一行"的可逆配方 | **「这条丢帧日志要不要管」的唯一真值** |
 | `ground_segmentation_slots.md` | **地面分割槽位 `ground`（`linefit` \| `patchwork`）**：上游/许可证/pinned commit 考证（BSD-2-Clause，pin `3e6903a1` = v1.4.1；上游 `ros/**` 因 `package.xml`(GPL-3.0) 与 `LICENSE`(MIT) 矛盾而**不 vendor**）、与 linefit 的**逐字段契约表**、参数表（每个默认值的来源；`th_dist` 0.125→0.08 的实测理由）、`ground` 槽位 diff 与 `--show-args` 证据、**互斥真值表**（LaunchDescription 求值 + 运行期 `/segmentation/obstacle` 单发布者实证）、离线 A/B（真实帧 + RMUC2026.stl 实测几何代理）、整栈建图 smoke A/B、结论与回退 | **地面分割槽位的唯一真值**（含「22~35° 缓坡：linefit 判障碍 35.7~44.3% → patchwork 2.5~3.0%」与「p2l `max_height 0.1` 砍掉 0.33 m 以上护墙」两条实测量） |
+| `map_assets.md` | **地图/先验资产的规范与清单**：命名约定（`map/<world>.pgm\|yaml` / `PCD/<world>.pcd` / 存档 `<world>_<tag>.*` / 备份 `.prev-<ts>`、`.bak-<日期>` / `attic/`）、逐个文件（是什么 / 哪来的 / 实测多好 / 谁在引用它）、**当前默认对**（2026-10-07 提升到 `RMUC2026_v3` 那次会话的 2D + 3D，含提升前的旧份与回滚命令）、换图流程、入库策略、未验证清单 | **`map/` 与 `PCD/` 里"哪一份是当前默认"的唯一真值**（含 `verify_low_terrain.py` + GICP 离线探针 + 整栈无头的实测对照） |
 | `lio_drift_diagnosis.md` | **LIO 漂移分段诊断（"才跑一小会儿里程计就飘"到底合不合理）**：分段脚本化路线（直线/原路返回/慢转/快转/窄沟/角速度扫频）+ 50 Hz 同步时间轴 + 逐段 ATE；**指令角速度 → 实际角速度的传递曲线**（仿真底盘权威只有指令的 0.4~0.8、小指令几乎死区）；"卡死+几何退化"与"温和/大角速度转弯"逐条对账；**唯一复现出来的失效模式 = 高角速度甩转（6 次坏 3 次，且与地图冷热无关；轻的 slam 能补、重的 1:1 跟着飘）**；续建污染存档的复测（`pcd_stats` 复现 z 到 +23.10 m，但**实时位姿不受影响**）；跑法护栏（脏 spawn / 采样饥饿） | **「LIO 到底会不会飘、什么时候飘」与「续建存档会不会让位姿飘」的唯一真值** |
 | `worlds.md` | **整场世界资产（`RMUC2026`，由附件 STL 生成）**：资产清单 / mm→m 与 z 抬升的依据 / 出生点怎么选 / 2D 图与先验 PCD 怎么来 / 无头实测（建图·AMCL·GICP）/ 场地对本车的坑 + `tools/scripts/world/stl_to_world.py` 一条命令复跑（§4.4） | **场地世界资产与生成口径的唯一真值**（含"可通行 ≈176 m²"等实测量） |
 
