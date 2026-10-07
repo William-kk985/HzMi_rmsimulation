@@ -13,6 +13,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch.conditions import LaunchConfigurationEquals
 from launch.conditions import IfCondition
 from launch.actions.append_environment_variable import AppendEnvironmentVariable
+from launch.actions import SetEnvironmentVariable
 from launch.substitution import Substitution
 
 # Enum for world types
@@ -162,9 +163,62 @@ def generate_launch_description():
         choices=['', 'hzmirm', 'robot11']
     )
 
+    # ★ 2026-10-07：Gazebo GUI / 在线模型库开关（**都是 opt-in，默认 = 改造前行为**）。
+    #   gui=False 的用途：一条命令无头跑（省 gzclient 的 ~450 MiB 与 1 个 GL 上下文），
+    #   也免掉"事后 pkill gzclient"这一步（本仓多个 bench 脚本会 `pkill -9 -x gzclient`，
+    #   那是**全机**范围的 —— 会把别人正在看的 GUI 一起杀掉，见
+    #   docs/gazebo_gui_troubleshooting.md §"exit code -9 到底是谁杀的"）。
+    declare_gui_cmd = DeclareLaunchArgument(
+        'gui',
+        default_value='True',
+        description='True（默认）= 起 gzclient（Gazebo 图形界面，与改造前逐字相同）；'
+                    'False = 只起 gzserver（无头；RViz 不受影响，nav_rviz/lio_rviz 照旧）'
+    )
+
+    #   为什么需要 gazebo_offline（2026-10-07 实测口径，别照抄"网络慢"这种含糊说法）：
+    #   `ModelDatabase` 构造函数就起一个后台线程去拉 http://models.gazebosim.org/ 的清单，
+    #   而这条 libcurl **没有设任何超时**。日常它不挡路（清单抓完就算了）；**只有当
+    #   GUI 线程也需要模型清单时**（`GetModels()` 抢不到锁 ⇒ 打印
+    #   "Waiting for model database update to complete..." 并**同步阻塞**）才会卡住界面。
+    #   实测：`robot:=robot11` 的 12 个 `<visual>` 是 `package://robot11/...`，
+    #   sdformat 转 SDF 时改写成 `model://robot11/...`；这些 URI 在
+    #   `GAZEBO_MODEL_PATH` 上解析不到 ⇒ `SystemPaths::FindFileURI()` **无条件回落**到
+    #   `ModelDatabase::GetModelPath(uri, /*forceDownload=*/true)` ⇒ 撞上那把锁。
+    #   黑洞代理下实测 **stall ≥ 99.95 s（不设上限）**，用户 19:50 日志实测 **48.03 s**
+    #   且是被 Ctrl-C 打断的。⇒ 治本是让 `model://robot11/...` 本地可解析
+    #   （docs/gazebo_gui_troubleshooting.md §5.1）；本开关只是"不再等"的兜底。
+    declare_gazebo_offline_cmd = DeclareLaunchArgument(
+        'gazebo_offline',
+        default_value='False',
+        description='False（默认，行为不变）= 用 gazebo 自带的在线模型库地址；'
+                    'True = 把 GAZEBO_MODEL_DATABASE_URI 指到 http://127.0.0.1:1/ '
+                    '（连接立刻被拒）⇒ 后台清单抓取立刻失败，GUI 不再可能卡在"等模型库"。'
+                    '⚠️ 它**不会**让车在 Gazebo 里出现（那是 robot11 的 model:// 解析问题）；'
+                    '⚠️ 别用空串（gazebo 的 GetURI() 对空串有越界读）'
+    )
+
+    #   ⚠️ 用 GroupAction 承载 condition：Humble 的 SetEnvironmentVariable 虽然能吃
+    #   condition kwarg，但语义上"整组生效"更清楚，也不会在 gui=True 时白设一遍。
+    set_gazebo_offline_env = GroupAction(
+        condition=IfCondition(LaunchConfiguration('gazebo_offline')),
+        actions=[
+            SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', 'http://127.0.0.1:1/'),
+        ],
+    )
+
     # Specify the actions
+    # ★ 2026-10-07 新增开关（**纯增量**：默认值 = 改造前的行为，不动任何节点的时序/参数）：
+    #   · gui=True（默认）      ⇒ 起 gzclient，命令与改造前逐字相同
+    #   · gui=False             ⇒ **只起 gzserver**，一条命令无头跑（不用事后 kill GUI）
+    #   · gazebo_offline=True   ⇒ 把在线模型库 GAZEBO_MODEL_DATABASE_URI 指到一个必然
+    #     立刻失败的地址，避免 gzclient 卡在 "Waiting for model database update to complete..."
+    #     （机理与实测见 docs/gazebo_gui_troubleshooting.md）
+    #   ⚠️ 为什么不用空串 `GAZEBO_MODEL_DATABASE_URI=""`：gazebo 的
+    #     `common::ModelDatabase::GetURI()` 里有 `result[result.size()-1]`，对空串是
+    #     越界读（UB）。指向 127.0.0.1:1 是"连接立刻被拒"，语义明确且不碰 UB。
     gazebo_client_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(pkg_gazebo_ros, 'launch', 'gzclient.launch.py')),
+        condition=IfCondition(LaunchConfiguration('gui')),
     )
 
     start_joint_state_publisher_cmd = Node(
@@ -243,6 +297,10 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_file_cmd)
     ld.add_action(declare_robot_description_cmd)
     ld.add_action(declare_robot_cmd)      # ★ 2026-10-07 模型槽位（默认 '' ⇒ 行为不变）
+    ld.add_action(declare_gui_cmd)               # ★ 2026-10-07 gui（默认 True ⇒ 行为不变）
+    ld.add_action(declare_gazebo_offline_cmd)    # ★ 2026-10-07 gazebo_offline（默认 False ⇒ 不变）
+    # ⚠️ 环境变量必须在 gazebo_client_launch / gzserver 之前生效
+    ld.add_action(set_gazebo_offline_env)
     ld.add_action(gazebo_client_launch)
     ld.add_action(start_joint_state_publisher_cmd)
     ld.add_action(start_robot_state_publisher_cmd)

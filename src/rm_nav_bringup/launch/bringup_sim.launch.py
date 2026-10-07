@@ -621,6 +621,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     use_lio_rviz = LaunchConfiguration('lio_rviz')
     use_nav_rviz = LaunchConfiguration('nav_rviz')
+    # ★ 2026-10-07：Gazebo GUI / 在线模型库（默认值 = 改造前行为，见各自 DeclareLaunchArgument）
+    gui = LaunchConfiguration('gui')
+    gazebo_offline = LaunchConfiguration('gazebo_offline')
     spin_speed = LaunchConfiguration('spin_speed')
 
     ################################ robot_description parameters start ###############################
@@ -860,6 +863,43 @@ def generate_launch_description():
         'nav_rviz',
         default_value='True',
         description='Visualize navigation2 if true')
+
+    # ★ 2026-10-07 新增：Gazebo GUI 开关（**纯增量**：默认 True = 改造前行为）。
+    #   为什么需要：用户 2026-10-07 反馈"gazebo 加载不出来"，而 RViz 一切正常。实测到两条
+    #   独立原因（证据与复现见 docs/gazebo_gui_troubleshooting.md）：
+    #     ① **`robot:=robot11` 的 `<visual>` mesh 让 gzclient 卡住**（不是"网络慢"这么笼统）：
+    #        URDF 的 `package://robot11/...` 被 sdformat 改写成 `model://robot11/...`，
+    #        该 URI 在 `GAZEBO_MODEL_PATH` 上解析不到 ⇒ `SystemPaths::FindFileURI()`
+    #        无条件回落到 `ModelDatabase::GetModelPath(uri, forceDownload=true)` ⇒
+    #        `GetModels()` 抢不到后台抓取线程的锁，于是打印
+    #        "Waiting for model database update to complete..." 并**同步阻塞**。
+    #        实测 stall：用户 19:50 = **48.03 s**、同机 20:13 = **76.34 s**、
+    #        黑洞代理复现 = **99.67 s**（三次都是被 Ctrl-C / 拆代理打断的，**不设上限**）；
+    #        同时 12 个 mesh 全部 `No mesh specified`（车在 Gazebo 里没有视觉）。
+    #        ⇒ 治本是给 `model://robot11/...` 一个本地解析根（见该文档 §5.1）。
+    #     ② 本仓多个 bench/ab 脚本收尾会 `pkill -9 -x gzclient`（**全机**范围，不看
+    #        GAZEBO_MASTER_URI）⇒ 别人正在看的 GUI 被打成 `exit code -9`（用户 16:55/16:56 那两次）。
+    #   ⇒ gui:=False 一条命令无头跑，既不用事后 kill GUI，也不会被别人误杀。
+    declare_gui_cmd = DeclareLaunchArgument(
+        'gui',
+        default_value='True',
+        description='True（默认）= 起 Gazebo GUI（gzclient），与改造前逐字相同；'
+                    'False = 只起 gzserver（无头）。RViz 由 nav_rviz/lio_rviz 单独控制，不受本开关影响'
+    )
+
+    #   在线模型库：默认行为不变（用 gazebo 自带的 http://models.gazebosim.org/）。
+    #   True = 把 GAZEBO_MODEL_DATABASE_URI 指到 http://127.0.0.1:1/（连接立刻被拒）⇒
+    #   后台清单抓取立刻失败、`UpdateModelCacheImpl()` 直接返回 ⇒ GUI 不再可能卡在"等模型库"。
+    #   ⚠️ 它**不会**让车在 Gazebo 里出现（那是 ① 的 mesh 解析问题）。
+    #   ⚠️ 不要用空串：gazebo 的 ModelDatabase::GetURI() 里 `result[result.size()-1]`
+    #   对空串是越界读（UB）；实测虽没崩，但 URI 会退化成 `//database.config`。
+    declare_gazebo_offline_cmd = DeclareLaunchArgument(
+        'gazebo_offline',
+        default_value='False',
+        description='False（默认，行为不变）= gazebo 自带的在线模型库地址；'
+                    'True = 指向 http://127.0.0.1:1/ ⇒ 启动不再等在线模型库'
+                    '（推荐给"窗口在但世界/模型不出来"；想彻底好还要给 model:// 一个本地解析根）'
+    )
 
     declare_spin_speed_cmd = DeclareLaunchArgument(
         'spin_speed',
@@ -1201,6 +1241,9 @@ def generate_launch_description():
             #   真因与修法见 docs/debug_fastlio_cartographer.md §9.2 候选④（CustomMsg/订阅 QoS 已于 2026-09-24 修复）。
             #   本行保留 False 属「故障隔离」的保守选择，代价是多几个进程；想省进程可删掉本行，但需重跑验收。
             'use_composition': 'False',
+            # ★ 2026-10-07：Gazebo GUI / 在线模型库开关（默认值 = 改造前行为）
+            'gui': gui,
+            'gazebo_offline': gazebo_offline,
             'rviz': 'False'}.items()
     )
 
@@ -2004,6 +2047,9 @@ def generate_launch_description():
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_lio_rviz_cmd)
     ld.add_action(declare_nav_rviz_cmd)
+    # ★ 2026-10-07：Gazebo GUI / 在线模型库（默认值 = 改造前行为；纯增量，无节点集合/时序变化）
+    ld.add_action(declare_gui_cmd)
+    ld.add_action(declare_gazebo_offline_cmd)
     # ★ 2026-10-07 Phase 3：`robot` 必须**声明在 spin_speed 之前** —— spin_speed 的默认值是
     #   "按槽位给"的（robot11 ⇒ 0.0），而 launch 的声明动作是**按顺序执行**的：
     #   声明顺序反了就读不到 robot（实测会退化成旧默认 5.0，甚至抛 SubstitutionFailure）。
