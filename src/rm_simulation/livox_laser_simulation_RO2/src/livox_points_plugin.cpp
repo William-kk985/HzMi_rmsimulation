@@ -128,8 +128,8 @@ namespace gazebo
             {
                 mount_rot_.Euler(ignition::math::Vector3d(r, p, y));
                 RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
-                            "tilt_rpy = [%.9f %.9f %.9f] rad（安装倾角：只改射线方向，"
-                            "点云仍表达在父 link 系）", r, p, y);
+                            "tilt_rpy = [%.9f %.9f %.9f] rad（安装倾角：只改射线方向；"
+                            "点云表达在哪个系由 <cloud_frame> 决定，缺省 = 父 link 系）", r, p, y);
             }
             else
             {
@@ -140,6 +140,39 @@ namespace gazebo
         if (downSample < 1)
         {
             downSample = 1;
+        }
+        // ★★ 2026-10-09：点云**表达在哪个系** —— 新增可选 SDF 参数 `<cloud_frame>parent|sensor</cloud_frame>`。
+        //   缺省（元素不存在）= `parent` ⇒ 与 2026-10-07 起的行为**逐字节相同**（含所有其它模型）。
+        //   `sensor` 时点云坐标 = range·(mount_rot·ray)（真·传感器系），与 `frame_id`（= `<sensor name>`
+        //   = 本仓的 `livox_frame`，它的 TF 位姿由 URDF 关节给出）**自洽**。
+        //   为什么需要这个开关：本插件原来把点表达在**父 link 系**（axis = offset.Rot()·mount_rot·ray），
+        //   只有当"关节 rpy = 0"（= `livox_mount:=plugin` 档，倾角记在 `<tilt_rpy>` 里）时，
+        //   父 link 系才**恰好**等于 `livox_frame`（帧与数据自洽）。一旦倾角记进关节
+        //   （`livox_mount:=urdf`），`livox_frame` 就斜了 30°，而点云还留在水平系 ⇒
+        //   **帧与数据差 30°**：任何用 TF 变换这朵云的消费者（LIO 的 /cloud_registered、RViz、
+        //   p2l 的 target_frame）都会看到"整个场景被刚性转了 30°"
+        //   （实测 30.970°，反变换回去 1.041°，见 docs/tilted_lidar_fidelity.md §I.5.1）。
+        //   `sensor` 就是"让数据回到它自称的那个帧里"这一档（真机驱动本来就是这样）。
+        //   ⚠️ 世界里的射线方向**不受本开关影响**（射线仍用 offset.Rot()·mount_rot·ray 生成），
+        //      只改"报出来的坐标用哪个系表达"。
+        cloud_frame_sensor_ = false;
+        if (sdfPtr->HasElement("cloud_frame"))
+        {
+            const std::string cloud_frame = sdfPtr->Get<std::string>("cloud_frame");
+            if (cloud_frame == "sensor")
+            {
+                cloud_frame_sensor_ = true;
+                RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
+                            "cloud_frame = sensor ⇒ 点云表达在**传感器系**（frame_id = %s 的那个帧），"
+                            "下游需要 gravity_aligned_frame / target_frame 做重力对齐",
+                            raySensor->Name().c_str());
+            }
+            else if (cloud_frame != "parent")
+            {
+                RCLCPP_WARN(rclcpp::get_logger("LivoxPointsPlugin"),
+                            "cloud_frame 取值 %s 不认识（只认 parent | sensor）⇒ 按 parent 处理",
+                            cloud_frame.c_str());
+            }
         }
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "sample: %ld", samplesStep);
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "downsample: %ld", downSample);
@@ -243,15 +276,17 @@ namespace gazebo
 
         // ★★ 2026-10-07（Phase 3，robot:=robot11 的"斜装雷达"）：把**安装倾角**乘进点的方向里。
         //   背景：本插件把点算成 `point = range * axis`，而 axis 原本只是 CSV 采样方向
-        //   （`ray * x̂`），**不含任何安装姿态** ⇒ 点云被表达在"传感器自身坐标系"里。
-        //   robot11 的雷达按实物斜 30°（用户确认 roll），我们**需要**：射线在物理上真的斜
-        //   （否则下视盲区、地面环半径、点云几何全不对），但点云坐标要是**父 link 系**的
-        //   （否则 frame_id 与实际坐标不自洽，而本仓 linefit 的 gravity_aligned_frame 路径
-        //    有 C++ bug：`Eigen::Affine3d tf;` 默认构造不清零 ⇒ 该键一开，地面分割恒为 0 点）。
+        //   （`ray * x̂`），**不含任何安装姿态**。robot11 的雷达按实物斜 30°（用户确认 roll），
+        //   我们**需要**：射线在物理上真的斜（否则下视盲区、地面环半径、点云几何全不对）。
         //   做法：新增 SDF 参数 `<tilt_rpy>roll pitch yaw</tilt_rpy>`（弧度；缺省 = 单位阵）：
         //     · 打射线时：axis = offset.Rot() · mount_rot · ray · x̂   （射线真的按倾角偏）
-        //     · 发布点时：axis = mount_rot · ray · x̂                 （点 = 父 link 系里的真实命中点）
-        //   ⇒ 对**已有**的每个传感器（没有这个参数）= 单位阵 ⇒ **输出逐字节不变**。
+        //     · 发布点时（缺省 `<cloud_frame>parent</cloud_frame>`）：
+        //                axis = sensor_rot · mount_rot · ray · x̂     （点 = **父 link 系**里的命中点）
+        //     · 发布点时（`<cloud_frame>sensor</cloud_frame>`，2026-10-09 新增）：
+        //                axis = mount_rot · ray · x̂                   （点 = **传感器系**里的命中点，
+        //                                                               与 frame_id=<sensor name> 自洽）
+        //   ⇒ 对**已有**的每个传感器（没有这个参数、也没有 `<cloud_frame>`）= 单位阵/父 link 系
+        //     ⇒ **输出逐字节不变**。
         //   实测（robot11）：仰角谱仍是 −7…+52°（传感器自身 FoV），但它在 world 里是斜的：
         //   地面最近环 0.43 m、下视到 −37°、地面点占 ~20%；而修之前"姿态只加在射线上、
         //   不加在点上"会让 linefit 只能判 2.8% 地面。
@@ -273,7 +308,15 @@ namespace gazebo
             auto rotate_info = pair.second;
             ignition::math::Quaterniond ray;
             ray.Euler(ignition::math::Vector3d(0.0, rotate_info.zenith, rotate_info.azimuth));
-            auto axis = sensor_rot * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
+            // ★★ 2026-10-09（`<cloud_frame>sensor</cloud_frame>`，见 Load 里的说明）：
+            //   `sensor` 档 ⇒ axis = mount_rot·ray（**真·传感器系**：mount_rot = 传感器在父 link 里的
+            //     姿态，ray 是传感器系里的采样方向 ⇒ 坐标与 frame_id=<sensor name> 自洽）；
+            //   缺省(`parent`) 档 ⇒ **原样** axis = sensor_rot·mount_rot·ray（父 link 系，逐字节不变）。
+            //   两档的**世界射线**逐条相同（RayShape 用的是 Load/InitializeRays 里的
+            //   offset.Rot()·mount_rot·ray，本行只决定"报出来的坐标用哪个系"）。
+            auto axis = cloud_frame_sensor_
+                                ? (mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0))
+                                : (sensor_rot * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0));
             auto point = range * axis;
 
             // 填充 CustomMsg 点云消息

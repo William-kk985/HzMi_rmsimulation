@@ -1,0 +1,35 @@
+# =============================================================================
+# laserscan_params_sensor_frame.yaml —— **增量覆盖**参数文件（2026-10-09 新增）
+#
+# 只被一种组合递进节点：`robot:=robot11 robot11_mount:=sensor`
+# （launch 里 `_PackageShareFile('pointcloud_to_laserscan', 'config',
+#   'laserscan_params_sensor_frame.yaml')`，见 bringup_sim.launch.py 的
+#   `bringup_pointcloud_to_laserscan_node_sensor`）。
+#
+# 为什么是"增量"而不是改 laserscan_params.yaml：
+#   同一份参数文件的**语义前提**在两档下不同。`robot11_mount:=plugin|urdf`（以及默认模型）里
+#   点云/`/segmentation/obstacle` 的坐标已经是**重力对齐**的，`target_frame: ""`（= 不做 TF、
+#   连 MessageFilter 都不建，见 laserscan_params.yaml 顶部 2026-09-23 的考证）既是加固也是对的；
+#   而 `robot:=robot11 robot11_mount:=sensor` 档里点云**真的在传感器系**（绕 x −30°）⇒
+#   不做 TF 的话 `/scan` 就是"一张斜 30° 的 2D 平盘"：
+#     · 它每一条波束在 odom/costmap 里的 z 会随方位在 ±0.5·r 之间摆动
+#       ⇒ `obstacle_layer.min/max_obstacle_height`(0/2.0) 会把**一半以上的波束按高度丢掉**
+#       （实测 `robot11_mount:=urdf` 档丢 **677/948 = 71.4%**，且丢掉的正是"斜装雷达唯一
+#        看得见东西的那半边"，见 docs/tilted_lidar_fidelity.md §I.7）；
+#     · `min_height/max_height`（−1.0/1.0）也不再是"离传感器的真高度"。
+#   本文件把 `target_frame` 设成 `base_link` ⇒ 节点先用 TF 把点云搬到 base_link（**含平移**）、
+#   再在那一系里做高度带过滤与 2D 投影 ⇒ `/scan` 回到"重力对齐的水平面里的一圈"、
+#   `min/max_height` 恢复"相对 base_link 原点的高度"语义。
+#   ⚠️ 代价（本仓 2026-09-23 刻意避开的那类）：一旦 `target_frame` 非空，节点会建
+#      tf2 Buffer/TransformListener + MessageFilter ⇒ 多一类"TF 缺失/时间戳不齐 ⇒ 整条
+#      Talker 被静默丢弃/排队"的故障面（那时漏配 `use_sim_time` 就是这么炸的；本 launch 已修）。
+#      判活：`ros2 topic hz /scan` 与 `/segmentation/obstacle` 同步、`/scan` 的 stamp 与
+#      `/livox/lidar/pointcloud` 同帧。
+#
+# 证据 / A-B / 回退：docs/tilted_lidar_fidelity.md §J。
+# =============================================================================
+/**:
+  ros__parameters:
+    # ★ 唯一的一个键：`/scan` 的坐标系 = base_link（重力对齐）⇒ 高度带语义恢复"离地高度"。
+    #   "" = 缺省（点云自带帧 = livox_frame，本仓"点云在源头已重力对齐"那两档用）。
+    target_frame: "base_link"

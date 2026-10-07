@@ -158,19 +158,48 @@ _LIVOX_RAISE_DEFAULT = '0.0'
 #:     代价：TF 里帧是平的、**画出来的雷达 mesh 也是平的**（用户看到的"URDF/雷达图像是平放的"）。
 #:   · 'urdf'：倾角放回 URDF 关节（rpy = −0.5236 roll = 上游/CSV 的字面值 = **实物的物理安装
 #:     姿态**，连 mesh 一起斜），插件 `<tilt_rpy>` = 单位阵 ⇒ 世界里的射线方向与 plugin 档**逐条
-#:     相同**，但点云表达在**斜的传感器系**里（地面在点云里是 30° 斜面）。
-#:     ⚠️ 本档**不动任何感知参数** —— 就是要看"物理安装保真"的原始后果（哪些语义会跟着变，
-#:     见 docs/tilted_lidar_fidelity.md §C）。
-_LIVOX_MOUNTS = ('plugin', 'urdf')
+#:     相同**，但点云**仍表达在水平的父 link 系** ⇒ `frame_id`（`livox_frame`，它现在真的斜了
+#:     30°）与数据**不自洽**（**诊断档**：就是要看"物理保真、账不对"的原始后果；
+#:     见 docs/tilted_lidar_fidelity.md §C/§I）。
+#:   · ★ 2026-10-09 新增 'sensor'：**物理斜装 + 账也对**这一档 —— 关节 rpy / 插件 `<tilt_rpy>`
+#:     与 'urdf' 档**逐字节相同**，外加 `<cloud_frame>sensor</cloud_frame>` ⇒ 点云**真的表达
+#:     在传感器系里**（与 `frame_id = livox_frame` 指向的那个 TF 帧自洽）。代价：点云不再重力
+#:     对齐 ⇒ 本 launch 在**只在这一档**给 linefit 加 `gravity_aligned_frame: base_link`、
+#:     给 `pointcloud_to_laserscan` 加 `target_frame: base_link`（两份都是**增量覆盖**参数文件，
+#:     其它档一个参数都不加、节点集合不变）。
+#:     ⚠️ 只与 `ground:=linefit` 组合（patchwork 槽位没有这一档的覆盖文件；选了**直接报错**，
+#:     检查在 `_MountReadout.perform` 里）。
+_LIVOX_MOUNTS = ('plugin', 'urdf', 'sensor')
 
 
 def _validate_livox_mount(value):
-    """把 `robot11_mount` 的取值验成 `plugin|urdf`（惰性；选错给可操作报错，不静默回退）。"""
+    """把 `robot11_mount` 的取值验成 `plugin|urdf|sensor`（惰性；选错给可操作报错，不静默回退）。"""
     v = (value or '').strip() or 'plugin'
     if v not in _LIVOX_MOUNTS:
         raise RuntimeError('[launch] robot11_mount:=%r 不是可用取值（%s）'
                            % (value, ' | '.join(_LIVOX_MOUNTS)))
     return v
+
+
+def _check_robot11_mount_combination(context):
+    """★ 2026-10-09：`robot11_mount:=sensor` 与其它槽位的**组合检查**（launch 期，t=0）。
+
+    为什么需要：`sensor` 档会给 linefit 加一份"重力对齐"的**覆盖参数文件**
+    （`segmentation_sim_robot11_sensor.yaml`，只含 `gravity_aligned_frame: base_link`）。
+    `ground:=patchwork` 走的是另一个节点（另一套参数），没有这份覆盖 ⇒ 那个组合会**静默**
+    退回"点云在斜系、分割器却以为它重力对齐"的状态。这里让它**直接报错**而不是静默变坏。
+
+    ⚠️ 必须作为 **Action**（OpaqueFunction）放在 `declare_ground_cmd` **之后**：launch 的
+    `DeclareLaunchArgument` 是按 LD 里的顺序生效的，横幅（LogInfo）在它之前 ⇒ 在
+    substitution 里读 `LaunchConfiguration('ground')` 会直接抛 "does not exist"。
+    """
+    mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+    ground = (LaunchConfiguration('ground').perform(context) or '').strip() or 'linefit'
+    if mount == 'sensor' and ground != 'linefit':
+        raise RuntimeError(
+            "[launch] robot11_mount:=sensor 目前只与 ground:=linefit 组合"
+            "（patchwork 槽位没有这一档的重力对齐覆盖参数文件）：当前 ground:=%r" % ground)
+    return []
 
 
 def _rpy_deg_to_R(rpy_rad):
@@ -481,12 +510,27 @@ class _MountReadout(Substitution):
                     '自击掩膜的 z 门限**语义都对**；代价 = TF 与画出来的雷达 mesh 是平的。'
                     'lio_tf_adapter 杆臂是**纯平移**（lio:=small_point_lio/cartographer/none 时'
                     '该节点不启动，由 LIO 用 TF 自己做相似变换）')
-        return ('  · 雷达安装方式 robot11_mount=urdf（**物理安装保真档**）：倾角写在 URDF 关节'
-                '（rpy = −0.5236 roll，上游/CSV 字面值，**画的 mesh 一起斜**）、插件 `<tilt_rpy>` = 单位阵。'
-                '世界里的射线方向与 plugin 档**逐条相同**，但点云表达在**斜的传感器系**（地面在点云里是 '
-                '30° 斜面）⇒ linefit 的 sensor_height / p2l 的 min/max_height / 自击掩膜的 z 门限'
-                '**都还在按"点云是重力对齐"解释**（本档**故意不调**，就是要看原始效果）；'
-                'lio_tf_adapter 杆臂**带 30° 旋转**（已按几何算，不再是纯平移）')
+        if m == 'sensor':
+            return ('  · 雷达安装方式 robot11_mount=sensor（**物理斜装 + 账也对**，2026-10-09 新增）：'
+                    '关节 rpy = 倾角（= urdf 档，**画的 mesh 一起斜**）、插件 `<tilt_rpy>` = 单位阵，'
+                    '**外加** `<cloud_frame>sensor</cloud_frame>` ⇒ 点云 **真的表达在传感器系**、'
+                    '与 `frame_id=livox_frame` 自洽（地面在**自己的帧**里斜 30°，转到 base_link/odom 后水平）。'
+                    '⇒ 下游**必须**做重力对齐，本 launch 在这一档才加：'
+                    'linefit `gravity_aligned_frame: base_link`（覆盖文件 segmentation_sim_robot11_sensor.yaml）'
+                    ' + p2l `target_frame: base_link`（覆盖文件 laserscan_params_sensor_frame.yaml）；'
+                    '自击掩膜盒子**不用重烘**（它在 linefit 的重力对齐之后作用，坐标系与原来相同）。'
+                    '⚠️ odom 不保证重力对齐（fix_gravity_direction + 初始 R=I ⇒ odom = 初始化时刻的'
+                    '身体系）：本档**选择"下游全部在 base_link 里"**，odom 的 30° 由 TF 正确表达')
+        return ('  · 雷达安装方式 robot11_mount=urdf（**物理安装保真、账不对**的诊断档）：'
+                '倾角写在 URDF 关节（rpy = −0.5236 roll，上游/CSV 字面值，**画的 mesh 一起斜**）、'
+                '插件 `<tilt_rpy>` = 单位阵、插件 `<cloud_frame>` 缺省 = 父 link 系。'
+                '世界里的射线方向与 plugin 档**逐条相同**，但点云**仍表达在水平的父 link 系** ⇒ '
+                '`frame_id=livox_frame`（这个帧自己斜了 30°）与数据**不自洽**：'
+                '任何用 TF 变换这朵云的消费者都会看到"场景被刚性转了 30°"。'
+                'linefit 的 sensor_height / p2l 的 min/max_height / 自击掩膜的 z 门限**都还在按'
+                '"点云是重力对齐"解释**（本档**故意不调**，就是要看这个原始效果）；'
+                'lio_tf_adapter 杆臂**带 30° 旋转**（已按几何算，不再是纯平移）。'
+                '要"斜装且账也对"请用 robot11_mount:=sensor')
 
     def describe(self):
         return '%s()' % type(self).__name__
@@ -1195,14 +1239,19 @@ def generate_launch_description():
     declare_robot11_mount_cmd = DeclareLaunchArgument(
         'robot11_mount',
         default_value='plugin',
-        description='仅 robot:=robot11：30° 安装倾角**记在哪个坐标系上**。'
+        description='仅 robot:=robot11：30° 安装倾角**记在哪个坐标系上 / 点云表达在哪个系**。'
                     'plugin（默认，= 2026-10-07 起的行为）= `body_to_livox` 关节 rpy 0（帧重力对齐）'
                     '+ 插件 `<tilt_rpy>` 承担倾角（射线真的斜 30°，点云表达在水平的父 link 系；'
                     '代价：TF 与画出来的雷达 mesh 是平的）；'
                     'urdf = 倾角放回 URDF 关节（rpy = −0.5236 roll = 上游/CSV 字面值 = 实物的物理'
                     '安装姿态，**连 mesh 一起斜**）、插件 `<tilt_rpy>` = 单位阵 ⇒ 世界射线方向与 '
-                    'plugin 档逐条相同，但点云表达在**斜的传感器系**里（地面是 30° 斜面）。'
-                    '⚠️ urdf 档**不调任何感知参数**，就是要看倾斜放置最原始的效果。',
+                    'plugin 档逐条相同，但点云**仍表达在水平的父 link 系** ⇒ frame_id=livox_frame'
+                    '（这个帧自己斜了 30°）与数据**不自洽**（**诊断档**：看"物理保真、账不对"的原始后果）；'
+                    'sensor（2026-10-09 新增，**物理斜装 + 账也对**）= 渲染与 urdf 档逐字节相同 + 插件 '
+                    '`<cloud_frame>sensor</cloud_frame>` ⇒ 点云**真的表达在传感器系**、与 frame_id 自洽；'
+                    '**只在这一档** launch 会给 linefit 加 gravity_aligned_frame=base_link、给 p2l 加 '
+                    'target_frame=base_link（两份**增量覆盖**参数文件；只支持 ground:=linefit）。'
+                    '取证 / A-B / 未验证项见 docs/tilted_lidar_fidelity.md §J。',
         choices=list(_LIVOX_MOUNTS))
 
     # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
@@ -1496,18 +1545,49 @@ def generate_launch_description():
         ]
     )
 
-    bringup_linefit_ground_segmentation_node = Node(
-        package='linefit_ground_segmentation_ros',
-        executable='ground_segmentation_node',
-        output='screen',
-        # ★ 2026-09-23 修复：原来漏了 use_sim_time ⇒ 这个节点跑在**墙钟**上，而全链路（plugin/scan/
-        #   costmap/AMCL/tf）都是仿真钟。它的输出戳虽然抄自输入（所以看起来还好），但任何依赖
-        #   "本节点时钟"的逻辑（tf2 Buffer 的缓存窗口、超时判定）都会用错时间轴。
-        parameters=[segmentation_params, *traversability_params_list, self_mask_params,
-                    {'use_sim_time': use_sim_time}],
-        # ★ 2026-10-06：地面分割槽位 ground（默认 linefit ⇒ 本节点照旧启动，行为不变）。
-        condition=LaunchConfigurationEquals('ground', 'linefit'),
-    )
+    # ★ 2026-10-09：`robot11_mount:=sensor`（**物理斜装 + 账也对**）才加的**增量覆盖**参数文件。
+    #   为什么用"再加一份只含一个键的 YAML"而不是改槽位那份：其它档（plugin/urdf/默认模型/其它
+    #   槽位）递进节点的参数文件列表**逐个不变** ⇒ 生效值、节点集合、契约全不变（"byte-identical"）；
+    #   而 ROS 的参数文件是**按列表顺序后者覆盖前者** ⇒ 这一档只多一个键。
+    #   ⚠️ 两个节点各有**两份互斥的 Node 定义**（条件 = robot11_mount 是否等于 sensor）：launch
+    #      的 `parameters` 不支持"条件元素"，这是本仓既有的互斥写法（见 ground:=linefit|patchwork）。
+    def _linefit_node(params, condition):
+        return Node(
+            package='linefit_ground_segmentation_ros',
+            executable='ground_segmentation_node',
+            output='screen',
+            # ★ 2026-09-23 修复：原来漏了 use_sim_time ⇒ 这个节点跑在**墙钟**上，而全链路（plugin/scan/
+            #   costmap/AMCL/tf）都是仿真钟。它的输出戳虽然抄自输入（所以看起来还好），但任何依赖
+            #   "本节点时钟"的逻辑（tf2 Buffer 的缓存窗口、超时判定）都会用错时间轴。
+            parameters=params,
+            condition=condition,
+        )
+
+    #   ↑ 与 2026-10-07 起的行为**逐个参数文件相同**（默认/plugin/urdf 档走的就是它）。
+    # ★ 2026-10-06：地面分割槽位 ground（默认 linefit ⇒ 本节点照旧启动，行为不变）。
+    #   ★ 2026-10-09：**必须**同时排除 `robot11_mount:=sensor`（那一档由下面那份**多一层重力对齐
+    #   覆盖文件**的节点承担）—— 否则两 个 linefit 会同时启动、`/segmentation/{ground,obstacle}`
+    #   各有两个发布者（实测过：契约检查里 publishers=2 ⇒ 本条件的回归判据）。
+    #   非 sensor 档（默认 'plugin'、'urdf'、以及所有其它模型）走的就是这一份，参数列表与
+    #   2026-10-07 起**逐个文件相同**。
+    bringup_linefit_ground_segmentation_node = _linefit_node(
+        [segmentation_params, *traversability_params_list, self_mask_params,
+         {'use_sim_time': use_sim_time}],
+        IfCondition(PythonExpression(
+            ["'", LaunchConfiguration('ground'), "' == 'linefit' and '",
+             LaunchConfiguration('robot11_mount'), "' != 'sensor'"])))
+    _linefit_sensor_overlay = _PackageShareFile(
+        'linefit_ground_segmentation_ros', 'config',
+        'segmentation_sim_robot11_sensor.yaml')
+    # ★ 2026-10-09：`robot11_mount:=sensor` 专用（多一份只含 gravity_aligned_frame 的覆盖文件）。
+    #   ⚠️ 与上面那份**互斥**（同一节点名、同一个话题契约 ⇒ 只会起一个）。条件里同时带上
+    #   ground==linefit（组合检查在 _check_robot11_mount_combination 里已经先报错）。
+    bringup_linefit_ground_segmentation_node_sensor = _linefit_node(
+        [segmentation_params, *traversability_params_list, self_mask_params,
+         _linefit_sensor_overlay, {'use_sim_time': use_sim_time}],
+        IfCondition(PythonExpression(
+            ["'", LaunchConfiguration('ground'), "' == 'linefit' and '",
+             LaunchConfiguration('robot11_mount'), "' == 'sensor'"])))
 
     # ★ 2026-10-06：ground:=patchwork —— 与上面 linefit 节点**同契约**的替代分割器。
     #   参数文件用惰性 substitution 解析（_PackageShareFile）：这样"没构建过
@@ -1535,19 +1615,37 @@ def generate_launch_description():
     #   ⇒ p2l 的高度带自动就是"离传感器的真高度"，且**保住了 target_frame="" 这个加固**
     #   （不做 TF、不建 MessageFilter —— 2026-09-23 刻意避开的那类故障面）。
     #   实测：robot:=robot11 的 /scan frame_id = livox_frame、10 Hz、有 >4 m 的波束。
-    bringup_pointcloud_to_laserscan_node = Node(
-        package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
-        remappings=[('cloud_in',  ['/segmentation/obstacle']),
-                    ('scan',  ['/scan'])],
-        # 参数已回归 pointcloud_to_laserscan 包 config/（R1）
-        # ★ 2026-09-23 修复：同上，原来漏了 use_sim_time。p2l 内部用
-        #   `tf2_ros::Buffer(this->get_clock())` 建 TF 缓存，节点时钟是墙钟时缓存窗口走的是墙钟，
-        #   与消息里的仿真戳不在一条时间轴上（本配置 target_frame==点云 frame，过滤器短路才没炸；
-        #   一旦改 target_frame 就会立刻表现为"整条 Talker 被丢光"）。
-        parameters=[os.path.join(get_package_share_directory('pointcloud_to_laserscan'), 'config', 'laserscan_params.yaml'),
-                    {'use_sim_time': use_sim_time}],
-        name='pointcloud_to_laserscan'
-    )
+    #   ★ 2026-10-09：`robot11_mount:=sensor` 这一档不成立（点云真的在斜的传感器系里）⇒
+    #   只有这一档递进 `laserscan_params_sensor_frame.yaml`（**只含 `target_frame: base_link`**），
+    #   让 `/scan` 回到"重力对齐的水平面里的一圈"、`min/max_heights` 恢复"离地高度"语义。
+    #   代价与本仓 2026-09-23 的取舍（TF/MessageFilter 故障面）登记在 docs/tilted_lidar_fidelity.md §J。
+    def _p2l_node(extra_params, condition):
+        return Node(
+            package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
+            remappings=[('cloud_in',  ['/segmentation/obstacle']),
+                        ('scan',  ['/scan'])],
+            # 参数已回归 pointcloud_to_laserscan 包 config/（R1）
+            # ★ 2026-09-23 修复：同上，原来漏了 use_sim_time。p2l 内部用
+            #   `tf2_ros::Buffer(this->get_clock())` 建 TF 缓存，节点时钟是墙钟时缓存窗口走的是墙钟，
+            #   与消息里的仿真戳不在同一条时间轴上（本配置 target_frame==点云 frame，过滤器短路才没炸；
+            #   一旦改 target_frame 就会立刻表现为"整条 Talker 被丢光"）。
+            parameters=[os.path.join(get_package_share_directory('pointcloud_to_laserscan'),
+                                     'config', 'laserscan_params.yaml'),
+                        *extra_params,
+                        {'use_sim_time': use_sim_time}],
+            name='pointcloud_to_laserscan',
+            condition=condition)
+
+    bringup_pointcloud_to_laserscan_node = _p2l_node(
+        [], IfCondition(PythonExpression(
+            ["'", LaunchConfiguration('robot11_mount'), "' != 'sensor'"])))
+    # ★ 2026-10-09：`robot11_mount:=sensor` 专用（多一份只含 target_frame: base_link 的覆盖文件）。
+    #   ⚠️ 与上面那份**互斥**（同一个节点名/同一个 /scan 契约 ⇒ 只会起一个）。
+    bringup_pointcloud_to_laserscan_node_sensor = _p2l_node(
+        [_PackageShareFile('pointcloud_to_laserscan', 'config',
+                           'laserscan_params_sensor_frame.yaml')],
+        IfCondition(PythonExpression(
+            ["'", LaunchConfiguration('robot11_mount'), "' == 'sensor'"])))
 
     bringup_LIO_group = GroupAction([
         GroupAction(
@@ -2347,6 +2445,8 @@ def generate_launch_description():
     ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
     ld.add_action(declare_ground_cmd)
+    # ★ 2026-10-09：robot11_mount:=sensor 的组合检查（必须在 ground 声明**之后**，见该函数注释）
+    ld.add_action(OpaqueFunction(function=_check_robot11_mount_combination))
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
     # ★ 2026-10-06：「续建 + 场地隔离」相关（默认值下现有行为不变，详见各自的 description）
@@ -2374,8 +2474,12 @@ def generate_launch_description():
     # 地面分割槽位：两个节点都进 LaunchDescription，但各自的 condition 保证**只有一个**真的被启动
     #（⇒ /segmentation/obstacle 与 /segmentation/ground 恒定只有一个发布者）。
     ld.add_action(bringup_linefit_ground_segmentation_node)
+    # ★ 2026-10-09：robot11_mount:=sensor 的 linefit（多一份重力对齐覆盖文件；与上面互斥）
+    ld.add_action(bringup_linefit_ground_segmentation_node_sensor)
     ld.add_action(bringup_patchwork_ground_segmentation_node)
     ld.add_action(bringup_pointcloud_to_laserscan_node)
+    # ★ 2026-10-09：robot11_mount:=sensor 的 p2l（多一份 target_frame 覆盖文件；与上面互斥）
+    ld.add_action(bringup_pointcloud_to_laserscan_node_sensor)
     ld.add_action(bringup_LIO_group)
     
     # T1：ICP 模式的帧桥（由条件控制，仅 nav+icp+LIO 时生效）

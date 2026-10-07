@@ -93,6 +93,12 @@ namespace gazebo
       /// ★ 2026-10-07 Phase 3：传感器**安装倾角**（SDF 的 `<tilt_rpy>`，弧度，缺省单位阵）。
       ///   只影响射线方向（物理姿态）；点云仍表达在**父 link** 系 ⇒ frame_id 与数据自洽。
       ignition::math::Quaterniond mount_rot_{ignition::math::Quaterniond::Identity};
+      /// ★ 2026-10-09：点云**表达在哪个系**（SDF 的 `<cloud_frame>`；缺省 / `parent` = 上面的行为）。
+      ///   `sensor` ⇒ 点 = range·(mount_rot·ray)（**真·传感器系**，与 `frame_id` = `<sensor name>`
+      ///   指向的那个 TF 帧一致）；缺省 ⇒ 点 = range·(sensor_rot·mount_rot·ray)（**父 link 系**，
+      ///   与 2026-10-07 起的行为**逐字节相同**）。只影响点云/CustomMsg 的坐标，**不影响射线方向**
+      ///   （世界里的射线两档逐条相同 ⇒ 物理不变）。见 docs/tilted_lidar_fidelity.md §J。
+      bool cloud_frame_sensor_{false};
       physics::EntityPtr parentEntity;
       transport::PublisherPtr scanPub;
 

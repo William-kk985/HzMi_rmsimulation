@@ -95,35 +95,51 @@
   <xacro:property name="livox_raise_m_p" value="$(arg livox_raise_m)"/>
 
   <!-- ==========================================================================
-       【我们加的｜2026-10-08】**雷达安装方式**开关（opt-in；**默认 = 今天的行为**）
+       【我们加的｜2026-10-08，2026-10-09 扩展第三档】**雷达安装方式**开关
+       （opt-in；**默认 = 今天的行为**）
        ==========================================================================
-       `livox_mount:=plugin`（默认）| `urdf`。两者**射线方向完全相同**（都是"物理上真的斜
-       30° 下俯"），差别只在**"这 30° 记在哪个坐标系上"**：
+       `livox_mount:=plugin`（默认）| `urdf` | `sensor`。三档的**射线方向完全相同**（都是
+       "物理上真的斜 30° 下俯"），差别只在**"这 30° 记在哪个坐标系上、点云又表达在哪个系"**：
 
          · plugin（今天）：`body_to_livox` 关节 rpy = **0**（`livox_frame` 帧**重力对齐**），
-           30° 由插件参数 `<tilt_rpy>` 承担 ⇒ 射线由插件旋到斜、点云**表达在水平的父 link 系**。
+           30° 由插件参数 `<tilt_rpy>` 承担 ⇒ 射线由插件旋到斜、点云**表达在水平的父 link 系**
+           （= 该档的 `livox_frame` 系 ⇒ **帧与数据自洽**）。
            代价：**TF 里帧不斜**（实物是斜的），而且**画出来的雷达 mesh 是平的**。
          · urdf：30° 放回 **URDF 关节**（rpy = roll −0.5236 = 上游/CSV 的字面值，即**实物的
            物理安装姿态**，**连画的 mesh 一起斜**），插件 `<tilt_rpy>` = **单位阵** ⇒ 射线由
-           link 姿态带斜（世界里的射线方向与 plugin 档逐条相同），但点云**表达在斜的传感器系**
-           （`frame_id` 仍是 `livox_frame`，只是这个帧自己斜了 30°）。
+           link 姿态带斜（世界里的射线方向与 plugin 档逐条相同），点云**仍表达在父 link 系**
+           ⇒ **帧与数据差 30°**（`frame_id` 写着 `livox_frame`，而这个帧自己斜了 30°；
+           这是"物理安装保真、账不对"的诊断档，见 docs/tilted_lidar_fidelity.md §C/§I）。
+         · sensor（2026-10-09 新增，**"物理斜装 + 账也对"**这一档）：关节 rpy 与插件
+           `<tilt_rpy>` 与 urdf 档**完全相同**，**外加** `<cloud_frame>sensor</cloud_frame>`
+           ⇒ 插件把点**表达在真·传感器系**里（`axis = mount_rot·ray`，与 `frame_id = livox_frame`
+           指向的那个 TF 帧自洽）。代价/前提：点云不再重力对齐 ⇒ 下游必须做重力对齐；
+           launch 里 `robot11_mount:=sensor` **只在这一档**给 linefit 加
+           `gravity_aligned_frame: base_link`、给 p2l 加 `target_frame: base_link`
+           （两份都是**增量覆盖**参数文件 ⇒ 其它档一个字节都不加、节点集合不变）。
 
        ⚠️ 为什么默认仍是 plugin：把倾角留在 URDF 里，`/livox/lidar/pointcloud` 的坐标就变成
        "斜系"的 ⇒ 所有**假设点云是重力对齐**的下游（linefit 的 sensor_height、p2l 的高度带、
        self_mask 的 z 门限）语义都会跟着变（这正是 `urdf` 档要让大家**看见**的原始效果，
        也是 docs/tilted_lidar_fidelity.md 的主题）。本开关**不动任何感知参数**，就是为了
        把"物理安装保真"与"感知语义"这两件事分开看。
+       ⚠️ `plugin` / `urdf` 两档的渲染结果**逐字节不变**（只有 `sensor` 档才多发一个
+       `<cloud_frame>` 元素；它的两处 property 取值与 urdf 档完全相同）—— 见 §J 的静态证据。
        ========================================================================== -->
   <xacro:arg name="livox_mount" default="plugin"/>
   <xacro:property name="livox_mount_p" value="$(arg livox_mount)"/>
   <xacro:property name="livox_tilt_rpy_p" value="$(arg livox_tilt_rpy)"/>
-  <xacro:property name="livox_mount_urdf" value="${livox_mount_p.strip() == 'urdf'}"/>
-  <!-- 关节 rpy：urdf 档 = 倾角；plugin 档 = 0 -->
+  <!-- 倾角记在**关节**上的两档（urdf / sensor）：关节 rpy = 倾角、插件 <tilt_rpy> = 单位阵 -->
+  <xacro:property name="livox_mount_tilt_in_joint"
+                  value="${livox_mount_p.strip() in ('urdf', 'sensor')}"/>
+  <!-- 点云表达在**传感器系**的那一档（sensor；缺省/plugin/urdf = 父 link 系） -->
+  <xacro:property name="livox_mount_sensor" value="${livox_mount_p.strip() == 'sensor'}"/>
+  <!-- 关节 rpy：urdf/sensor 档 = 倾角；plugin 档 = 0 -->
   <xacro:property name="livox_joint_rpy"
-                  value="${livox_tilt_rpy_p if livox_mount_urdf else '0 0 0'}"/>
-  <!-- 插件 <tilt_rpy>：plugin 档 = 倾角；urdf 档 = 单位阵（射线已由 link 姿态带斜） -->
+                  value="${livox_tilt_rpy_p if livox_mount_tilt_in_joint else '0 0 0'}"/>
+  <!-- 插件 <tilt_rpy>：plugin 档 = 倾角；urdf/sensor 档 = 单位阵（射线已由 link 姿态带斜） -->
   <xacro:property name="livox_plugin_tilt_rpy"
-                  value="${'0 0 0' if livox_mount_urdf else livox_tilt_rpy_p}"/>
+                  value="${'0 0 0' if livox_mount_tilt_in_joint else livox_tilt_rpy_p}"/>
 
   <!-- ==========================================================================
        【我们加的｜Phase 5（2026-10-07）】`<visual>` 用哪一档 mesh —— **只改渲染代价，不改几何**
@@ -952,7 +968,12 @@
          `livox_mount:=plugin`（默认）⇒ rpy = 0 0 0（上面这段就是它的理由）；
          `livox_mount:=urdf` ⇒ rpy = $(arg livox_tilt_rpy)（= 上游/CSV 的字面值，
          实物的物理安装姿态，**画的 mesh 也一起斜**），插件 <tilt_rpy> 变单位阵。
-         默认档不在 → 生成物与 2026-10-07 逐字节相同。 -->
+         默认档不在 → 生成物与 2026-10-07 逐字节相同。
+       · ★ 2026-10-09：新增第三档 `livox_mount:=sensor` —— 关节 rpy 与 urdf 档
+         完全一致（倾角在关节上、mesh 一起斜、<tilt_rpy> 单位阵），**外加**
+         `<cloud_frame>sensor</cloud_frame>` ⇒ 点云也表达在真·传感器系里
+         （帧与数据自洽：`/livox/lidar/pointcloud` 的地面在**自己的帧**里斜 30°）。
+         plugin/urdf 两档的渲染（去注释）逐字节不变。见 docs/tilted_lidar_fidelity.md §J。 -->
   <joint name="body_to_livox" type="fixed">
     <origin xyz="0.000561701465058485 0.130915824456595 ${0.15702816968305 + livox_raise_m_p}" rpy="${livox_joint_rpy}"/>
     <parent link="base_link"/>
@@ -1049,12 +1070,18 @@
              缺省（元素不存在）= 单位阵 ⇒ 其它模型逐字节不变。
              ★ 2026-10-08：这个值现在是 `livox_mount` 的函数 —— plugin 档（默认）=
              $(arg livox_tilt_rpy)（下面这条，与 2026-10-07 逐字节相同）；
-             urdf 档 = `0 0 0`（倾角已经写在关节上，射线由 link 姿态带斜）。 -->
+             urdf/sensor 档 = `0 0 0`（倾角已经写在关节上，射线由 link 姿态带斜）。 -->
         <tilt_rpy>${livox_plugin_tilt_rpy}</tilt_rpy>
         <samples>30000</samples>
         <downsample>1</downsample>
         <csv_file_name>$(find ros2_livox_simulation)/scan_mode/mid360.csv</csv_file_name>
-        <topic>/livox/lidar</topic>
+        <topic>/livox/lidar</topic><!--【我们加的｜2026-10-09】`livox_mount:=sensor` 档才发下面这个元素（**写在行内**：
+             条件为假时 xacro 连同它的缩进一起删掉 ⇒ plugin/urdf 两档的渲染去注释后逐字节不变）。
+             语义（`livox_points_plugin.cpp` 的 `cloud_frame_sensor_`）：点云表达在**真·传感器系**
+             （`axis = mount_rot·ray`），与 `frame_id`（= `<sensor name>` = `livox_frame`）自洽；
+             缺省（元素不存在）= **父 link 系** = 2026-10-07 起的行为。
+             ⚠️ 这一档点云不再重力对齐 ⇒ launch 会在**只在这一档**给 linefit 加
+             `gravity_aligned_frame: base_link`、给 p2l 加 `target_frame: base_link`。--><xacro:if value="${livox_mount_sensor}"><cloud_frame>sensor</cloud_frame></xacro:if>
       </plugin>
     </sensor>
   </gazebo>

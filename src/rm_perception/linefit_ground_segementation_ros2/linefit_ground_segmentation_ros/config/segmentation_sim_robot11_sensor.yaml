@@ -1,0 +1,35 @@
+# =============================================================================
+# segmentation_sim_robot11_sensor.yaml —— **增量覆盖**参数文件（2026-10-09 新增）
+#
+# 只被一种组合递进节点：`robot:=robot11 robot11_mount:=sensor ground:=linefit`
+# （launch 里 `_PackageShareFile('linefit_ground_segmentation_ros', 'config',
+#   'segmentation_sim_robot11_sensor.yaml')`，见 bringup_sim.launch.py 的
+#   `bringup_linefit_ground_segmentation_node_sensor`）。
+#
+# 为什么是"增量"而不是改 `segmentation_sim_robot11.yaml`：
+#   ROS 的参数文件按列表顺序**后者覆盖前者**（launch 递进去的顺序 =
+#   [segmentation_sim_robot11.yaml, traversability_criteria.yaml, self_mask,
+#    **本文件**, {use_sim_time}]）⇒ 其它档（plugin / urdf / 默认模型 / hzmirm）
+#   递进节点的文件列表**逐个不变**、生效值也一个键都不变（"byte-identical"）。
+#
+# 这一个键为什么是它：
+#   `robot11_mount:=sensor` 档下**点云真的表达在传感器系**（插件 `<cloud_frame>sensor</cloud_frame>`；
+#   与 `frame_id = livox_frame` 自洽）。而 livefit 的分割算法假设"点云的 z 轴朝上"：
+#   `src/segment.cc` 用 `-sensor_height_` 当每个径向 bin 的**地面线起点**。
+#   传感器系被绕 x 转了 −30° ⇒ 直接把点喂进去，"地面"在该系里是一条 30° 斜面 ⇒
+#   分割结果与重力无关（实测：`/segmentation/ground` 会大幅偏移）。
+#   开 `gravity_aligned_frame: base_link` 后，节点先查 TF `base_link←livox_frame` 并**只取旋转**
+#   （源码 `ground_segmentation_node.cc:114-145`：`tf.translate(0,0,0)` ⇒ 平移被刻意清零）
+#   ⇒ 点云被转成"base_link 的朝向、仍在传感器原点"⇒ 地面回到 z = −0.2595 m 的水平面，
+#   `sensor_height: 0.2595`（那份槽位文件里的键，**本文件不动它**）继续成立。
+#   ⚠️ 该键的 C++ bug（`Eigen::Affine3d tf;` 默认构造不清零 ⇒ 恒 0 点）已于 2026-10-07
+#      修好（同一文件 :142，`Identity()` 起步）；本档依赖的正是这个修复。
+#
+# 证据 / A-B / 回退：docs/tilted_lidar_fidelity.md §J（含 `robot11_mount:=plugin|urdf|sensor` 的
+# 三方对照表与"这条链仍然解决不了什么"）。回退 = 用 `robot11_mount:=urdf`（或默认 plugin）。
+# =============================================================================
+ground_segmentation:
+  ros__parameters:
+    # ★ 唯一的一个键：把点云旋转到 base_link 的朝向（只旋转、不平移）后再做地面分割。
+    #   "" = 缺省（点云在源头已重力对齐）⇒ 那正是 plugin / urdf 两档的现状。
+    gravity_aligned_frame: "base_link"
