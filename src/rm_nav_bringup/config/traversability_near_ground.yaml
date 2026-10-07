@@ -1,0 +1,21 @@
+# =============================================================================
+# traversability_near_ground.yaml —— 「近地剔除」的**默认（关闭）**参数文件
+# （2026-10-09 新增；**增量**文件，只含一个键）
+#
+# 谁读它：`bringup_sim.launch.py` 的 `_RobotSlotFile`（机制与 `traversability_self_mask.yaml`
+#   同款）。**默认槽位（= 不带 robot:= 的现行模型）/ hzmirm / 任何未登记的槽位都读这一份**
+#   ⇒ `obstacle_near_ground_m: 0.0` = **关**，与引入本键之前的行为**逐字节相同**
+#   （`TraversabilityRos::applyFrame()` 里 `nearGroundEnabled()` 为假 ⇒ 连掩码都不填）。
+#   只有 `robot:=robot11` 走
+#   `src/rm_nav_bringup/config/traversability_near_ground_robot11.yaml`（0.05）。
+#
+# 这个键是什么 / 为什么需要 / 为什么是 0.05：见
+#   `traversability_near_ground_robot11.yaml` 的文件头（那里有实测数字与"台阶仍然安全"的
+#   构造性论证），以及 docs/tilted_lidar_fidelity.md §K。
+#
+# 回退：本文件的值改回 0.0 即"没有这一级"；或去掉 launch 里这一路参数。
+# =============================================================================
+ground_segmentation:
+  ros__parameters:
+    # 离局部地面高度 ≤ 该值（m）的点不算障碍。**0.0 = 关（默认）**。
+    obstacle_near_ground_m: 0.0

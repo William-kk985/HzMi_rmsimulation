@@ -170,6 +170,25 @@ void SegmentationNode::scanCallback(
       is_ground[i] = (labels[i] == 1) ? 1u : 0u;
     }
     traversability_->applyFrame(cloud_proc, &is_ground);
+    // ★★ 2026-10-09：**近地剔除**（`obstacle_near_ground_m`，默认 **0.0 = 关**）。
+    //   为什么必须在这里做、而不是在代价图侧：`/scan` 是**二维平盘**（LaserScan 没有高度），
+    //   nav2 的 `obstacle_layer` 用 `projectLaser`（z 置 0）再搬到代价图帧 ⇒ 每条波束在那个帧里
+    //   的 z **恒等于"那一帧传感器原点的 z"**（实测 948 条波束的 odom z 全在 [0.020, 0.089]）⇒
+    //   `min_obstacle_height` 在那条链路上**根本没有逐点高度可判**。唯一能在"投影成 2D 之前"
+    //   用上高度的地方就是这里（本判据本来就有 dz = z − 局部地面）。
+    //   语义：`dz ≤ obstacle_near_ground_m` 的点 = **贴着地面** ⇒ 改判 ground（这就是"升"，
+    //   所以显式写在这一处，而不是塞进判据类的"只降不升"里）。
+    //   与台阶判据**结构上互斥**：`near_ground_m (0.05) ≤ slope_min_height (0.05) <
+    //   step_height_threshold (0.15)` ⇒ "被判成台阶/边沿的点"永远不可能被剔掉。
+    //   关掉时（默认）`nearGroundEnabled()` 为假 ⇒ 下面整个循环不执行，行为逐字节不变。
+    if (traversability_->nearGroundEnabled()) {
+      const std::vector<uint8_t> & near_ground = traversability_->nearGroundFlags();
+      for (size_t i = 0; i < is_ground.size() && i < near_ground.size(); ++i) {
+        if (near_ground[i] != 0u) {
+          is_ground[i] = 1u;   // 贴地 ⇒ ground（这一步是**升**，只在这一处发生）
+        }
+      }
+    }
     for (size_t i = 0; i < labels.size() && i < is_ground.size(); ++i) {
       labels[i] = (is_ground[i] != 0u) ? 1 : 0;
     }

@@ -67,6 +67,36 @@ struct Criteria
   double ground_percentile{5.0};              ///< == --ground-percentile
   int ground_min_points{2};                   ///< == --ground-min-points
 
+  /// ★★ 2026-10-09：**近地剔除**（`obstacle_near_ground_m`，米；**0.0 = 关，默认**）。
+  ///
+  /// 语义：本判据算出的「离**局部地面**的高度」`dz = z − g(x,y)` **≤ 它**的点，
+  /// 由调用方（`ground_segmentation_node.cc` 的 `applyFrame()` 返回值）从
+  /// `/segmentation/obstacle` **剔除**（改判成 ground）—— 它**不是** `self_mask`（自击掩膜）：
+  ///   · self_mask = "机器人自己的 collision 几何 / 近场死区"里的点（几何固定、与地面无关）；
+  ///   · 本键      = "确实贴着地面"的点（判据用**局部地面**判，与车体几何无关）。
+  ///
+  /// 为什么必须有这一级（robot11 实测，docs/tilted_lidar_fidelity.md §K）：
+  ///   `/scan` 是一张**二维平盘**（`pointcloud_to_laserscan` → LaserScan 没有高度）。nav2 的
+  ///   `obstacle_layer` 用 `projectLaser`（z 强行置 0）再 `transformLaserScanToPointCloud` 搬到
+  ///   代价图帧 ⇒ 每条波束在那个帧里的 z **恒等于"那一帧传感器原点的 z"**，与它实际打到的
+  ///   三维点**无关**（实测：948 条波束的 odom z 全落在 [0.020, 0.089]、min_obstacle_height
+  ///   0.0 一条都不丢）。⇒ **2D 那条链路根本没有"逐点高度"可判**，`min_obstacle_height`
+  ///   在那里只是一条"传感器自身高度"的常量闸。
+  ///   后果：linefit 漏判的近场地面点（水平 0.30~0.50 m，实测 100% 落在真值地面 ±0.023 m 内）
+  ///   被当成障碍、在雷达高度上投成 lethal 格 ⇒ 车心到最近 lethal **0.39 m**、车半径圆内
+  ///   `≥99` 440/1000 格、free 仅 26 格 ⇒ P2P 控制器判 `collision ahead` ⇒ **目标被接受但车不走**。
+  ///   唯一能在**投影之前**用上"高度"的地方就是这里（本判据本来就有 dz）。
+  ///
+  /// 取值（robot11 槽位 = 0.05 m，见 config/traversability_near_ground_robot11.yaml）：
+  ///   · 实测（同一帧 raw 云，`livox_frame`，真值地面 = −0.259527 m）：
+  ///     水平 0.30–0.40 m 的 341 点离地 p05/p50/p95 = 0.0159/0.0183/0.0228 m；
+  ///     0.40–0.50 m 的 693 点 = 0.0088/0.0122/0.0153 m ⇒ `dz ≤ 0.05` **把它们全剔掉**（100%）；
+  ///   · 真障碍（场地低矮件）在 0.50–1.00 m 的 p95 = 0.169 m ⇒ 只剔掉贴地那一层（~19% 的点）；
+  ///   · 本判据的台阶闸 `step_height_threshold` = 0.15 m ⇒ 任何会被判成"台阶/边沿"的点
+  ///     `dz > 0.15`，**结构上不可能**被 0.05 剔掉 ⇒ "0.2/0.35 m 台阶仍是障碍"是构造性的。
+  ///   · 保守方向：**只少标障碍**（可能漏一个 5 cm 以下的矮物），不会多标 ⇒ 不会凭空断路。
+  double near_ground_m{0.0};
+
   /// 粗格/细格比（≥1）。0.20/0.05 = 4 ⇒ 每个粗格最多看 4×4 个细格。
   int cell_ratio() const
   {
@@ -78,7 +108,8 @@ struct Criteria
   {
     return fine_cell_m > 0.0 && ground_cell_m >= fine_cell_m &&
            step_height_threshold > 0.0 && drivable_slope_deg > 0.0 &&
-           drivable_slope_deg < 90.0 && slope_min_height >= 0.0;
+           drivable_slope_deg < 90.0 && slope_min_height >= 0.0 &&
+           near_ground_m >= 0.0;
   }
 
   /// 参数不合法的**原因**（空串 = 合法）。节点在构造期调用它并直接报错退出，
@@ -121,9 +152,15 @@ struct Criteria
        << " ground_cell=" << ground_cell_m << " m"
        << " fine_cell=" << fine_cell_m << " m"
        << " ground_percentile=p" << ground_percentile
-       << " ground_min_points=" << ground_min_points;
+       << " ground_min_points=" << ground_min_points
+       << " near_ground=" << (near_ground_m > 0.0
+        ? (std::to_string(near_ground_m) + " m（贴地即不算障碍）") : std::string("关（默认）"));
     return os.str();
   }
+
+  /// ★ 2026-10-09：**近地剔除**是否启用（`near_ground_m > 0`）。调用方（节点）用它决定
+  /// 要不要把 `LowTerrainClassifier::apply()` 填好的 `near_ground_flags` 变成"改判 ground"。
+  bool nearGroundEnabled() const {return near_ground_m > 0.0;}
 };
 
 /// **自击掩膜**（self-hit mask）：把"近场自身回波"的点从**建格**里剔掉。
@@ -339,6 +376,9 @@ struct FrameStats
   double classify_ms{0.0};
   /// ★2026-10-07 Phase 4：被**自击掩膜**剔出建格的点数（掩膜关时恒 0）。
   std::size_t self_masked{0};
+  /// ★2026-10-09：被判成「贴地」（`dz ≤ near_ground_m`）的点数（该键关时恒 0）。
+  ///   注意它**不影响**本类的建格/判据/限速，只是"给调用方一个把贴地点改判 ground 的掩码"。
+  std::size_t near_ground{0};
   // ---- 前瞻走廊（describeCorridor() 填；不在 apply() 里算，见节点调用顺序） ----
   std::size_t corridor_cells{0};           ///< 走廊内可用粗格数
   double corridor_max_slope_deg{0.0};      ///< 走廊内最大局部坡度
@@ -372,15 +412,24 @@ public:
   /// @param cloud          输入点云（帧与 labels 同序）
   /// @param ground_flags   in/out：1 = ground（可行驶），0 = obstacle。**只会被降级，不会被升级**
   /// @param step_edge_flags out：1 = 本判据命中的点（台阶/边沿 ∪ 超限坡面）；可为 nullptr
+  /// @param near_ground_flags ★2026-10-09 out：1 = `dz = z − 局部地面 ≤ near_ground_m` 的点
+  ///   （**贴地点**）。`near_ground_m` 关（默认 0.0）时**恒 0、一个字节都不写** ⇒ 默认路径不变。
+  ///   调用方拿它把"贴地点"从 obstacle 改判成 ground（`obstacle_near_ground_m` 的语义，
+  ///   见 Criteria::near_ground_m 的头注）。**不改本类的建格/判据/限速任何一步。**
   void apply(
     const pcl::PointCloud<pcl::PointXYZ> & cloud,
     std::vector<uint8_t> * ground_flags,
-    std::vector<uint8_t> * step_edge_flags)
+    std::vector<uint8_t> * step_edge_flags,
+    std::vector<uint8_t> * near_ground_flags = nullptr)
   {
     stats_ = FrameStats();
     stats_.points = cloud.size();
+    near_ground_ = 0;
     if (step_edge_flags != nullptr) {
       step_edge_flags->assign(cloud.size(), 0u);
+    }
+    if (near_ground_flags != nullptr) {
+      near_ground_flags->assign(cloud.size(), 0u);
     }
     if (ground_flags != nullptr) {
       for (std::size_t i = 0; i < ground_flags->size(); ++i) {
@@ -401,10 +450,11 @@ public:
 
     const auto t0 = std::chrono::steady_clock::now();
     buildGrid(cloud);
-    classify(cloud, ground_flags, step_edge_flags);
+    classify(cloud, ground_flags, step_edge_flags, near_ground_flags);
     const auto t1 = std::chrono::steady_clock::now();
     stats_.classify_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     stats_.self_masked = self_masked_;   // ★ Phase 4：掩膜剔掉的点数（关=0）
+    stats_.near_ground = near_ground_;   // ★ 2026-10-09：贴地点数（关=0）
     stats_.coarse_cells = ground_cache_.size();
     stats_.coarse_cells_no_ground = 0;
     for (const auto & kv : ground_cache_) {
@@ -737,9 +787,15 @@ private:
   void classify(
     const pcl::PointCloud<pcl::PointXYZ> & cloud,
     std::vector<uint8_t> * ground_flags,
-    std::vector<uint8_t> * step_edge_flags)
+    std::vector<uint8_t> * step_edge_flags,
+    std::vector<uint8_t> * near_ground_flags)
   {
     const double inv_coarse = 1.0 / criteria_.ground_cell_m;
+    // ★ 2026-10-09：近地剔除（`near_ground_m > 0`）。**只在有地面估计的格里**判（`!isfinite(g)`
+    //   的那些点连 dz 都算不出来 ⇒ 不动它们，与"这一段本来就保守"的既有原则一致）。
+    //   与下面的台阶判据**互斥**：`near_ground_m (0.05) < slope_min_height (0.05) ≤
+    //   step_height_threshold (0.15)` ⇒ 被判成台阶/陡面的点不可能同时被判成贴地。
+    const bool near_ground_on = criteria_.near_ground_m > 0.0;
     for (std::size_t i = 0; i < cloud.size(); ++i) {
       const float x = cloud[i].x, y = cloud[i].y, z = cloud[i].z;
       if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
@@ -752,6 +808,12 @@ private:
         continue;   // 这一格连地面都估不出来 ⇒ 不动上一级分割器的判定（保守）
       }
       const double dz = static_cast<double>(z) - g;
+      if (near_ground_on && dz <= criteria_.near_ground_m) {
+        ++near_ground_;
+        if (near_ground_flags != nullptr) {
+          (*near_ground_flags)[i] = 1u;
+        }
+      }
       const double slope = slopeOf(cx, cy);
       const bool is_step = dz > criteria_.step_height_threshold;
       const bool is_steep = (slope > criteria_.drivable_slope_deg) &&
@@ -784,6 +846,7 @@ private:
 
   Criteria criteria_;
   FrameStats stats_;
+  std::size_t near_ground_{0};   ///< 本帧"贴地"点数（`near_ground_m` 关时恒 0）
   std::unordered_map<int64_t, FineCell> fine_;
   std::unordered_map<int64_t, CoarseCell> ground_cache_;   ///< 判据与前瞻**共用**的粗格缓存
   std::unordered_map<int64_t, float> slope_cache_;

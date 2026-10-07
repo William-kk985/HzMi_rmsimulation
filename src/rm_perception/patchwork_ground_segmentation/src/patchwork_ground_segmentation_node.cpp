@@ -254,6 +254,23 @@ private:
     //   "相对局部地面的高差"判定 ⇒ 保持 free。详见 traversability_ros.hpp 头注。
     traversability_->applyFrame(*cloud_proc, &is_ground);
 
+    // ★★ 2026-10-09：**近地剔除**（`obstacle_near_ground_m`，默认 **0.0 = 关**）。
+    //   语义与 linefit 那一份**逐字相同**（见 ground_segmentation_node.cc 的同名段落与
+    //   src/rm_nav_bringup/config/traversability_near_ground_robot11.yaml 的文件头）：
+    //   `dz = z − 局部地面 ≤ 阈值` 的点 = 贴着地面 ⇒ 改判 ground（这一步是**升**，
+    //   所以显式写在这里，而不是塞进判据类的"只降不升"里）。
+    //   为什么必须在这一级：`/scan` 是二维平盘，nav2 的 `obstacle_layer` 用 projectLaser（z=0）
+    //   再搬到代价图帧 ⇒ 那条链路上的 z 恒等于"传感器原点的 z"，**没有逐点高度可判**。
+    //   关掉时（默认）`nearGroundEnabled()` 为假 ⇒ 下面整个循环不执行，行为逐字节不变。
+    if (traversability_->nearGroundEnabled()) {
+      const std::vector<uint8_t> & near_ground = traversability_->nearGroundFlags();
+      for (std::size_t i = 0; i < is_ground.size() && i < near_ground.size(); ++i) {
+        if (near_ground[i] != 0u) {
+          is_ground[i] = 1u;
+        }
+      }
+    }
+
     // 拆两朵云（与 linefit 完全相同的写法：逐一按 label 归拢，保持原始顺序）
     pcl::PointCloud<pcl::PointXYZ> ground_cloud;
     pcl::PointCloud<pcl::PointXYZ> obstacle_cloud;

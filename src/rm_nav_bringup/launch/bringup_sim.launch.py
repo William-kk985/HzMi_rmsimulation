@@ -962,6 +962,33 @@ def generate_launch_description():
         slot_map={'robot11': ('config', 'traversability_self_mask_robot11.yaml')})
     ########################## 自击掩膜（self_mask）parameters end ####################################
 
+    ########################## 近地剔除（near_ground）parameters start ################################
+    # ★★ 2026-10-09：**按 robot 槽位**选"近地剔除"参数文件（同一套 _RobotSlotFile 机制）。
+    #   与自击掩膜（self_mask）是**两件不同的事**：
+    #     · self_mask   = "机器人自己的 collision 几何 / 近场死区"里的点（几何固定、与地面无关）；
+    #     · near_ground = `dz = z − 局部地面 ≤ 阈值` 的点（判据用**局部地面**判，与车体几何无关）。
+    #   为什么必须有这一级（robot11 实测，docs/tilted_lidar_fidelity.md §K）：
+    #     `/scan` 是**二维平盘**（LaserScan 没有高度）。nav2 的 `obstacle_layer` 先 `projectLaser`
+    #     （z 强行置 0）再 `transformLaserScanToPointCloud` 搬到代价图帧 ⇒ 每条波束在那个帧里的 z
+    #     **恒等于"那一帧传感器原点的 z"**（实测：948 条波束的 odom z 全在 [0.020, 0.089]，
+    #     `min_obstacle_height 0.0` 一条都不丢）⇒ **`min_obstacle_height` 在 2D 链路上没有逐点
+    #     高度可判**。唯一能在"投影成 2D 之前"用上高度的地方就是地面分割节点里的这一级。
+    #   不修的后果：近场地面点（水平 0.30–0.50 m）被投成 lethal 格 ⇒ 车心到最近 lethal 0.39 m
+    #     （只比本槽位 inscribed 0.3565 大 3~4 cm）⇒ 车半径圆内 ≥99 440/1000、free 仅 26
+    #     ⇒ RPP `detected collision ahead` ⇒ **目标被接受但车不走**。
+    #   默认文件 = `traversability_near_ground.yaml`（obstacle_near_ground_m: 0.0 = **关**）
+    #     ⇒ 默认模型 / 其它槽位**逐字节行为不变**；只有 robot11 读 robot11 那份（0.05）。
+    #   参数文件顺序仍是"后者覆盖前者"：本文件放在自击掩膜**之后**（两者键不同，顺序不影响结果，
+    #   放在后面只为让"最后一份是槽位专属"这条读法继续成立）。
+    near_ground_params = _RobotSlotFile(
+        'rm_nav_bringup',
+        ('config', 'traversability_near_ground.yaml'),
+        error_hint='该文件属于 2026-10-09 的近地剔除：'
+                   '`colcon build --symlink-install --packages-select rm_nav_bringup` 后重试；'
+                   '或删掉 launch 里这一路参数（回到"没有这一级"的行为）',
+        slot_map={'robot11': ('config', 'traversability_near_ground_robot11.yaml')})
+    ########################## 近地剔除（near_ground）parameters end ##################################
+
     #################################### FAST_LIO parameters start ####################################
     # 参数已回归 fast_lio 包自身 config/（R1）
     fastlio_mid360_params = os.path.join(get_package_share_directory('fast_lio'), 'config', 'fastlio_mid360_sim.yaml')
@@ -1572,7 +1599,7 @@ def generate_launch_description():
     #   2026-10-07 起**逐个文件相同**。
     bringup_linefit_ground_segmentation_node = _linefit_node(
         [segmentation_params, *traversability_params_list, self_mask_params,
-         {'use_sim_time': use_sim_time}],
+         near_ground_params, {'use_sim_time': use_sim_time}],
         IfCondition(PythonExpression(
             ["'", LaunchConfiguration('ground'), "' == 'linefit' and '",
              LaunchConfiguration('robot11_mount'), "' != 'sensor'"])))
@@ -1584,7 +1611,7 @@ def generate_launch_description():
     #   ground==linefit（组合检查在 _check_robot11_mount_combination 里已经先报错）。
     bringup_linefit_ground_segmentation_node_sensor = _linefit_node(
         [segmentation_params, *traversability_params_list, self_mask_params,
-         _linefit_sensor_overlay, {'use_sim_time': use_sim_time}],
+         near_ground_params, _linefit_sensor_overlay, {'use_sim_time': use_sim_time}],
         IfCondition(PythonExpression(
             ["'", LaunchConfiguration('ground'), "' == 'linefit' and '",
              LaunchConfiguration('robot11_mount'), "' == 'sensor'"])))
@@ -1603,6 +1630,7 @@ def generate_launch_description():
                               'ground_segmentation_sim.yaml'),
             *traversability_params_list,
             self_mask_params,
+            near_ground_params,
             {'use_sim_time': use_sim_time}],
         condition=LaunchConfigurationEquals('ground', 'patchwork'),
     )

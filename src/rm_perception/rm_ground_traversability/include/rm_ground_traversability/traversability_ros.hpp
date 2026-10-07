@@ -69,6 +69,12 @@ public:
       "ground_percentile", criteria_.ground_percentile);
     criteria_.ground_min_points = node_->declare_parameter(
       "ground_min_points", criteria_.ground_min_points);
+    // ★★ 2026-10-09：**近地剔除**（`obstacle_near_ground_m`，米；0.0 = 关，默认）。
+    //   语义/取值论证/实测数字：`Criteria::near_ground_m` 的头注 +
+    //   src/rm_nav_bringup/config/traversability_near_ground_robot11.yaml +
+    //   docs/tilted_lidar_fidelity.md §K。默认 0.0 ⇒ 所有其它槽位**逐字节不变**。
+    criteria_.near_ground_m = node_->declare_parameter(
+      "obstacle_near_ground_m", criteria_.near_ground_m);
     const bool publish_step_edge =
       node_->declare_parameter("publish_step_edge", true);
     const bool publish_stats =
@@ -270,8 +276,20 @@ public:
   void applyFrame(
     const pcl::PointCloud<pcl::PointXYZ> & cloud, std::vector<uint8_t> * ground_flags)
   {
-    classifier_->apply(cloud, ground_flags, &step_edge_);
+    classifier_->apply(cloud, ground_flags, &step_edge_,
+                       criteria_.nearGroundEnabled() ? &near_ground_ : nullptr);
   }
+
+  /// ★2026-10-09：本帧被判成「贴地」（`obstacle_near_ground_m`）的点的掩码（与输入点云同序）。
+  ///   `obstacle_near_ground_m` 关（默认 0.0）时**恒空**（`applyFrame()` 不往里写）⇒
+  ///   调用方按 `nearGroundEnabled()` 判断即可，不会改变默认路径的任何行为。
+  ///   语义：这些点 `dz = z − 局部地面 ≤ obstacle_near_ground_m`，调用方应把它们从
+  ///   `/segmentation/obstacle` **改判成 ground**（"贴着地面"不是障碍）。
+  ///   为什么必须由调用方做（而不是本类自己做）：本类的 `ground_flags` 只降不升（安全性单调），
+  ///   而"贴地"是**升**（obstacle → ground）—— 这一条只在**这一处**、**显式**做。
+  const std::vector<uint8_t> & nearGroundFlags() const {return near_ground_;}
+  bool nearGroundEnabled() const {return criteria_.nearGroundEnabled();}
+  std::size_t nearGroundPoints() const {return stats().near_ground;}
 
   /// ★2026-10-07：前瞻限速（**必须在 applyFrame() 之后调**：复用同一帧的粗格缓存）。
   /// 只做"测量 → 上限 → 发布"，**不产生 /cmd_vel**。
@@ -351,6 +369,9 @@ public:
        << ",\"corridor_max_step_m\":" << s.corridor_max_step_m
        << ",\"self_masked\":" << s.self_masked
        << ",\"self_mask_on\":" << (self_mask_.enable ? "true" : "false")
+       // ★2026-10-09：贴地点数 + 该键是否开（关时恒 0 ⇒ 与引入前逐字节同义）
+       << ",\"near_ground\":" << s.near_ground
+       << ",\"near_ground_m\":" << criteria_.near_ground_m
        << ",\"classify_ms\":" << s.classify_ms << "}";
     std_msgs::msg::String msg;
     msg.data = os.str();
@@ -517,6 +538,8 @@ private:
   CorridorProfile profile_;
   SpeedLimitDecision decision_;
   std::vector<uint8_t> step_edge_;
+  /// ★2026-10-09：贴地点掩码（`obstacle_near_ground_m` 关时恒空，一字节都不写）。
+  std::vector<uint8_t> near_ground_;
   int64_t last_stamp_ns_{0};
   double log_period_s_{2.0};
   double last_log_s_{-1e9};

@@ -1,0 +1,52 @@
+# =============================================================================
+# traversability_near_ground_robot11.yaml —— `robot:=robot11` 槽位的**近地剔除**覆盖层
+# （2026-10-09 新增；**增量**文件，只含一个键）
+#
+# 谁读它：`bringup_sim.launch.py` 的 `_RobotSlotFile`（机制与 `traversability_self_mask*.yaml`
+#   同款）。默认文件 = `traversability_near_ground.yaml`（`obstacle_near_ground_m: 0.0` = 关）
+#   ⇒ 默认模型 / hzmirm / 任何其它槽位读到的永远是 0.0，**行为逐字节不变**；
+#   只有 `robot:=robot11` 读到本文件（0.05）。
+#
+# 这个键是什么：地面分割节点在**把点云发出去之前**，把"离**局部地面**高度 ≤ 该值"的点
+#   从 `/segmentation/obstacle` **改判成 ground**。局部地面 = 与坡度/台阶判据**同一份**公式
+#   （0.20 m 粗格 → 4×4 个 0.05 m 细格"最低点"的 p05，见
+#   src/rm_perception/rm_ground_traversability/include/rm_ground_traversability/low_terrain_classifier.hpp）。
+#
+# 为什么必须由它来治（2026-10-09 实测，docs/tilted_lidar_fidelity.md §K）：
+#   ① `/scan` 是一张**二维平盘**（`pointcloud_to_laserscan` 输出 LaserScan，没有高度）。
+#      nav2 的 `obstacle_layer` 先 `projectLaser`（z 强行置 0）再 `transformLaserScanToPointCloud`
+#      搬到代价图帧 ⇒ 每条波束在代价图帧里的 z **恒等于"那一帧传感器原点的 z"**，与它实际打到
+#      的三维点**无关**。实测：948 条波束的 odom z 全部落在 [0.020, 0.089]，`min_obstacle_height`
+#      0.0 **一条都没丢**。
+#   ② 所以 `min_obstacle_height` 在 2D 这条链路上只是"传感器自身高度"的常量闸，**不可能**
+#      分辨"这个回波是地面还是障碍"。唯一能在"投影成 2D 之前"用上高度的地方就是本键这一级。
+#   ③ 后果（不修）：linefit 漏判的近场地面点（水平 0.30–0.50 m）被当成障碍、在雷达高度上被投成
+#      lethal 格 ⇒ 车心到最近 lethal **0.386~0.400 m**（只比本槽位 inscribed 0.3565 大 3~4 cm）
+#      ⇒ 车那格非 free、车半径圆内 `≥99` **440/1000** 格、free 仅 **26** 格
+#      ⇒ RPP 控制器 `detected collision ahead` ⇒ **目标被接受但车不走**（真值位移 0.0015 m）。
+#
+# 为什么是 0.05 m（三个数，都是实测）：
+#   · 近场地面环（水平 0.30–0.40 m，341 点/帧）：离地 p05/p50/p95 = 0.0159 / 0.0183 / 0.0228 m；
+#     0.40–0.50 m（693 点）：0.0088 / 0.0122 / 0.0153 m ⇒ `dz ≤ 0.05` **100% 剔掉**（余量 >2×）。
+#     ⚠️ 这些数是在**当前插件**（`point = range·axis`，见下）下量的；那个 0.1 m 的系统内移让近场
+#        地面点"抬高 + 沿射线内移"，**剔除判据不受影响**（本来就要剔它们），修好插件后它们回到
+#        真值地面（离地 ≤0.02 m）⇒ 更该剔。
+#   · 真障碍（场地 ~0.15 m 高的低矮件）在水平 0.50–1.00 m 的离地 p95 = **0.169 m**
+#     ⇒ 只剔掉"贴地那一层"（约 19% 的点），低矮件本体全部保留。
+#   · **台阶仍然是障碍**（这是**构造性**的，不靠调参）：本判据的台阶闸
+#     `step_height_threshold = 0.15 m` ⇒ 任何会被判成"台阶/边沿"的点 `dz > 0.15 m > 0.05`
+#     ⇒ 结构上不可能被本键剔掉。0.2 / 0.35 m 台阶、0.4 m 护栏、坡脚都走这条路。
+#
+# 保守方向：**只少标障碍**（代价是可能漏掉一个 <5 cm 的矮物），不会多标
+#   ⇒ 不会凭空断路；与自击掩膜（`self_mask_*`，几何固定、与地面无关）是**两件不同的事**，
+#     两者可以同时开（robot11 就是这样）。
+#
+# 校验：`python3 tools/scripts/regress/check_traversability_criteria.py`（断言各默认值一致）；
+#      实跑 A/B 与反向验证（0.2/0.35 m 台阶仍进 obstacle、限速仍触发）见
+#      docs/tilted_lidar_fidelity.md §K。
+# 回退：把本文件的值改成 0.0（或去掉 launch 里这一路参数）⇒ 完全回到今天的行为。
+# =============================================================================
+ground_segmentation:
+  ros__parameters:
+    # 离**局部地面**高度 ≤ 该值（m）的点不算障碍（0.0 = 关）。见文件头论证。
+    obstacle_near_ground_m: 0.05
