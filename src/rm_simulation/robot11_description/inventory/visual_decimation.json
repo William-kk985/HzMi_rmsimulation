@@ -1,0 +1,1011 @@
+{
+  "tool": "tools/scripts/regress/robot11_decimate_visuals.py",
+  "generated_utc": "2026-10-07T09:53:57Z",
+  "algorithm": "quadric edge collapse (Garland–Heckbert) via VTK vtkQuadricDecimation + vtkCleanPolyData(point merging, tolerance=0)",
+  "why_not_meshlab": "meshlabserver 2020.09 在本机（无显示）抛 MLException: GLEW initialization failed: Missing GL version",
+  "budget": {
+    "per_link_faces": {
+      "base_link": 50000,
+      "l11": 40000,
+      "l10": 8000,
+      "l2": 12000,
+      "l3": 12000,
+      "l4": 12000,
+      "l5": 12000,
+      "l6": 3000,
+      "l7": 3000,
+      "l8": 3000,
+      "l9": 3000,
+      "l12": 6000
+    },
+    "total_faces": 200000
+  },
+  "tolerances": {
+    "bbox_max_m": 0.001,
+    "err_p99_mm": 3.0,
+    "err_max_mm": 12.0,
+    "silhouette_iou_min": 0.97,
+    "sil_bins_mm": 2.0
+  },
+  "totals": {
+    "src_faces": 2821320,
+    "out_faces": 163995,
+    "src_bytes": 141067008,
+    "out_bytes": 8200758
+  },
+  "meshes": [
+    {
+      "link": "base_link",
+      "src": "src/rm_simulation/robot11_description/meshes/base_link.STL",
+      "src_sha256": "3a76fd4269064f62b196ab3ddfe967b0ed20a1d9998d21d3cf2c17a0a3fda5a1",
+      "src_bytes": 103911384,
+      "src_faces": 2078226,
+      "budget_faces": 50000,
+      "out_faces": 50000,
+      "reduction": 0.9759410189267193,
+      "decimate_s": 24.264,
+      "src_bbox_min": [
+        -0.300000012,
+        -0.300000012,
+        -0.047944333
+      ],
+      "src_bbox_max": [
+        0.300000012,
+        0.300000012,
+        0.213
+      ],
+      "out_bbox_min": [
+        -0.300000012,
+        -0.300000012,
+        -0.047944333
+      ],
+      "out_bbox_max": [
+        0.300000012,
+        0.300000012,
+        0.213
+      ],
+      "bbox_err_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bbox_err_max_m": 0.0,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.059532618111112996,
+      "hull_vol_out_m3": 0.05962272259125228,
+      "hull_vol_err_rel": 0.0015135312875222467,
+      "area_src_m2": 3.5688570456671926,
+      "area_out_m2": 3.4716875443124895,
+      "area_err_rel": 0.02722706460676893,
+      "err_out2src_mm": {
+        "max": 2.878892397748621,
+        "p99": 0.06920694528781324,
+        "p999": 0.5440457392519398,
+        "mean": 0.004615761128414175
+      },
+      "err_src2out_mm": {
+        "max": 4.799778688271234,
+        "p99": 0.0,
+        "p999": 0.4255379178052051,
+        "mean": 0.0017972485025166296
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.9972,
+        "XZ": 0.99828,
+        "YZ": 0.99642
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 19636,
+        "out": 2380
+      },
+      "nonmanifold_edges": {
+        "src": 52078,
+        "out": 3497
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/base_link.stl",
+      "out_sha256": "52ebf3e3fb56fb213d2f545bc877709c919aed5721e64b9e24f917f4fa2eeb9b",
+      "out_bytes": 2500084,
+      "fov_visual": {
+        "rays": 30000,
+        "local_box_m": 0.13,
+        "local_tris": {
+          "src": 67208,
+          "out": 6727
+        },
+        "src": {
+          "selfhit_lt012": 0.3833,
+          "selfhit_lt005": 0.2884,
+          "selfhit_lt012_horiz": 0.3833
+        },
+        "out": {
+          "selfhit_lt012": 0.38103333333333333,
+          "selfhit_lt005": 0.2869,
+          "selfhit_lt012_horiz": 0.38103333333333333
+        },
+        "selfhit_lt012_delta": -0.002266666666666639
+      },
+      "fov_ok": true,
+      "ok": true
+    },
+    {
+      "link": "l11",
+      "src": "src/rm_simulation/robot11_description/meshes/l11.STL",
+      "src_sha256": "f4de025b574e240cbb53c2df1d30395c1e333c2ceafc1ff7f87024e007145dd9",
+      "src_bytes": 8822984,
+      "src_faces": 176458,
+      "budget_faces": 40000,
+      "out_faces": 39999,
+      "reduction": 0.7733228303618991,
+      "decimate_s": 0.47,
+      "src_bbox_min": [
+        -0.025999414,
+        -0.043663274,
+        -0.129138589
+      ],
+      "src_bbox_max": [
+        0.106999412,
+        0.128723815,
+        0.206081748
+      ],
+      "out_bbox_min": [
+        -0.025999414,
+        -0.043663274,
+        -0.129138589
+      ],
+      "out_bbox_max": [
+        0.106999412,
+        0.128723815,
+        0.206059307
+      ],
+      "bbox_err_m": [
+        0.0,
+        0.0,
+        2.2441e-05
+      ],
+      "bbox_err_max_m": 2.244114875793457e-05,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.003017323780949438,
+      "hull_vol_out_m3": 0.0030188325009246173,
+      "hull_vol_err_rel": 0.0005000192504048921,
+      "area_src_m2": 0.38155108980818364,
+      "area_out_m2": 0.3815991233477867,
+      "area_err_rel": 0.00012589019108077927,
+      "err_out2src_mm": {
+        "max": 0.12001160893822493,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 2.6826543169374913e-05
+      },
+      "err_src2out_mm": {
+        "max": 0.5329423529986659,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 3.291074888913024e-05
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99748,
+        "XZ": 0.99892,
+        "YZ": 0.99828
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 52,
+        "out": 14
+      },
+      "nonmanifold_edges": {
+        "src": 325,
+        "out": 565
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l11.stl",
+      "out_sha256": "05ba76dd6156c749db108cc07655b4b6992bb13e69ad93e2c4b7e8679437aed5",
+      "out_bytes": 2000034,
+      "fov_visual": {
+        "rays": 30000,
+        "local_box_m": 0.13,
+        "local_tris": {
+          "src": 37907,
+          "out": 14360
+        },
+        "src": {
+          "selfhit_lt012": 0.0031,
+          "selfhit_lt005": 0.0,
+          "selfhit_lt012_horiz": 0.0032
+        },
+        "out": {
+          "selfhit_lt012": 0.0031,
+          "selfhit_lt005": 0.0,
+          "selfhit_lt012_horiz": 0.0032
+        },
+        "selfhit_lt012_delta": 0.0
+      },
+      "fov_ok": true,
+      "ok": true
+    },
+    {
+      "link": "l2",
+      "src": "src/rm_simulation/robot11_description/meshes/l2.STL",
+      "src_sha256": "a3f5a04054e2d4788cb547c39d3016a585055b53d1bbb2581494adb2695a94cf",
+      "src_bytes": 4477884,
+      "src_faces": 89556,
+      "budget_faces": 12000,
+      "out_faces": 12000,
+      "reduction": 0.8660056277636339,
+      "decimate_s": 0.179,
+      "src_bbox_min": [
+        -0.13420096,
+        -0.05447869,
+        -0.061134558
+      ],
+      "src_bbox_max": [
+        -0.01785,
+        0.049151104,
+        0.063457578
+      ],
+      "out_bbox_min": [
+        -0.13420096,
+        -0.054480232,
+        -0.061134592
+      ],
+      "out_bbox_max": [
+        -0.01785,
+        0.049198203,
+        0.063409954
+      ],
+      "bbox_err_m": [
+        0.0,
+        4.7099e-05,
+        4.7624e-05
+      ],
+      "bbox_err_max_m": 4.762411117553711e-05,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.0007827584349083401,
+      "hull_vol_out_m3": 0.000783255190854684,
+      "hull_vol_err_rel": 0.0006346222847181537,
+      "area_src_m2": 0.13408400468879567,
+      "area_out_m2": 0.13409783257623767,
+      "area_err_rel": 0.000103128538516558,
+      "err_out2src_mm": {
+        "max": 0.30288943690668024,
+        "p99": 0.0,
+        "p999": 0.013897791655113845,
+        "mean": 0.00015717143267144203
+      },
+      "err_src2out_mm": {
+        "max": 0.2576420739290346,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 6.917370664451562e-06
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99917,
+        "XZ": 0.99826,
+        "YZ": 0.99605
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 4,
+        "out": 20
+      },
+      "nonmanifold_edges": {
+        "src": 321,
+        "out": 219
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l2.stl",
+      "out_sha256": "54cfcaad68e70f28f413ebc2100ce118bbef4fcc8b1abf3fb2443b7fe2934e87",
+      "out_bytes": 600084,
+      "ok": true
+    },
+    {
+      "link": "l3",
+      "src": "src/rm_simulation/robot11_description/meshes/l3.STL",
+      "src_sha256": "04d4b1864166a6d1f03d47c0dde4fb153bea88d05b7c5ea71beb9376266bf6c1",
+      "src_bytes": 4440084,
+      "src_faces": 88800,
+      "budget_faces": 12000,
+      "out_faces": 11999,
+      "reduction": 0.8648761261261262,
+      "decimate_s": 0.244,
+      "src_bbox_min": [
+        -0.13420096,
+        -0.063457578,
+        -0.05447869
+      ],
+      "src_bbox_max": [
+        -0.01785,
+        0.046345364,
+        0.049151104
+      ],
+      "out_bbox_min": [
+        -0.13420096,
+        -0.063409954,
+        -0.054480232
+      ],
+      "out_bbox_max": [
+        -0.01785,
+        0.046345364,
+        0.049198203
+      ],
+      "bbox_err_m": [
+        0.0,
+        4.7624e-05,
+        4.7099e-05
+      ],
+      "bbox_err_max_m": 4.762411117553711e-05,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.00074186036011423,
+      "hull_vol_out_m3": 0.0007423652858491756,
+      "hull_vol_err_rel": 0.0006806209929694811,
+      "area_src_m2": 0.1321485817905348,
+      "area_out_m2": 0.13221818764343382,
+      "area_err_rel": 0.0005267241763468936,
+      "err_out2src_mm": {
+        "max": 0.15830474706196818,
+        "p99": 0.0,
+        "p999": 0.006975977504032782,
+        "mean": 5.641583387851947e-05
+      },
+      "err_src2out_mm": {
+        "max": 0.2335118969053258,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 1.958383037036868e-05
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99687,
+        "XZ": 0.99958,
+        "YZ": 0.99745
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 4,
+        "out": 14
+      },
+      "nonmanifold_edges": {
+        "src": 321,
+        "out": 216
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l3.stl",
+      "out_sha256": "e672502111f265aafd9d75dc621f0c818a711b1517b9424a47674e4d6bb559fc",
+      "out_bytes": 600034,
+      "ok": true
+    },
+    {
+      "link": "l4",
+      "src": "src/rm_simulation/robot11_description/meshes/l4.STL",
+      "src_sha256": "e021577401b047d6b034c4588fe59b49fec15811f5977a4b819631ea8327d1a5",
+      "src_bytes": 4561784,
+      "src_faces": 91234,
+      "budget_faces": 12000,
+      "out_faces": 11998,
+      "reduction": 0.8684920095578403,
+      "decimate_s": 0.255,
+      "src_bbox_min": [
+        -0.135344177,
+        -0.049151104,
+        -0.063457578
+      ],
+      "src_bbox_max": [
+        -0.01785,
+        0.05447869,
+        0.046345364
+      ],
+      "out_bbox_min": [
+        -0.135344177,
+        -0.049198203,
+        -0.063409954
+      ],
+      "out_bbox_max": [
+        -0.01785,
+        0.054480232,
+        0.046345364
+      ],
+      "bbox_err_m": [
+        0.0,
+        4.7099e-05,
+        4.7624e-05
+      ],
+      "bbox_err_max_m": 4.762411117553711e-05,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.0007566398764228454,
+      "hull_vol_out_m3": 0.000757215272255525,
+      "hull_vol_err_rel": 0.0007604619457804848,
+      "area_src_m2": 0.14733271221736735,
+      "area_out_m2": 0.14686933678610403,
+      "area_err_rel": 0.0031450953714859853,
+      "err_out2src_mm": {
+        "max": 0.04948271818392014,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 2.347802328695405e-05
+      },
+      "err_src2out_mm": {
+        "max": 0.03887217018390032,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 1.4965978706505822e-06
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99708,
+        "XZ": 0.99558,
+        "YZ": 0.99795
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 4,
+        "out": 34
+      },
+      "nonmanifold_edges": {
+        "src": 321,
+        "out": 181
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l4.stl",
+      "out_sha256": "57d777ce1ad944d8e2584dc5876516c5ff143bf6d3ca517368f0b7fb759f7bb4",
+      "out_bytes": 599984,
+      "ok": true
+    },
+    {
+      "link": "l5",
+      "src": "src/rm_simulation/robot11_description/meshes/l5.STL",
+      "src_sha256": "1d903bdd0f2125f61dc2e1a6dc102fb4164955be14d110240283e8bc7f516ca5",
+      "src_bytes": 4512584,
+      "src_faces": 90250,
+      "budget_faces": 12000,
+      "out_faces": 12000,
+      "reduction": 0.8670360110803323,
+      "decimate_s": 0.25,
+      "src_bbox_min": [
+        -0.135344177,
+        -0.046345364,
+        -0.049151104
+      ],
+      "src_bbox_max": [
+        -0.01785,
+        0.063457578,
+        0.05447869
+      ],
+      "out_bbox_min": [
+        -0.135344177,
+        -0.046345364,
+        -0.049198203
+      ],
+      "out_bbox_max": [
+        -0.01785,
+        0.063409954,
+        0.054480232
+      ],
+      "bbox_err_m": [
+        0.0,
+        4.7624e-05,
+        4.7099e-05
+      ],
+      "bbox_err_max_m": 4.762411117553711e-05,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.0007566398764228454,
+      "hull_vol_out_m3": 0.0007572252450246293,
+      "hull_vol_err_rel": 0.0007736422835013704,
+      "area_src_m2": 0.14431272617560506,
+      "area_out_m2": 0.1440705104186326,
+      "area_err_rel": 0.00167840885132826,
+      "err_out2src_mm": {
+        "max": 0.12401275802852008,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 3.470518383680095e-05
+      },
+      "err_src2out_mm": {
+        "max": 0.4730348119787051,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 5.242319477772189e-05
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99821,
+        "XZ": 0.99792,
+        "YZ": 0.9974
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 4,
+        "out": 28
+      },
+      "nonmanifold_edges": {
+        "src": 321,
+        "out": 181
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l5.stl",
+      "out_sha256": "363a30b6724244313c69e089dafb14122b094bcb16ad345500040d6c13e13a18",
+      "out_bytes": 600084,
+      "ok": true
+    },
+    {
+      "link": "l10",
+      "src": "src/rm_simulation/robot11_description/meshes/l10.STL",
+      "src_sha256": "701ba5fcc80f2b92f57cb056966c48c8e6ca81dfdb097775031570426b591207",
+      "src_bytes": 1882484,
+      "src_faces": 37648,
+      "budget_faces": 8000,
+      "out_faces": 8000,
+      "reduction": 0.7875053123671908,
+      "decimate_s": 0.132,
+      "src_bbox_min": [
+        -0.136999995,
+        -0.049600001,
+        -0.032387465
+      ],
+      "src_bbox_max": [
+        0.01,
+        0.088299997,
+        0.038178392
+      ],
+      "out_bbox_min": [
+        -0.136999995,
+        -0.049600001,
+        -0.032496639
+      ],
+      "out_bbox_max": [
+        0.01,
+        0.088299997,
+        0.038178392
+      ],
+      "bbox_err_m": [
+        0.0,
+        0.0,
+        0.000109173
+      ],
+      "bbox_err_max_m": 0.00010917335748672485,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.0010337140520189113,
+      "hull_vol_out_m3": 0.0010357268234257718,
+      "hull_vol_err_rel": 0.0019471259028833237,
+      "area_src_m2": 0.12103293347466254,
+      "area_out_m2": 0.12074399672882705,
+      "area_err_rel": 0.0023872572327265054,
+      "err_out2src_mm": {
+        "max": 0.09022552640680548,
+        "p99": 0.0,
+        "p999": 0.04809442038653422,
+        "mean": 0.00011728816421657683
+      },
+      "err_src2out_mm": {
+        "max": 0.21397968029207526,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 9.015973671318739e-05
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.9985,
+        "XZ": 0.99903,
+        "YZ": 0.99845
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 0,
+        "out": 5
+      },
+      "nonmanifold_edges": {
+        "src": 264,
+        "out": 277
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l10.stl",
+      "out_sha256": "ed383db23272a3f4bf6b9132ba5ad5d65396d94524bbeecf3ef9e0e0f3159738",
+      "out_bytes": 400084,
+      "fov_visual": {
+        "rays": 30000,
+        "local_box_m": 0.13,
+        "local_tris": {
+          "src": 149,
+          "out": 36
+        },
+        "src": {
+          "selfhit_lt012": 0.0,
+          "selfhit_lt005": 0.0,
+          "selfhit_lt012_horiz": 0.0
+        },
+        "out": {
+          "selfhit_lt012": 0.0,
+          "selfhit_lt005": 0.0,
+          "selfhit_lt012_horiz": 0.0
+        },
+        "selfhit_lt012_delta": 0.0
+      },
+      "fov_ok": true,
+      "ok": true
+    },
+    {
+      "link": "l12",
+      "src": "src/rm_simulation/robot11_description/meshes/l12.STL",
+      "src_sha256": "13cf2b869428a8db02ca77f7f05c4424f9512ded5cb65b83467c44300d84fd83",
+      "src_bytes": 3437084,
+      "src_faces": 68740,
+      "budget_faces": 6000,
+      "out_faces": 6000,
+      "reduction": 0.9127145766656968,
+      "decimate_s": 0.154,
+      "src_bbox_min": [
+        -0.039861701,
+        -0.030344684,
+        0.0
+      ],
+      "src_bbox_max": [
+        0.031875219,
+        0.034529161,
+        0.060097102
+      ],
+      "out_bbox_min": [
+        -0.039861701,
+        -0.030343721,
+        -4.1754e-05
+      ],
+      "out_bbox_max": [
+        0.031875219,
+        0.034529939,
+        0.06009569
+      ],
+      "bbox_err_m": [
+        0.0,
+        9.63e-07,
+        4.1754e-05
+      ],
+      "bbox_err_max_m": 4.175425804836541e-05,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.00017799103247438232,
+      "hull_vol_out_m3": 0.00017808224231748314,
+      "hull_vol_err_rel": 0.0005124406653124277,
+      "area_src_m2": 0.044389939734168465,
+      "area_out_m2": 0.04421505273777278,
+      "area_err_rel": 0.003939789002711142,
+      "err_out2src_mm": {
+        "max": 0.12792809946309114,
+        "p99": 0.0,
+        "p999": 0.03763957278102248,
+        "mean": 0.00012985310882535355
+      },
+      "err_src2out_mm": {
+        "max": 0.3389264606781437,
+        "p99": 0.0,
+        "p999": 0.0,
+        "mean": 3.898574066318672e-05
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 1.0,
+        "XZ": 1.0,
+        "YZ": 0.99873
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 500,
+        "out": 76
+      },
+      "nonmanifold_edges": {
+        "src": 0,
+        "out": 0
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l12.stl",
+      "out_sha256": "605a57d0d711b4792dc7fd46c0fd3d771dcf9574c1461e56d5dc3bbc1d9658ba",
+      "out_bytes": 300084,
+      "ok": true
+    },
+    {
+      "link": "l6",
+      "src": "src/rm_simulation/robot11_description/meshes/l6.STL",
+      "src_sha256": "c5ccab5c8e6a12fdb2e710942d01eb0130b657cae6275071dcf6f70524019190",
+      "src_bytes": 1221884,
+      "src_faces": 24436,
+      "budget_faces": 3000,
+      "out_faces": 3000,
+      "reduction": 0.8772303159273204,
+      "decimate_s": 0.101,
+      "src_bbox_min": [
+        -0.005,
+        -0.057996813,
+        -0.057995055
+      ],
+      "src_bbox_max": [
+        0.040199999,
+        0.058000889,
+        0.058002625
+      ],
+      "out_bbox_min": [
+        -0.005001953,
+        -0.058293529,
+        -0.058281105
+      ],
+      "out_bbox_max": [
+        0.040199999,
+        0.058297601,
+        0.058286887
+      ],
+      "bbox_err_m": [
+        1.953e-06,
+        0.000296716,
+        0.00028605
+      ],
+      "bbox_err_max_m": 0.000296715646982193,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.0003587396631867675,
+      "hull_vol_out_m3": 0.00035667109204644666,
+      "hull_vol_err_rel": 0.005766218103527333,
+      "area_src_m2": 0.1068247632132846,
+      "area_out_m2": 0.10556398351992287,
+      "area_err_rel": 0.01180231676099745,
+      "err_out2src_mm": {
+        "max": 0.521753792602512,
+        "p99": 0.18068090084816468,
+        "p999": 0.5111805597993065,
+        "mean": 0.004787007968871505
+      },
+      "err_src2out_mm": {
+        "max": 0.7671777904749257,
+        "p99": 0.0,
+        "p999": 0.26065505448090454,
+        "mean": 0.0009620764297431218
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99293,
+        "XZ": 0.99899,
+        "YZ": 0.99543
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 0,
+        "out": 46
+      },
+      "nonmanifold_edges": {
+        "src": 208,
+        "out": 168
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l6.stl",
+      "out_sha256": "6a2852f70390b3dac48fff01dcf9c5a74baba000d9f7bf735c11e048a80529a4",
+      "out_bytes": 150084,
+      "ok": true
+    },
+    {
+      "link": "l7",
+      "src": "src/rm_simulation/robot11_description/meshes/l7.STL",
+      "src_sha256": "39ffdecc71735a91af8d50ac4b71deda9f7df8709cde648cef78da3a0fdf8a26",
+      "src_bytes": 1266284,
+      "src_faces": 25324,
+      "budget_faces": 3000,
+      "out_faces": 2999,
+      "reduction": 0.8815747907123677,
+      "decimate_s": 0.052,
+      "src_bbox_min": [
+        -0.0051,
+        -0.057996813,
+        -0.057995055
+      ],
+      "src_bbox_max": [
+        0.040199999,
+        0.058000889,
+        0.058002625
+      ],
+      "out_bbox_min": [
+        -0.0051,
+        -0.058293529,
+        -0.058281105
+      ],
+      "out_bbox_max": [
+        0.040199999,
+        0.058297601,
+        0.058286887
+      ],
+      "bbox_err_m": [
+        0.0,
+        0.000296716,
+        0.00028605
+      ],
+      "bbox_err_max_m": 0.000296715646982193,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.00035904088681415914,
+      "hull_vol_out_m3": 0.00035602321217178737,
+      "hull_vol_err_rel": 0.008404821715844656,
+      "area_src_m2": 0.11138071792565388,
+      "area_out_m2": 0.10971127539544753,
+      "area_err_rel": 0.014988613480842254,
+      "err_out2src_mm": {
+        "max": 0.5233592077050202,
+        "p99": 0.1640296156157579,
+        "p999": 0.511610014002837,
+        "mean": 0.004986049223930829
+      },
+      "err_src2out_mm": {
+        "max": 1.1301122505393617,
+        "p99": 0.0,
+        "p999": 0.42057075419508916,
+        "mean": 0.0013818179294990533
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99192,
+        "XZ": 0.99899,
+        "YZ": 0.99619
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 0,
+        "out": 48
+      },
+      "nonmanifold_edges": {
+        "src": 208,
+        "out": 166
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l7.stl",
+      "out_sha256": "328f27bcee90a70f115d0ec049fb52a35dd83e0db35704877421010cfa1445be",
+      "out_bytes": 150034,
+      "ok": true
+    },
+    {
+      "link": "l8",
+      "src": "src/rm_simulation/robot11_description/meshes/l8.STL",
+      "src_sha256": "b6dbcd1e17621bfdbe94e51a097bfbebd79e0b581b4a7ca9ba3ff4688152668e",
+      "src_bytes": 1266284,
+      "src_faces": 25324,
+      "budget_faces": 3000,
+      "out_faces": 3000,
+      "reduction": 0.881535302479861,
+      "decimate_s": 0.052,
+      "src_bbox_min": [
+        -0.0051,
+        -0.057996813,
+        -0.057995055
+      ],
+      "src_bbox_max": [
+        0.040199999,
+        0.058000889,
+        0.058002625
+      ],
+      "out_bbox_min": [
+        -0.005001953,
+        -0.058293529,
+        -0.058281105
+      ],
+      "out_bbox_max": [
+        0.040199999,
+        0.058297601,
+        0.058286887
+      ],
+      "bbox_err_m": [
+        9.8047e-05,
+        0.000296716,
+        0.00028605
+      ],
+      "bbox_err_max_m": 0.000296715646982193,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.00035904088681415914,
+      "hull_vol_out_m3": 0.0003558826294595599,
+      "hull_vol_err_rel": 0.008796372420486913,
+      "area_src_m2": 0.1113807179256539,
+      "area_out_m2": 0.11002547251133216,
+      "area_err_rel": 0.012167684313422798,
+      "err_out2src_mm": {
+        "max": 0.5276894291311445,
+        "p99": 0.16359568012408698,
+        "p999": 0.5124116282172686,
+        "mean": 0.003984100356274082
+      },
+      "err_src2out_mm": {
+        "max": 0.9813630263319553,
+        "p99": 0.0,
+        "p999": 0.3661517168947479,
+        "mean": 0.001119653811903881
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99394,
+        "XZ": 1.0,
+        "YZ": 0.99466
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 0,
+        "out": 46
+      },
+      "nonmanifold_edges": {
+        "src": 208,
+        "out": 174
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l8.stl",
+      "out_sha256": "3b4e8ad8fbe89ea34fd7bd04b73e562fecf96d1495cd83b166d9980628c10631",
+      "out_bytes": 150084,
+      "ok": true
+    },
+    {
+      "link": "l9",
+      "src": "src/rm_simulation/robot11_description/meshes/l9.STL",
+      "src_sha256": "9258bd59e7109528d71f7d995b171b191af498d6c485f5091ef93c4c60e786e1",
+      "src_bytes": 1266284,
+      "src_faces": 25324,
+      "budget_faces": 3000,
+      "out_faces": 3000,
+      "reduction": 0.881535302479861,
+      "decimate_s": 0.052,
+      "src_bbox_min": [
+        -0.0051,
+        -0.057996813,
+        -0.057995055
+      ],
+      "src_bbox_max": [
+        0.040199999,
+        0.058000889,
+        0.058002625
+      ],
+      "out_bbox_min": [
+        -0.005001953,
+        -0.058293529,
+        -0.058281105
+      ],
+      "out_bbox_max": [
+        0.040199999,
+        0.058297601,
+        0.058286887
+      ],
+      "bbox_err_m": [
+        9.8047e-05,
+        0.000296716,
+        0.00028605
+      ],
+      "bbox_err_max_m": 0.000296715646982193,
+      "bbox_ok": true,
+      "hull_vol_src_m3": 0.00035904088681415914,
+      "hull_vol_out_m3": 0.0003558826294595599,
+      "hull_vol_err_rel": 0.008796372420486913,
+      "area_src_m2": 0.11138071792565389,
+      "area_out_m2": 0.10985930598619398,
+      "area_err_rel": 0.013659563053592888,
+      "err_out2src_mm": {
+        "max": 0.5302250901112715,
+        "p99": 0.17190312521634765,
+        "p999": 0.5112817240982519,
+        "mean": 0.004394589145845988
+      },
+      "err_src2out_mm": {
+        "max": 0.7640389914124284,
+        "p99": 0.0,
+        "p999": 0.28664189265067824,
+        "mean": 0.0009552816991017735
+      },
+      "err_ok": true,
+      "silhouette_iou": {
+        "XY": 0.99293,
+        "XZ": 0.99899,
+        "YZ": 0.99581
+      },
+      "silhouette_ok": true,
+      "boundary_edges": {
+        "src": 0,
+        "out": 48
+      },
+      "nonmanifold_edges": {
+        "src": 208,
+        "out": 175
+      },
+      "topology_ok": true,
+      "out": "src/rm_simulation/robot11_description/meshes/decimated/l9.stl",
+      "out_sha256": "76cc35c549c641b03b8f82e3f7f8da52cfc1cb58c98da6f30ea5b128113a29b4",
+      "out_bytes": 150084,
+      "ok": true
+    }
+  ],
+  "all_ok": true
+}
