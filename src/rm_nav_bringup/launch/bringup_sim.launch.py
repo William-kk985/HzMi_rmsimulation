@@ -8,7 +8,8 @@ from ament_index_python.packages import PackageNotFoundError
 
 from launch import LaunchDescription
 from launch.actions import (IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo,
-                            TimerAction, OpaqueFunction, RegisterEventHandler, Shutdown)
+                            TimerAction, OpaqueFunction, RegisterEventHandler, Shutdown,
+                            AppendEnvironmentVariable)
 from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -529,6 +530,141 @@ class _SelfMaskReadout(Substitution):
 
 
 # =============================================================================
+# `model://` 的本地解析根（2026-10-08 新增）—— 让 `robot:=robot11` **不再需要手工前缀环境变量**
+# -----------------------------------------------------------------------------
+# 现象（用户 2026-10-07）：「gazebo加载不出来吗，rviz倒是挺好的看着」。
+# 机理（取证见 docs/gazebo_gui_troubleshooting.md §3）：
+#   ① URDF 里 12 个 `<visual>` 写的是 `package://robot11/meshes/decimated/<link>.stl`；
+#   ② sdformat 做 URDF→SDF 时把它**改写成** `model://robot11/meshes/decimated/<link>.stl`；
+#   ③ gazebo 的 `model://` 解析根 = `$HOME/.gazebo/models` + `GAZEBO_MODEL_PATH`
+#      （后者由 gazebo_ros 的 gzserver/gzclient launch 扫描各包 package.xml 的
+#       `<export><gazebo_ros gazebo_model_path=…/></export>` 拼出来）；
+#   ④ 本地解析不到 ⇒ `SystemPaths::FindFileURI()` **无条件**回落到在线模型库
+#      `ModelDatabase::GetModelPath(uri, /*forceDownload=*/true)` ⇒ `GetModels()` 抢不到后台
+#      抓取线程的锁 ⇒ 打印 `Waiting for model database update to complete...` 并**同步阻塞**
+#      （实测 stall 48.03 / 76.34 / 99.67 s，三次都是被人打断的，**不设上限**）；
+#   ⑤ 网络那一路最后也失败 ⇒ `Visual.cc:2956 No mesh specified` ×24 ⇒ **车在 Gazebo 里没有视觉**
+#      （RViz 不受影响：它走 `package://` + ament 索引，根本不经过 gazebo 的 `model://` 解析）。
+#
+# 修法（本段 = 「启动侧」，与 `package.xml` 的 `<export>` 互为兜底；两条都做，都是纯增量）：
+#   把「本次 slot 真的用到的、带 mesh 的包」的 share **父目录**追加进 `GAZEBO_MODEL_PATH`
+#   ——因为 `model://<pkg>/meshes/x.stl` 要求某个解析根 R 满足 `R/<pkg>/meshes/x.stl` 存在，
+#   而文件在 `<install>/<pkg>/share/<pkg>/meshes/x.stl` ⇒ R = `<install>/<pkg>/share`
+#   = `os.path.dirname(get_package_share_directory('<pkg>'))`。
+#
+# 为什么这样写（每一条都对应一个"不许弄坏别的路径"的约束）：
+#   · **惰性**：查包只在 OpaqueFunction 里做（launch 运行期），不选这个槽位就永不执行
+#     ⇒ 没构建过 `robot11` 也不会挡住别的槽位，`--show-args` 同样不受影响（与文件顶部
+#     `_PackageShareFile` 的"描述构建期陷阱"同一原则）；
+#   · **只在该加的时候加**：`_GAZEBO_MODEL_PATH_PKGS` 只登记「`<visual>` 里真有 `package://`
+#     mesh」的槽位（默认模型与 hzmirm 全是 box/cylinder ⇒ 0 个，见文档 §3.2）
+#     ⇒ 默认模型 / 其它 world 的 `GAZEBO_MODEL_PATH`、日志、时序**一个字节都不动**；
+#   · **追加，不覆盖**：用 `AppendEnvironmentVariable`（`os.pathsep` 分隔），用户自己 export 的
+#     值原样保留；用户若已经手工 export 过同一个目录（= 文档里那条 workaround），
+#     这里认出来就不再重复追加（幂等）；
+#   · **落在 gzserver/gzclient 上**：`AppendEnvironmentVariable` 改的是 launch 进程的 `os.environ`，
+#     而 gazebo_ros 的 `gzserver.launch.py`/`gzclient.launch.py` 在**被执行时**读
+#     `os.environ['GAZEBO_MODEL_PATH']` 并把它拼进 `ExecuteProcess` 的 `additional_env`
+#     （`launch/descriptions/executable.py` 用 `copy.deepcopy(context.environment)` 建子进程环境）
+#     ⇒ 只要本 Action **排在** include gzserver/gzclient 之前就一定生效（见 ld.add_action 的顺序）。
+#   ⚠️ 顺带必须知道：`--show-args` 不执行 Action ⇒ 加了本段后 `--show-args` 的行为与以前逐字相同。
+# =============================================================================
+
+#: robot 槽位 → 该槽位需要在 `GAZEBO_MODEL_PATH` 上补解析根的 ROS 包名（只登记真有 mesh 的）。
+#: 默认槽位与 hzmirm 都**不在表里** ⇒ 它们的 env 与改造前逐字节相同。
+#: hzmi_rm_simulation（world / obstacle 的 `model://…`）**不在表里**：它自己的 package.xml
+#: 早就 export 了 `${prefix}/meshes`（改造前就有，本次没动），本来就解析得到。
+_GAZEBO_MODEL_PATH_PKGS = {
+    'robot11': ('robot11',),        # 12 个 <visual> mesh + 2 个 package:// 引用（文档 §3.2）
+}
+
+
+def _pkg_model_path_exports(share_dir):
+    """读出「这个包的**已安装** package.xml 里声明了哪些 gazebo_model_path」（只用于日志）。
+
+    与 gazebo_ros 的 `gazebo_ros_paths.py` 走同一套代码/同一份文件（`catkin_pkg.parse_package`
+    + `export.tagname == 'gazebo_ros'` + `${prefix}` 替换），所以日志里说的就是 gzserver/gzclient
+    真正会拿到的东西。解析不了就返回 `[]`（= 不声称有）。
+    """
+    try:
+        from catkin_pkg.package import parse_package
+        package = parse_package(os.path.join(share_dir, 'package.xml'))
+    except Exception:                                             # noqa: BLE001
+        return []
+    out = []
+    for export in package.exports:
+        if export.tagname == 'gazebo_ros' and 'gazebo_model_path' in export.attributes:
+            out.append(export.attributes['gazebo_model_path'].replace('${prefix}', share_dir))
+    return out
+
+
+def _gazebo_model_path_setup(context):
+    """按 `robot` 槽位把 `model://` 的本地解析根**追加**进 `GAZEBO_MODEL_PATH`（纯增量、惰性）。
+
+    返回 launch Action 列表（OpaqueFunction 的约定）；不需要时返回 `[]`（= 什么都不做）。
+    失败一律"降级为警告"，绝不 raise —— 解析根缺失只会让 mesh 加载退回旧行为（卡 + 没视觉），
+    不该让整条 launch 起不来。
+
+    ⚠️ 为什么**不**因为"包自己 export 了"就跳过追加（两条腿都要）：本函数跑在 gzserver/gzclient
+       被 include **之前**，此刻 `os.environ` 里还**没有** gazebo_ros 扫出来的那些 export 项
+       （那是 gzserver.launch.py 执行时才现算的）⇒ "包 export 在不在"这件事此刻无法从 env 判定，
+       只能自己解析那份 package.xml；一旦那份 manifest 是旧的/解析不了，跳过就等于没修。
+       所以默认**无条件追加**（只对"用户自己已经 export 过同一个目录"做幂等），
+       包 export 那条只作为**其它 gazebo 入口**（裸 gzserver/gzclient、gz sim）的兜底。
+    """
+    slot = context.perform_substitution(LaunchConfiguration('robot')).strip()
+    pkgs = _GAZEBO_MODEL_PATH_PKGS.get(slot, ())
+    if not pkgs:
+        return []                       # 其它槽位：env / 日志 / 时序都不动（逐字节不变）
+
+    cur = os.environ.get('GAZEBO_MODEL_PATH', '')
+    cur_items = [p for p in cur.split(os.pathsep) if p]
+    added, covered, notes, broken = [], [], [], []
+    for pkg in pkgs:
+        try:
+            share = get_package_share_directory(pkg)
+        except PackageNotFoundError:
+            broken.append('%s（当前 AMENT_PREFIX_PATH 里没有这个包：没构建过，'
+                          '或构建后没重新 source install/setup.bash）' % pkg)
+            continue
+        share = os.path.abspath(share)
+        root = os.path.dirname(share)
+        exports = _pkg_model_path_exports(share)
+        if exports:
+            notes.append('%s 自己的 package.xml 也 export 了 %s（裸 gzserver/gzclient 入口靠它）'
+                         % (pkg, '、'.join(exports)))
+        # 幂等：用户手工 export 过同一个目录（文档里那条 workaround 的各种写法）、
+        # 或上一次同槽位 launch 追加过 ⇒ 不重复追加。
+        if any(os.path.realpath(p) == os.path.realpath(root) for p in cur_items):
+            covered.append('%s（已在 GAZEBO_MODEL_PATH 里）' % root)
+        elif not os.path.isdir(os.path.join(root, pkg)):
+            broken.append('%s（%s/ 不存在 ⇒ install/ 不完整，请 colcon build 后重试）'
+                          % (root, pkg))
+        else:
+            added.append(root)
+
+    actions = []
+    for why in broken:
+        actions.append(LogInfo(msg='[gzmodel] ⚠️ 无法为 robot:=%s 补 model:// 解析根：%s；'
+                                   '本次会退回旧行为（gzclient 可能卡在"等在线模型库"、'
+                                   '车在 Gazebo 里没有 mesh）。' % (slot, why)))
+    if added:
+        actions.append(LogInfo(msg='[gzmodel] robot:=%s 需要 %s 的本地解析根：GAZEBO_MODEL_PATH '
+                                   '追加 %s（追加，不覆盖原值：%s；有此根后 '
+                                   'model://%s/meshes/… 不再回落在线模型库、不再 No mesh specified%s）'
+                                   % (slot, '/'.join(pkgs), os.pathsep.join(added),
+                                      (cur or '<空>'), pkgs[0],
+                                      ('；' + '；'.join(notes)) if notes else '')))
+        for root in added:
+            actions.append(AppendEnvironmentVariable('GAZEBO_MODEL_PATH', root))
+    if covered:
+        actions.append(LogInfo(msg='[gzmodel] robot:=%s 的 model:// 解析根已存在（无需追加）：%s%s'
+                                   % (slot, '；'.join(covered),
+                                      ('；' + '；'.join(notes)) if notes else '')))
+    return actions
+
+
+# =============================================================================
 # 「在上次基础上继续建图」= 存档（posegraph / PCD）+ 场地隔离守卫
 # -----------------------------------------------------------------------------
 # 用户需求原话：「能不能就是我在上次基础上继续建，手动指定一个地图名字去覆盖之类的」
@@ -954,6 +1090,11 @@ def generate_launch_description():
     #        黑洞代理复现 = **99.67 s**（三次都是被 Ctrl-C / 拆代理打断的，**不设上限**）；
     #        同时 12 个 mesh 全部 `No mesh specified`（车在 Gazebo 里没有视觉）。
     #        ⇒ 治本是给 `model://robot11/...` 一个本地解析根（见该文档 §5.1）。
+    #        ★ 2026-10-08：**已自动化** —— 本文件里的 `_gazebo_model_path_setup`（OpaqueFunction，
+    #        排在 include gzserver/gzclient 之前）会按 slot 自动追加解析根，`robot:=robot11`
+    #        现在**不需要**在命令行前缀 `GAZEBO_MODEL_PATH=…`；`robot11` 包自己也 export 了
+    #        `${prefix}/..`（裸 gzserver/gzclient 入口的兜底）。实测见该文档 §5.1。下面这个
+    #        `gazebo_offline` 开关因此只作"万一还是解析不到时不再等"的兜底。
     #     ② 本仓多个 bench/ab 脚本收尾会 `pkill -9 -x gzclient`（**全机**范围，不看
     #        GAZEBO_MASTER_URI）⇒ 别人正在看的 GUI 被打成 `exit code -9`（用户 16:55/16:56 那两次）。
     #   ⇒ gui:=False 一条命令无头跑，既不用事后 kill GUI，也不会被别人误杀。
@@ -2222,6 +2363,12 @@ def generate_launch_description():
     ld.add_action(declare_map_resume_check_yaw_tol_deg_cmd)
     ld.add_action(declare_map_session_announce_cmd)
 
+    # ★ 2026-10-08：`model://` 本地解析根（= `robot:=robot11` 不再需要手工前缀 GAZEBO_MODEL_PATH）。
+    #   ⚠️ **必须在 `start_rm_simulation` 之前**：它内部的 gzserver/gzclient launch 在**执行时**
+    #   读 launch 进程的 `os.environ['GAZEBO_MODEL_PATH']`；本 Action 通过 `AppendEnvironmentVariable`
+    #   改的正是这个 `os.environ`（launch 的 `context.environment` 就是 `os.environ`）。
+    #   顺序反了 ⇒ mesh 解析根晚一步，gzclient 照样会回落到在线模型库并卡住（本 Task 的回归点）。
+    ld.add_action(OpaqueFunction(function=_gazebo_model_path_setup))
     ld.add_action(start_rm_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
     # 地面分割槽位：两个节点都进 LaunchDescription，但各自的 condition 保证**只有一个**真的被启动

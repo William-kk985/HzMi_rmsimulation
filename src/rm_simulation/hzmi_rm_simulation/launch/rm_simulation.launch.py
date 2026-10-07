@@ -3,10 +3,12 @@
 import os
 
 from ament_index_python.packages import get_package_share_directory, get_package_share_path
+from ament_index_python.packages import PackageNotFoundError
 
 from launch import LaunchDescription
 from launch.substitutions import LaunchConfiguration, Command
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction, LogInfo
+from launch.actions import OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -22,6 +24,75 @@ class WorldType:
     RMUL = 'RMUL'
     RMUL2026 = 'RMUL2026'
     RMUC2026 = 'RMUC2026'
+
+# =============================================================================
+# `model://` 的本地解析根（2026-10-08 新增）
+# -----------------------------------------------------------------------------
+# 与 rm_nav_bringup/launch/bringup_sim.launch.py 里的同名机制**语义完全一致**（那边是本仓的
+# 正式入口，注释更全，含机理/取证指向 docs/gazebo_gui_troubleshooting.md §3）：
+#   URDF 的 `package://robot11/meshes/…` 被 sdformat 改写成 `model://robot11/meshes/…`，
+#   而 gazebo 的 `model://` 解析根只有 `$HOME/.gazebo/models` + `GAZEBO_MODEL_PATH`；
+#   解析不到就**无条件**回落在线模型库并**同步阻塞**（gzclient 卡住 + 车没有视觉）。
+#   修法 = 把「本次 slot 真的用到的、带 mesh 的包」的 share **父目录**追加进 `GAZEBO_MODEL_PATH`
+#   （`model://<pkg>/meshes/x.stl` ⇒ 需要解析根 R 满足 `R/<pkg>/meshes/x.stl` 存在，
+#    而文件在 `<install>/<pkg>/share/<pkg>/meshes/x.stl` ⇒ R = `<install>/<pkg>/share`）。
+# 约束（与 bringup_sim 那边逐条相同）：惰性（OpaqueFunction 里才查包）、只在该加时加
+#   （默认槽位与 hzmirm 不在表里 ⇒ env / 日志 / 时序都不动）、追加不覆盖、幂等（用户手工
+#   export 过同一目录就不再追加）、且必须排在 include gzserver/gzclient **之前**。
+# =============================================================================
+
+#: robot 槽位 → 需要补 `model://` 解析根的 ROS 包名（只登记 `<visual>` 里真有 mesh 的槽位）。
+_GAZEBO_MODEL_PATH_PKGS = {
+    'robot11': ('robot11',),
+}
+
+
+def _gazebo_model_path_setup(context):
+    """按 `robot` 槽位把 `model://` 的本地解析根追加进 `GAZEBO_MODEL_PATH`（纯增量、惰性）。
+
+    不需要时返回 `[]`（= 什么都不做）；失败一律降级为警告，绝不 raise（解析根缺失只会让
+    mesh 加载退回旧行为，不该让整条 launch 起不来）。
+    """
+    slot = context.perform_substitution(LaunchConfiguration('robot')).strip()
+    pkgs = _GAZEBO_MODEL_PATH_PKGS.get(slot, ())
+    if not pkgs:
+        return []
+
+    cur = os.environ.get('GAZEBO_MODEL_PATH', '')
+    cur_items = [p for p in cur.split(os.pathsep) if p]
+    added, covered, broken = [], [], []
+    for pkg in pkgs:
+        try:
+            share = os.path.abspath(get_package_share_directory(pkg))
+        except PackageNotFoundError:
+            broken.append('%s（当前 AMENT_PREFIX_PATH 里没有这个包：没构建过，'
+                          '或构建后没重新 source install/setup.bash）' % pkg)
+            continue
+        root = os.path.dirname(share)
+        if any(os.path.realpath(p) == os.path.realpath(root) for p in cur_items):
+            covered.append('%s（已在 GAZEBO_MODEL_PATH 里）' % root)
+        elif not os.path.isdir(os.path.join(root, pkg)):
+            broken.append('%s（%s/ 不存在 ⇒ install/ 不完整，请 colcon build 后重试）'
+                          % (root, pkg))
+        else:
+            added.append(root)
+
+    actions = []
+    for why in broken:
+        actions.append(LogInfo(msg='[gzmodel] ⚠️ 无法为 robot:=%s 补 model:// 解析根：%s；'
+                                   '本次会退回旧行为（gzclient 可能卡在"等在线模型库"、'
+                                   '车在 Gazebo 里没有 mesh）。' % (slot, why)))
+    if added:
+        actions.append(LogInfo(msg='[gzmodel] robot:=%s 需要 %s 的本地解析根：GAZEBO_MODEL_PATH '
+                                   '追加 %s（追加，不覆盖原值：%s）'
+                                   % (slot, '/'.join(pkgs), os.pathsep.join(added), (cur or '<空>'))))
+        for root in added:
+            actions.append(AppendEnvironmentVariable('GAZEBO_MODEL_PATH', root))
+    if covered:
+        actions.append(LogInfo(msg='[gzmodel] robot:=%s 的 model:// 解析根已存在（无需追加）：%s'
+                                   % (slot, '；'.join(covered))))
+    return actions
+
 
 def get_world_config(world_type):
     world_configs = {
@@ -301,6 +372,11 @@ def generate_launch_description():
     ld.add_action(declare_gazebo_offline_cmd)    # ★ 2026-10-07 gazebo_offline（默认 False ⇒ 不变）
     # ⚠️ 环境变量必须在 gazebo_client_launch / gzserver 之前生效
     ld.add_action(set_gazebo_offline_env)
+    # ★ 2026-10-08：`model://` 本地解析根（`robot:=robot11` 不再需要手工前缀 GAZEBO_MODEL_PATH）。
+    #   ⚠️ **必须在 gazebo_client_launch / gzserver 之前**：那两个 launch（gazebo_ros 的
+    #   gzclient.launch.py / gzserver.launch.py）在**执行时**读 launch 进程的
+    #   `os.environ['GAZEBO_MODEL_PATH']` 并拼进 ExecuteProcess 的 additional_env。
+    ld.add_action(OpaqueFunction(function=_gazebo_model_path_setup))
     ld.add_action(gazebo_client_launch)
     ld.add_action(start_joint_state_publisher_cmd)
     ld.add_action(start_robot_state_publisher_cmd)

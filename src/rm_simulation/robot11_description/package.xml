@@ -21,5 +21,31 @@
 
   <export>
     <build_type>ament_cmake</build_type>
+
+    <!-- ★ 2026-10-08：把本包 share 目录的**父目录**交给 gazebo 当 `model://` 的解析根。
+         为什么需要：URDF 里的 `package://robot11/meshes/<name>.STL` 会被 sdformat 在
+         URDF→SDF 时改写成 `model://robot11/meshes/<name>.STL`（本机 `gz sdf -p` 可复现），
+         而 gazebo 的 `model://` 解析根只有 `$HOME/.gazebo/models` + `GAZEBO_MODEL_PATH`
+         ——后者由 gazebo_ros 的 `gzserver.launch.py` / `gzclient.launch.py` 扫描**各包
+         package.xml 的这一行**拼出来（实现：`/opt/ros/humble/lib/gazebo_ros/gazebo_ros_paths.py`
+         会把 `${prefix}` 替换成本包的 share 目录）。
+         解析不到时 `SystemPaths::FindFileURI()` **无条件**回落到在线模型库
+         `ModelDatabase::GetModelPath(uri, /*forceDownload=*/true)` 并**同步阻塞**
+         （实测 stall 48.03 / 76.34 / 99.67 s，不设上限），同时 12 个 mesh 全部
+         `No mesh specified` ⇒ **车在 Gazebo 里没有视觉**（RViz 不受影响：它走
+         `package://` + ament 索引）。取证/机理/复现：docs/gazebo_gui_troubleshooting.md §3。
+
+         路径表达式为什么是 `${prefix}/..`：
+           `${prefix}` = 本包 share 目录 = `<install>/robot11/share/robot11`；
+           `model://robot11/meshes/decimated/l2.stl` 要求解析根 R 满足
+             `R/robot11/meshes/decimated/l2.stl` 存在，
+           而文件在 `<install>/robot11/share/robot11/meshes/decimated/l2.stl`
+           ⇒ **R = `<install>/robot11/share` = `${prefix}/..`**
+           （实测：`${prefix}/..` 解成 `/home/weicheng/HzMi_rmsimulation/install/robot11/share`）。
+         ⚠️ 这是**兜底**：本仓 launch（`rm_nav_bringup/launch/bringup_sim.launch.py` 与
+         `hzmi_rm_simulation/launch/rm_simulation.launch.py` 里的 `_gazebo_model_path_setup`）
+         也会按 slot 主动追加同一个目录；两条一起保证"裸 gzserver/gzclient 入口"与
+         "本仓 launch 入口"都能解析。默认模型 / 其它槽位不受影响（它们没有 mesh 视觉）。-->
+    <gazebo_ros gazebo_model_path="${prefix}/.."/>
   </export>
 </package>
