@@ -106,6 +106,121 @@ class _PackageShareFile(Substitution):
 
 
 # =============================================================================
+# robot:=<模型> 槽位（2026-10-07 新增）——「换机器人模型试一试」的**唯一开关**
+# -----------------------------------------------------------------------------
+# 为什么要有它：用户给了一份别人的哨兵 URDF（hzmirmvision-master/configs/sentry_robot.urdf，
+# 里面雷达装在云台头上），想在本仿真里"试一试"。但那份 URDF 是**纯描述文件**：
+# 没有 inertial（Gazebo 会把无惯性的 link 整条丢掉 ⇒ spawn 出来是空模型）、
+# 没有 <gazebo>/<sensor>/<plugin>、没有 imu_link ⇒ 直接换上去本栈一个话题都不会有。
+# 所以做法是：**新增一个 opt-in 槽位**，默认值仍然是现在的模型（一个字节都不变），
+# 只有显式 `robot:=hzmirm` 才切到"他们的运动学 + 我们补的仿真件"。
+#
+# 设计要点（与文件开头那段 _PackageShareFile 的原则一致）：
+#   · 全部惰性：不选这个槽位时，这两个 Substitution 的 perform() 根本不会被调用
+#     ⇒ 路径不存在/文件没构建也不会挡住别的组合，`--show-args` 同样不受影响；
+#   · 默认路径逐字节不变：robot 留空时 _RobotXacroCommand 返回的命令字符串
+#     与改造前 Command([...]) 拼接出来的**完全相同**；
+#   · 选错值 → 抛一条可操作的 RuntimeError（列出可用取值），launch 正常收尾退出码 1。
+# =============================================================================
+
+#: 可用的 robot 槽位值 → (相对 urdf/ 的文件名, 人话说明)
+_ROBOT_SLOTS = {
+    '': ('sentry_robot_sim.xacro', '默认模型（本仓现行，雷达在 base_link+0.12,0,0.175）'),
+    'hzmirm': ('sentry_robot_hzmirm_sim.xacro',
+               '用户给的哨兵 URDF（雷达在云台头上 base_link+0,0,0.8；运动学逐字保留）'),
+}
+
+
+def _robot_slot_error(value):
+    return RuntimeError(
+        "[launch] robot:=%r 不是可用的机器人模型槽位。\n"
+        '  可用取值：\n%s\n'
+        '  · 留空（默认）＝ 本仓现行模型，行为与以前完全一致；\n'
+        '  · robot:=hzmirm ＝ 用户给的哨兵 URDF 变体（详见 docs/robot_models.md）。'
+        % (value, '\n'.join('      robot:=%-8s → %s' % (k or "''", v[1])
+                            for k, v in sorted(_ROBOT_SLOTS.items()))))
+
+
+class _RobotSlot(Substitution):
+    """把 robot 槽位值解析成 urdf/ 下的 xacro 文件名（惰性，选错值给可操作报错）。"""
+
+    def __init__(self, urdf_dir):
+        super().__init__()
+        self.__urdf_dir = urdf_dir
+
+    def perform(self, context):
+        slot = LaunchConfiguration('robot').perform(context).strip()
+        if slot not in _ROBOT_SLOTS:
+            raise _robot_slot_error(slot)
+        return os.path.join(self.__urdf_dir, _ROBOT_SLOTS[slot][0])
+
+    def describe(self):
+        return '%s(urdf_dir=%s)' % (type(self).__name__, self.__urdf_dir)
+
+
+class _RobotXacroCommand(Substitution):
+    """拼出 `xacro <模型> xyz:=… rpy:=… [云台角]` 这条命令（惰性）。
+
+    默认槽位的输出与改造前逐字节相同；只有 hzmirm 槽位才追加 turret_yaw_deg / turret_pitch_deg
+    （默认 0 ⇒ 与上游 URDF 数值等价；非 0 用于试"雷达斜放/云台转动"假设，见 docs/robot_models.md §3）。
+    """
+
+    def __init__(self, urdf_dir, xyz, rpy):
+        super().__init__()
+        self.__slot = _RobotSlot(urdf_dir)
+        self.__xyz = xyz
+        self.__rpy = rpy
+
+    def perform(self, context):
+        cmd = ['xacro ', self.__slot.perform(context), ' xyz:=', self.__xyz, ' rpy:=', self.__rpy]
+        if LaunchConfiguration('robot').perform(context).strip() == 'hzmirm':
+            cmd += [' turret_yaw_deg:=', LaunchConfiguration('turret_yaw_deg').perform(context),
+                    ' turret_pitch_deg:=', LaunchConfiguration('turret_pitch_deg').perform(context)]
+        return ''.join(cmd)
+
+    def describe(self):
+        return '%s(%s)' % (type(self).__name__, self.__slot.describe())
+
+
+class _RobotSlotFile(Substitution):
+    """按 robot 槽位选一个"包 share 下的参数文件"（惰性；缺包/缺文件给可操作报错）。
+
+    与 _PackageShareFile 的区别只有一个：文件名随 robot 槽位变。
+    默认槽位返回的路径与改造前**逐字节相同** ⇒ 默认模型读的还是同一份 YAML。
+    """
+
+    def __init__(self, package_name, default_rel, alt_rel, slot='hzmirm', error_hint=''):
+        super().__init__()
+        self.__package_name = package_name
+        self.__default_rel = tuple(default_rel)
+        self.__alt_rel = tuple(alt_rel)
+        self.__slot = slot
+        self.__error_hint = error_hint
+
+    def perform(self, context):
+        rel = (self.__alt_rel
+               if LaunchConfiguration('robot').perform(context).strip() == self.__slot
+               else self.__default_rel)
+        try:
+            share_dir = get_package_share_directory(self.__package_name)
+        except PackageNotFoundError:
+            raise RuntimeError("[launch] robot 槽位需要 ROS 包 '%s'，但当前 AMENT_PREFIX_PATH 里没有"
+                               '（没构建过，或构建后没有重新 source install/setup.bash）。%s'
+                               % (self.__package_name, ('\n  · ' + self.__error_hint)
+                                  if self.__error_hint else ''))
+        path = os.path.join(share_dir, *rel)
+        if not os.path.isfile(path):
+            raise RuntimeError('[launch] robot 槽位要的参数文件不在：%s%s'
+                               % (path, ('\n  · ' + self.__error_hint) if self.__error_hint else ''))
+        return path
+
+    def describe(self):
+        return '%s(package=%s, default=%s, alt=%s)' % (
+            type(self).__name__, self.__package_name,
+            os.path.join(*self.__default_rel), os.path.join(*self.__alt_rel))
+
+
+# =============================================================================
 # 「在上次基础上继续建图」= 存档（posegraph / PCD）+ 场地隔离守卫
 # -----------------------------------------------------------------------------
 # 用户需求原话：「能不能就是我在上次基础上继续建，手动指定一个地图名字去覆盖之类的」
@@ -281,14 +396,34 @@ def generate_launch_description():
     # 平台外参（base_link↔livox）随仿真平台包 hzmi_rm_simulation 存放（规则③）
     launch_params = yaml.safe_load(open(os.path.join(
     get_package_share_directory('hzmi_rm_simulation'), 'config', 'measurement_params_sim.yaml')))
-    robot_description = Command(['xacro ', os.path.join(
-    get_package_share_directory('rm_nav_bringup'), 'urdf', 'sentry_robot_sim.xacro'),
-    ' xyz:=', launch_params['base_link2livox_frame']['xyz'], ' rpy:=', launch_params['base_link2livox_frame']['rpy']])
+    # ★ 2026-10-07：robot:=<模型> 槽位（**opt-in**）。
+    #   robot 留空（默认）= 现在的默认模型 sentry_robot_sim.xacro：命令字符串与逐字节行为都不变；
+    #   robot:=hzmirm     = 用户给的哨兵 URDF（urdf/sentry_robot_hzmirm_sim.xacro = 其运动学逐字
+    #                       保留 + 我们补的 inertial/IMU/雷达/底盘，见该文件头与 docs/robot_models.md）。
+    #   惰性：路径/命令都在 Substitution.perform() 里才求值 ⇒ 不选这个槽位零成本，
+    #   选错值时的可操作报错也只在真正执行时抛（与 _PackageShareFile 同一套设计原则）。
+    robot_description = Command([_RobotXacroCommand(
+        os.path.join(get_package_share_directory('rm_nav_bringup'), 'urdf'),
+        launch_params['base_link2livox_frame']['xyz'],
+        launch_params['base_link2livox_frame']['rpy'])])
     ################################# robot_description parameters end ################################
 
     ########################## linefit_ground_segementation parameters start ##########################
-    # 参数已回归 linefit_ground_segmentation_ros 包自身 config/（R1）
-    segmentation_params = os.path.join(get_package_share_directory('linefit_ground_segmentation_ros'), 'config', 'segmentation_sim.yaml')
+    # 参数已回归 linefit_ground_segmentation_ros 包自身 config/（R1）。
+    # ★ 2026-10-07：按 robot 槽位选文件（默认模型那份**一个字都没改**）：
+    #   · 默认模型 → segmentation_sim.yaml（sensor_height 0.226 = 默认模型实测）
+    #   · hzmirm   → segmentation_sim_hzmirm.yaml（sensor_height = 该模型雷达离地**实测值**，
+    #                且 gravity_aligned_frame="base_link"）。该模型雷达比默认模型高 ~0.57 m，
+    #                照抄 0.226 会让地面线整体偏 0.57 m ⇒ 地面分割近乎全错；
+    #                判据/实测见 docs/robot_models.md §3/§5。
+    segmentation_params = _RobotSlotFile(
+        'linefit_ground_segmentation_ros',
+        ('config', 'segmentation_sim.yaml'),
+        ('config', 'segmentation_sim_hzmirm.yaml'),
+        error_hint='该文件属于本次新增的 robot:=hzmirm 槽位：'
+                   'colcon build --symlink-install --packages-select '
+                   'linefit_ground_segmentation_ros 后重试；'
+                   '或去掉 robot:=hzmirm 回到默认模型')
     ########################## linefit_ground_segementation parameters end ############################
 
     ########################## 可通行性判据（坡度/台阶）parameters start #############################
@@ -473,6 +608,35 @@ def generate_launch_description():
         'world',
         default_value='RMUL2026',
         description='Select world (map file, pcd file, world file share the same name prefix as the this parameter)')
+
+    # ★ 2026-10-07：机器人模型槽位（**opt-in**，默认值 = 本仓现行模型 ⇒ 现有行为不变）。
+    declare_robot_cmd = DeclareLaunchArgument(
+        'robot',
+        default_value='',
+        description="机器人模型槽位（留空 = 本仓现行默认模型，行为与以前完全一致）："
+                    "'' → urdf/sentry_robot_sim.xacro（雷达 base_link+0.12,0,0.175，离地 0.226）；"
+                    "hzmirm → urdf/sentry_robot_hzmirm_sim.xacro（用户给的哨兵 URDF："
+                    "雷达在云台头上 base_link+0,0,0.8、底盘 0.6x0.6x0.3、轮距 0.50/轴距 0.44；"
+                    "运动学逐字保留，我们补 inertial/IMU/MID360/Livox 插件/底盘里程计）。"
+                    "选 hzmirm 时 launch 会同时切到该模型的 linefit 参数文件并调整 lio_tf_adapter 杆臂。"
+                    "范围/数值对照见 docs/robot_models.md",
+        choices=['', 'hzmirm'])
+
+    # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。
+    # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
+    # head_to_lidar 的 rpy 是 0，即**没有**斜装）。pitch≠0 会破坏"雷达重力对齐"，
+    # 这时 linefit 必须用 gravity_aligned_frame（该槽位的 YAML 已经配好 base_link）。
+    declare_turret_yaw_deg_cmd = DeclareLaunchArgument(
+        'turret_yaw_deg',
+        default_value='0',
+        description='仅 robot:=hzmirm：base_to_turret 的静态偏航角（度）。绕 z 转 ⇒ '
+                    '雷达 z 轴仍朝上，**不影响** linefit/p2l 的重力对齐假设（实测见 docs/robot_models.md §3.3）')
+    declare_turret_pitch_deg_cmd = DeclareLaunchArgument(
+        'turret_pitch_deg',
+        default_value='0',
+        description='仅 robot:=hzmirm：turret_to_head 的静态俯仰角（度）。会**破坏**雷达重力对齐 ⇒ '
+                    'linefit 必须配 gravity_aligned_frame=base_link（本槽位 YAML 已配）+ p2l 的高度带'
+                    '在传感器系里被"拧斜"（实测劣化见 docs/robot_models.md §3.3）')
 
     declare_mode_cmd = DeclareLaunchArgument(
         'mode',
@@ -1079,13 +1243,38 @@ def generate_launch_description():
         condition = IfCondition(PythonExpression([
             "'", LaunchConfiguration('lio'), "' != 'none' and '",
             LaunchConfiguration('lio'), "' != 'cartographer' and '",
-            LaunchConfiguration('lio'), "' != 'small_point_lio'"])),
+            LaunchConfiguration('lio'), "' != 'small_point_lio' and '",
+            LaunchConfiguration('robot'), "' != 'hzmirm'"])),
         package='lio_tf_adapter',
         executable='lio_tf_adapter_node',
         name='lio_tf_adapter',
         output='screen',
         parameters=[os.path.join(get_package_share_directory('lio_tf_adapter'), 'config', 'lio_tf_adapter.yaml'),
                     {'use_sim_time': use_sim_time}]
+    )
+
+    # ★ 2026-10-07：robot:=hzmirm 的 lio_tf_adapter —— **同一个包/可执行文件/节点名**，
+    #   唯一区别是杆臂补偿量（与上面那条 condition 互斥 ⇒ 永远只有一个在跑、同一时刻只有一个
+    #   odom→base_link 发布者；写法照抄本文件里 ground:=linefit / patchwork 的互斥两节点模式）。
+    #   为什么必须换：适配器的 xyz = T_body←base_link = -(imu_link 在 base_link 系下的位置)。
+    #     默认模型：imu_link = base_link+(0.12, 0, 0.125) ⇒ [-0.12, 0, -0.125]
+    #     hzmirm  ：imu_link = base_link+(0.00, 0, 0.750) ⇒ [ 0.00, 0, -0.750]
+    #   不换的后果：base_link 在 odom 里被抬到 z≈0.675（水平直行时 x/y/yaw 不受影响，
+    #   但俯仰/侧倾一动就按 0.675 m 的假杆臂放大成 x/y 误差，RViz 里车也悬空）。
+    lio_tf_adapter_hzmirm_node = Node(
+        condition = IfCondition(PythonExpression([
+            "'", LaunchConfiguration('lio'), "' != 'none' and '",
+            LaunchConfiguration('lio'), "' != 'cartographer' and '",
+            LaunchConfiguration('lio'), "' != 'small_point_lio' and '",
+            LaunchConfiguration('robot'), "' == 'hzmirm'"])),
+        package='lio_tf_adapter',
+        executable='lio_tf_adapter_node',
+        name='lio_tf_adapter',
+        output='screen',
+        parameters=[os.path.join(get_package_share_directory('lio_tf_adapter'), 'config', 'lio_tf_adapter.yaml'),
+                    {'use_sim_time': use_sim_time,
+                     'xyz': [0.0, 0.0, -0.75],   # hzmirm 的 imu_link 在 base_link+0,0,0.75
+                     'rpy': [0.0, 0.0, 0.0]}]
     )
 
     # 注（2026-09-22 更正，原文写反了）：`body` **并不在 URDF 里**（曾试图用 imu_link→body 固定关节
@@ -1456,6 +1645,24 @@ def generate_launch_description():
     ld.add_action(declare_nav_rviz_cmd)
     ld.add_action(declare_spin_speed_cmd)
     ld.add_action(declare_world_cmd)
+    # ★ 2026-10-07：robot 模型槽位（默认 ''）+ 只对它生效的两个云台角
+    ld.add_action(declare_robot_cmd)
+    ld.add_action(declare_turret_yaw_deg_cmd)
+    ld.add_action(declare_turret_pitch_deg_cmd)
+    # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
+    ld.add_action(LogInfo(
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == ''"])),
+        msg='[robot] 模型槽位 = 默认（urdf/sentry_robot_sim.xacro）'
+            '：雷达 base_link+0.12,0,0.175，linefit sensor_height=0.226（现行标定，未改）'))
+    ld.add_action(LogInfo(
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == 'hzmirm'"])),
+        msg=['[robot] 模型槽位 = hzmirm（urdf/sentry_robot_hzmirm_sim.xacro）：用户给的哨兵 URDF，'
+             '雷达在云台头上、离地 ~0.80 m（比默认模型高 0.57 m）⇒ '
+             '本次 linefit 用 segmentation_sim_hzmirm.yaml（sensor_height 重新标定 + '
+             'gravity_aligned_frame=base_link），lio_tf_adapter 杆臂改为 [0,0,-0.75]。'
+             '云台角 turret_yaw_deg=', LaunchConfiguration('turret_yaw_deg'),
+             ' turret_pitch_deg=', LaunchConfiguration('turret_pitch_deg'),
+             '（0 = 与上游 URDF 数值等价）。数值对照/回滚见 docs/robot_models.md']))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)
@@ -1498,7 +1705,9 @@ def generate_launch_description():
     # 定位链延后 4s、Nav2 延后 10s，避免 costmap/amcl 在 odom/map 尚未出现时激活失败
     ld.add_action(TimerAction(period=4.0, actions=[start_localization_group]))
     ld.add_action(bringup_fake_vel_transform_node)
+    # 两条互斥的适配器（默认模型 / robot:=hzmirm），同一时刻只有一个真的启动
     ld.add_action(lio_tf_adapter_node)
+    ld.add_action(lio_tf_adapter_hzmirm_node)
     # ★ 续建/从零的判定与横幅在 **t=0** 就执行（OpaqueFunction 是 Action，`--show-args` 不执行它）；
     #   slam_toolbox 节点本身仍由 OpaqueFunction 内部的 TimerAction 延后 4 s 起 ⇒ 时序与改造前一致。
     ld.add_action(start_mapping)

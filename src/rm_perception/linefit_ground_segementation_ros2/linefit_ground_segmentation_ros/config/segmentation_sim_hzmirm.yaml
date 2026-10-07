@@ -1,0 +1,67 @@
+ground_segmentation:
+  ros__parameters:
+    n_threads: 4                # number of threads to use.
+
+    r_min: 0.2                  # minimum point distance.
+    r_max: 50                   # maximum point distance.
+    n_bins: 120                 # number of radial bins.
+    n_segments: 360             # number of radial segments.
+
+    # ==========================================================================
+    # ★★ 2026-10-07 新增：robot:=hzmirm 槽位专用的地面分割参数
+    #    （默认模型仍然读同目录 segmentation_sim.yaml —— 那份**一个字都没改**）
+    #
+    # 这是 segmentation_sim.yaml 的逐键副本，**只改了两个键**（下面标 ★ 的两处），
+    # 原因是"换机器人模型 = 换雷达安装高度"，而这两个键都是**传感器几何量**：
+    #
+    #   · sensor_height  —— linefit 用它给每个径向 bin 的"地面线"定起点
+    #       （src/segment.cc:30 `double cur_ground_height = -sensor_height_;`），
+    #       语义 = **雷达在传感器系下的地面 z 的相反数**（= 雷达离地高度，要求雷达 z 轴朝上。
+    #       默认模型实测 0.226；hzmirm 模型的雷达装在云台头上，比默认模型高 ~0.57 m。
+    #       照抄 0.226 的后果：整条地面线被抬高 0.57 m ⇒ max_start_height(0.5) 之内的点
+    #       会被误当"地面附近"吞掉（详见 docs/robot_models.md §3.2 的实测对照）。
+    #
+    #   · gravity_aligned_frame —— 见文件末尾 ★ 段
+    #
+    # 每个平台各自标定，不通用（与 segmentation_sim.yaml 里那条 ⚠️ 同一条纪律）。
+    # ==========================================================================
+
+    # ★ 2026-10-07 实测值（方法同默认模型：/livox/lidar/pointcloud 在传感器系下的 z 直方图，
+    #   静置 20 帧取地面峰；见 docs/robot_models.md §2.3/§5.1）：
+    #     几何算 = base_link(z=0) + head_to_lidar 链 0.30+0.30+0.20 = 0.80 m
+    #     Gazebo 实测地面峰 = −0.800 m（底盘 box 与轮子最低点都在 z=0 ⇒ 不悬空不下陷）
+    sensor_height: 0.80         # hzmirm 模型：雷达离地（实测，非照抄）
+
+    # 其余键与 segmentation_sim.yaml **逐字相同**（含各个 ★ 历史注释的结论），
+    # 只有新模型实测后确实需要动的才动 —— 目前实测没有第二个需要动的键。
+    # ⚠️ 别再调更小：场地有坡道/高地，容差过小会把坡面点判成障碍（表现为车周围一圈"假障碍"）。
+    max_dist_to_line: 0.05      # maximum vertical distance of point to line to be considered ground.
+
+    min_slope: -0.4             # minimum slope of a ground line.
+    max_slope: 0.4              # maximum slope of a ground line.
+    max_fit_error: 0.05         # maximum error of a point during line fit.
+    long_threshold: 1.0         # distance between points after which they are considered far from each other.
+    max_long_height: 0.1        # maximum height change to previous point in long line.
+    max_start_height: 0.5       # maximum difference to estimated ground height to start a new line.
+    line_search_angle: 0.8      # how far to search in angular direction to find a line [rad].
+
+    # ★★ 2026-10-07：由 "" 改为 "base_link"。这是本槽位的**核心决策**（docs/robot_models.md §3）。
+    #   语义（上游 README + src/ground_segmentation_node.cc:114-136）：这是"z 轴与重力对齐"的帧，
+    #   指定后节点先把点云**只旋转、不平移**地变到这个帧的姿态，再做地面拟合
+    #   （平移被显式清零 ⇒ sensor_height 仍是"雷达离地"，语义不变）。
+    #   为什么这份要开：
+    #     · hzmirm 的上游 URDF 里两个云台关节都是 fixed ⇒ 雷达此刻**本来就是**重力对齐的，
+    #       填 base_link 的旋转是恒等变换 ⇒ 默认（turret_yaw_deg=0/turret_pitch_deg=0）结果不变；
+    #     · 但本槽位允许 turret_pitch_deg≠0（试"雷达斜放"假设）。一旦俯仰不为 0，
+    #       传感器系 z 就不再朝上，"" 会让 linefit 把"斜着的 z"当"高度"用 ⇒ 地面线全错；
+    #       填 base_link 后，即使雷达斜 10° 也能正常分割（实测对照见 docs/robot_models.md §3.3）。
+    #   ⚠️ 代价：每次回调多一次 TF 查询（base_link→livox_frame 是 robot_state_publisher 发的静态变换，
+    #      永远可用、开销可忽略）。默认模型**没有**开这个（它的那份 YAML 保持 gravity_aligned_frame: ""）。
+    gravity_aligned_frame: "base_link"
+
+    latch: false                # latch output topics or not
+    visualize: false            # visualize segmentation result - USE ONLY FOR DEBUGGING
+
+    input_topic: "/livox/lidar/pointcloud"
+    obstacle_output_topic: "segmentation/obstacle"
+    ground_output_topic: "segmentation/ground"

@@ -13,6 +13,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch.conditions import LaunchConfigurationEquals
 from launch.conditions import IfCondition
 from launch.actions.append_environment_variable import AppendEnvironmentVariable
+from launch.substitution import Substitution
 
 # Enum for world types
 class WorldType:
@@ -68,14 +69,43 @@ def get_world_config(world_type):
     }
     return world_configs.get(world_type, None)
 
+class _RobotSlotXacro(Substitution):
+    """robot:=<模型> 槽位 → 某个包的 urdf/ 下的 xacro 文件名（惰性，包也是惰性查的）。
+
+    ★ 2026-10-07 新增，与 rm_nav_bringup/launch/bringup_sim.launch.py 里的同类**语义一致**
+    （那边是本仓的正式入口；这里让"只起 Gazebo+模型、不起感知/LIO"的单独调试也能选模型）。
+    默认值（''）返回的文件与改造前**完全相同** ⇒ 默认行为一个字节都不变。
+    ⚠️ 本文件不含 linefit/p2l/LIO 节点 ⇒ 这里选 hzmirm **不会**自动切换感知标定与 LIO 杆臂，
+    完整链路请走 `ros2 launch rm_nav_bringup bringup_sim.launch.py robot:=hzmirm ...`；
+    云台角（turret_yaw_deg/turret_pitch_deg）也只有那边会传，这里取默认 0（= 与上游 URDF 等价）。
+    """
+
+    _SLOTS = {
+        '': ('hzmi_rm_simulation', 'simulation_waking_robot.xacro'),
+        'hzmirm': ('rm_nav_bringup', 'sentry_robot_hzmirm_sim.xacro'),
+    }
+
+    def perform(self, context):
+        slot = LaunchConfiguration('robot').perform(context).strip()
+        if slot not in self._SLOTS:
+            raise RuntimeError(
+                "[launch] robot:=%r 不是可用的机器人模型槽位：本文件只认 %s"
+                '（完整链路见 rm_nav_bringup/launch/bringup_sim.launch.py + docs/robot_models.md）'
+                % (slot, ' / '.join("robot:=%s" % (k or "''") for k in sorted(self._SLOTS))))
+        package, filename = self._SLOTS[slot]
+        return os.path.join(get_package_share_directory(package), 'urdf', filename)
+
+    def describe(self):
+        return '%s(slots=%s)' % (type(self).__name__, ','.join(sorted(self._SLOTS)))
+
+
 def generate_launch_description():
     # Get the launch directory
     bringup_dir = get_package_share_directory('hzmi_rm_simulation')
     pkg_gazebo_ros = get_package_share_directory('gazebo_ros')
 
-    # Specify xacro path
-    default_robot_description = Command(['xacro ', os.path.join(
-    get_package_share_directory('hzmi_rm_simulation'), 'urdf', 'simulation_waking_robot.xacro')])
+    # Specify xacro path（默认槽位 = 本文件原来的那份 xacro，命令字符串与改造前逐字节相同）
+    default_robot_description = Command(['xacro ', _RobotSlotXacro()])
 
     # Create the launch configuration variables
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -110,6 +140,20 @@ def generate_launch_description():
         'robot_description',
         default_value=default_robot_description,
         description='Robot description'
+    )
+
+    # ★ 2026-10-07：机器人模型槽位（**opt-in**；默认 '' = 本文件原来的模型 ⇒ 行为不变）。
+    #   完整链路（感知标定 + LIO 杆臂一起切）请用 rm_nav_bringup/launch/bringup_sim.launch.py。
+    declare_robot_cmd = DeclareLaunchArgument(
+        'robot',
+        default_value='',
+        description="机器人模型槽位：'' = simulation_waking_robot.xacro（本文件原来的模型，默认）；"
+                    'hzmirm = rm_nav_bringup/urdf/sentry_robot_hzmirm_sim.xacro'
+                    '（用户给的哨兵 URDF，雷达在云台头上、离地 ~0.8 m，底盘 0.6x0.6x0.3）。'
+                    '⚠️ 本文件不起感知/LIO ⇒ 选 hzmirm 不会自动切 linefit sensor_height 与 '
+                    'lio_tf_adapter 杆臂；要完整链路请用 bringup_sim.launch.py robot:=hzmirm。'
+                    '详见 docs/robot_models.md',
+        choices=['', 'hzmirm']
     )
 
     # Specify the actions
@@ -192,6 +236,7 @@ def generate_launch_description():
     ld.add_action(declare_world_cmd)
     ld.add_action(declare_rviz_config_file_cmd)
     ld.add_action(declare_robot_description_cmd)
+    ld.add_action(declare_robot_cmd)      # ★ 2026-10-07 模型槽位（默认 '' ⇒ 行为不变）
     ld.add_action(gazebo_client_launch)
     ld.add_action(start_joint_state_publisher_cmd)
     ld.add_action(start_robot_state_publisher_cmd)
