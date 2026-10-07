@@ -99,6 +99,15 @@ namespace gazebo
       ///   与 2026-10-07 起的行为**逐字节相同**）。只影响点云/CustomMsg 的坐标，**不影响射线方向**
       ///   （世界里的射线两档逐条相同 ⇒ 物理不变）。见 docs/tilted_lidar_fidelity.md §J。
       bool cloud_frame_sensor_{false};
+      /// ★★ 2026-10-09：**点坐标是否含射线起点**（SDF 的 `<range_from_origin>`；缺省 = **true**）。
+      ///   射线的起点在 `InitializeRays()` 里是 `minDist·axis + offset.Pos()`
+      ///   （`minDist` = `<range><min>` = 本仓 0.1 m；`offset.Pos()` = 传感器在父 link 里的位置），
+      ///   而 `range` 是**从射线起点**量的距离 ⇒ 命中点 = `range·axis + minDist·axis + offset.Pos()`。
+      ///   老代码只发 `range·axis` ⇒ 每个点沿自己的射线朝传感器方向内移 0.1 m、并且整朵云少一个平移
+      ///   （实测：robot11 的地面点 z 随距离单调变化 0.208→0.253，真值 0.2595）。
+      ///   显式写 `<range_from_origin>false</range_from_origin>` = 2026-10-09 之前的行为（逐字节）。
+      ///   见 docs/tilted_lidar_fidelity.md §K（含逐模型 A/B 与回退）。
+      bool range_from_origin_{true};
       physics::EntityPtr parentEntity;
       transport::PublisherPtr scanPub;
 

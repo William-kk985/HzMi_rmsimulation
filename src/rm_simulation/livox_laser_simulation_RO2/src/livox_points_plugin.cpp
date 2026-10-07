@@ -174,6 +174,23 @@ namespace gazebo
                             cloud_frame.c_str());
             }
         }
+        // ★★ 2026-10-09：**点 = range·axis 漏了射线起点**（共享代码修复 + 一个回退开关）。
+        //   缺省（元素不存在）= **修好的语义**：`point = range·axis + minDist·axis + offset.Pos()`；
+        //   显式写 `false` = 2026-10-09 之前的老行为（`point = range·axis`，逐字节）。
+        //   为什么默认改成"修好的"：老行为让**每一个点**沿自己的射线朝传感器方向内移 `minDist`
+        //   （本仓 `minDist` = 0.1 m）⇒ 地面不再是平面（近处抬高、远处压低，实测 r 0.25–0.35
+        //   → z −0.208、r 2–4 → −0.253，真值 −0.2595）、`sensor_height` 标定偏 0.8 mm~5 cm、
+        //   近场那圈"幽灵地面"还要靠下游掩膜兜。逐模型 A/B（默认模型 / robot11 的点数、地面
+        //   高度、分割、`/scan` 分带、代价图、契约）见 docs/tilted_lidar_fidelity.md §K。
+        range_from_origin_ = true;
+        if (sdfPtr->HasElement("range_from_origin"))
+        {
+            range_from_origin_ = sdfPtr->Get<bool>("range_from_origin");
+        }
+        RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
+                    "range_from_origin = %s ⇒ 点 = %s（缺省 = 修好的语义；写 false = 旧行为）",
+                    range_from_origin_ ? "true" : "false",
+                    range_from_origin_ ? "range·axis + minDist·axis + offset.Pos()" : "range·axis（旧行为）");
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "sample: %ld", samplesStep);
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "downsample: %ld", downSample);
         // 这行日志用于确认加载的是修好时间基的插件（旧库打的是墙钟偏移）
@@ -317,7 +334,20 @@ namespace gazebo
             auto axis = cloud_frame_sensor_
                                 ? (mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0))
                                 : (sensor_rot * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0));
-            auto point = range * axis;
+            // ★★ 2026-10-09（**共享代码改动**，见文件头/§K）：`range` 是**从射线起点**量的距离。
+            //   射线起点在 `InitializeRays()` 里是 `minDist·axis + offset.Pos()`：
+            //     · `minDist` = SDF `<range><min>`（本仓所有模型 = **0.1 m**）
+            //     · `offset.Pos()` = 传感器在父 link 里的位置（本仓 `livox_frame` = (0.00056, 0.1309, 0.1570)）
+            //   而命中点在父 link 系里是 `range·axis + offset.Pos()`。
+            //   ⇒ 老代码只发 `range·axis`（既漏了 `minDist·axis`、也漏了 `offset.Pos()`）
+            //     ⇒ 每个点沿自己的射线**朝传感器方向内移 0.1 m**、并且整朵云少了一个平移。
+            //   实测（robot11，独立于本行）：地面点 z 随距离单调变化 —— r 0.25–0.35 → −0.208、
+            //   r 2–4 → −0.253，而真值 −0.2595；正是"沿射线内移 0.1 m"应有的样子
+            //   （docs/robot_models.md §12.3.1 / 本插件 §K 的 A/B）。
+            //   ⚠️ 这是**共享代码**：所有模型都走这一行 ⇒ 逐模型 A/B 见 §K；
+            //      回退 = SDF `<range_from_origin>false</range_from_origin>`（老行为，逐字节）。
+            auto point = range_from_origin_ ? (range * axis + minDist * axis + sensor_offset.Pos())
+                                            : (range * axis);
 
             // 填充 CustomMsg 点云消息
             livox_ros_driver2::msg::CustomPoint p;
