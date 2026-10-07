@@ -29,7 +29,9 @@
 | **用户 `robot11` 的 12 个 STL 在哪 / 各自多少面 / 多大** | §9.1–§9.2（Phase 1）|
 | **`base_link.STL`（208 万面）能不能当碰撞 / 代价多少** | §9.3（实测 RTF 0.203、峰值内存 760 MB）|
 | **`robot11` 的足印/高度/轴距/雷达离地** | §9.4 |
-| 雷达 30° 到底是 roll 还是 pitch | §9.5（**仰角测不出来**，只有方位能区分）| 
+| 雷达 30° 到底是 roll 还是 pitch | §9.5（**仰角测不出来**，只有方位能区分）+ §10.5 实测 |
+| **怎么试 `robot:=robot11` / 它跑得怎么样** | §10.1（命令）+ §10.4（实测表）+ §10.8（结论）|
+| 它能不能当默认模型 | §10.8（**现在还不是**，三条实测理由）| 
 
 ---
 
@@ -664,3 +666,218 @@ SolidWorks CSV 写 `Joint Origin Roll = −0.523598775598293` = roll）。
 顺带一个重要结论：30° 下俯把雷达的**盲区**从"整片近场"缩到
 **半径 0.3444 m 的圆**（= 0.2595 / tan 37°）——这正是 hzmirm（0.80 m 高、不斜放、盲区 6.3 m，
 §3.2）缺的那件事。**这台车的雷达能看见近处地面。**
+
+---
+
+## 10. Phase 2：`robot:=robot11` 槽位接入 + 雷达 30° 的实测判定（2026-10-07）
+
+> 状态：**新增（opt-in）**。`robot` 留空 = 默认模型，**默认路径逐字节未改**（见 §10.1 的证据）。
+> 一句话：**接得进去、跑得起来（spawn ✅ / TF ✅ / 10 Hz ✅ / RTF 0.75），但"看得见"这条不成立** ——
+> 这台车的雷达装在底盘**顶板的凹槽里**（雷达原点 z=0.157 < 底盘顶面 0.213），
+> 实测 **75.5% 的点是"打到自己"的近距回波（r<0.12 m）**、`/segmentation/ground` 只剩 **529 点/帧**
+> （默认模型 2626）、**LIO 连 `/odom` 都没发出来**。**不建议**拿它当默认模型（理由与数字见 §10.4–§10.7）。
+
+### 10.1 槽位怎么用 / 加了哪些文件
+
+```bash
+# ① 构建（install/ 是逐文件符号链接；新 xacro 不 build 看不到）
+colcon build --symlink-install --packages-select robot11 rm_nav_bringup hzmi_rm_simulation
+
+# ② 试（无头建图；与默认模型逐项对照）
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  world:=RMUL2026 mode:=mapping lio:=small_point_lio robot:=robot11 \
+  map_autocontinue:=False nav_rviz:=False lio_rviz:=False
+# ③ 换"30° 绕哪个轴"（默认 roll = SolidWorks CSV；pitch = URDF 原文）
+#   ... robot:=robot11 livox_tilt_axis:=pitch ...
+# ④ 只起 Gazebo + 模型
+ros2 launch hzmi_rm_simulation rm_simulation.launch.py robot:=robot11 world:=RMUC2026
+# ⑤ 一条命令量齐（隔离无头跑 + 探针 + 契约检查）→ .tmp_robotslot/<tag>/
+tools/scripts/regress/run_robot_model_probe.sh r11 --duration 20 --drive-seconds 10 \
+  --dump-cloud .tmp_robotslot/r11/frames --dump-scan .tmp_robotslot/r11/scans \
+  -- world:=RMUL2026 mode:=mapping lio:=small_point_lio robot:=robot11 livox_tilt_axis:=roll \
+     map_autocontinue:=False
+```
+
+| 文件 | 是什么 |
+|---|---|
+| `src/rm_simulation/robot11_description/`（包名 **`robot11`**）| 12 个原始 STL + 12 个抽稀件 + 4 份量测产物（Phase 1，§9）|
+| `src/rm_nav_bringup/urdf/upstream/robot11.urdf` | 上游 URDF **逐字节副本**（只读、不参与运行；sha256 `e3e322ac…a64fc`）|
+| `src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro` | **生成物**（别手改）：上游运动学/inertial/visual 逐字 + 我们替换的 collision + 补的 IMU/雷达/底盘 |
+| `tools/scripts/regress/robot11_make_sim_xacro.py` | 上者的**生成器**（provenance 是构造性的：可逐字节重算）|
+| `tools/scripts/regress/robot11_geometry.py` | 零位 FK + 地面/足印/雷达倾角候选（§9.4/§9.5）|
+| `tools/scripts/regress/robot11_gz_collision_bench.py` | Gazebo 碰撞代价实测（§9.3）|
+| `bringup_sim.launch.py` | `robot` 的 `choices` 加 `'robot11'`；新增 `livox_tilt_axis`；新增互斥的 `lio_tf_adapter_robot11_node` |
+| `hzmi_rm_simulation/launch/rm_simulation.launch.py` | `robot` 的 `choices` 加 `'robot11'`（只起 Gazebo）|
+
+**"默认路径没变"的证据**（可复现，`_RobotXacroCommand` 的单元级比对，见 §10.7 工具）：
+`robot` 留空时拼出的命令**仍是** `xacro …/sentry_robot_sim.xacro xyz:=… rpy:=…`（逐字符相同）；
+`robot:=hzmirm` 也一字未变（仍追加两个云台角）。linefit / p2l / nav2 的**任何默认文件都没动**。
+
+### 10.2 这个槽位里，哪些是用户的、哪些是我们补的/换的
+
+| 元素 | 来源 | 说明 |
+|---|---|---|
+| 12 个 link / 12 个 joint（名字/类型/父子/xyz/rpy/axis）| **上游原样** | 由生成器逐字抄；`j2..j9` 保持 `continuous`（4 个转向 + 4 个轮），`j10/j11` 是云台（yaw→pitch，带发射机构）|
+| 12 条 `<inertial>`（质量/惯量/质心）| **上游原样** | 这份 URDF **自带惯性**（与 hzmirm 那份不同）⇒ 不需要我们补；合计 **9.5521 kg** |
+| 12 个 `<visual>`（`package://robot11/meshes/*.STL`）| **上游原样** | **原始 mesh，视觉零损失** |
+| `<collision>` ×12 | **我们换掉** | 上游 12 个全是 mesh（`body` 208 万面）。换成：`body` = 4 个 DP box；`l2..l5/l10/l11` = 各自 mesh 包围盒的 box；`l6..l9` = cylinder(r=0.058, l=0.045)；**`livox_frame` 与 `imu_link` 故意不给碰撞**（理由见 §10.5）|
+| `body_to_livox` 的 `rpy` | **上游原样 + 参数化** | 默认 = CSV 的 `-0.523598775598293 0 0`（roll）；`livox_tilt_axis:=pitch` 换成 `0 -0.523598775598293 0`（URDF 原文）|
+| `imu_link` + `imu_joint`（fixed，挂 `livox_frame` 下方 0.05 m，**跟着雷达斜 30°**）| **我们加的** | 见 §10.3 的三条理由 |
+| MID-360 射线传感器（`type="ray"`，挂在**上游自己的** `livox_frame` 上，sensor 名 = `livox_frame` ⇒ 点云 `frame_id` = `livox_frame`）| **我们加的** | **没有**用 `ros2_livox_simulation` 的 `mid360` 宏：宏会 new 一个同名 link + 关节，与上游的 `livox_frame` 冲突 ⇒ 把宏里那段 `<sensor type="ray">` 逐字抄过来、只改 sensor 名。参数与宏一致：100×360 / 10 Hz / 0.1–200 m / σ=2 mm / 垂直 −7.22°…+55.22° |
+| `libgazebo_ros_planar_move.so` 底盘插件 | **我们加的**（与默认模型同款）| `cmd_vel→/cmd_vel_chassis`、`odom→/odom_ground_truth`、`publish_odom_tf=false` ⇒ 契约不变 |
+| `gazebo_ros_imu_sensor`（100 Hz，`/livox/imu`，`frame_name=imu_link`）| **我们加的** | 与默认模型同款 |
+| 13 条 `<gazebo><material>` | **我们加的** | 纯观感 |
+| `<xacro:arg name="xyz"/"rpy">` | **我们加的**（声明但不用）| launch 会无条件传平台外参；本模型的雷达位姿由上游关节链唯一决定 |
+
+### 10.3 IMU 为什么"跟着雷达一起斜"，而不是"挂在底盘上保持水平"
+
+三条理由（这是本槽位最容易做错、也最容易把里程计搞歪的一处）：
+
+1. **物理**：MID-360 的 IMU 与雷达本来就在**同一个壳**里，跟着雷达斜才是事实；
+2. **改动面**：本栈三份 LIO 配置（`small_point_lio / FAST_LIO / point_lio`）的外参都是
+   `extrinsic_T=[0,0,0.05]`（雷达在 IMU 系下、**无相对旋转**）。照抄"IMU 在雷达下方 0.05 m 且不转"
+   就**一个字节都不用改**；若改挂到 `body` 上保持水平，就必须给三份 LIO 配置补一条 30° 的
+   `extrinsic_R`（更大的改动面、且要同时改三处才自洽）；
+3. **后果可控**：IMU 的 z 轴相对 `base_link` 斜 30° ⇒ 由 `lio_tf_adapter` 的 **`rpy`** 精确补偿
+   （该节点本来就支持 rpy）。补偿量**不是手抄的**，是 launch 里的 `_LioAdapterRobot11` 从
+   URDF 几何算出来的（`T_imu_link←base_link`，随 `livox_tilt_axis` 变）：
+
+   | 候选 | `xyz`（T_imu←base_link）| `rpy` |
+   |---|---|---|
+   | roll | `[-0.000561701, -0.034862345, -0.151448296]` | `[0.523598776, 0, 0]` |
+   | pitch | `[-0.079000533, -0.130915824, -0.085709533]` | `[0, 0.523598776, 0]` |
+
+   两种候选下 IMU 离地都是 **0.216226 m**（= 0.2595 − 0.05·cos30°，由几何唯一决定）。
+
+### 10.4 无头 A/B 实测（`mode:=mapping`、`lio:=small_point_lio`、RMUL2026、隔离无头跑）
+
+口径：默认模型那轮是**静止 12 s**（`--drive-seconds 0`）；robot11 两轮是**静止 20 s + 直线 10 s**
+（0.2 m/s），所以"位移"两列不可直接比，其余静止量可比。原始数据：`.tmp_robotslot/{r11_default,r11_roll,r11_pitch}/probe.json`。
+
+| 指标 | 默认模型（对照） | `robot:=robot11` roll | `robot:=robot11` pitch |
+|---|---|---|---|
+| spawn | ✅ | ✅（同样出现那条"实体已入队但服务超时"的**瞬时竞态**，随后模型正常出现）| ✅ |
+| TF 帧（实见） | 9 | **13**：`body→{l2,l3,l4,l5,l10,livox_frame}`、`l2→l6`/`l3→l7`/`l4→l8`/`l5→l9`、`l10→l11`、`livox_frame→imu_link` | 同左 |
+| RTF | 0.804 | 0.747 | 0.734 |
+| `/livox/lidar/pointcloud` | 10.0 Hz | 10.0 Hz | 10.0 Hz |
+| `/livox/imu` | 100.0 Hz | 100.0 Hz | 100.0 Hz |
+| `/scan` | 10.0 Hz | 10.0 Hz | 10.0 Hz |
+| **点/帧（中位）** | **6373** | **19717** | **19049** |
+| **`/segmentation/ground` 点/帧** | **2626** | **529** | **570** |
+| `/scan` 有效波束（中位） | 1102 | 1108 | 1032 |
+| `/scan` inf 比 | ~0.20 | 0.242 | 0.294 |
+| **`/scan` 最近回波** | 0.755 m | **0.05 m** | **0.05 m** |
+| **< 1 m 的波束（累计）** | —（未统计）| **346950** | **265675** |
+| 1–2 m / 2–4 m / 4–7 m / >7 m | — | 8136 / 8201 / **0** / **0** | 17384 / 12958 / 20248 / **0** |
+| 点云 `z∈[−0.02,0.03]` 的占比 | — | 极高（`z_hist` 前 3 名都是 0.00–0.02）| 同左 |
+| **LIO `/odom`** | ✅ 有数据 | ❌ **有发布者（publishers=1）但探针窗口内一条消息都没有** | ❌ 同左 |
+| 真值位移（10 s 直线）| 0.002 m（没行驶）| 0.536 m | 0.541 m |
+| 车体最大俯仰/侧倾 | 0.02° | **0.11°** | 0.11° |
+| 契约（`/cmd_vel_chassis`、`/odom`、`/livox/imu` 发布者）| 各 1 | 各 1 | 各 1 |
+
+**"点头"没了**：hzmirm 槽位实测直线行驶时车体俯仰 **6.45°**（因为它的模型只有底盘 box 有碰撞、
+轮子没有碰撞 ⇒ 平底盒子在滑）。robot11 **四个轮子是真 cylinder 碰撞、底盘离地 5.46 cm**
+⇒ 实测最大俯仰 **0.11°**。这是本模型**相对 hzmirm 明确更好**的一条。
+
+### 10.5 雷达 30° 的实测判定：**轴看得出来，但"哪个对"文件说了算**
+
+**(1) 先说一条能省掉一半测量的几何事实（§9.5 已推、这里实测复核）**
+MID-360 的方位是 **360°** ⇒ "绕 x 转 30°"与"绕 y 转 30°"给出的**射线方向集合完全相同**
+（只差一个绕 z 的旋转）⇒ **世界仰角谱 / 地面环半径 / 盲区大小都区分不了它们**。实测：
+
+| 分位数 | roll | pitch |
+|---|---|---|
+| p1 | −33.03° | −32.89° |
+| p5 | −27.25° | −27.66° |
+| p25 | −9.74° | −10.23° |
+| min | **−37.20°** | −34.48° |
+
+（p50 以上开始分叉，是因为两个候选把**同一台车**的**不同方位**采样进了视场，不是倾斜本身变了。）
+两者降下界的**理论值都是 −37.22°**（= 本仓 mid360 宏的 −7.22° 再下俯 30°）⇒ 都**朝下**，
+地面可见环半径都是 **0.3416 m**（= 0.2595/tan 37.22°）。
+
+**(2) 唯一能区分的判据 = "最朝下的那一束指向 body 的哪个方位"，据此实测（离线分析 dump 的点云帧）：**
+
+| 候选 | 世界仰角 < −34° 的回波方位峰 | 与几何预言 |
+|---|---|---|
+| **roll**（`rpy=-0.5236 0 0`）| **75° 与 105°**（中心 **+90° = +y**）| ✅ 完全一致（roll→最朝下为 ±y）|
+| **pitch**（`rpy=0 -0.5236 0`）| **165° 与 195°**（中心 **180° = −x**）| ✅ 完全一致（pitch→最朝下为 ±x）|
+
+复现：`python3 -c` 读 `.tmp_robotslot/r11_{roll,pitch}/frames/*.csv`（传感器系 x,y,z），
+按候选旋转到 body 系后统计"仰角 < −34° 的点"的方位直方图。
+
+**(3) 结论（诚实版）**：
+* **仿真不能替你决定哪个是"真的"** —— 你写 roll 它就渲染 roll，写 pitch 就渲染 pitch，
+  两者在"看得见多少地面 / 盲区多大 / `sensor_height` 该填多少"上**完全等价**；
+* 所以**默认取 `roll`**：它来自 **SolidWorks 导出器的 CSV**（机器生成、`-0.523598775598293` 精确到 15 位），
+  而 `rpy="0 -0.5236 0"` 是**手打的一行**（只有 5 位有效数字）⇒ 论"字面真相"CSV 更可信；
+* **要真正定死，只能看实物/装配图**：雷达是往**左/右侧**歪（roll）还是往**前/后**歪（pitch）。
+  这一条列进 §10.7 未验证清单。
+
+**(4) 一个必须说清的坑（我们自己的 bug，已修，但结论受影响）**：
+第一版给 `livox_frame` 和 `imu_link` 都加了碰撞体。**两者都正好在雷达原点上/正下方** ⇒
+每一条朝下的射线先打到自己：实测 **48% 的点 r<0.05 m**、`/scan` 最近回波恒为 **0.05 m**、
+点云基本全是自击。**已改成两者都不给碰撞**（默认模型与 hzmirm 槽位的雷达 link 同样没有碰撞）。
+
+### 10.6 这台车真正的问题：**雷达装在底盘凹槽里**（不是倾斜的问题）
+
+修掉上面那两个自击之后，**仍然有 75.5%（roll）/78.1%（pitch）的点在 r<0.12 m**。逐点归因（把点云
+变换回 body 系再与 4 个 box 比对）：**80% 的近点落在第 4 个 box（body 上塔 z∈[0.142,0.213]）的面/内部**。
+原因很直接：
+
+* 雷达原点 **z = 0.157 m**，而**底盘顶面 z = 0.213 m** ⇒ **雷达在顶板下面 5.6 cm 的凹槽里**；
+* 同时直接量 `base_link.STL`：雷达轴 0.06 m 内、z∈[0.09,0.15] 有 **14086 个顶点**（最近 **1.8 mm**），
+  z∈[0.16,0.18] 也有顶点落在雷达自身 6 cm 的体积里 ⇒ **上游 mesh 本身就在雷达位置有结构**（安装座/凹槽壁）；
+* 把 `body` 的碰撞换成**抽稀 mesh（表面）**理论上能让射线穿过开口。试了：
+  **spawn 反而干净成功**（`SpawnEntity: Successfully spawned entity [robot]`，连那条瞬时竞态都没有），
+  **但在 RMUL2026 里 100 s 内一条传感器数据都没出来**（`gzserver` 没死、插件都加载了）
+  ⇒ 这条路**未验**（列进 §10.7），默认仍是 4 个 box。
+
+**结论**：以现有上游数据，这台车的雷达**看不出去**——`/segmentation/ground` 只剩 529 点/帧、
+`/scan` 的近场几乎全是自击、4 m 以外一个波束都没有（roll），**LIO 也因此初始化不出来（无 `/odom`）**。
+
+### 10.7 换成 `robot:=robot11` 时**需要跟着改**的配置键（默认值一个都没改）
+
+| # | 文件 → 键 | 现值（默认模型标定）| robot11 需要的值 | 现状 | 不改会怎样（实测）|
+|---|---|---|---|---|---|
+| 1 | `linefit_ground_segmentation_ros/config/segmentation_sim.yaml` → `sensor_height` | `0.226` | **`0.2595`** | ❌ 未改（该目录属别的任务，**没动**）| 差 3.4 cm，影响小；**不是**主要问题 |
+| 2 | 同上 → `gravity_aligned_frame` | `""` | **`"base_link"`** | ❌ 未改 | 雷达斜 30° ⇒ 传感器系里的"地面"是**倾斜 30° 的斜面**，linefit 的极坐标地面线模型直接失效 —— **这才是 `ground` 从 2626 掉到 529 的主因之一** |
+| 3 | `rm_navigation/params/nav2_params_sim_base.yaml` → `robot_radius`（局部/全局各一处）| `0.22` | **0.30（内切）/ 0.3565（外接）**；连带 `inflation_radius` | ❌ 未改（`params` 目录禁改）| 车体 0.6×0.6 比 0.22 的圈大得多 ⇒ 规划器把"贴着墙"当可行 |
+| 4 | `pointcloud_to_laserscan/config/laserscan_params.yaml` → `min_height/max_height` | `-1.0 / 1.0`（传感器系）| 数值可不变，但**含义变了**：30° 倾斜把"高度带"拧斜（同 hzmirm §4 第 9 项）| ❌ 未改（`rm_perception` 禁改）| 近场自击点会进入 `/scan`（实测 `<1 m` 波束累计 346950）|
+| 5 | `rm_nav_bringup/config/traversability_criteria.yaml` → `speed_limit_lookahead_m` | `3.0` | 视雷达实际可视距离（本模型几乎没有 4 m 以外的地面点）| ❌ 未改 | 前瞻限速无意义（本来就取不到远处地面）|
+| 6 | `lio_tf_adapter` 的 `xyz`/`rpy` | `[-0.12,0,-0.125]` / `[0,0,0]` | **本槽位已按模型切**（含 30° 旋转补偿，见 §10.3 表）| ✅ **已切**（`robot:=robot11` 分支）| 不切 ⇒ `odom→base_link` 会带 30° 静态倾斜 |
+| 7 | 三份 LIO 配置 → `extrinsic_T` / `extrinsic_R` | `[0,0,0.05]` / 无 | **不用改**（我们把 IMU 放在雷达下方 0.05 m 且不转，刻意保持这条几何）| — | 无 |
+| 8 | `fake_vel_transform` → `spin_speed` | `5.0` | 建议 `0.0`（同 hzmirm，本模型云台 `j10/j11` 我们不加控制器）| ❌ 未改 | nav 看到的 `base_link_fake` 会凭空转，而雷达没转 |
+
+**但请注意顺序**：在 §10.6 的"雷达看不出去"解决之前，**改第 1/2/4 项都救不了** ——
+先把雷达从凹槽里"放出来"（要么用户确认雷达的真实安装高度/开口，要么用能穿过开口的碰撞表示）。
+
+### 10.8 结论、回滚、未验证
+
+**结论：`robot:=robot11` 是一个能跑通链路的 opt-in 槽位，但"当默认模型"这个问题的答案是 ❌（现在还不是）。**
+支持它的：真 mesh 视觉、真 inertial（质量/惯量不是你拍的）、四轮真碰撞 ⇒ **点头消失（0.11°）**、
+足印比 hzmirm 小（内切 0.30 / 外接 0.3565）、雷达离地 0.2595 m 与现行默认模型（0.226）同量级。
+挡住它的：**雷达在凹槽里 ⇒ 75.5% 的点是自击、地面分割塌到 529 点/帧、LIO 发不出 `/odom`**，
+以及 30° 倾斜轴的**上游自相矛盾**还没被实物定死。
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| 只退回默认模型 | **什么都不用改**：去掉 `robot:=robot11` 即可（默认路径从未改动）|
+| 退掉整套 robot11 槽位 | `git revert <本主题 commit>`；删掉 `robot11_description/`、`urdf/upstream/robot11.urdf`、`sentry_robot_robot11_sim.xacro`、`robot11_*.py` 后，`robot:=robot11` 会给一条可操作的错 |
+| 只换倾斜轴 | 加 `livox_tilt_axis:=pitch`（或 `roll`）|
+| 只换 `body` 的碰撞表示 | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --body-collision mesh`（重新生成 xacro；**这条路未验**，见 §10.6）|
+| 重新生成 xacro | `python3 tools/scripts/regress/robot11_make_sim_xacro.py`（上游 URDF 改了就重跑）|
+
+**未验证清单（本槽位新增）**：
+1. **`livox_tilt_axis` 的最终真值**：仿真只能说"roll 的最朝下方位是 ±y、pitch 是 ±x"，**不能**判定哪个是实物
+   （§10.5）。需要用户看实物/装配图，或让 SolidWorks 重新导出一次 CSV 核对；
+2. **`body` 用抽稀 mesh 当碰撞**这条路没跑通（spawn 成功但 100 s 内无传感器数据）⇒ 上表中"地面能不能看见"
+   的结论**只对 4-box 版本成立**；
+3. **`/odom` 没出来**的原因没查到底（有发布者、无消息）；未排除是 LIO 配置/时序问题而非点云质量问题；
+4. **`mode:=slam_nav` / `mode:=nav`** 没跑（连 `/odom` 都没有，跑了也说明不了什么）；
+5. **`localization:=*` 各槽、`ground:=patchwork`、其它 LIO 槽**与 robot11 的配合未验；
+6. **抽稀碰撞件（`meshes/generated/*.stl`）在小 link 上的可用性**：实测会让 Gazebo 插入模型时卡住/段错误，
+   所以本槽位对 `l2..l5/l10/l11` 用的是 box ⇒ **那 11 个抽稀件目前只有 `base_link` 那个是验证过的**；
+7. **`<1 m` 波束里自击与真障碍的占比**没分离（只有总数）；
+8. 大文件（99.10 MiB 的 `base_link.STL`）**已入库并 push 成功**（GitHub 只给了 >50 MiB 的 warning），
+   但**没有**用 LFS ⇒ 以后每次 clone 都要拖这 104 MB。

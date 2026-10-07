@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- robot11 / sentry —— 由用户 2026-10-07 在会话中贴出的 URDF 原文重建（数值逐项照抄；格式压缩为一行一元素）。
+     来源二：同一机器人 SolidWorks URDF Exporter 的 link/joint 表（CSV）。
+     ⚠️ 已知矛盾（Phase 2 用点云实测定死，勿猜）：
+        body_to_livox 的 30° 旋转轴：URDF 原文写 rpy="0 -0.5236 0"（绕 y / pitch），
+        CSV 写 Joint Origin Roll=-0.523598775598293（绕 x / roll）。本文件暂按 CSV 的 roll 写入。
+     另：CSV 里 link/joint 名为 base_link + j2..j12，URDF 原文为 body + l2..l11 + livox_frame + body_to_livox；本文件按 URDF 原文。
+     mesh 路径 package://robot11/meshes/*.STL（12 个：base_link.STL, l2..l12.STL，其中 l12 = MID-360 雷达）。 -->
+<robot name="sentry">
+
+  <link name="body">
+    <inertial><origin xyz="0.00436933539925447 0.0121729882941287 0.0624624952683773" rpy="0 0 0"/><mass value="6.98390841611154"/><inertia ixx="0.012450840516849" ixy="8.34803982990868E-06" ixz="2.47736216819592E-06" iyy="0.0180415546421503" iyz="6.50018190294825E-06" izz="0.0214898895578463"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/base_link.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/base_link.STL"/></geometry></collision>
+  </link>
+
+  <link name="l2">
+    <inertial><origin xyz="-0.0759213146953557 -0.00537350706190212 0.000690815947393508" rpy="0 0 0"/><mass value="0.232272967518165"/><inertia ixx="9.38551187090929E-05" ixy="-3.89659064263769E-08" ixz="-4.1188007722221E-07" iyy="0.000108022676479579" iyz="6.52751789180565E-07" izz="9.89453938308141E-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l2.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l2.STL"/></geometry></collision>
+  </link>
+  <joint name="j2" type="continuous"><origin xyz="-0.182134559672904 -0.182134559672906 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/><parent link="body"/><child link="l2"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l6">
+    <inertial><origin xyz="0.0110913531432632 1.7910558091222E-06 3.54892059312162E-06" rpy="0 0 0"/><mass value="0.14656841077267"/><inertia ixx="0.00027895263582235" ixy="4.01635255414384E-11" ixz="-1.35108698277116E-10" iyy="0.000144586311352007" iyz="4.08768977179887E-08" izz="0.000144975173531681"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l6.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l6.STL"/></geometry></collision>
+  </link>
+  <joint name="j6" type="continuous"><origin xyz="-0.101852036480475 -0.00967840298231593 -0.000646938971864019" rpy="-3.14159265358979 -0.0671344193635971 1.5707963267949"/><parent link="l2"/><child link="l6"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l3">
+    <inertial><origin xyz="-0.0762602424717105 -0.000710888687789513 -0.0056941695447669" rpy="0 0 0"/><mass value="0.230157374090603"/><inertia ixx="9.38312233563086E-05" ixy="4.11880077230659E-07" ixz="-3.89659072508048E-08" iyy="9.87577896218705E-05" iyz="-6.52751787883143E-07" izz="0.00010783561712015"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l3.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l3.STL"/></geometry></collision>
+  </link>
+  <joint name="j3" type="continuous"><origin xyz="0.182134559672905 -0.182134559672905 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/><parent link="body"/><child link="l3"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l7">
+    <inertial><origin xyz="0.0105187945781376 1.8021279142022E-06 3.55954245623291E-06" rpy="0 0 0"/><mass value="0.153493109299713"/><inertia ixx="0.000283619688479151" ixy="4.01635256040596E-11" ixz="-1.35108698263563E-10" iyy="0.000146944991593877" iyz="4.0876897717852E-08" izz="0.00014733385377355"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l7.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l7.STL"/></geometry></collision>
+  </link>
+  <joint name="j7" type="continuous"><origin xyz="-0.101852036480475 0.000646938971863992 -0.00967840298231593" rpy="0 -1.5036619074313 -1.57079632679489"/><parent link="l3"/><child link="l7"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l4">
+    <inertial><origin xyz="-0.0776627136340258 0.00398958109592307 -0.000928689858610388" rpy="0 0 0"/><mass value="0.246338313228366"/><inertia ixx="9.77808326150043E-05" ixy="3.89659073115738E-08" ixz="4.11880076872962E-07" iyy="0.000115206733276597" iyz="8.71786533446865E-07" izz="0.000102885906115304"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l4.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l4.STL"/></geometry></collision>
+  </link>
+  <joint name="j4" type="continuous"><origin xyz="0.182134559672906 0.182134559672903 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/><parent link="body"/><child link="l4"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l8">
+    <inertial><origin xyz="0.0105187945792852 1.80212880822317E-06 3.55953718383928E-06" rpy="0 0 0"/><mass value="0.153493109323926"/><inertia ixx="0.000283619688507033" ixy="4.01627190513287E-11" ixz="-1.35103941451045E-10" iyy="0.000146944991623376" iyz="4.08769024931138E-08" izz="0.000147333853773518"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l8.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l8.STL"/></geometry></collision>
+  </link>
+  <joint name="j8" type="continuous"><origin xyz="-0.101852036480475 0.00967840298231593 0.000646938971863908" rpy="0 0.0671344193635832 -1.5707963267949"/><parent link="l4"/><child link="l8"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l5">
+    <inertial><origin xyz="-0.0772527853329836 0.000915076051536207 0.00449377212435478" rpy="0 0 0"/><mass value="0.242232927657393"/><inertia ixx="9.72362930691966E-05" ixy="-4.11880085194013E-07" ixz="3.89659437807715E-08" iyy="0.000102339058097997" iyz="-8.3745233829181E-07" izz="0.000114151537565015"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l5.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l5.STL"/></geometry></collision>
+  </link>
+  <joint name="j5" type="continuous"><origin xyz="-0.182134559672904 0.182134559672906 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/><parent link="body"/><child link="l5"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l9">
+    <inertial><origin xyz="0.0105187945792853 1.80212880823705E-06 3.55953718389479E-06" rpy="0 0 0"/><mass value="0.153493109323925"/><inertia ixx="0.000283619688507032" ixy="4.01627190942481E-11" ixz="-1.35103941448504E-10" iyy="0.000146944991623376" iyz="4.08769024930526E-08" izz="0.000147333853773518"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l9.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l9.STL"/></geometry></collision>
+  </link>
+  <joint name="j9" type="continuous"><origin xyz="-0.101852036480475 -0.000646938971863936 0.00967840298231593" rpy="3.14159265358978 1.50366190743131 1.57079632679489"/><parent link="l5"/><child link="l9"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l10">
+    <inertial><origin xyz="-0.0587830596021165 0.0228978288796906 -0.000459080994328639" rpy="0 0 0"/><mass value="0.141144182015615"/><inertia ixx="3.8779406325307E-05" ixy="1.66227406397812E-06" ixz="-3.65320210838414E-06" iyy="0.000141699871508992" iyz="-1.82170051595229E-11" izz="0.000141520295602471"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l10.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l10.STL"/></geometry></collision>
+  </link>
+  <joint name="j10" type="continuous"><origin xyz="0 0 0.21299999999999" rpy="1.5707963267949 1.5707963267949 0"/><parent link="body"/><child link="l10"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="l11">
+    <inertial><origin xyz="0.0374549515667048 0.0224690151279817 0.0334169424121364" rpy="0 0 0"/><mass value="0.729033019617516"/><inertia ixx="0.000577863329904443" ixy="-1.28185778246335E-07" ixz="3.64314989996771E-07" iyy="0.00058773469511404" iyz="-3.89011863670918E-05" izz="0.00023266714750829"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l11.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l11.STL"/></geometry></collision>
+  </link>
+  <joint name="j11" type="continuous"><origin xyz="-0.12 -0.0403 0" rpy="0 0 1.5707963267949"/><parent link="l10"/><child link="l11"/><axis xyz="-1 0 0"/></joint>
+
+  <link name="livox_frame">
+    <inertial><origin xyz="-0.000348524070196802 0.00208606529928732 0.0221378690951775" rpy="0 0 0"/><mass value="0.13998133026592"/><inertia ixx="4.17032187760686E-05" ixy="-5.98077892665089E-09" ixz="3.05517185056836E-07" iyy="4.50191700802289E-05" iyz="-5.90930308926011E-10" izz="6.87178468496533E-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l12.STL"/></geometry><material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://robot11/meshes/l12.STL"/></geometry></collision>
+  </link>
+  <joint name="body_to_livox" type="fixed">
+    <origin xyz="0.000561701465058485 0.130915824456595 0.15702816968305" rpy="-0.523598775598293 0 0"/>
+    <parent link="body"/><child link="livox_frame"/><axis xyz="0 0 0"/>
+  </joint>
+
+</robot>

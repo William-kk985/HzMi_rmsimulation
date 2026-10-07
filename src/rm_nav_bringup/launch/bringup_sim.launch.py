@@ -128,7 +128,72 @@ _ROBOT_SLOTS = {
     '': ('sentry_robot_sim.xacro', '默认模型（本仓现行，雷达在 base_link+0.12,0,0.175）'),
     'hzmirm': ('sentry_robot_hzmirm_sim.xacro',
                '用户给的哨兵 URDF（雷达在云台头上 base_link+0,0,0.8；运动学逐字保留）'),
+    'robot11': ('sentry_robot_robot11_sim.xacro',
+                '用户的哨兵 robot11（SolidWorks 导出：真 mesh + 真 inertial；'
+                '雷达在底盘上、斜 30° 下俯、离地 0.2595 m）'),
 }
+
+#: robot:=robot11 的雷达 30° 安装：**上游两份材料自相矛盾**（URDF 原文写 pitch、
+#: SolidWorks CSV 写 roll），所以做成开关而不是猜。取值 → `body_to_livox` 的 rpy：
+_LIVOX_TILT_RPY = {
+    # 默认：SolidWorks CSV 的 Joint Origin Roll = -0.523598775598293
+    # （机器导出 ⇒ 比手打的一行更可能是字面真相）
+    'roll': '-0.523598775598293 0 0',
+    # URDF 原文那一行 rpy="0 -0.5236 0"
+    'pitch': '0 -0.523598775598293 0',
+}
+
+
+def _lio_adapter_robot11(axis):
+    """robot:=robot11 的 lio_tf_adapter 补偿量（xyz = base_link 原点在 imu 系下的坐标，rpy = 其姿态）。
+
+    纯几何、无魔法：imu_link 的位姿 = body_to_livox(tilt) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
+    固定关节 ⇒ **IMU 跟着雷达一起斜 30°**，这正是让三份 LIO 配置的 extrinsic_T=[0,0,0.05]
+    一个字节都不用改的原因）。T_imu←base_link 就是它的逆。数值：
+      roll ：xyz = [-0.000561701, -0.034862345, -0.151448296]  rpy = [ 0.523598776, 0, 0]
+      pitch：xyz = [-0.079000533, -0.130915824, -0.085709533]  rpy = [ 0,  0.523598776, 0]
+    两种候选下 imu 离地都是 0.216226 m（由几何唯一决定，与轴的选择无关）。
+    """
+    import math
+    ang = -0.523598775598293
+    p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305)
+    if axis == 'roll':
+        R = ((1.0, 0.0, 0.0),
+             (0.0, math.cos(ang), -math.sin(ang)),
+             (0.0, math.sin(ang), math.cos(ang)))
+        rpy = [0.523598775598293, 0.0, 0.0]
+    else:
+        R = ((math.cos(ang), 0.0, math.sin(ang)),
+             (0.0, 1.0, 0.0),
+             (-math.sin(ang), 0.0, math.cos(ang)))
+        rpy = [0.0, 0.523598775598293, 0.0]
+    d = (0.0, 0.0, -0.05)
+    p_imu = tuple(p_livox[i] + sum(R[i][j] * d[j] for j in range(3)) for i in range(3))
+    t = [-sum(R[j][i] * p_imu[j] for j in range(3)) for i in range(3)]   # -(R^T · p_imu)
+    return [round(v, 9) for v in t], rpy
+
+
+class _LioAdapterRobot11(Substitution):
+    """把 robot11 的杆臂算成一段 **YAML 列表字符串**（launch_ros 会对 Substitution 的求值结果
+    做 yaml.safe_load ⇒ 正好还原成 double 数组；见 launch_ros/utilities/evaluate_parameters.py）。
+
+    惰性：只有 `robot:=robot11` 且 LIO 不是 none/cartographer/small_point_lio 时才会被求值。
+    """
+
+    def __init__(self, which):
+        super().__init__()
+        self.__which = which
+
+    def perform(self, context):
+        axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
+        if axis not in _LIVOX_TILT_RPY:
+            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
+        xyz, rpy = _lio_adapter_robot11(axis)
+        v = xyz if self.__which == 'xyz' else rpy
+        return '[%s]' % ', '.join(repr(float(x)) for x in v)
+
+    def describe(self):
+        return '%s(%s)' % (type(self).__name__, self.__which)
 
 
 def _robot_slot_error(value):
@@ -136,7 +201,8 @@ def _robot_slot_error(value):
         "[launch] robot:=%r 不是可用的机器人模型槽位。\n"
         '  可用取值：\n%s\n'
         '  · 留空（默认）＝ 本仓现行模型，行为与以前完全一致；\n'
-        '  · robot:=hzmirm ＝ 用户给的哨兵 URDF 变体（详见 docs/robot_models.md）。'
+        '  · robot:=hzmirm  ＝ 用户给的哨兵 URDF 变体（详见 docs/robot_models.md §1–§8）；\n'
+        '  · robot:=robot11 ＝ 用户的哨兵 robot11（真 mesh + 真 inertial；§9–§10）。'
         % (value, '\n'.join('      robot:=%-8s → %s' % (k or "''", v[1])
                             for k, v in sorted(_ROBOT_SLOTS.items()))))
 
@@ -173,9 +239,17 @@ class _RobotXacroCommand(Substitution):
 
     def perform(self, context):
         cmd = ['xacro ', self.__slot.perform(context), ' xyz:=', self.__xyz, ' rpy:=', self.__rpy]
-        if LaunchConfiguration('robot').perform(context).strip() == 'hzmirm':
+        slot = LaunchConfiguration('robot').perform(context).strip()
+        if slot == 'hzmirm':
             cmd += [' turret_yaw_deg:=', LaunchConfiguration('turret_yaw_deg').perform(context),
                     ' turret_pitch_deg:=', LaunchConfiguration('turret_pitch_deg').perform(context)]
+        elif slot == 'robot11':
+            # ★ 2026-10-07：robot11 的雷达 30° 安装轴（roll|pitch，上游两份材料矛盾 ⇒ 不猜）。
+            #   ⚠️ 值里带空格 ⇒ **必须像 xyz/rpy 那样加引号**，否则 xacro 会把它当成多个输入文件
+            #   （实测报 `xacro: error: expected exactly one input file as argument`）。
+            cmd += [' livox_tilt_rpy:="',
+                    _LIVOX_TILT_RPY[LaunchConfiguration('livox_tilt_axis').perform(context).strip()],
+                    '"']
         return ''.join(cmd)
 
     def describe(self):
@@ -619,8 +693,28 @@ def generate_launch_description():
                     "雷达在云台头上 base_link+0,0,0.8、底盘 0.6x0.6x0.3、轮距 0.50/轴距 0.44；"
                     "运动学逐字保留，我们补 inertial/IMU/MID360/Livox 插件/底盘里程计）。"
                     "选 hzmirm 时 launch 会同时切到该模型的 linefit 参数文件并调整 lio_tf_adapter 杆臂。"
+                    "robot11 → urdf/sentry_robot_robot11_sim.xacro（用户的哨兵 robot11：真 mesh 视觉、"
+                    "真 inertial、雷达在底盘上斜 30° 下俯、离地 0.2595、足印内切 0.30/外接 0.3565；"
+                    "碰撞件按实测换过 —— body 用 4 个 box 而不是 208 万面的原网格）。"
+                    "选 robot11 时 launch 会调整 lio_tf_adapter 杆臂（含 30° 旋转补偿）；"
+                    "linefit 的参数**没有**跟着切（该文件属别的任务的目录，见 docs/robot_models.md §10.6）。"
                     "范围/数值对照见 docs/robot_models.md",
-        choices=['', 'hzmirm'])
+        choices=['', 'hzmirm', 'robot11'])
+
+    # ★ 2026-10-07：robot:=robot11 的雷达 30° 安装轴 —— **上游两份材料自相矛盾，不猜，实测**：
+    #   · URDF 原文 `body_to_livox` 的 rpy="0 -0.5236 0"（绕 y = pitch）
+    #   · 同一台车的 SolidWorks CSV 写 Joint Origin Roll = -0.523598775598293（绕 x = roll）
+    #   几何事实（docs/robot_models.md §9.5）：MID-360 方位 360° ⇒ 两个候选的**世界仰角谱与
+    #   地面环半径完全相同**（都下俯 30°，盲区都是半径 ~0.34 m 的圆），只差一个绕 z 的旋转；
+    #   **唯一判据是"最朝下的那一束指向 body 的哪个方位"**（roll → ±y / pitch → ±x）。
+    declare_livox_tilt_axis_cmd = DeclareLaunchArgument(
+        'livox_tilt_axis',
+        default_value='roll',
+        description='仅 robot:=robot11：雷达 30° 倾斜绕哪个轴（roll=绕 x / pitch=绕 y）。'
+                    '默认 roll = SolidWorks CSV 的字面值（URDF 原文写的是 pitch，两者矛盾）。'
+                    '⚠️ 对 360° 的 MID-360，两个取值在**仰角/地面可见性/盲区半径上完全等价**，'
+                    '只改变"最朝下的方位"（roll→±y，pitch→±x）；实测见 docs/robot_models.md §10.5',
+        choices=['roll', 'pitch'])
 
     # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。
     # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
@@ -1244,7 +1338,8 @@ def generate_launch_description():
             "'", LaunchConfiguration('lio'), "' != 'none' and '",
             LaunchConfiguration('lio'), "' != 'cartographer' and '",
             LaunchConfiguration('lio'), "' != 'small_point_lio' and '",
-            LaunchConfiguration('robot'), "' != 'hzmirm'"])),
+            LaunchConfiguration('robot'), "' != 'hzmirm' and '",
+            LaunchConfiguration('robot'), "' != 'robot11'"])),
         package='lio_tf_adapter',
         executable='lio_tf_adapter_node',
         name='lio_tf_adapter',
@@ -1275,6 +1370,31 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time,
                      'xyz': [0.0, 0.0, -0.75],   # hzmirm 的 imu_link 在 base_link+0,0,0.75
                      'rpy': [0.0, 0.0, 0.0]}]
+    )
+
+    # ★ 2026-10-07：robot:=robot11 的 lio_tf_adapter —— 同包/同可执行文件/同节点名，
+    #   唯一区别是杆臂（xyz）**和姿态补偿（rpy）**。与前两条互斥 ⇒ 同一时刻只有一个
+    #    odom→base_link 发布者（契约不变）。
+    #   为什么这次连 rpy 都要给：robot11 的雷达是**斜 30°** 装的，而 imu_link 按
+    #   【MID-360 的 IMU 与雷达同壳】这条物理事实跟着雷达一起斜
+    #   （好处：三份 LIO 配置的 extrinsic_T=[0,0,0.05]/extrinsic_R=I **一个字节都不用改**）。
+    #   ⇒ LIO 的 body 系 = 斜 30° 的 IMU 系 ⇒ 必须用 rpy 把它转回水平的 base_link。
+    #   数值由 _LioAdapterRobot11 从 URDF 几何**算**出来（不是手抄），随 livox_tilt_axis 变；
+    #   用 Substitution 惰性求值（照抄本文件 _PackageShareFile 的设计原则：不选这个槽位零成本）。
+    lio_tf_adapter_robot11_node = Node(
+        condition = IfCondition(PythonExpression([
+            "'", LaunchConfiguration('lio'), "' != 'none' and '",
+            LaunchConfiguration('lio'), "' != 'cartographer' and '",
+            LaunchConfiguration('lio'), "' != 'small_point_lio' and '",
+            LaunchConfiguration('robot'), "' == 'robot11'"])),
+        package='lio_tf_adapter',
+        executable='lio_tf_adapter_node',
+        name='lio_tf_adapter',
+        output='screen',
+        parameters=[os.path.join(get_package_share_directory('lio_tf_adapter'), 'config', 'lio_tf_adapter.yaml'),
+                    {'use_sim_time': use_sim_time,
+                     'xyz': [_LioAdapterRobot11('xyz')],   # T_imu_link←base_link（30° 倾斜下挂 0.05 m）
+                     'rpy': [_LioAdapterRobot11('rpy')]}]  # 该 30° 旋转的逆 ⇒ 斜的 body 系转回水平
     )
 
     # 注（2026-09-22 更正，原文写反了）：`body` **并不在 URDF 里**（曾试图用 imu_link→body 固定关节
@@ -1649,6 +1769,8 @@ def generate_launch_description():
     ld.add_action(declare_robot_cmd)
     ld.add_action(declare_turret_yaw_deg_cmd)
     ld.add_action(declare_turret_pitch_deg_cmd)
+    # ★ 2026-10-07：robot:=robot11 的雷达安装轴（roll | pitch；上游两份材料矛盾 ⇒ 不猜）
+    ld.add_action(declare_livox_tilt_axis_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
     ld.add_action(LogInfo(
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == ''"])),
@@ -1663,6 +1785,16 @@ def generate_launch_description():
              '云台角 turret_yaw_deg=', LaunchConfiguration('turret_yaw_deg'),
              ' turret_pitch_deg=', LaunchConfiguration('turret_pitch_deg'),
              '（0 = 与上游 URDF 数值等价）。数值对照/回滚见 docs/robot_models.md']))
+    ld.add_action(LogInfo(
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == 'robot11'"])),
+        msg=['[robot] 模型槽位 = robot11（urdf/sentry_robot_robot11_sim.xacro）：用户的哨兵，'
+             '真 mesh 视觉 + 真 inertial；雷达在**底盘**上（不在云台）斜 30° 下俯，离地 0.2595 m；'
+             '足印内切 0.300 / 外接 0.3565 m；质量 9.5521 kg。',
+             '  · 雷达倾斜轴 livox_tilt_axis=', LaunchConfiguration('livox_tilt_axis'),
+             '（roll = SolidWorks CSV 的字面值；两条候选在仰角/盲区上等价，只差最朝下的方位）',
+             '  · lio_tf_adapter 杆臂 = T_imu←base_link（含 30° 旋转补偿，由 URDF 几何算出）',
+             '  · ⚠️ linefit 参数**没有**跟着切（sensor_height 仍是 0.226、gravity_aligned_frame 仍是 ""）',
+             '⇒ 空地分割会被 30° 倾斜打歪；需要改哪两个键见 docs/robot_models.md §10.6']))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)
@@ -1708,6 +1840,7 @@ def generate_launch_description():
     # 两条互斥的适配器（默认模型 / robot:=hzmirm），同一时刻只有一个真的启动
     ld.add_action(lio_tf_adapter_node)
     ld.add_action(lio_tf_adapter_hzmirm_node)
+    ld.add_action(lio_tf_adapter_robot11_node)
     # ★ 续建/从零的判定与横幅在 **t=0** 就执行（OpaqueFunction 是 Action，`--show-args` 不执行它）；
     #   slam_toolbox 节点本身仍由 OpaqueFunction 内部的 TimerAction 延后 4 s 起 ⇒ 时序与改造前一致。
     ld.add_action(start_mapping)

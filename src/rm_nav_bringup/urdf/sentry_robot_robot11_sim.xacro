@@ -1,0 +1,584 @@
+<?xml version="1.0"?>
+<!--
+  ============================================================================
+  sentry_robot_robot11_sim.xacro —— `robot:=robot11` 槽位的机器人模型（**opt-in，不是默认**）
+  ============================================================================
+  ⚠️ **本文件是生成的，不要手改**：由
+       tools/scripts/regress/robot11_make_sim_xacro.py
+     从上游 `urdf/upstream/robot11.urdf`（sha256 e3e322acbe06996fc8adf410af5c0fcab7207de6cb76bf7234310bab2b3a64fc）+ Phase 1 的碰撞清单
+     `robot11_description/inventory/collision_assets.json` 生成。
+     改生成器 → 重跑 → 提交；手改会在下次重跑时被覆盖。
+
+  ── 上游来源（用户 2026-10-07 在会话里贴出，另一个 agent 逐字重建） ──────────
+    文件：`.tmp_urdf2/robot11.urdf`（11737 B）→ 本仓逐字节副本
+          `src/rm_nav_bringup/urdf/upstream/robot11.urdf`（**只读、不参与运行**，仅供核对）
+    sha256：e3e322acbe06996fc8adf410af5c0fcab7207de6cb76bf7234310bab2b3a64fc
+    根 link：`body`；12 个 link / 12 个 joint；机器人名 `sentry`
+    它**自带** `<inertial>`（与 hzmirm 那份不同）⇒ 不需要我们补惯性
+    mesh：`package://robot11/meshes/<name>.STL`（**这正是"包名必须叫 robot11"的原因**）
+
+  ── 上游自相矛盾的一处（本文件用 arg 留了开关，不猜） ──────────────────────
+    `body_to_livox` 的 30° 旋转轴：
+      · URDF 原文写 `rpy="0 -0.5236 0"`（绕 y = pitch）
+      · 同一台车的 SolidWorks CSV 写 `Joint Origin Roll = -0.523598775598293`（绕 x = roll）
+    本文件默认按 **CSV 的 roll 形式**（机器导出的 CSV 比手打的一行更可能是字面真相），
+    但把它参数化成 `livox_tilt_rpy`，并给了 `livox_tilt_axis:=roll|pitch` 这个 launch 开关。
+    ⚠️ 几何事实（§9.5 已推过、Phase 2 实测复核）：MID-360 方位 360° ⇒ 两个候选的
+    **世界仰角谱与地面环半径完全相同**，只差一个绕 z 的旋转；**唯一判据是"最朝下的方位"**。
+
+  ── `【上游原样】/【我们加的】` 两种标记 ────────────────────────────────────
+    【上游原样】= 与上游 URDF 数值逐字相同（脚本生成，可重算）
+    【我们加的】= 本栈要跑起来必须补的（逐条写理由与日期）
+
+  ── ⚠️ 上游的 <collision> 全被替换掉了（这是本槽位最关键的一处偏离） ────────
+    上游 12 个 link 的 collision **全部是 mesh**，其中 `body` = 2,078,226 面。
+    Phase 1 实测（极简世界单模型 spawn，无头隔离，见 docs/robot_models.md §9.3）：
+      · 稳态悬空 RTF 1.002（没有接触对 ⇒ 别拿这个当"能用"）
+      · **一有接触** RTF **0.200**、最低 0.04（慢 25–50 倍）；同工况 4 个 box = 1.002
+      · 峰值内存恒 **759 MB vs 基线 172 MB**
+    ⇒ 替换为：`body` = 4 个 box（DP 最优分段包络，覆盖率 1.000、总体积只比凸包胖 9.4%）；
+      轮 = cylinder；其余 = 抽稀件。**`<visual>` 仍然是原始 mesh，视觉零损失。**
+-->
+<robot name="sentry" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!-- 【我们加的】launch 会无条件传平台外参（bringup_sim.launch.py 的 xyz/rpy）。
+       本模型的雷达位姿由上游关节链唯一决定 ⇒ 这两个参数**声明但不用**（与 hzmirm 槽位同款理由：
+       再叠一个外部平移就等于改上游几何）。 -->
+  <xacro:arg name="xyz" default="0 0 0"/>
+  <xacro:arg name="rpy" default="0 0 0"/>
+  <!-- 【我们加的】雷达 30° 安装的旋转；默认 = SolidWorks CSV 的 roll 形式。
+       pitch 形式 = "0 -0.523598775598293 0"。两者对 360° 雷达几何等价（差一个绕 z 的旋转）。 -->
+  <xacro:arg name="livox_tilt_rpy" default="-0.523598775598293 0 0"/>
+
+  <!-- ==================== link body ==================== -->
+  <link name="body">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="0.00436933539925447 0.0121729882941287 0.0624624952683773" rpy="0 0 0"/>
+      <mass value="6.98390841611154"/>
+      <inertia ixx="0.012450840516849" ixy="8.34803982990868E-06" ixz="2.47736216819592E-06" iyy="0.0180415546421503" iyz="6.50018190294825E-06" izz="0.0214898895578463"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/base_link.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- body：4 个 box = DP 最优 z 分段包络（覆盖率 1.000 / 总体积 0.065121 m³，网格凸包 0.0595 m³）
+         生成：robot11_make_collision_assets.py，清单：robot11_description/inventory/collision_assets.json -->
+    <collision>
+      <origin xyz="0 0 -0.005444" rpy="0 0 0"/>
+      <geometry><box size="0.6 0.6 0.085"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.072056" rpy="0 0 0"/>
+      <geometry><box size="0.553269 0.549539 0.07"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.00634 0.124556" rpy="0 0 0"/>
+      <geometry><box size="0.532413 0.334483 0.035"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.014821 0.177528" rpy="0 0 0"/>
+      <geometry><box size="0.285 0.346467 0.070944"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l2 ==================== -->
+  <link name="l2">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="-0.0759213146953557 -0.00537350706190212 0.000690815947393508" rpy="0 0 0"/>
+      <mass value="0.232272967518165"/>
+      <inertia ixx="9.38551187090929E-05" ixy="-3.89659064263769E-08" ixz="-4.1188007722221E-07" iyy="0.000108022676479579" iyz="6.52751789180565E-07" izz="9.89453938308141E-05"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l2.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l2：**解析 box**（= 源 mesh l2.STL 的包围盒；理由见下） -->
+    <collision>
+      <origin xyz="-0.076025 -0.002664 0.001162" rpy="0 0 0"/>
+      <geometry><box size="0.116351 0.103630 0.124592"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l6 ==================== -->
+  <link name="l6">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="0.0110913531432632 1.7910558091222E-06 3.54892059312162E-06" rpy="0 0 0"/>
+      <mass value="0.14656841077267"/>
+      <inertia ixx="0.00027895263582235" ixy="4.01635255414384E-11" ixz="-1.35108698277116E-10" iyy="0.000144586311352007" iyz="4.08768977179887E-08" izz="0.000144975173531681"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l6.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l6：cylinder（半径/宽度由轮 mesh 包围盒直接得到：r=0.0580 m 宽 0.0452 m） -->
+    <collision>
+      <origin xyz="0 0 0" rpy="0 1.5707963267949 0"/>
+      <geometry><cylinder radius="0.058" length="0.0452"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l3 ==================== -->
+  <link name="l3">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="-0.0762602424717105 -0.000710888687789513 -0.0056941695447669" rpy="0 0 0"/>
+      <mass value="0.230157374090603"/>
+      <inertia ixx="9.38312233563086E-05" ixy="4.11880077230659E-07" ixz="-3.89659072508048E-08" iyy="9.87577896218705E-05" iyz="-6.52751787883143E-07" izz="0.00010783561712015"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l3.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l3：**解析 box**（= 源 mesh l3.STL 的包围盒；理由见下） -->
+    <collision>
+      <origin xyz="-0.076025 -0.008556 -0.002664" rpy="0 0 0"/>
+      <geometry><box size="0.116351 0.109803 0.103630"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l7 ==================== -->
+  <link name="l7">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="0.0105187945781376 1.8021279142022E-06 3.55954245623291E-06" rpy="0 0 0"/>
+      <mass value="0.153493109299713"/>
+      <inertia ixx="0.000283619688479151" ixy="4.01635256040596E-11" ixz="-1.35108698263563E-10" iyy="0.000146944991593877" iyz="4.0876897717852E-08" izz="0.00014733385377355"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l7.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l7：cylinder（半径/宽度由轮 mesh 包围盒直接得到：r=0.0580 m 宽 0.0453 m） -->
+    <collision>
+      <origin xyz="0 0 0" rpy="0 1.5707963267949 0"/>
+      <geometry><cylinder radius="0.058" length="0.0453"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l4 ==================== -->
+  <link name="l4">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="-0.0776627136340258 0.00398958109592307 -0.000928689858610388" rpy="0 0 0"/>
+      <mass value="0.246338313228366"/>
+      <inertia ixx="9.77808326150043E-05" ixy="3.89659073115738E-08" ixz="4.11880076872962E-07" iyy="0.000115206733276597" iyz="8.71786533446865E-07" izz="0.000102885906115304"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l4.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l4：**解析 box**（= 源 mesh l4.STL 的包围盒；理由见下） -->
+    <collision>
+      <origin xyz="-0.076597 0.002664 -0.008556" rpy="0 0 0"/>
+      <geometry><box size="0.117494 0.103630 0.109803"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l8 ==================== -->
+  <link name="l8">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="0.0105187945792852 1.80212880822317E-06 3.55953718383928E-06" rpy="0 0 0"/>
+      <mass value="0.153493109323926"/>
+      <inertia ixx="0.000283619688507033" ixy="4.01627190513287E-11" ixz="-1.35103941451045E-10" iyy="0.000146944991623376" iyz="4.08769024931138E-08" izz="0.000147333853773518"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l8.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l8：cylinder（半径/宽度由轮 mesh 包围盒直接得到：r=0.0580 m 宽 0.0453 m） -->
+    <collision>
+      <origin xyz="0 0 0" rpy="0 1.5707963267949 0"/>
+      <geometry><cylinder radius="0.058" length="0.0453"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l5 ==================== -->
+  <link name="l5">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="-0.0772527853329836 0.000915076051536207 0.00449377212435478" rpy="0 0 0"/>
+      <mass value="0.242232927657393"/>
+      <inertia ixx="9.72362930691966E-05" ixy="-4.11880085194013E-07" ixz="3.89659437807715E-08" iyy="0.000102339058097997" iyz="-8.3745233829181E-07" izz="0.000114151537565015"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l5.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l5：**解析 box**（= 源 mesh l5.STL 的包围盒；理由见下） -->
+    <collision>
+      <origin xyz="-0.076597 0.008556 0.002664" rpy="0 0 0"/>
+      <geometry><box size="0.117494 0.109803 0.103630"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l9 ==================== -->
+  <link name="l9">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="0.0105187945792853 1.80212880823705E-06 3.55953718389479E-06" rpy="0 0 0"/>
+      <mass value="0.153493109323925"/>
+      <inertia ixx="0.000283619688507032" ixy="4.01627190942481E-11" ixz="-1.35103941448504E-10" iyy="0.000146944991623376" iyz="4.08769024930526E-08" izz="0.000147333853773518"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l9.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l9：cylinder（半径/宽度由轮 mesh 包围盒直接得到：r=0.0580 m 宽 0.0453 m） -->
+    <collision>
+      <origin xyz="0 0 0" rpy="0 1.5707963267949 0"/>
+      <geometry><cylinder radius="0.058" length="0.0453"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l10 ==================== -->
+  <link name="l10">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="-0.0587830596021165 0.0228978288796906 -0.000459080994328639" rpy="0 0 0"/>
+      <mass value="0.141144182015615"/>
+      <inertia ixx="3.8779406325307E-05" ixy="1.66227406397812E-06" ixz="-3.65320210838414E-06" iyy="0.000141699871508992" iyz="-1.82170051595229E-11" izz="0.000141520295602471"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l10.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l10：**解析 box**（= 源 mesh l10.STL 的包围盒；理由见下） -->
+    <collision>
+      <origin xyz="-0.063500 0.019350 0.002895" rpy="0 0 0"/>
+      <geometry><box size="0.147000 0.137900 0.070566"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link l11 ==================== -->
+  <link name="l11">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="0.0374549515667048 0.0224690151279817 0.0334169424121364" rpy="0 0 0"/>
+      <mass value="0.729033019617516"/>
+      <inertia ixx="0.000577863329904443" ixy="-1.28185778246335E-07" ixz="3.64314989996771E-07" iyy="0.00058773469511404" iyz="-3.89011863670918E-05" izz="0.00023266714750829"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l11.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- l11：**解析 box**（= 源 mesh l11.STL 的包围盒；理由见下） -->
+    <collision>
+      <origin xyz="0.040500 0.042530 0.038472" rpy="0 0 0"/>
+      <geometry><box size="0.132999 0.172387 0.335220"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== link livox_frame ==================== -->
+  <link name="livox_frame">
+    <!-- 【上游原样】inertial -->
+    <inertial>
+      <origin xyz="-0.000348524070196802 0.00208606529928732 0.0221378690951775" rpy="0 0 0"/>
+      <mass value="0.13998133026592"/>
+      <inertia ixx="4.17032187760686E-05" ixy="-5.98077892665089E-09" ixz="3.05517185056836E-07" iyy="4.50191700802289E-05" iyz="-5.90930308926011E-10" izz="6.87178468496533E-05"/>
+    </inertial>
+    <!-- 【上游原样】visual（**原始 mesh，视觉零损失**） -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://robot11/meshes/l12.STL"/></geometry>
+      <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/></material>
+    </visual>
+    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
+    <!-- livox_frame：**故意不给 collision**（射线传感器就在本 link 原点上，给碰撞体 = 每条射线打自己；实测见 docs/robot_models.md §10.5） -->
+  </link>
+
+  <!-- ==================== joint j2 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j2" type="continuous">
+    <origin xyz="-0.182134559672904 -0.182134559672906 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/>
+    <parent link="body"/>
+    <child link="l2"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j6 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j6" type="continuous">
+    <origin xyz="-0.101852036480475 -0.00967840298231593 -0.000646938971864019" rpy="-3.14159265358979 -0.0671344193635971 1.5707963267949"/>
+    <parent link="l2"/>
+    <child link="l6"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j3 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j3" type="continuous">
+    <origin xyz="0.182134559672905 -0.182134559672905 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/>
+    <parent link="body"/>
+    <child link="l3"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j7 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j7" type="continuous">
+    <origin xyz="-0.101852036480475 0.000646938971863992 -0.00967840298231593" rpy="0 -1.5036619074313 -1.57079632679489"/>
+    <parent link="l3"/>
+    <child link="l7"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j4 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j4" type="continuous">
+    <origin xyz="0.182134559672906 0.182134559672903 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/>
+    <parent link="body"/>
+    <child link="l4"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j8 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j8" type="continuous">
+    <origin xyz="-0.101852036480475 0.00967840298231593 0.000646938971863908" rpy="0 0.0671344193635832 -1.5707963267949"/>
+    <parent link="l4"/>
+    <child link="l8"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j5 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j5" type="continuous">
+    <origin xyz="-0.182134559672904 0.182134559672906 0.057350000000002" rpy="1.5707963267949 -1.5707963267949 0"/>
+    <parent link="body"/>
+    <child link="l5"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j9 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j9" type="continuous">
+    <origin xyz="-0.101852036480475 -0.000646938971863936 0.00967840298231593" rpy="3.14159265358978 1.50366190743131 1.57079632679489"/>
+    <parent link="l5"/>
+    <child link="l9"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j10 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j10" type="continuous">
+    <origin xyz="0 0 0.21299999999999" rpy="1.5707963267949 1.5707963267949 0"/>
+    <parent link="body"/>
+    <child link="l10"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint j11 ==================== -->
+  <!-- 【上游原样】 -->
+  <joint name="j11" type="continuous">
+    <origin xyz="-0.12 -0.0403 0" rpy="0 0 1.5707963267949"/>
+    <parent link="l10"/>
+    <child link="l11"/>
+    <axis xyz="-1 0 0"/>
+  </joint>
+
+  <!-- ==================== joint body_to_livox ==================== -->
+  <!-- 【上游原样 + 参数化】xyz 逐字照抄；rpy 参数化：默认 = CSV 的 roll 形式，
+       可切 pitch（两份上游材料矛盾，见文件头与 docs/robot_models.md §9.5） -->
+  <joint name="body_to_livox" type="fixed">
+    <origin xyz="0.000561701465058485 0.130915824456595 0.15702816968305" rpy="$(arg livox_tilt_rpy)"/>
+    <parent link="body"/>
+    <child link="livox_frame"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+
+  <!-- ==================== 【我们加的】配件：IMU / 雷达 / 底盘 ==================== -->
+  <!-- 上游 URDF 里**没有** imu_link、没有 <gazebo>、没有 <sensor>、没有 <plugin>
+       （但有 inertial 与 mesh）⇒ 下面这些全是我们为本栈补的。 -->
+
+  <!-- ① IMU。上游没有 imu_link，而本栈 LIO（fastlio / pointlio / small_point_lio）与
+       imu_complementary_filter 都要 `/livox/imu` + 一个 `imu_link` 帧。
+       位置：【刻意选"跟着雷达一起斜 30°"而不是"挂在 body 上保持水平"】，理由三条：
+         (a) MID-360 的 IMU 与雷达本来就在**同一个壳**里 ⇒ 跟着雷达斜才是物理事实；
+         (b) 本栈的 LIO 外参 `extrinsic_T=[0,0,0.05]`（雷达在 IMU 系下）来自"IMU 在雷达下方 0.05 m、
+             **无相对旋转**"这条几何；照抄它就**一个 LIO 配置文件都不用改**（已核对三份配置：
+             small_point_lio / FAST_LIO / point_lio 都是 `extrinsic_T=[0,0,0.05]` 且无 extrinsic_R）；
+             若改挂到 body 上保持水平，就必须给三份 LIO 配置补一条 30° 的 `extrinsic_R` —— 那是更大的改动面；
+         (c) 后果（IMU 的 z 轴相对 base_link 斜 30°）由 `lio_tf_adapter` 的 `rpy` 精确补偿，
+             已在本槽位的 launch 分支里显式写死并实测（见 docs/robot_models.md §10）。
+       绝对位置：body + (0.000562, 0.130916, 0.107028)（= 雷达原点沿**雷达自身的** −z 走 0.05 m）。 -->
+  <joint name="imu_joint" type="fixed">
+    <origin xyz="0 0 -0.05" rpy="0 0 0"/>
+    <parent link="livox_frame"/>
+    <child link="imu_link"/>
+  </joint>
+
+  <link name="imu_link">
+    <!-- ⚠️ **故意不给 collision**：imu_link 在雷达原点正下方 0.05 m、正好在雷达的视场里，
+         给碰撞体 ⇒ 每条朝下的射线先在 r=0.05 m 处打到自己
+         （实测：`/scan` 最近回波恒为 0.05 m、r<0.3 m 的点占满，见 docs/robot_models.md §10.5）。
+         物理上 MID-360 的 IMU 就在雷达壳**内部** ⇒ 本来就不该有独立碰撞体。 -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.02 0.02 0.01"/></geometry>
+      <material name="green"><color rgba="0 1 0 1"/></material>
+    </visual>
+    <inertial>
+      <mass value="1e-2"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <!-- ② 雷达射线传感器：**挂在上下游自己的 `livox_frame` 上**。
+       上游 `livox_frame` 已经有 l12.STL（MID-360 本体）的 visual+collision 和 inertial，
+       所以这里**不能**再用 ros2_livox_simulation 的 `mid360` 宏（宏会自己 new 一个同名 link +
+       livox_frame_joint，与上游重复）。改成把宏里那段 <sensor type="ray"> **逐字抄过来**、
+       只把 <sensor name> 设成 `livox_frame`（插件用 <sensor name> 当点云 frame_id
+       ⇒ header.frame_id = livox_frame，与本栈 `lidar_frame: livox_frame` 契约一致）。
+       射线参数与宏一致：水平 100 × 垂直 360、10 Hz、0.1–200 m、σ=2 mm、
+       垂直 FOV −7.22°…+55.22°（这是本仓 mid360.xacro 的既有取值）。 -->
+  <gazebo reference="livox_frame">
+    <sensor type="ray" name="livox_frame">
+      <pose>0 0 0 0 0 0</pose>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>10</update_rate>
+      <plugin name="livox_frame_plugin" filename="libros2_livox.so">
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>100</samples>
+              <resolution>1</resolution>
+              <min_angle>0</min_angle>
+              <max_angle>${2*3.1415926}</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>360</samples>
+              <resolution>1</resolution>
+              <min_angle>${-7.22/180*3.1415926}</min_angle>
+              <max_angle>${55.22/180*3.1415926}</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.1</min>
+            <max>200.0</max>
+            <resolution>0.002</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.002</stddev>
+          </noise>
+        </ray>
+        <visualize>false</visualize>
+        <samples>30000</samples>
+        <downsample>1</downsample>
+        <csv_file_name>$(find ros2_livox_simulation)/scan_mode/mid360.csv</csv_file_name>
+        <topic>/livox/lidar</topic>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- ③ 底盘驱动 + 真值里程计：与默认模型**逐字同款**（libgazebo_ros_planar_move.so）
+       ⇒ 契约不变：只有它订阅 /cmd_vel_chassis；真值里程计发 /odom_ground_truth
+       （/odom 留给 LIO）；`publish_odom_tf=false`（T4：odom→base_link 那条边归 LIO）。
+       上游 j2..j9 是 continuous（转向 + 轮子）但我们**不加轮子控制器**：与默认模型一样，
+       轮子自由滚动、底盘由 planar_move 平动 ⇒ 运动学忠实、接口最小。 -->
+  <gazebo>
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel_chassis</remapping>
+        <remapping>odom:=odom_ground_truth</remapping>
+      </ros>
+      <update_rate>100</update_rate>
+      <publish_rate>10</publish_rate>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>false</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <covariance_x>0.0001</covariance_x>
+      <covariance_y>0.0001</covariance_y>
+      <covariance_yaw>0.01</covariance_yaw>
+    </plugin>
+  </gazebo>
+
+  <!-- ④ IMU 传感器：与默认模型同款（gazebo_ros_imu_sensor，100 Hz，帧名 imu_link，
+       话题 /livox/imu）。上游没有任何 <sensor>。 -->
+  <gazebo reference="imu_link">
+    <sensor name="mid360_imu" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+        <ros>
+          <namespace>/</namespace>
+          <remapping>~/out:=/livox/imu</remapping>
+        </ros>
+        <frame_name>imu_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- ⑤ 材质（纯观感） -->
+  <gazebo reference="body"><material>Gazebo/Orange</material></gazebo>
+  <gazebo reference="l2"><material>Gazebo/Grey</material></gazebo>
+  <gazebo reference="l3"><material>Gazebo/Grey</material></gazebo>
+  <gazebo reference="l4"><material>Gazebo/Grey</material></gazebo>
+  <gazebo reference="l5"><material>Gazebo/Grey</material></gazebo>
+  <gazebo reference="l6"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="l7"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="l8"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="l9"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="l10"><material>Gazebo/Grey</material></gazebo>
+  <gazebo reference="l11"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="livox_frame"><material>Gazebo/LightBlueLaser</material></gazebo>
+  <gazebo reference="imu_link"><material>Gazebo/BuildingFrame</material></gazebo>
+
+  <!-- ==================== 几何速查（实测值，来自 Phase 1；供 config 对照） ====================
+       地面平面（body 系） z = **-0.102499**（四个轮 mesh 的最低点；轮 r=0.0580 心在 z=-0.0445）
+       ⚠️ j2..j5 的 origin z=0.05735 是**转向关节**高度，**不是**轮心 —— 差 0.102 m
+       雷达 livox_frame  z = 0.157028 ⇒ **离地 0.2595 m**（对比：默认模型 0.226 / hzmirm 0.80）
+       IMU  imu_link      = 雷达原点沿雷达自身 -z 0.05 m（跟着雷达斜 30°）
+       外形：整车 0.6000 x 0.6000 x 0.5642（含云台/发射机构），底盘组高 0.3155
+       足印：**内切半径 0.300 m / 外接半径 0.3565 m**（XY 凸包，3 mm 体素抽稀）
+       轴距(x) = 轮距(y) = **0.36427 m**（j2..j5 的 origin ±0.1821345596729）
+       质量合计 **9.5521 kg**（上游 12 条 inertial 求和）
+       雷达 30° 下俯后的世界仰角范围 = -37.22°…+85.22°（用本仓 mid360 宏的 -7.22…+55.22）
+         ⇒ 地面可见环：半径 **0.3416 m** 以外（盲区是半径 0.34 m 的圆）
+         ⇒ 最近地面环出现在 body 的哪个方位 = **roll→±y / pitch→±x**（唯一能区分两候选的判据）
+       lio_tf_adapter 需要的 T_body←base_link：xyz = -(imu 在 body 里的位置)，
+         rpy = 该 30° 旋转的逆；由 bringup_sim.launch.py 的 robot:=robot11 分支注入，不写死在 YAML 里。 -->
+</robot>

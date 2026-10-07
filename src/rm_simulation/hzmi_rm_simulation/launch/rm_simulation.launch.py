@@ -83,6 +83,10 @@ class _RobotSlotXacro(Substitution):
     _SLOTS = {
         '': ('hzmi_rm_simulation', 'simulation_waking_robot.xacro'),
         'hzmirm': ('rm_nav_bringup', 'sentry_robot_hzmirm_sim.xacro'),
+        # ★ 2026-10-07：用户的哨兵 robot11（真 mesh；碰撞件按 Phase 1 实测换过）。
+        #   本文件不带额外 xacro 参数 ⇒ 用模型自己的默认值（livox_tilt_rpy 默认 = roll，
+        #   与 launch 的 livox_tilt_axis 默认一致）。
+        'robot11': ('rm_nav_bringup', 'sentry_robot_robot11_sim.xacro'),
     }
 
     def perform(self, context):
@@ -148,12 +152,14 @@ def generate_launch_description():
         'robot',
         default_value='',
         description="机器人模型槽位：'' = simulation_waking_robot.xacro（本文件原来的模型，默认）；"
-                    'hzmirm = rm_nav_bringup/urdf/sentry_robot_hzmirm_sim.xacro'
+                    'hzmirm = rm_nav_bringup/urdf/sentry_robot_hzmirm_sim.xacro；'
+                    'robot11 = rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro'
+                    '（用户的哨兵 robot11：真 mesh 视觉 + 真 inertial + 雷达斜 30° 下俯+4 个 box 碰撞）'
                     '（用户给的哨兵 URDF，雷达在云台头上、离地 ~0.8 m，底盘 0.6x0.6x0.3）。'
                     '⚠️ 本文件不起感知/LIO ⇒ 选 hzmirm 不会自动切 linefit sensor_height 与 '
                     'lio_tf_adapter 杆臂；要完整链路请用 bringup_sim.launch.py robot:=hzmirm。'
                     '详见 docs/robot_models.md',
-        choices=['', 'hzmirm']
+        choices=['', 'hzmirm', 'robot11']
     )
 
     # Specify the actions
