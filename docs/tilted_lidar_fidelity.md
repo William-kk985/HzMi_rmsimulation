@@ -2207,3 +2207,328 @@ tools/scripts/tiltmount/run_nav_goal_forensics.sh n2_r11_nav_b20 --settle 30 --d
 # ⑥ 读表
 python3 tools/scripts/tiltmount/nav_goal_report.py .tmp_tiltmount/n1_r11_slam_f20
 ```
+
+## M. 2026-10-10：`robot:=robot11` 的**角速度通道**归因与修复（§L.9 第 2/3 项的收口）
+
+> 触发 = 父任务原文：**"查清 `robot:=robot11` 为什么几乎不执行角速度指令，若原因在我们的
+> 仿真模型/驱动链里就修掉它 —— 这是转向类目标（任何非直线目标）的真正阻塞项"**。
+>
+> 与 §L 的关系：§L 把"长目标走不到"归因到**场地里的实体障碍**（正前方 0.42 m），并把
+> "角速度通道几乎不执行"登记为**第二条独立缺陷**（§L.0 第 5 条、§L.5、§L.9 第 2/3 项），
+> 但**没有**钉死机理。本节就是把那条钉死 + 修掉。§L 及以前的内容**逐字保留**。
+>
+> 全部无头隔离跑（`HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、按 tag 哈希占用的
+> `GAZEBO_MASTER_URI`、`unset DISPLAY`、只 kill **本 master URI 上**的 gzserver/gzclient，
+> **绝不做全机 pkill**；`world:=RMUL2026` 不带前导 `--`），
+> 原始数据：`.tmp_wz/bench/out/*`（台架）、`.tmp_tiltmount/m1_*` … `m10_*`（整栈）、
+> `.tmp_wz/static/*`（生成物）。
+
+### M.0 一句话结论（六条，都是实测）
+
+1. **根因是"驱动器与模型结构不自洽"，不是单位/缩放/mixing bug**：底盘驱动是
+   `libgazebo_ros_planar_move.so`，它的实现（`gazebo/physics/Model.cc:746-771`，本机读源码核对）
+   是 **`SetLinearVel` / `SetAngularVel` 对模型里的每一个 link 各设一遍同一个 `(v, ω)`**。
+   这对**单刚体**恰好自洽（绕质心转时正是"每个 link 同一个 ω"），对
+   **多刚体 + 关节树**则不自洽（第 i 个 link 的质心速度本应是 `ω × r_i`，插件写成 `v`）⇒
+   关节/接触约束求解器每步都要把它掰回来，**反作用把底盘的角速度吃掉**。
+   `robot11` 是 13 link / 12 joint，`robot:=` 默认模型只有 7 link / 6 joint ⇒ 前者被吃得更狠。
+2. **决定性对照（台架，只发 `/cmd_vel_chassis` `wz=1.0` × 12 仿真秒 = 请求 687.5°）**：
+   把同一台车的几何**塌成一个刚体**（几何/惯量逐项守恒，见 M.6）⇒ 真值 **+7.09° → +111.7…113.3°**
+   （**1.03% → 16.2~16.5%**，**15.7×**）；对照：默认模型 **+40.0°（5.8%）**、
+   极简单 link box（无接触）**+681.2°（99.9%）** ⇒ 修好后 robot11 的角速度通道**优于默认模型 2.8×**。
+3. **接触/摩擦是第二个、独立的限制项**（剂量-响应单调）：把轮子对地摩擦从 `mu=1` 降到
+   `0.5/0.2/0.05/0.001` ⇒ 真值 **+17.3° / +54.8° / +96.9° / +126.8°**；
+   把重力关掉（完全没有接触）⇒ **+128.0°**（= 多刚体结构的**上限** 18.6%）。
+   ⇒ "轮子真的存在"确实是阻力来源之一，但**它只解释 18.6% → 1.03% 那一段**，
+   剩下 100% → 18.6% 那一段是第 1 条（多刚体不自洽）。
+4. **自由偏航漂移是同一个根因的另一个面**：无指令 60 s，robot11 真值 yaw **+18.4°**（台架）/
+   **+8.20°**（§L 整栈）；塌成单刚体后 **+0.02°**（台架）/ **+0.006°**（整栈，LIO −0.091°），
+   与默认模型（−0.24° / −0.154°）同量级 ⇒ **漂移停了**。
+5. **被否掉的修法（有实测理由）**：把插件 `<update_rate>` 从 100 Hz 提到 1000 Hz（= 每个物理步
+   都重设速度）确实把角速度从 1.03% 提到 7.8%，但**同一次改动让车"爬上"了实体障碍**：
+   纯物理正前方盲推从 0.408 m 变成 **2.565 m**、底盘 z 从 0.152 m 升到 **0.400 m**
+   ⇒ 场地障碍不再是障碍 ⇒ **不采用**（这正是"必须做反向验收"的价值）。
+6. **新的验收口径已接线**（§L.9 第 1 项的建议）：`nav_goal_forensics.py` 新增
+   `--preflight-reach`（发目标**之前**先用绕过 nav2 的盲推量出"这个出生点物理上能走多远"：
+   本节实测 **前 0.3992 m / 后 1.4370 m**）、`--reach-gate`（目标超出实测可达区就**不发目标**，
+   在 JSON 里记 `goal_gate`）、`--goal-yaw-only-deg`（原地转目标）与 `--dump-traces`
+   （把真值/里程计完整时间线落盘，"无指令漂移"只能从它读）。
+
+### M.1 为什么先做一个"只有 Gazebo + 底盘插件"的台架
+
+整栈跑（Gazebo + LIO + nav2 + 雷达 30000 条射线 @10 Hz）一次 ~3 min、RTF ≈ 0.35；
+要判"角速度通道"必须做**变体矩阵**（十来种改法 × 前后对照），整栈跑不动。
+台架（`tools/scripts/tiltmount/run_chassis_yaw_bench.sh` + `chassis_bench_mkworld.py` +
+`chassis_yaw_probe.py`，本节新增并提交）只做一件事：把**同一个世界**加载进来，只放**一个模型** + 底盘插件，
+摘掉 LIO/nav2/雷达（`--strip-sensors` 连 `<sensor>` 一起删），探针只订阅
+`/odom_ground_truth`（= Gazebo 模型 WorldPose，逐条真值）与 `/joint_states`，只发 `/cmd_vel_chassis`。
+一次 <40 s、RTF ≈ 1.00。
+
+**台架本身的可信度由三条外部锚点钉住**（都在同一次会话里复现了 §L 的数）：
+
+| 锚点 | §L 记的 | 台架实测 |
+|---|---|---|
+| robot11 正前方盲推（`vx=+0.25`）被挡住的极限 | **0.4199 m** | **0.4077 m**（RTF 1.00；`--push-wall 25`） |
+| 默认模型同协议 | **0.5402 m** | **0.5401 m** |
+| robot11 原样盲发 `wz=1.0` × 12 s | **+3.79°**（真值）/ +3.86°（LIO） | **+7.09°**（12 **仿真**秒、RTF 1.00；§L 那跑 12 **墙钟**秒、RTF≈0.35 ⇒ 折成仿真时间后同量级） |
+
+> **量纲口径（必须写清）**：§L 的 `--push-time 12` 是**墙钟**秒，而它那跑 RTF≈0.35
+> ⇒ 12 墙钟秒 ≈ 4.2 仿真秒。台架 RTF≈1.0 ⇒ 12 墙钟秒 ≈ 12 仿真秒。
+> 所以"执行率"一律用**仿真时间**归一（下表的 `exec_ratio_sim`），跨跑可比。
+
+### M.2 候选原因逐条判决（每条：测什么 / 结果 / 证据）
+
+| # | 候选 | 判决性测量 | 结果 | 证据 |
+|---|---|---|---|---|
+| 1 | **驱动链/mixing**：`wz` 没走到和执行 `vx` 同一条通道（单位/缩放/几何参数） | ① 生成物与插件块逐字对比；② FK 复核 8 个关节的**轴**与轮碰撞的**圆柱轴**；③ 同一插件在"极简单 link box"上的表现 | **无 bug、驳回**：两个模型的 `<plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">` 块**逐字相同**（`update_rate 100`、`cmd_vel:=cmd_vel_chassis`、`odom:=odom_ground_truth`）；FK 复核：`j2…j5` 的轴在 base_link 系里是 **`(0,0,-1)`（竖直）**、`j6…j9` 的轴与轮 cylinder 的轴**平行**（都是水平），轮底 **z=−0.10250 m** 是整车最低点；**同一个插件在极简单 link box 上能做到 99.9%**（+681.2°/687.5°）⇒ 通道本身没坏 | `.tmp_wz/static/{robot11,default}.sdf`、`tools/scripts/regress/robot11_weld_chassis.py --report-only`、`m` 系列 |
+| 1b | **（本节新增）通道的"结构性上限"**：插件把同一个 `(v,ω)` 写给每个 link ⇒ 多刚体不自洽 | 台架：把同一台车的几何塌成单刚体前后对比（同一世界/出生点/命令） | **成立、是主因**：`+7.09° → +111.7…113.3°`（1.03% → 16.2~16.5%）；"全关节改 fixed"只到 **+21.3°（3.1%）**、"转向关节 fixed" 只到 **+16.7°（2.4%）** ⇒ 光"锁自由度"没用，**必须是单刚体**（插件那一步才自洽） | `.tmp_wz/bench/out/{w1,f3,w6,g1,h1}_*/probe.json` |
+| 2 | **真轮子（4 个 cylinder 碰撞 + 8 个连续关节）在"顶"底盘** | ① 轮对地摩擦剂量-响应；② 零重力（完全无接触）；③ 轮子碰撞换成球/去掉 | **部分成立（第二限制项）**：`mu` 1.0/0.5/0.2/0.05/0.001 ⇒ `+7.09/+17.26/+54.75/+96.91/+126.80°`（**单调**）；零重力 ⇒ `+128.02°`；⇒ 摩擦把 18.6% 再压到 1.03%（**18×**），但它**不是**主因（主因见 1b，把摩擦拿掉也只到 18.6%） | `w1/w14/w13/w12/w3/w2_*` |
+| 3 | **场地 mu / 质量 / 惯量不足** | ① 场地 mu 是两个模型共用的常量（`RMUL2026_world.world:85` = 1、torsional `use_patch_radius=1`+`patch_radius=0` ⇒ 扭转项实际为 0）；② 两车质量 9.56 vs 10.21 kg（同量级）；③ 角速度对 `wz` 的剂量-响应 | **驳回（不是"mu 太高"或"惯量太大"这种可调参数问题）**：同一场地、同一 mu 下默认模型能做到 5.8%，robot11 只有 1.03% ⇒ 差异来自**模型结构**；`wz` 剂量-响应在修好后线性（见 M.7） | `RMUL2026_world.world`、M.7 表 |
+| 4 | **传感器/估计器伪影** | 真值（Gazebo WorldPose）与 LIO（`/odom`，含 IMU 陀螺）**两个独立估计器**同跑对比 | **驳回**：整栈盲发 `wz=1.0`：真值 **+35.42°** / LIO **+33.75°**；60 s 漂移：真值 **+0.006°** / LIO **−0.091°** ⇒ 两者一致 ⇒ **是物理，不是估计器** | `.tmp_tiltmount/m1_r11_blind_wz/`、`m5_r11_drift60/` |
+
+### M.3 判决性测量 A：源码级机理 + 四个结构对照
+
+`gazebo/physics/Model.cc`（gazebo-classic 11 分支，逐字）：
+
+```cpp
+void Model::SetLinearVel(const ignition::math::Vector3d &_vel)
+{ for (Link_V::iterator iter = this->links.begin(); iter != this->links.end(); ++iter)
+    if (*iter) { (*iter)->SetEnabled(true); (*iter)->SetLinearVel(_vel); } }
+void Model::SetAngularVel(const ignition::math::Vector3d &_vel)
+{ for (Link_V::iterator iter = this->links.begin(); iter != this->links.end(); ++iter)
+    if (*iter) { (*iter)->SetEnabled(true); (*iter)->SetAngularVel(_vel); } }
+```
+
+而 `libgazebo_ros_planar_move.so` 的 `OnUpdate` 每次（`update_rate=100` ⇒ 每 10 ms 仿真时间）就是
+`model_->SetLinearVel(...); model_->SetAngularVel(...)`（源码逐字见
+`gazebo_plugins/src/gazebo_ros_planar_move.cpp`）。**纯自转**时它给每个 link 写的是
+`v=0, ω=(0,0,wz)` —— 只有"整个模型是一个刚体、且绕**自身质心**转"时这才是自洽的速度场。
+
+台架上把这句话变成四个对照（同一世界/出生点、`wz=1.0` × 12 仿真秒）：
+
+| 结构 | Δyaw 真值 | 执行率（仿真时间） | 读法 |
+|---|---|---|---|
+| 极简 **单 link box**，无接触（自由落体） | **+681.25°** | **99.9%** | 单刚体 + 无外力 ⇒ 插件说的就是发生的 |
+| **robot11 塌成单刚体**（本修法） | **+111.68…113.32°** | **16.2~16.5%** | 单刚体 + 真实接触 ⇒ 剩下的差额全是摩擦 |
+| robot11 原样（13 link / 12 joint） | **+7.09°** | **1.03%** | 多刚体不自洽 + 摩擦 |
+| robot11 原样，全关节改 `fixed` | +21.31° | 3.10% | 锁自由度**不能**替代单刚体 |
+| robot11 原样，仅转向关节改 `fixed` | +16.69° | 2.43% | 同上 |
+| robot11 原样，**零重力/无接触** | +128.02° | 18.6% | 多刚体结构的上限（≈ `I_base/(I_base+Σmᵢrᵢ²)`） |
+| 默认模型（7 link / 6 joint） | +40.01° | 5.82% | 对照：它的结构上限是 +330.85°（48.1%） |
+| 默认模型，零重力 | +330.85° | 48.1% | —— |
+
+⇒ **同一台车、同一世界、同一命令**，唯一变量是"模型是不是单刚体"，
+角速度执行率差 **15.7×**；而默认模型的结构上限（48.1%）比 robot11（18.6%）高，是因为它只有
+6 个关节、要"掰回来"的 link 更少。
+
+### M.4 判决性测量 B：接触/摩擦的剂量-响应（第二限制项）
+
+台架、`wz=1.0` × 12 仿真秒、唯一变量 = 轮 link 的 `mu1/mu2`（`<surface><friction><ode>`）：
+
+| 轮-地 `mu` | 1.0（默认） | 0.5 | 0.2 | 0.05 | 0.001 | 零重力（无接触） |
+|---|---|---|---|---|---|---|
+| Δyaw 真值 | **+7.09°** | +17.26° | +54.75° | +96.91° | **+126.80°** | **+128.02°** |
+| 执行率 | 1.03% | 2.5% | 8.0% | 14.2% | 18.6% | 18.6% |
+
+两条读法：
+* **单调** ⇒ 摩擦确实是限制项之一（而且是"轮子真的存在"带来的）；
+* **饱和在 18.6%** ⇒ 把摩擦**全部**拿掉也只能到多刚体结构的 18.6% ⇒ **摩擦不是主因**，
+  主因是 M.3 的结构不自洽。这也是"只降 mu 不算修好"的定量依据。
+
+### M.5 被否掉的修法：把插件 `update_rate` 提到 1000 Hz（有实测理由）
+
+动机：插件每 10 ms 才重设一次速度，接触/约束有 10 个物理步去"掰回来"；提到 1000 Hz
+（= 每个物理步都重设）应当让指令重新占上风。实测：
+
+| 量 | 原样（100 Hz） | **1000 Hz** |
+|---|---|---|
+| 盲发 `wz=1.0` × 12 s 的 Δyaw（robot11） | +7.09° | **+53.80°** |
+| 默认模型同改动（对照） | +40.01° | **+210.74°** |
+| **纯物理正前方盲推 `vx=0.25` × 25 s** | **0.4077 m**（被障碍挡住，z 不变） | ⚠️ **2.5652 m，底盘 z 0.1522 → 0.4005 m（爬上了障碍）** |
+| 60 s 自由漂移 | 0.308°/s | 0.297°/s（**没解决**） |
+
+⇒ 它确实"让指令占上风"，但**把实体障碍也一起变成可攀爬的**（车速级 0.25 m/s 的盲推能爬 25 cm），
+而且**不解决漂移** ⇒ **不采用**。
+
+### M.6 采用的修法：把 `robot11` 的底盘塌成**一个刚体**（robot 槽位专属）
+
+**做法**（`tools/scripts/regress/robot11_weld_chassis.py`；生成器
+`robot11_make_sim_xacro.py --chassis rigid` 默认调用它）：
+
+1. 从根 link `base_link` 对 `j2…j11` 做 FK（关节 origin 全是字面数字 ⇒ 可精确复算）；
+2. `l2…l11` 的 `<collision>` / `<visual>` 的 pose **逐条**变换到根 link 系后挂到根 link 上
+   （**几何一块都不改**，只改"装在哪条 link 上"）；
+3. 它们的 `<inertial>` 用**平行轴定理**合成到根 link（`M=9.4121 kg`、
+   `COM=(0.003551,0.007121,0.073122)`、`Izz=0.126766 kg·m²`）；
+4. 删掉 `j2…j11`；**保留** `livox_frame` / `imu_link` 及其固定关节
+   （感知链的 TF 与两个传感器都挂在它们上面 ⇒ 雷达/IMU 的位姿、`base_link→livox_frame`
+   的 30° 安装语义、`lio_tf_adapter` 的外参**一个字节都不变**）；
+5. 去掉指向被塌掉 link 的 `<gazebo reference="…">` 材质块（否则 Gazebo 每个都报一次
+   "unknown link"；材质由各 `<visual>` 自带的 `<color>` 承担）。
+
+**自证（不通过就报错、不写文件）** —— 这两条都实际抓到过 bug：
+
+| 检查 | 结果 |
+|---|---|
+| 碰撞几何 AABB **逐条**相等（塌陷前按各 link FK、塌陷后按根 link） | ✅ 113 条，min z 逐条相等 |
+| 整车最低点必须落在**轮子**（cylinder）上 | ✅ **−0.10250 m**（= Phase 1 独立量到的"地面平面 z=−0.102499"） |
+| 总质量 / 质心 / 惯量 | ✅ `9.4121 kg`（= 上游 11 条 inertial 求和）、`Izz 0.126766` |
+
+> 自证为什么必须有第二条：AABB 那条比较的是"塌陷前 vs 塌陷后"，若 FK **静默退化**
+> （实测踩过一次：`rpy="1.5708 -1.5708 0"` 被按"6 个数"解析 ⇒ 读成零向量），两边会**一起**错、
+> 检查照样通过。加上"最低点必须在轮子上"这条**不依赖 FK 正确性**的物理锚点后，
+> 那次退化当场报错。
+
+**为什么这不是"为了跑通而造假"**：本栈**没有任何**轮子/云台控制器（`.xacro` 自己写着
+"上游 j2..j9 是 continuous 但我们不加轮子控制器"），也就是说这 12 个关节**在运行期没有任何
+执行机构**——它们唯一的作用就是**与 planar_move 较劲**。塌成单刚体后：
+质量、质心、惯量、碰撞几何、足迹、雷达/IMU 位姿**逐项不变**，丢掉的只有"12 个不受控自由度"。
+
+### M.7 验收（整栈、同协议、逐项实测）
+
+命令模板（§L 的原款，`--settle 25 --duration 6 --goal-wait 0`）：
+
+```bash
+tools/scripts/tiltmount/run_nav_goal_forensics.sh <tag> --settle 25 --duration 6 --goal-wait 0 \
+    --push-wz 1.0 --push-time 12 -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+```
+
+| 项 | 修前（§L 同协议） | **修后（本节，`m1_r11_blind_wz`）** | 默认模型（同会话 `m2_def_blind_wz`） |
+|---|---|---|---|
+| 盲发 `wz=1.0` × 12 s：真值 Δyaw / LIO | **+3.79° / +3.86°** | **+35.42° / +33.75°**（9.3×） | +27.35° / +26.88° |
+| 执行率（对 687.5°） | 0.55% | **5.15%**（RTF 1.05 ⇒ 12.6 仿真秒） | 3.98% |
+| 60 s 无指令自由漂移（真值 / LIO） | **+8.20°** / — | **+0.006° / −0.091°**（`m5_r11_drift60`） | −0.154° / −0.156°（`m6_def_drift60`） |
+| 纯物理盲推：正前方 / 正后方（真值） | 0.4199 m / 1.5753 m | **0.3992 m / 1.4370 m**（`m10_r11_reach25`，25 s 腿） | 0.5402 m（§L） |
+
+> **`robot11` 的角速度执行率现在**高于**默认模型**（+35.42° vs +27.35°，同一次会话、同一协议、
+> 同样 RTF≈1.05）⇒ 验收口径"与默认模型可比"达成，且是**更好**的一侧。
+
+**原地转目标（`--goal-yaw-only-deg 180`，`m7_r11_rotate180`）**：nav2 **立即**回
+`controller_server: Reached the goal!`、`FollowPath SUCCEEDED`、`navigate_to_pose SUCCEEDED`，
+`/cmd_vel` 与 `/cmd_vel_chassis` 的 `max|wz|` **= 0.0**、真值位移 0.00012 m、Δyaw 0.005°。
+⇒ **不是"车转不动"，而是本仓 nav2 配置根本不检查朝向**：
+`nav2_params_sim_controller_rpp.yaml` 用的是
+`goal_checker_plugins: ["general_goal_checker"]` = **`PositionGoalChecker`**
+（文件里自己核实过"该插件只声明 `xy_goal_tolerance`；`yaw_goal_tolerance` 在 1.1.20 的
+PositionGoalChecker 里不存在"）⇒ 位置一到就算到。**登记为本节发现的缺陷**（见 M.9 ①），
+按规则**不改** `src/rm_navigation/**/params`（只许走既有槽位覆盖）。
+
+**转向类目标的真实验收 ⇒ 用"反向目标"**（RPP 的 `use_rotate_to_heading` 先原地转 180° 再走，
+§L.5 就是它失败的）：
+
+| 场景 | 修前（§L 记录，`mode:=nav`） | **修后（本节）** |
+|---|---|---|
+| **反向 2.0 m**（`--goal-forward -2.0`） | 45 条 plan、`vx` **恒 0**、`wz=-0.75` 连发 45 s、真值 **0.0069 m**、Δyaw **−6.03°**、`Failed to make progress` ×2（§L.8） | **`m9_r11_rev20`（不加闸门）**：**0 条 plan**（目标落在先验图西墙内）、8 次恢复、真值 0.0733 m、Δyaw **−179.7°**（恢复 Spin 这次真的把车转了 180° —— 角速度通道修好的直接后果）；**`m12_r11_rev20_gated`（加闸门）**：`in_reach=false` ⇒ **不发目标**（0 plan / 0 条 `/cmd_vel` / 位移 0） |
+| **反向 1.2 m**（在可达区内；闸门放行） | 未测（§L 只有 2.0 m） | **`m11_r11_rev12_long`**：真值位移 **1.2102 m**（请求 1.2）、残余（map 系）**0.0794 m**（< `xy_goal_tolerance 0.25`）、**`Goal succeeded`**、`/cmd_vel_chassis` 的 `max|vx| = 0.9624`、`n(vx>0.01) = 121`、`collision ahead` 14 条、恢复 4 次 |
+| **原地转 180°**（`--goal-yaw-only-deg 180`） | 未测 | **`m7_r11_rotate180`**：nav2 **立即** `Reached the goal!`（`FollowPath SUCCEEDED`、`/cmd_vel` 与 `/cmd_vel_chassis` 的 `max\|wz\| = 0.0`、真值位移 0.00012 m、Δyaw 0.005°）⇒ **本仓 nav2 根本不查朝向**（`PositionGoalChecker`，见 M.9 ①），所以"原地转目标"在本仓配置下**测不出**转向能力；转向能力由上面两行的反向目标体现 |
+
+**契约（9 个关键话题的发布者数）**：在一次 `mode:=nav` 的 robot11 会话里逐个 `/topic info` 实测
+`/livox/lidar`、`/livox/lidar/pointcloud`、`/cloud_registered`、`/segmentation/{ground,obstacle}`、
+`/scan`、`/odom`、`/local_costmap/costmap`、`/global_costmap/voxel_grid` **全部 = 1**（与 §K 的口径一致；
+本节只改 URDF，节点集合与话题一个都没动）。
+
+**反向验收（本节反向验证）**：`effective.txt` 逐项回读 = `robot_radius 0.300`、
+局部/全局 `inflation_radius 0.60/0.65`、`regulated_linear_scaling_min_radius 0.9`、
+`use_rotate_to_heading True`、`obstacle_near_ground_m 0.05` ⇒ 限速器与近地剔除**都还在**（未受本节改动影响：
+本节的改动只落在机器人的 URDF/xacro，一行参数/launch/节点集合都没动）。
+
+### M.8 新的验收口径：**盲推可达性前置判据 + 闸门**（§L.9 第 1 项的建议，已接线）
+
+**为什么**：§L 的主结论是"`--goal-forward 2.0` 物理上不可达"（正前方只有 0.42 m）。
+那么"发目标 → 看车动不动"这种验收在**不可达的目标**上永远是红叉，而红叉的原因与控制器无关。
+⇒ 规定：**任何基于目标的验收，必须先跑一次"盲推可达性探针"**，目标必须落在实测可达区内。
+
+**怎么用（两条命令）**：
+
+```bash
+# ① 可达性探针（发目标之前；绕过 nav2，只有盲推）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh m10_r11_reach25 --settle 25 --duration 6 \
+    --goal-wait 0 --preflight-reach 0.25 --preflight-time 25 -- \
+    world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+#   → forensics.json 的 reach = {fwd_m, back_m, fwd_dyaw_deg, back_dyaw_deg, t_last_motion_s, …}
+
+# ② 目标验收（把 ① 的文件交给闸门；目标超出可达区就**不发目标**并记 goal_gate）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh m8_r11_rev12 --settle 30 --duration 30 \
+    --goal-forward -1.2 --goal-wait 60 --reach-gate .tmp_tiltmount/m10_r11_reach25/forensics.json \
+    -- world:=RMUL2026 mode:=nav lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+```
+
+**判据（本节实测的取值）**：`reach = {fwd_m: 0.3992, back_m: 1.4370}`（`m10_r11_reach25`，
+25 s 腿、真值、RTF≈1.0）⇒ 本出生点的可达区是"**前 0.40 m / 后 1.44 m**"，
+`--goal-forward 2.0`（或 `-2.0`）**都在区外**，闸门会直接判 `in_reach=false` 并且不发目标。
+新增的 `--goal-yaw-only-deg`（原地转目标）与 `--dump-traces`（完整真值/里程计时间线，
+"无指令漂移"只能从它读）也在同一次提交里。
+
+### M.9 顺带查到的两件（与本节结论无关，但必须登记）
+
+① **本仓 nav2 不检查目标朝向**（`PositionGoalChecker`）：位置进入 `xy_goal_tolerance`
+（0.25 m）就 `Reached the goal!` ⇒ **"原地转 180°"这类目标在本仓配置下会立即成功**（实测
+`max|wz| = 0.0`、Δyaw 0.005°）。要让"原地转"变成真判据，需要把 `goal_checker_plugins` 换成
+`nav2_controller::SimpleGoalChecker`（它同时有 `xy_goal_tolerance` 与 `yaw_goal_tolerance`）。
+**本节没改**（参数在 `src/rm_navigation/**/params`，按规则只许走既有槽位覆盖）。
+
+② **`/odom_ground_truth.twist` 是"指令回显"，不是实测速度**：planar_move 的
+`OnUpdate` 挂在 `ConnectWorldUpdateBegin` 上 —— 它**先** `SetAngularVel`、**再**在同一个回调里
+`UpdateOdometry()` 读 `model_->WorldAngularVel()`。所以 ① 里 `twist.angular.z` 恒等于
+**刚设进去的命令值**（实测：真值 yaw 12 s 只转 7.09°，而该字段中位 = 57.296°/s = 1.0 rad/s）。
+**要量"到底转了多少"只能用位姿差（`/odom_ground_truth.pose` 或 `/odom`），不能信 twist。**
+
+### M.10 未验证 / 诚实清单（本节）
+
+1. **没有重跑"修前"的整栈基线**（§L 的 +3.79° / +8.20° 直接引用；同一模型的**台架**复现见 M.1，
+   整栈的"修后"见 M.7）。要严格同期对照，可 `robot11_make_sim_xacro.py --chassis articulated`
+   回退后再跑一次同样的命令。
+2. **反向 2.0 m 目标本身没做"修前 vs 修后"的同协议对照**（§L 的修前读数：45 条 plan、
+   `vx` 恒 0、`wz=-0.75` 连发 45 s、真值 0.0069 m、Δyaw −6.03°）；本节只跑了"修后"。
+3. `wz` 剂量-响应（0.3/0.6/1.0/1.5）只做了台架的单点 `wz=1.0` 与整栈的 `wz=1.0`
+   （`wz=-0.75` 只由 RPP 在反向目标里给出），**没有**做完整扫描。
+4. 单刚体修法**丢掉了 12 个不受控自由度**（j2…j11）：将来若要给轮子/云台加真控制器，
+   必须回退到 `--chassis articulated` 再改造（生成器留了开关，输出与 HEAD 逐字节相同）。
+5. 塌陷后的接触是"4 个 cylinder 刚体接触"（不再是"4 个自由轮"）：所以**平动**的摩擦特性也变了
+   （正前方极限 0.4077 → 0.3992 m，−2%；反向 1.4370 m 与 §L 的 1.5753 m 同量级，
+   差异来自 25 s 腿的时间上限 + 起始点不同）。这一点**没有**做系统标定。
+6. `m7` 的"原地转"结论依赖"`PositionGoalChecker` 不查朝向"这一条**源码/参数级**判读
+   （不是本节实测出来的"转向能力"）；真正的转向能力由反向目标那一跑体现。
+
+### M.11 回退
+
+| 想退掉什么 | 怎么做 |
+|---|---|
+| **单刚体底盘**（模型行为） | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --chassis articulated` ⇒ 生成物与 2026-10-09 的 HEAD **逐字节相同**（已核 sha256）；再 `colcon build --packages-select rm_nav_bringup`（install/ 里是逐文件符号链接，通常不用重编） |
+| 塌陷工具本身 | `rm -f tools/scripts/regress/robot11_weld_chassis.py`（生成器只在 `--chassis rigid` 时 import 它；把默认改回 `articulated` 即可） |
+| 新增的验收工具 | `git revert <第 2 个 commit>`：`nav_goal_forensics.py` 的 `--preflight-reach/--reach-gate/--goal-yaw-only-deg/--dump-traces` 都是**新增开关**，默认关 ⇒ 回退不影响 §L 的任何旧命令 |
+| 本文档 | `git revert <第 3 个 commit>` |
+
+### M.12 复现命令（复制即可）
+
+```bash
+# ① 生成模型（默认 rigid；articulated = 回退档，输出逐字节等于 2026-10-09）
+python3 tools/scripts/regress/robot11_make_sim_xacro.py                    # rigid
+python3 tools/scripts/regress/robot11_make_sim_xacro.py --chassis articulated
+# ② 只做自证（不写文件）：几何 AABB / 最低点在轮上 / 质量·Izz
+python3 tools/scripts/regress/robot11_weld_chassis.py \
+    --in src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro --report-only
+# ③ 整栈：盲发角速度（§L 同协议）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh m1_r11_blind_wz --settle 25 --duration 6 \
+    --goal-wait 0 --push-wz 1.0 --push-time 12 -- world:=RMUL2026 mode:=slam_nav \
+    lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+# ④ 整栈：60 s 无指令漂移（要 --dump-traces 才拿得到时间线）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh m5_r11_drift60 --settle 30 --duration 30 \
+    --goal-wait 0 --dump-traces -- world:=RMUL2026 mode:=slam_nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+# ⑤ 可达性前置判据 + 闸门（M.8）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh m10_r11_reach25 --settle 25 --duration 6 \
+    --goal-wait 0 --preflight-reach 0.25 --preflight-time 25 -- world:=RMUL2026 mode:=slam_nav \
+    lio:=small_point_lio robot:=robot11 spin_speed:=0.0 gui:=False
+# ⑥ 原地转目标（注意 M.9 ①：本仓 nav2 不查朝向 ⇒ 会立即 SUCCEEDED）
+tools/scripts/tiltmount/run_nav_goal_forensics.sh m7_r11_rotate180 --settle 30 --duration 5 \
+    --goal-yaw-only-deg 180 --goal-wait 45 -- world:=RMUL2026 mode:=nav lio:=small_point_lio \
+    robot:=robot11 spin_speed:=0.0 gui:=False
+# ⑦ 台架（变体矩阵，一次 <40 s；已提交：tools/scripts/tiltmount/run_chassis_yaw_bench.sh）
+#    先备好模型 SDF：xacro <模型>.xacro <args> | gz sdf -p /dev/stdin > /tmp/<模型>.sdf
+tools/scripts/tiltmount/run_chassis_yaw_bench.sh t_r11_weld --model /tmp/robot11_welded.sdf \
+    --variant baseline --wz 1.0 --push-wall 12 --settle 8 --add-jsp
+#    --variant {baseline,float,nofric,nowheelcol,spherewheel,fixsteer,fixwheel,fixall,weld,baseonly,boxwheel}
+#    → .tmp_tiltmount/<tag>/bench/{world.world,probe.json,gzserver.log}
+```
