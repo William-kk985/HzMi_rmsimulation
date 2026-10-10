@@ -1406,7 +1406,9 @@ rviz2 有像素；`decimated` 把 rviz2 内存从 1381 → 243 MiB）。**未复
    这是推断，不是实测。要证实需要在同类内存受限环境里跑一次 `full` 并看 OOM 记录。
    → **该问题已另案结清**（2026-10-07 追加）：见 `docs/gazebo_gui_troubleshooting.md` ——
    用户机内核日志（本次开机完整保留）与 cgroup `memory.events`（`oom_kill=0`）都表明
-   那两次 `exit code -9` **不是 OOM**，而是本仓 bench 脚本的全机 `pkill -9 -x gzclient`；
+   那两次 `exit code -9` **不是 OOM**；**发送者无法指认**（无 `auditd`）—— ⭐ **用户 2026-10-10 回忆：
+   是用户自己手动 `pkill -9` 的，因为当时"太卡了或者直接卡住了"**（另一个候选才是本仓 bench 脚本的
+   全机 `pkill -9 -x gzclient`）；
    而"GUI 卡住不出来"另有真因：`robot11` 的 `model://` mesh 本地解析不到 ⇒
    回落到在线模型库并**同步阻塞**（用户 19:50 日志实测 48.03 s，且是被 Ctrl-C 打断的）。
 2. **限速器的"承诺距离前推"在车不动时会衰减到 0**（`speed_limit_hold_decay_factor=1.0` 按"以限速前进"
