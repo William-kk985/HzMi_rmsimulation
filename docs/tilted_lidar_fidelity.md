@@ -2532,3 +2532,299 @@ tools/scripts/tiltmount/run_chassis_yaw_bench.sh t_r11_weld --model /tmp/robot11
 #    --variant {baseline,float,nofric,nowheelcol,spherewheel,fixsteer,fixwheel,fixall,weld,baseonly,boxwheel}
 #    → .tmp_tiltmount/<tag>/bench/{world.world,probe.json,gzserver.log}
 ```
+
+---
+
+## N. 2026-10-11：`small_point_lio` 两个变换 bug（②③）与 1 ns 截断的**来源审计** + 真机可达性 + 守卫设计
+
+> **触发** = 用户 2026-10-11 的两问（父任务原文）：
+> 「smallpointlio的改动是不是你对代码库看的不全面导致的，这么多人用按道理不会有这么明显的问题」
+> 与「lio那个难道是实际的mid360有内置imu所以可以解决问题吗」。
+>
+> **本节只做取证与登记**：不改任何功能代码 / 参数 / launch，不跑仿真；每条结论都给出
+> 文件:行 / commit / URL，并单列"未能验证"（§N.6）。
+> 与 §I、§J 的关系：**§I 是诊断**（谁斜了、账错在哪）、**§J 是施工**（修 bug ②③ 的姿态 + `sensor` 档）、
+> **本节是"这两段代码从哪来的 + 为什么上游那么多人用却没炸 + 真机内置 IMU 有没有用"**。
+
+### N.0 一句话结论（三条）
+
+1. **来源**：bug ②（`/cloud_registered` 对"已在 odom 的点"再乘一次 `T(base_link←livox_frame)`）、
+   bug ③（`odom→base_link` 姿态用**共轭**而不是**合成**）、1 ns 截断（`static_cast<uint32_t>((ts-sec)*1e9)`）
+   —— **三处全部是上游原样代码**。本仓 vendoring 提交 **`98baa55`**（KK <2518412558@qq.com>，2026-10-05）
+   引入的 `small_point_lio_node.cpp` 与上游 **`Yancey2023/small_point_lio@688d75c`（分支 `ros2`）
+   逐字节相同**（221 行；sha256 `ad48b540e15d005b4ccc68aa872fe48169dacef42243224b753b56be3941e417`，`diff` 为空）。
+   本仓对该包的**唯一**源码改动是 `src/lidar_adapter/livox_custom_msg.h` 的 3 行 `timebase` 兜底
+   （已在 `THIRD_PARTY_NOTICES.md:32`、`docs/lio_slots.md` §3.2 登记）。
+   ⇒ **这两处变换没有一行是本仓写错的**；`git log --follow` 显示该文件在本仓总共只有 3 个提交（§N.1）。
+2. **为什么"这么多人用没炸"**：上游自己的 launch 里**硬发一条单位 `base_link→livox_frame` 静态 TF**
+   （`launch/small_point_lio.launch.py:24-47`，xyz 与 rpy 全 0）。用户按上游 launch/README 跑时
+   `R_bl = I`，两个 bug **同时退化**：② 只剩"整朵云平移 `|t|`"（肉眼/单帧统计看不出）、
+   ③ 的姿态与共轭**逐位相同**。本仓的 `robot11_mount:=urdf|sensor` 把 30° 倾角**记进 URDF 关节**，
+   第一次让 `R_bl ≠ I` 成为常态 ⇒ 暴露（这是"不寻常挂法"，不是"不寻常代码"）。
+3. **判决**：**上游潜伏 bug 被不寻常挂法暴露**（**不是**"本仓集成写错代码"）。
+   本仓集成的责任是"选了会触发它的挂法 + 插件把点云表达在父 link 系"，且**当时没有把这条隐藏前提写下来**。
+   **真机 MID-360 的内置 IMU 完全不能解决**（§N.3）：两个 bug 的自变量是 `livox_frame↔base_link` 这条 TF，
+   与 LiDAR→IMU 外参 `extrinsic_R` 无关 —— 内置 IMU 恰恰是上游把 `extrinsic_R` 写成单位阵的**原因**
+   （`config/mid360.yaml` 的 `extrinsic_T=[-0.011,-0.02329,0.04412]` 就是 MID-360 出厂 IMU-LiDAR 杆臂），
+   反而让人更不容易怀疑"问题出在挂装 TF 上"。
+
+---
+
+### N.1 来源表（逐行：谁引入的、上游还是本地）
+
+**取证口径（三条，都可复跑，命令见 §N.7）**
+
+* `git log --follow -- src/rm_localization/small_point_lio/src/small_point_lio_node.cpp`
+  ⇒ 本仓**只有 3 个提交**（下表）；
+* `git blame -L 80,200 --date=short …` ⇒ 所有"问题行"的 blame 都是 **`98baa55`**；
+* `git show 98baa55:…/small_point_lio_node.cpp` 与
+  `curl raw.githubusercontent.com/Yancey2023/small_point_lio/688d75c…/src/small_point_lio_node.cpp`
+  的 `diff` ⇒ **空**；两份 sha256 与 `ros2` 分支 HEAD 的那份**三者相同**。
+
+| # | 上游行 = vendored 行 | 当前 HEAD 行（`7c6cd9f`） | 内容 | blame | 上游同一位置 | 判定 |
+|---|---|---|---|---|---|---|
+| 1 | `:57`（odom 回调）/ `:105`（点云回调） | 已被 `double_to_msg_time()` 取代（定义 `:40-53`，调用 `:91`/`:179`） | `time_msg.nanosec = static_cast<uint32_t>((ts - sec) * 1e9)` —— **截断**（float 误差让 ~40% 的帧低 1 ns） | `98baa55` | 上游同（同 URL 的 `:57`/`:105`） | **上游原样**；本仓 `a281636` 修（丢帧 116 → 10 条） |
+| 2 | `:65` | `:99` | `lookupTransform(lidar_frame, "base_link", time_msg)` = bug ③ 的 `T_bl` | `98baa55` | 上游同 `:65` | **上游原样**；`2a5a8b6` 保留该查询（语义本身需要它） |
+| 3 | `:75` | 姿态 `:126`；**平移仍取旧值** `:149-151` | `T_ob = T_bl⁻¹ · T_ol · T_bl`（**共轭 / 相似变换**） | `98baa55` | 上游同 `:75` | **上游原样**；`2a5a8b6` 只把**姿态**改成合成，平移**有意**保留（理由与实测见 §J.5） |
+| 4 | `:109` | 已删除（`2a5a8b6`） | `lookupTransform("base_link", lidar_frame, …)` = bug ② 的 `T` | `98baa55` | 上游同 `:109` | **上游原样**；`2a5a8b6` 删 |
+| 5 | `:127` | `:197` | `msg.header.frame_id = "odom"`（点云自称 odom） | `98baa55` | 上游同 `:127` | **上游原样**（修后数据与标签自洽，保留） |
+| 6 | `:159` | 已删除（`2a5a8b6`；现 `:227-236` 直接写点） | `transformed_point = R(base←livox)·point + T` —— 对**已配准**的点再变换一次（还绕 odom 原点转） | `98baa55` | 上游同 `:159` | **上游原样**；`2a5a8b6` 删 |
+
+**本仓对该文件的三个提交（`git log --follow` 的全部输出）**
+
+| commit | author date | 作者 | 对 `small_point_lio_node.cpp` 做了什么 |
+|---|---|---|---|
+| `98baa55` | 2026-10-05 14:09:27 +0800 | KK <2518412558@qq.com> | `vendor(small_point_lio)`：引入上游 221 行**原样**（补丁在另一个文件 `livox_custom_msg.h`） |
+| `a281636` | 2026-10-06 14:24:28 +0800 | 同上 | 修 1 ns 截断（本仓**第一次**动这个文件） |
+| `2a5a8b6` | 2026-10-08 00:47:04 +0800 | 同上 | 修 bug ②（删那次 TF 与逐点变换）+ bug ③（姿态改合成） |
+
+**上游身份 / 许可（本次独立复核，与 `THIRD_PARTY_NOTICES.md:32`、`docs/lio_slots.md` §1 一致）**：
+`LICENSE.txt`「The MIT License (MIT) / Copyright (c) 2025 Yingjie Huang」；
+`package.xml` `<author email="1709185482@qq.com">Yingjie Huang</author>`、`<license>MIT</license>`；
+`README.md`「Small Point-LIO … an advanced implementation of the Point-LIO algorithm … 2-3x speed」
+（contact = QQ 群 1070252119）。
+`https://github.com/Yancey2023/small_point_lio/commits/ros2.atom`（本次 HTTP 200）
+首条目 id = `Grit::Commit/688d75cfa780049ae532e5100ca64f46ad8b1a93`、title「fix bugs」、
+`<updated>2026-08-31T06:26:28Z</updated>`、`<author><name>Yancey2023</name></author>`
+⇒ **pin 就是 `ros2` 的 HEAD**，即截至本次审计（2026-10-11）上游**没有后续提交**动过这个文件。
+
+---
+
+### N.2 上游对照：别人的 LIO 用**合成**还是**共轭**？会不会"对已配准的点再变换"？
+
+对照对象 = `hku-mars/FAST_LIO` 与 `hku-mars/Point-LIO`（本仓 `third_party/` 有 checkout，**可离线逐行核对**），
+外加本仓自有两个 fork 与自写的桥接节点。
+
+| 项 | hku-mars FAST_LIO | hku-mars Point-LIO | small_point_lio（上游 = 本仓 vendored） |
+|---|---|---|---|
+| `odom→body` TF / `/Odometry` 怎么发 | `third_party/fast_lio/src/laserMapping.cpp:589-620`：`odomAftMapped`（`camera_init→body`）**直接用 LIO 状态**，`:619` 原样广播，**没有任何 `lookupTransform`** | `third_party/point_lio/src/laserMapping.cpp:271-299`：同样 `camera_init→body` 直接发状态（`:298` 广播） | `small_point_lio_node.cpp:65-75`：**先 `lookupTransform(lidar_frame,"base_link")` 求一条外部 TF，再做共轭** |
+| 点云怎么发 | `:478-499` `publish_frame_world()`：对 **body/lidar 系的点**做一次 `pointBodyToWorld`（`:178-187`：`p_global = rot·(offset_R_L_I·p_body+offset_T_L_I)+pos`）后发，`frame_id="camera_init"` | `:167-188`：直接发已经算好的 `feats_down_world`，`frame_id="camera_init"`（另有一条 `body` 系云 `:239`） | 上游 `:159`：回调入参**已经是 odom 点**（出点公式 `small_point_lio.cpp:98`），却**又**乘一次 `T(base_link←livox_frame)`，还盖 `frame_id="odom"` |
+| 有没有"对已配准点再变换" | **没有** | **没有** | **有**（bug ②） |
+| 有没有"共轭" | **没有**（根本不碰外部 TF） | **没有** | **有**（bug ③） |
+| 全仓 `grep -rn lookupTransform`（4 份 LIO 源码） | 0 处 | 0 处 | 只有 `small_point_lio_node.cpp:99`（+ 注释 `:111`） |
+| 本仓自有 fork 的同款位置 | `src/rm_localization/FAST_LIO/src/laserMapping.cpp:628-659`（`:658` 广播，直接发状态） | `src/rm_localization/point_lio/src/laserMapping.cpp:234-268`（`:245-246` 帧名、`:268` 广播） | — |
+| 需要 `base_link` 时的桥接 | 本仓自写的 `lio_tf_adapter`：`src/rm_localization/lio_tf_adapter/src/lio_tf_adapter_node.cpp:63-68` = `q_out = q_lio*q_offset`、`t = quatRotate(q_lio, t_offset)` ⇒ **合成**（正确）；杆臂由 launch 按挂法算（`bringup_sim.launch.py:219-245`，`urdf\|sensor` 档带 30° 旋转） | 同左 | ⚠️ `lio:=small_point_lio` 时该节点被**显式排除**（`bringup_sim.launch.py:1977-2010`：它"自己就发 `odom→base_link`"）⇒ **本仓唯一写对合成的那条路，恰好没被 small_point_lio 用上** |
+
+**URL / 哈希（本次实际取到的）**
+
+* 上游 pin：<https://github.com/Yancey2023/small_point_lio>（分支 `ros2`，commit
+  `688d75cfa780049ae532e5100ca64f46ad8b1a93`，2026-08-31「fix bugs」）；
+  节点文件 <https://raw.githubusercontent.com/Yancey2023/small_point_lio/688d75cfa780049ae532e5100ca64f46ad8b1a93/src/small_point_lio_node.cpp>
+  （HTTP 200，12663 B）；出点公式 <https://raw.githubusercontent.com/Yancey2023/small_point_lio/688d75cfa780049ae532e5100ca64f46ad8b1a93/src/small_point_lio/small_point_lio.cpp>
+  （HTTP 200，8202 B，公式在 `:98`）；上游 launch（单位静态 TF）
+  <https://raw.githubusercontent.com/Yancey2023/small_point_lio/688d75cfa780049ae532e5100ca64f46ad8b1a93/launch/small_point_lio.launch.py>；
+  上游真机配置 <https://raw.githubusercontent.com/Yancey2023/small_point_lio/688d75cfa780049ae532e5100ca64f46ad8b1a93/config/mid360.yaml>。
+* 本仓 submodule 哈希：`third_party/fast_lio` = `7cc4175de6f8ba2edf34bab02a42195b141027e9`（`heads/main`）；
+  `third_party/point_lio` = `3c3db59d6969d8ecee8e68468693d006397f4a0c`（`heads/point-lio-with-grid-map`）；
+  自有 fork：`src/rm_localization/FAST_LIO` = `24208b6fc2feb6f32e09bd71b8ea2eadc7a172f1`、
+  `src/rm_localization/point_lio` = `cf25c86118e235639479e194e79866f0116ddc62`。
+
+**差异的精确表述**：不是"上游漏乘了一次外参"，而是**语义对象不同**。
+FAST-LIO / Point-LIO 发布的 TF 是 `world→body(=IMU)`，发布者**拥有**这两个帧名，所以直接发状态；
+`small_point_lio` 也直接发状态，却把 `child_frame_id` **硬编码**成别人的帧 `base_link`
+（上游 `:61-62`、`:80-81`；当前 HEAD `:95-96`、`:156-157`），于是必须引入一条它**不拥有**的外部 TF 来换算
+—— 而它把换算写成了**共轭**（③），并且**顺手也拿它去换算点云**（②）。这两件事是同一个错误认知的两面：
+把"外部 TF 当成状态的一部分"，而不是"当成帧与帧之间的固定关系"。
+
+---
+
+### N.3 真机 MID-360（内置 IMU）会不会中招？
+
+#### N.3.1 三个"外参"必须分开（这是用户第二问的核心）
+
+| 外参 | 谁提供 | 在代码里的位置 | MID-360 内置 IMU 时 |
+|---|---|---|---|
+| **LiDAR→IMU**（`extrinsic_R` / `extrinsic_T`） | LIO 参数文件 | `small_point_lio.cpp:16-20`（装载）、`:93-98`（用：`p_odom = R_ol·(R_ext·p_lidar+t_ext)+t_ol`） | **`R = I`**（同壳体），`T` ≈ 出厂杆臂 `[-0.011,-0.02329,0.04412]` ⇒ 上游 `config/mid360.yaml` 就是这么写的 |
+| **IMU→body**（`imu_link→base_link`） | URDF / `robot_state_publisher` | 只出现在 LIO 之外（`lio_tf_adapter` 的杆臂，或 small_point_lio 的 TF 查询做链路的一部分） | 与"是否内置 IMU"无关 |
+| **LiDAR→body**（`livox_frame→base_link`） | **URDF 关节 / 用户静态 TF** | **`small_point_lio_node.cpp:99`（查）+ `:126`（用）+ 旧 `:159`（用）** | **与"是否内置 IMU"完全无关** —— 这正是两个 bug 的自变量 `R_bl` |
+
+⇒ **内置 IMU 不能解决**：把 `extrinsic_R` 设成单位，只让"算法内部的 body = 传感器壳体"，
+**不会**让 `R_bl` 变成单位；两个 bug 的错全部发生在 `lidar_frame↔base_link` 这条
+**节点自己没拥有、也不该假设朝向**的 TF 上。
+**反过来**：内置 IMU 是上游 `extrinsic_R = I` 的**来源**，用户照抄那份配置时会看到
+"外参已经按内置 IMU 配好了"，**更不会怀疑**问题出在挂装 TF 上。
+
+#### N.3.2 (i) 什么条件下真的咬人？
+
+**代码路径本身每帧都走**：两个回调里都是无条件 `lookupTransform`，失败就 `return`
+（上游 `:65-69`（odom 回调）/`:109-113`（点云回调）；当前 HEAD `:99-103`）
+⇒ "没有这条 TF"本身就是一种硬依赖：那时 `/Odometry`、`odom→base_link`、`/cloud_registered`
+**一条都不发**（已在 `docs/lio_slots.md` §2.1 那行登记为"强依赖：丢帧、不发 odom"）。
+**是否"咬人"只取决于 `R_bl = R(T(lidar_frame←base_link))` 的旋转**：
+
+| 挂法 | `R_bl` | bug ②（`/cloud_registered`） | bug ③（`odom→base_link` / `/Odometry`） | 本仓实测 |
+|---|---|---|---|---|
+| 上游 launch 的单位静态 TF；真机雷达平装、URDF 只给平移 | `I` | 只是把整朵云**平移** `\|t\|`（本仓仿真 = 0.2044 m）⇒ 肉眼/单帧统计都看不出 | **姿态与共轭逐位相同**（平移差恰好 `−p`）⇒ nav2 拿到的是对的姿态 | 默认档 `plugin`：`/cloud_registered` 地面 0.742°、`odom→base_link` pitch 0.047°（§I.5.3 / §J.2） |
+| 安装倾角记进 URDF / 静态 TF（`robot11_mount:=urdf\|sensor`；真机上任何"雷达斜装"的同款做法） | `R_x(±30°)` 等 | 整朵 odom 场景被**刚性旋转 `R_bl`**（且绕 **odom 原点**转）⇒ RViz 里地面成大斜坡 | 发布 `rpy = [0.383, **4.890**, 7.701]°`（真值 pitch 0.003°）、pitch 随 yaw 一起长 ⇒ **nav2 的车身姿态是假的** | §I.5.3 / §J.1：修后 30.970°→**1.054°**、4.890°→**0.317°** |
+
+**推论（回答"这么多人用"）**：上游把"单位 `base_link→livox_frame`"**写进了自己的 launch**，
+所以**默认用法下 `R_bl ≡ I`，两处 bug 在数值上被完全掩盖**；只有"用户自己把倾角写进 TF/URDF"这条路才会现形。
+而这条路在上游文档里**完全不出现**——本次逐字核对：上游 `README.md` 与 `config/*.yaml` 里
+`base_link` **一次都没出现**，唯一的出现就是 `launch/small_point_lio.launch.py` 那条**单位**静态 TF
+（`:24-47`，`--x/y/z 0 --roll/pitch/yaw 0 --frame-id base_link --child-frame-id livox_frame`）。
+再叠加上游 `/cloud_registered` **只在有订阅者时才发**（`get_subscription_count()>0`，上游 `:102`）、
+以及很多人只把 LIO 当"里程计源"、用 `camera_init/odom` 而不用 `base_link` 看车 —— 报告面就更小。
+
+#### N.3.3 (ii) 内置 IMU + 斜装时，每个产物"自称什么 / 实际含什么"
+
+| 产物 | 自称（frame 标签 / 源码） | **修前**实际含 | **修后**（`2a5a8b6`）实际含 |
+|---|---|---|---|
+| `/cloud_registered` | `frame_id = "odom"`（上游 `:127` / HEAD `:197`） | `T(base←livox)·p_odom`：把 odom 场景按 `R_bl` 刚性旋转、且**绕 odom 原点**转（`R·p+T`） | `p_odom`（与标签自洽） |
+| TF `odom→base_link` | `odom` → `base_link`（上游 `:61-62` / HEAD `:95-96`） | 姿态 `R_bl·R_ol·R_blᵀ`（**共轭**）；平移 `R_blᵀ(t_ol+(R_ol−I)p)` | 姿态 `R_ol·R_bl`（**合成**）；**平移仍取旧值**（有意，§J.5） |
+| `/Odometry` | `odom` → `base_link`（上游 `:80-81` / HEAD `:156-157`） | 与上面**同一条** `transform_stamped`（同错） | 同上 |
+| LIO 内部状态 `R_ol`（不单独发布） | 语义 = `odom←IMU` | 内置 IMU ⇒ `IMU ≡ 传感器壳体` ⇒ `R_ol` 里**含安装倾角** | 同（未变） |
+| `R_bl` 本身 | TF 树里的 `base_link→livox_frame` | 未读 | 未读（仍未做守卫，见 N.5） |
+
+一句话：修前"**自称 odom 的点云**"里混着 `base_link` 的朝向，"**自称 `base_link` 的 TF**"里是被共轭过的 `R_ol`
+—— 两个产物都错在"帧标签与内容不一致"，不是"差一点精度"。
+
+#### N.3.4 (iii) 一个实现正确的 LIO，在真机斜装上会不会**仍然**给出"重力倾斜的 odom"？
+
+**会，而且这是本仓（与上游同款）设计使然** —— 下面全部是**源码级 verified**，不是推断：
+
+* `fix_gravity_direction: true` 时，初始化只把**前 200 帧测得的加速度均值方向**写进状态里的
+  **重力向量**：`small_point_lio.cpp:53-64`（`kf.x.gravity = −(|g|/|Σa|)·Σa`，随后 `acceleration = −gravity`）；
+* **初始姿态从不被旋转**：`src/small_point_lio/eskf.h:30` 的 `rotation` 默认 `Identity()`；
+  预测里 `v += (R·a + g)·dt`（`eskf.h:103`）用的就是这个 `g`。
+  ⇒ `g` 携带了倾角，而 **`odom` 的定义就是"初始化那一刻的 IMU（= 传感器壳体）系"**。
+
+对照实测：本仓 `robot11_mount:=plugin` 之所以"odom 看起来水平"，是因为**插件把点云发在父 link（水平）系**
+（`livox_points_plugin.cpp` 的 `axis = sensor_rot·mount_rot·ray`；§I.8 原则 4 把这个叫"歪打正着"）；
+`robot11_mount:=sensor` 让点云真的回到斜的传感器系后，实测 `odom→base_link` 的 **roll = 30.060°**（§J.1.2）
+—— 那个 30° 是**物理事实**（odom 自己斜 30°，水平的车在它里面就是"躺"了 30°），不是 bug。
+真机（MID-360 点云本来就在斜的传感器系里）会**直接落进这一档**。
+
+⇒ 回答用户第二问的落点：**"真机内置 IMU" 既不免除这两个 bug，也不免除"odom 重力倾斜"这件事**。
+真机上要在 nav2 里用，只有两条路：
+
+* **(a) 初始化时把 `R` 设成由前 200 帧加速度解出的 `R_world←imu`** —— 上游与本仓**都没做**
+  （`fix_gravity_direction` 这个名字容易误导：它修的是 `g`，不是姿态）；
+* **(b) 下游统一在重力对齐帧里工作** —— 本仓 `robot11_mount:=sensor` 走的就是这条
+  （linefit `gravity_aligned_frame: base_link`、p2l `target_frame: base_link`），
+  但代价图那一层仍未修（§J.7 第 3 条、§N.4 第 5/6 行）。
+
+#### N.3.5 判决（明写）
+
+> **「上游潜伏 bug 被不寻常挂法暴露」** —— **不是**"本仓集成写错了代码"。
+> 精确地说：三处 bug 都是上游原样；上游默认用法（launch 里的单位静态 TF）把它们**掩盖**；
+> 本仓引入的 `robot11_mount:=urdf|sensor`（把倾角记进关节）+ 插件"点云表达在父 link 系"这一组合，
+> 第一次让 `R_bl ≠ I` 成为本仓常态，于是暴露。
+> **本仓该改进的是"把隐藏前提显式化 + 加守卫"（§N.5），而不是"承认读代码不仔细"**：
+> 这两段代码在本仓的生命周期里**从未被本地编辑过**（blame 只指向 `98baa55` 的 vendoring）。
+
+---
+
+### N.4 爆炸半径：本仓还有哪些地方**静默假设 `R_bl = I`**
+
+口径：`R_bl = R(T(lidar_frame ← base_link))`；"已处理" = `robot11_mount:=sensor` 这一档已经绕开或对齐的。
+
+| # | 位置（文件:行） | 假设的内容（原文 / 代码） | 已处理？ |
+|---|---|---|---|
+| 1 | `src/rm_perception/linefit_ground_segementation_ros2/linefit_ground_segmentation_ros/config/segmentation_sim_robot11.yaml:46` | `sensor_height: 0.2595` 的语义 = "**雷达系**里地面 z 的相反数"（`ground_segmentation.cc:131`；`segment.cc:30` `cur_ground_height = -sensor_height_`）⇒ **要求雷达 z 轴朝上**；同文件 `:55-73` 明写"本槽位的点云在源头就已重力对齐" | ✅ `sensor` 档用 `…/config/segmentation_sim_robot11_sensor.yaml:35` 加 `gravity_aligned_frame: base_link`（只旋转、不平移，`sensor_height` 继续成立） |
+| 2 | 同文件 `:74` `gravity_aligned_frame: ""` | 空 ⇒ 不做任何旋转 ⇒ **等价于断言 `R(livox←base) = I`**（或"数据已重力对齐"）。注：该路径 2026-10-07 之前有 Eigen 默认构造 bug（`ground_segmentation_node.cc:142`；现为 `Identity()` 起步，已修） | ✅ 同上（`sensor` 档走增量文件；其余档逐字节不变） |
+| 3 | `src/rm_perception/pointcloud_to_laserscan/config/laserscan_params.yaml:9`（`target_frame: ""`）、`:32-33`（`min/max_height: -1.0/1.0`）；代码 `pointcloud_to_laserscan_node.cpp:198` | 高度带量在**点云自带帧**（`livox_frame`）里，注释 `:14-27` 把"离地换算"写成 `z + 0.226` ⇒ 断言该帧 z 朝上 | ✅ `sensor` 档 `…/config/laserscan_params_sensor_frame.yaml:35` 设 `target_frame: base_link` |
+| 4 | `src/rm_nav_bringup/config/traversability_self_mask_robot11.yaml:16-17`（AABB 假设）、`:18-31`（近场死区 `z ≥ -0.2295`）；应用：`src/rm_perception/rm_ground_traversability/include/rm_ground_traversability/traversability_ros.hpp:91-94` 读参、`low_terrain_classifier.hpp` 建格前剔除 | 113 个 AABB 烘在 `livox_frame` 里，注释明写"`livox_frame` 相对 `base_link` 的 rpy = 0 ⇒ 变换是纯平移、**无旋转误差**" | ⚠️ **掩膜功能不需要重烘**（§J.3/§J.6 ⑧：掩膜作用在 linefit **内部旋转之后**的坐标上，与 `plugin` 档逐点相同）；但**注释里那条"rpy = 0"的前提在 `urdf/sensor` 档已不成立** ⇒ 注释过期（建议后续改成"掩膜坐标系 = linefit 处理后的 `cloud_proc`"） |
+| 5 | `src/rm_navigation/rm_navigation/params/nav2_params_sim_base.yaml:128`（`local_costmap.global_frame: odom`）+ `:163-184`（`obstacle_layer.scan`；`:180` 有 `max_obstacle_height: 2.0`，**没有** `min_obstacle_height` ⇒ nav2 默认 **0.0**）+ 同文件 `:187` 注释"`odom` 的 z=0 ≈ base_link 起始高度、地面约 −0.05" | 代价图帧 = `odom`，且"z 就是高度" ⇒ 断言 **`odom` 的 z 与重力同向** | ❌ **未处理**：`sensor` 档 `odom` 斜 30° ⇒ `/scan` 这张 2D 平盘在 odom 里是斜面，实测丢 **41.2%** 波束（§J.4.2(3)）；`urdf` 档时代丢 **71.4%**（§I.7） |
+| 6 | 同文件 `:196`（`obstacle_cloud_layer.min_obstacle_height: -0.02`）、`:250` 与 `:354`（global STVL/obstacle `min_obstacle_height: 0.0`）、`:85`（`global_frame: map`）、`:413`（`global_frame: odom`） | 三条高度带都在**代价图帧**里量 ⇒ 同样假设"代价图帧 z 朝上" | ❌ 未处理（与第 5 行同根因；改它要动 `src/rm_navigation/**/params`，属**别的任务的目录**） |
+| 7 | `src/rm_localization/lio_tf_adapter/src/lio_tf_adapter_node.cpp:37-38`（`xyz`/`rpy` 参数）、`:63-68`（**合成**） | **没有**"`R_bl = I`"假设 —— 杆臂由 `bringup_sim.launch.py:219-245` 按 `mount` 算出（`urdf/sensor` 档带 30° 旋转） | ✅ **本仓唯一写对的桥接**；但 `lio:=small_point_lio` 时该节点被排除（`:1977-2010`）⇒ 这条正确的路**没被 small_point_lio 用上** |
+| 8 | `src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro`（生成器 `tools/scripts/regress/robot11_make_sim_xacro.py`）+ 插件 `<tilt_rpy>` / `<cloud_frame>` | `plugin` 档 = 用"关节 rpy=0 + 倾角记在插件里"来**主动维持 `R_bl = I`** —— 即"用挂法掩盖 bug"的做法本身 | ✅ `sensor` 档把倾角放回关节、点云放回传感器系（§J.6 ①②③） |
+| 9 | `docs/lio_slots.md` §2.1 那行"**`base_link→livox_frame` TF：强依赖**…失败就 `return`" | 只写了"必须有这条 TF"，**没写"它的旋转必须 ≈ 单位才安全"** | ⚠️ 文档层缺口 ⇒ 本节已在 `docs/robot_models.md`、`docs/README.md` 各加一行指针（§N.5 第 6 条） |
+
+---
+
+### N.5 守卫设计（**只设计，不实现**）：让"`R_bl ≠ I`"无法静默
+
+目标：把 N.3.1 那张表里"最容易被忽略的自变量"变成**开机就能看到、改错就跑不过**的东西。
+6 个候选按性价比排序；插入点行号 = **当前 HEAD**（`2a5a8b6` 之后）。
+
+| # | 放哪儿（插入点） | 检查什么 | 预期成本 | 备注 |
+|---|---|---|---|---|
+| **1** | `src/rm_localization/small_point_lio/src/small_point_lio_node.cpp` 构造函数，`:44-50` 附近（`tf_listener` 已建、首帧回调之前）起一个 **1 Hz 一次性定时器** | 等 `lookupTransform(lidar_frame,"base_link")` 头一次成功，随后打印 **`rpy(T_bl)` 与 `\|t\|`**；若 `‖R_bl − I‖_F > ε`（建议 `ε = 1e-3`，≈0.06°）打 `WARN` + 一句可操作话术（"倾角会同时出现在 `/cloud_registered` 与 `odom→base_link` 上；要正确链请用 `robot11_mount:=sensor`，或把点云/下游对齐到重力帧"）；`ε_big = 0.05`（≈6°）时给 ERROR | 一次性 **1 次 TF 查询 + 1 次日志**；运行时 **0** | 本仓已有先例：`bringup_sim.launch.py:498-535` 就是"按 `robot11_mount` 在启动横幅里说不同的话"，可复用同一入口把 `rpy(T_bl)` 回读进去 |
+| **2** | 同文件 odom 回调，**`:108`（`tf_base_link_to_lidar_frame` 就绪）之后、`:126`（合成）之前** | **位姿一致性断言**：`T_ob·T_bl⁻¹ ≈ T_ol`（= 链式法则），超差（如 1e-6 rad / 1e-4 m）则 ERROR 并**跳过发布**；同时缓存 `‖R_bl−I‖_F` 供一次性 WARN | 一次 4×4 乘法 ≈ **100 ns/帧**；**无新 TF 查询** | 判据就是 `tools/scripts/tiltmount/tf2_compose_order_test.cpp` 单测里的那条 —— 把它从"离线单测"提升到"在线断言"，**直接防"共轭写法回归"** |
+| **3** | 同文件点云回调，`:197`（`frame_id` 赋值）附近 | 低频（如每 N 帧）自检"这朵云的坐标真的在 odom 里"：用 `T_ol` 把几个点反变换回 `livox_frame` 再与 `T_bl` 一致性比对；**不要新增 TF 查询** —— bug ② 就是这么来的 | 低频，一次性开销可忽略 | 防 bug ② 复发的"正面写法"；这条的成本必须压住，否则等于把 ② 的成本重新引入 |
+| **4** | `tools/scripts/tiltmount/tf2_compose_order_test.cpp`（**不进 colcon**） | 扩成"三档 mount × 两条等式"：现有 5 条断言（① 乘法序 ② 旧写法假俯仰+违反一致性 ③ 新写法一致性 ④ 逐点恒等式 ⑤ 默认档逐位不变）+ **新增 ⑥**：`urdf/sensor` 档的假俯仰 < 0.5° | 秒级（`g++ … && ./a.out`） | §J.3 末行已记录现有 5 条；本条只加 1 条 |
+| 5 | 同文件 `:96` / `:157`（`child_frame_id = "base_link"` **硬编码**） | 把子帧名参数化成 `body_frame`（**默认建议 = `livox_frame`**），只有用户显式声明"我的 `R_bl` 已知/为单位"时才发 `base_link` ⇒ **默认不再冒用别人的帧名** | 一次参数声明 + 1 处字符串；**会改默认行为**，需迁移说明 ⇒ 本任务**不做** | 与上游语义对齐（FAST-LIO/Point-LIO 都发 `body`/`camera_init`，从不冒用 `base_link`） |
+| **6** | `docs/lio_slots.md` §2.1 的 TF 依赖行（**文档**） | 补一句："**且该 TF 的旋转必须 ≈ 单位；否则见 `docs/tilted_lidar_fidelity.md` §N**" | 0 | 本节已在 `docs/robot_models.md`（§15 指针处）与 `docs/README.md`（`lio_slots.md` 行）各加一行指针 |
+
+**推荐组合**：**1（启动期守卫，可见）+ 2（每帧一致性断言，防回归）+ 4（单测锁语义）**。
+总运行成本 **< 1 µs/帧**（一次 4×4 乘法）**+ 一次启动日志**；不新增 TF 查询、不改任何默认行为。
+**明确反对**的做法：为了"校验"在**点云回调里再查一次 TF** —— 那正是 bug ② 的形状，
+还会把 `MessageFilter`/超时失败面引回这条链路（本仓 2026-09-23 刻意避开过，见 `laserscan_params.yaml:1-9`）。
+
+---
+
+### N.6 未验证 / 诚实清单（本节）
+
+1. **GitHub REST API 不可达**：`https://api.github.com/repos/Yancey2023/small_point_lio` 连试 5 次（间隔 10 s）
+   **全部 HTTP 403** ⇒ 拿不到"文件级提交史 / 作者邮箱 / commit 时间"。
+   可用的是 `raw.githubusercontent.com`（HTTP 200，逐字节核对**文件内容**）与
+   `github.com/Yancey2023/small_point_lio/commits/ros2.atom`（HTTP 200）。
+   ⇒ pin 的**内容**是确证的；"上游至今没改这两行"由 atom feed 的 `updated=2026-08-31`
+   与首条目 = pin 来佐证 —— 这是**分支级**证据，**不是**文件级 history。
+2. **没有真机、没有 MID-360、没有真机 bag**：§N.3 里"真机用户会不会把倾角写进 TF"是**推断**
+   （依据：上游 launch 发的就是单位 TF、README/config 完全不提 `base_link`）。
+   所有**数字**都来自本仓仿真，且已在 §I/§J 登记过。
+3. **没有去上游 issue / 讨论区求证"是否有人报过"**（API 403；`bbs.robomaster.com` 未访问）。
+   ⇒ "很多人用却没暴露"只能由"上游 launch 发单位 TF"这一条支持，**不能**主张"没人遇到过"。
+4. **没有跑任何仿真、没有改任何代码**（本节 = 纯取证 + 设计）：§N.5 的守卫**一行都没实现**，
+   其成本是"读代码估的量级"，不是实测。
+5. **`R_bl` 在真机上由谁提供没有在本仓之外核实**（`robot_state_publisher` 的 URDF 关节 vs
+   用户自己的 `static_transform_publisher`）。本仓是 URDF 固定关节
+   （`docs/lio_slots.md` §2.1 实测 `/tf_static base_link→livox_frame = (0.12,0,0.175) rpy 全 0`）。
+6. **上游 `main`（无 ROS）分支未取**（只核了 `ros2` 分支的 pin 文件与 launch/config）⇒ 不对 `main` 下结论。
+7. **没验证 `fastlio` / `pointlio` 在"同样斜装"下的整栈行为**：它们走 `lio_tf_adapter`（合成 + 带旋转杆臂），
+   本仓只做过几何/单元级验证（§J.8 第 5 项），没有跑过组合。
+8. **§N.4 第 4 行"掩膜注释过期"是文本层面的判断**：掩膜**功能**在 `sensor` 档仍然正确（§J.3 逐点相同），
+   过期的是那条"rpy = 0"的**注释理由**；没有实测"把注释当真、按传感器系重烘掩膜"会怎样。
+
+---
+
+### N.7 复现命令（本节逐字用过；`<repo>` = 本仓根）
+
+```bash
+# ① 来源：这个文件在本仓只有 3 个提交；所有"问题行"的 blame
+git -C <repo> log --follow --oneline -- src/rm_localization/small_point_lio/src/small_point_lio_node.cpp
+git -C <repo> blame -L 80,200 --date=short src/rm_localization/small_point_lio/src/small_point_lio_node.cpp
+
+# ② 与上游逐字节比对（本仓 vendoring 提交 vs 上游 pin）—— 期望 diff 为空、sha256 相同
+git -C <repo> show 98baa55:src/rm_localization/small_point_lio/src/small_point_lio_node.cpp > /tmp/vendor.cpp
+curl -sS -o /tmp/upstream.cpp \
+  https://raw.githubusercontent.com/Yancey2023/small_point_lio/688d75cfa780049ae532e5100ca64f46ad8b1a93/src/small_point_lio_node.cpp
+sha256sum /tmp/vendor.cpp /tmp/upstream.cpp     # 两者都应是 ad48b540…41e417
+diff -u /tmp/upstream.cpp /tmp/vendor.cpp       # 期望空
+
+# ③ 上游 launch 发的就是"单位 base_link→livox_frame"（这条单位 TF = "为什么上游用户看不见"）
+curl -sS https://raw.githubusercontent.com/Yancey2023/small_point_lio/688d75cfa780049ae532e5100ca64f46ad8b1a93/launch/small_point_lio.launch.py
+
+# ④ 上游仍停在同一个 commit（分支 HEAD = pin；API 403 时这是可用证据）
+curl -sS https://github.com/Yancey2023/small_point_lio/commits/ros2.atom | head -20
+
+# ⑤ 别人的 LIO 从不查外部 TF（期望只有 small_point_lio_node.cpp 命中）
+grep -rn "lookupTransform" third_party/fast_lio/src third_party/point_lio/src \
+    src/rm_localization/FAST_LIO/src src/rm_localization/point_lio/src \
+    src/rm_localization/small_point_lio/src
+
+# ⑥ 本仓唯一"写对合成"的桥接（small_point_lio 却不用它）
+sed -n '60,70p' src/rm_localization/lio_tf_adapter/src/lio_tf_adapter_node.cpp
+grep -n "lio.*!=.*small_point_lio" src/rm_nav_bringup/launch/bringup_sim.launch.py | head
+```

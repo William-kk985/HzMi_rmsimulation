@@ -2134,6 +2134,13 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 mode:=nav lio:=
 > `/cloud_registered` 多乘一次 `T(base_link←livox_frame)`（bug ②：`urdf` 档 **30.970° → 1.054°**）
 > 与 `odom→base_link` 的**假俯仰**（bug ③：**4.890° → 0.317°**，真值 0.003°）。
 > `plugin`（默认）与其它模型/槽位的渲染、参数、行为**逐字节不变**（§J.3 静态证据 + §J.2 逐项 diff）。
+>
+> ★ **2026-10-11：这两个 bug（含 1 ns 截断）的来源审计** —— 它们**全部是上游原样代码**
+> （与 `Yancey2023/small_point_lio@688d75c` 逐字节相同，本仓唯一改动是 `livox_custom_msg.h` 的 3 行
+> `timebase` 兜底）；上游 launch 发的是**单位** `base_link→livox_frame` 静态 TF，才把这两处掩盖住，
+> 而**真机 MID-360 的内置 IMU 不能免除**（bug 在"挂装 TF `livox_frame↔base_link`"上，不在 LiDAR→IMU
+> 外参上）。取证 + 上游对照 + 真机可达性判决 + 爆炸半径 + 守卫设计见
+> **`docs/tilted_lidar_fidelity.md` §N**。
 
 ### 15.1 ★ 2026-10-08 接手复核的补充（上面四条结论全部复现）
 
