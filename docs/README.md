@@ -70,6 +70,7 @@
 | `rm_algorithm_catalog.md` | 候选算法池（2D/3D 建图、重定位、相机；含 §〇.0 前端 vs 系统） | **现行**，加新候选算法时更新 |
 | `traversability_plan.md` | **3D 派生可通行性的设计计划**（坡度/落空/净空三层：表示选型取舍 + 包可用性核对 + 三个派生层设计 + 动作怎么接 BT + **用 STL 当真值做逐格验证** + RViz/PNG 怎么看 + 三步计划与"不做什么"） | **plan only（未实现、无代码/参数改动）**；本文只写设计与"要量什么"，不写实测结论 |
 | `rm_bench_refactor_plan.md` | 实验台改造路线（M0–M4 设计草案） | **部分完成**：M0/M1 相关项已在 `issues_and_findings.md` 落地；**未完成项看 `algorithm_matrix.md` §五/§六** |
+| `gazebo_sim_migration_plan.md` | **Gazebo Classic 11 → 新 Gazebo（`gz sim`/`ros_gz`）迁移可行性调研 + 迁移清单**：Humble↔Fortress 配对与 EOL（带 URL）· apt 实测（`ros-humble-ros-gz` 已装；`gzharmonic` 会 `Remv` 掉 Classic）· **传感器图案裁决**（任意逐射线 MID-360 CSV **不支持**，附 SDF `<lidar>` 规范全文 + Jetty `cpu_lidar` 源码）· **无 GPU 裁决**（Xvfb+llvmpipe 与 `--headless-rendering` 双路径实测跑通）· **PoC 实测**（GUI 窗口 / 30000 射线 RTF≈1.0 / 内存 0.218 KiB/条 vs Classic 94.8 KiB/条）· 逐类迁移清单（S/M/L）· P0–P4 分阶段与出入口判据 · 诚实未验证清单 | **spike 已完成，plan only（未改任何功能代码/配置）**；后续落地从 **P1 机器人** 起，P2 传感器系统是成败点 |
 
 ## 三、专题子目录
 
