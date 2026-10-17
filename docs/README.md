@@ -72,6 +72,8 @@
 | `rm_bench_refactor_plan.md` | 实验台改造路线（M0–M4 设计草案） | **部分完成**：M0/M1 相关项已在 `issues_and_findings.md` 落地；**未完成项看 `algorithm_matrix.md` §五/§六** |
 | `gazebo_sim_migration_plan.md` | **Gazebo Classic 11 → 新 Gazebo（`gz sim`/`ros_gz`）迁移可行性调研 + 迁移清单**：Humble↔Fortress 配对与 EOL（带 URL）· apt 实测（`ros-humble-ros-gz` 已装；`gzharmonic` 会 `Remv` 掉 Classic）· **传感器图案裁决**（任意逐射线 MID-360 CSV **不支持**，附 SDF `<lidar>` 规范全文 + Jetty `cpu_lidar` 源码）· **无 GPU 裁决**（Xvfb+llvmpipe 与 `--headless-rendering` 双路径实测跑通）· **PoC 实测**（GUI 窗口 / 30000 射线 RTF≈1.0 / 内存 0.218 KiB/条 vs Classic 94.8 KiB/条）· 逐类迁移清单（S/M/L）· P0–P4 分阶段与出入口判据 · 诚实未验证清单 | **spike 已完成，plan only（未改任何功能代码/配置）**；后续落地从 **P1 机器人** 起，P2 传感器系统是成败点 |
 
+> **§9 第二枪速查**（`gazebo_sim_migration_plan.md` §9，`.tmp_gzsim2/`）：真世界 `RMUC2026.stl` + 真 30k MID-360 图案的**纯 CPU BVH 实测**（1 线程 12.5–29.4 ms/帧、4 线程 5.6–13.6 ms、命中率 9.8–100 %）、**修掉一个 mm/m 单位 bug（0 % 命中却"通过"）**、R0 的 30k/2880 × headless/GUI 全量数字、**GUI 把 10 Hz 拖到 8.35 Hz 的机制=RTF 掉（不是 publisher 耦合）**、R3 能否吃 CSV 的源码级裁决（2–3 个 fork、250–400 行、重采样精度上限）与**四方案决策表**。
+
 ## 三、专题子目录
 
 | 目录 | 内容 | 索引 |

@@ -1239,3 +1239,597 @@ tail -3 .tmp_gzsim/scale_rays30k_server/stats.txt                               
   gzserver 3199.9 MiB / 66.9 %；Livox 插件 +2.74 GiB ≈ 94.8 KiB/条，根因 `AddRay()`）
 - `docs/tf_interface_contract.md`（TF 契约、单发布者）
 - `docs/worlds.md`（场地资产）、`docs/robot_models.md`（模型槽位）、`docs/ground_segmentation_slots.md`（感知链）
+
+---
+
+## 9. 第二枪（`.tmp_gzsim2/`）：R0/R1/R3 收口 —— 修掉一个"看起来通过"的假数字、量出 CPU 射线、回答 GUI 与 10 Hz 的关系
+
+> 本节是 §5（`.tmp_gzsim/`，第一枪）的续篇。第一枪用的是**微型世界 + 规则网格**，只回答了
+> "Fortress 能不能跑、30000 条射线贵不贵"。第二枪换到**真机世界**（`RMUC2026.stl`）+ **真 MID-360 图案**
+> （`mid360.csv`）+ **真机器人位姿**，并补上第一枪明确没测的四件事（§8 的 #5 / #6 / #8 / #13）：
+>
+> 1. **R1（纯 CPU 逐射线 BVH）到底多少 µs/ray**，1/2/4/8/16 线程怎么摊，30k@10 Hz 够不够；
+> 2. **R0（Fortress `gpu_ray` 规则网格）在 30k / 2880 × headless / GUI 下的真实数字**；
+> 3. **GUI 把点云从 10 Hz 拖到 8.35 Hz 的机制**（是 RTF 掉了，还是 publisher/时钟耦合错了）；
+> 4. **R3（改造 OGRE2 `GpuRays` 的方向表）在源码层是否现实**、要动几个包、能不能上游。
+>
+> 一句话结论：**R1 在"没有 GPU 的电脑"上是可行的（30k 条 12.5–29.4 ms/帧 @1 线程，
+> 4 线程 5.6–13.6 ms，预算 100 ms 有 3.4–18× 余量）；R0 已经能跑且便宜，但它给不了 MID-360 的图案；
+> R3 技术上成立、但必须 fork 2–3 个包且精度受立方图重采样限制；GUI 与"10 Hz 点云"在 sim 时间里
+> 完全兼容，代价是 wall-clock 吞吐掉到 0.82–0.84×。**
+>
+> ⚠️ **同时必须记一笔**：第一枪留下的 R1 数字（`us_per_ray=0.348`、`fits_10Hz=YES`）是
+> **无效的**——世界 STL 是毫米、探针按米算，**0% 命中**却"通过"了。见 §9.1.2。
+
+### 9.0 本节与 §5 的口径差异（**别把两节的数字混着比**）
+
+| | §5（第一枪，`.tmp_gzsim/`） | 本节（第二枪，`.tmp_gzsim2/`） |
+|---|---|---|
+| 世界 | 微型世界（1 个地面 + 2 面墙） | **真机世界** `RMUC2026.stl`（2,295,084 B，45,900 三角面，137,700 顶点，1 个 submesh） |
+| 世界真实尺寸 | 未量 | **29.150 × 16.050 × 1.730 m**（mesh 原始 bbox 29150×16050×1730 **mm**） |
+| 传感器图案 | 规则网格 1000×30 | **真 `mid360.csv` 的 30,000 行滚动窗口**（方位 0–360° 均匀、俯仰 −7.16°…+52.16°，85.3% 在地平线以上） |
+| 测的东西 | 端到端 RTF / RSS / CPU（`gpu_ray`） | ①**射线求交本身**（CPU BVH，R1）②端到端（`gpu_ray`，R0）③源码（R3） |
+| 能否互换 | **不能**：本节 R1 是"求交成本"，§5 是"整机世界更新成本" | |
+
+### 9.0.1 本节关闭 / 未关闭的 §8 条目
+
+| §8 # | 第一枪未验证 | 本节状态 |
+|---|---|---|
+| #5 | 真机世界（RMUC2026 STL）的加载时间与内存 | **关闭（部分）**：`gz-common::MeshManager` 加载 **16.4–16.9 ms**（45,900 面 / 2.29 MB），BVH 建树 **22.1–24.0 ms**；world 真实尺寸 **29.150×16.050×1.730 m**。整机 RSS 见 §9.2。 |
+| #6 | 有质量/关节/摩擦的动力学下的 RTF | **关闭（部分）**：P1-lite（含 `DiffDrive` + `Physics` + `IMU`）headless RTF **0.999**（§9.3.1）。完整栈（SLAM/LIO/nav2）仍未测。 |
+| #8 | `RayQuery` 在 llvmpipe 下的逐条射线吞吐 | **未关闭**：第一枪那组 `us_per_ray=0.348 / engine_ms=117.3` 与 CPU BVH 的 0-hit 数字**同源**（mm/m 单位错），**同样无效**；本轮没重测（见 §9.6 #5）。**但 R1 的答案已由 CPU BVH 给出**（§9.1），`RayQuery` 不再是 R1 的唯一选项。 |
+| #13 | `mid360.csv` 的 800,001 行与 `<samples>30000</samples>` 的对应关系 | **关闭**：`csv_reader.hpp:20-45` 逐行读三元组；`livox_points_plugin.cpp:407-427` 是**滚动窗口** `[currStartIndex, currStartIndex+30000)`，`index = k % 800000` ⇒ **26.7 帧一个循环**。本节用 `RAY_START` 复现了第 0/10/20 帧（命中率 16.70/17.05/16.72 %）。 |
+
+### 9.1 R1：纯 CPU 逐射线 BVH（**本节最硬的数字**）
+
+#### 9.1.1 方法（被测对象 / 坐标 / 射线 / 线程 / 重复次数）
+
+**探测器**：`.tmp_gzsim2/cpu_ray_bvh.cc`（438 行 C++17，依赖 `ignition-common4` 的 `MeshManager`
+加载 STL、`bullet` 的 `btBvhTriangleMeshShape` 做求交、`ignition-msgs8` 只为复用常量）。
+它**不碰渲染器、不需要 GL/DISPLAY**，是 R1 路线（"自己写一个 gz system 逐条打射线"）的成本上界估计。
+
+**世界坐标变换**（与 `world/RMUC2026_world/model.sdf:35-40` 完全一致）：
+
+```
+world = mesh_local × 0.001 + (0, 0, +1.6413436)
+```
+
+- `0.001`：STL 是**毫米**；
+- `+1.6413436`：mesh 局部里**可行驶地面顶面**在 z = −1.64134362793，抬起来让地面落在 world z = 0
+  （mesh bbox 的 z 是 −1.84134…−0.11134 m，即底板 0.2 m 厚 + 场地高 1.53 m）；
+- 变换后实测 bbox：`(-14.575, -6.401, -0.200) … (14.575, 9.649, 1.530)`，即 **29.150 × 16.050 × 1.730 m**。
+
+**传感器位姿**：`RMUC2026` 的出生点是 `(10.925, 2.525, 0.2)`（`rm_simulation.launch.py:134-139`），
+`base_link → livox_frame` 是 `xyz="0.12 0 0.175"`（`simulation_waking_robot.xacro:17`），落地后
+雷达光心约在 **0.26 m**。所以标称位姿取 **(10.925, 2.525, 0.26)**，另测 4 个场景（§9.1.4）。
+`max_range` 取 **200 m**（Classic 的 `mid360.xacro:9` 就是 `laser_max_range=200.0`），
+另做 10/30/70/200 m 敏感性（§9.1.4 末）。
+
+**射线**：直接读 `src/rm_simulation/livox_laser_simulation_RO2/scan_mode/mid360.csv`，
+方向约定与 Classic 插件**逐字一致**（`livox_points_plugin.cpp:420-423`）：
+
+```
+el = 90° − zenith_csv ,  dir = (cos el·cos az, cos el·sin az, sin el)
+```
+
+**只取连续 30,000 行**，因为 Classic 插件是**滚动窗口**（`livox_points_plugin.cpp:407-427`：
+`end_index = currStartIndex + samplesStep; currStartIndex += samplesStep; index = k % maxPointSize`），
+80 万行 / 3 万 = **26.7 帧一个循环**。本探针用 `RAY_START` 复现第 0/10/20 帧（§9.1.4）。
+⚠️ **不能只取前 4000 行**：CSV 是**按时间排序**的，前 4000 行几乎全在高仰角带
+（前 300 行的 zenith 是 37.8°–46.2°），据此算命中率会得到 0% 的假结果——这一点我在扫描位姿时踩过。
+
+**线程**：每个线程各自一份 `btCollisionDispatcher/btDbvtBroadphase`，**共享只读的
+`btBvhTriangleMeshShape`**（BVH 只建一次，22–24 ms）。每档跑 5 次取**最小值**（min 对噪声最稳）。
+
+**构建**：
+
+```bash
+g++ -O2 -std=c++17 -Wall cpu_ray_bvh.cc -o cpu_ray_bvh \
+    $(pkg-config --cflags --libs ignition-common4 ignition-common4-graphics ignition-msgs8 ignition-utils1) \
+    $(pkg-config --cflags --libs bullet) -lpthread
+```
+
+（`ignition-common4-graphics` 必须显式加：`MeshManager` 在 graphics 库里，`ignition-common4.pc`
+的 `Libs` 不含它；`ignition-utils1` 是 `Mesh.hh` 里 `ImplPtr.hh` 的依赖。）
+
+#### 9.1.2 ⚠️ 上一枪的 R1 数字**无效**：mm/m 单位 bug，以及"0 命中会静默通过"
+
+第一枪跑的是 `scale=1.0`（把毫米 STL 当米），于是：
+
+```
+SCENE bounds=(-14575.00 -6400.66 -1841.34)-(14575.00 9649.34 -111.34) origin=(0.00 1624.34 -1841.04)
+SANITY ray0 dir=(-0.011 -0.613 0.790) hit=0 dist=-1.000
+RESULT threads=1 rays=3000 done=3000 hit=0.0% total_ms=1.04 us_per_ray=0.348 frame_30k_ms=10.4 fps_30k=95.8 fits_10Hz=YES
+```
+
+逐条对账：
+
+| 症状 | 根因 |
+|---|---|
+| `bounds` 是 `±14575`（不是 ±14.575） | **世界是 29.15 mm 宽**（不是 29.15 m） |
+| `origin.z = -1841.04` | 传感器"离地 0.26"落在 mm 世界里 = 离地 0.26 mm |
+| `max_range=70.0` 但几乎打不到东西 | 70 单位 = **70 mm**，比场地小 400 倍 |
+| `hit=0.0%` 却打印 `fits_10Hz=YES` ⚠️ | **没有"几何有效性"断言**：射线全不中 ⇒ 求交立即返回 ⇒ 计时**异常地快** ⇒ 看起来"通过" |
+| 唯一命中的那次 `dist=1233.000` | 在"把原点抬到 AABB 上方"的实验里打到 1233 **mm**，正好说明单位是毫米 |
+
+**这就是为什么必须把"几何正确"变成硬闸门**：本节的探针在打印任何计时之前先打一组 sanity 射线，
+**任何一条不满足就 `exit 9` 并拒绝给结论**：
+
+| sanity 射线 | 期望 | 作用 |
+|---|---|---|
+| 正下方 `(0,0,-1)` | **命中，距离 ≈ 传感器高度 ±0.15 m** | 一举抓住 mm/m、z 偏移、mesh 未变换三类错误 |
+| 正上方 `(0,0,+1)` | **不命中**（这个场地 mesh 没有天花板） | 反向断言：`expect=miss` 也是断言，避免"全 miss"被当成正常 |
+| 俯角 5° | 命中 ≈ `z/sin5°`（z=0.26 ⇒ 2.983 m），允许 −30% 以内（可能有台阶/矮物） | **与距离相关的**标尺校验，独立于墙在哪 |
+| 四个水平方向 | ≥1 个命中且距离在 0.5–40 m（这个场地南边是敞开的，允许逃逸） | 抓整体尺度/朝向错误 |
+| `RAY_ENCLOSED=1` | 只放宽"上方必 miss / 5° 必打地面"两条（封闭场景本来就有顶和近墙） | **正下方的断言永不放宽** |
+
+> **教训（值得写进任何 benchmark 的规范）**：**"0 命中"的探针会静默通过每一条性能断言。**
+> 任何"每帧 N 条射线"的 benchmark，必须同时断言**命中率非零**且**命中距离几何合理**
+> （至少一个"向下打地面 = 传感器高度"的标尺）。否则单位错 1000 倍也能得到漂亮的 µs/ray。
+
+#### 9.1.3 修正后的有效性证据（sanity + 独立暴力求交交叉验证）
+
+标称位姿 `(10.925, 2.525, 0.26)`、200 m、30k 窗口 0：
+
+```
+SCENE mesh=.../RMUC2026.stl submeshes=1 verts=137700 tris=45900 load_ms=16.4 bvh_ms=22.7 scale=0.001000 zoff=1.641344
+WORLD bounds_m=(-14.575 -6.401 -0.200)-(14.575 9.649 1.530) size_m=(29.150 16.050 1.730)
+SENSOR pose=(10.925 2.525 0.260) max_range=200.0 reps=5
+SANITY down       dir=(+0.000 +0.000 -1.000) hit=1 dist=0.260 expect=hit~sensor_z PASS=YES
+SANITY up         dir=(+0.000 +0.000 +1.000) hit=0 dist=-1.000 expect=miss(no ceiling) PASS=YES
+SANITY graze-5deg dir=(+0.996 +0.000 -0.087) hit=1 dist=2.751 expect=hit~z/sin(5) PASS=YES
+SANITY +x         hit=0  SANITY -x hit=1 dist=6.925  SANITY +y hit=0  SANITY -y hit=1 dist=3.808
+SANITY overall=PASS fails=0
+HITDIST threads=1 p01=2.17 p05=2.49 p50=3.74 p95=7.41 max=26.64 zero_lt_0.1m=0
+```
+
+- **正下方 = 0.260 m**，与传感器高度**完全一致** ⇒ 尺度、z 偏移、mesh 变换三者同时被钉住；
+- 命中距离分布 `p05=2.49 / p50=3.74 / p95=7.41 / max=26.64 m` ⇒ 打的是 2–7 m 的地面/结构 + 26.6 m 的远角，
+  **没有一条 < 0.1 m**（`zero_lt_0.1m=0`）⇒ 不是"传感器埋在实体里"的退化命中；
+- 5° 俯角打 2.751 m（理论 2.983 m，差 7.8%，是场地上一处矮台阶/坡），在 ±30% 容差内；
+- 水平 2/4 命中（+x / +y 打空，因为这个场地 0.26 m 高度上南/东边界是敞开的），符合目视几何。
+
+**独立交叉验证**（防止"BVH 和我自己的射线构造一起错"）：用 Python + numpy 写一份**暴力
+Möller–Trumbore**（45,900 个三角面 × 35 条射线，同一 STL、同一变换、同一 CSV 行），与 C++ 的
+`ClosestRayResultCallback` 结果逐条比对：
+
+```
+   idx   C++ dist    py dist    delta
+  6156     5.1178     5.1178  0.00000
+  ...
+ 12599     6.8006     6.8006  0.00000
+     0    -1.0000    -1.0000  0.00000   （未命中，两边一致）
+mismatches: 0 of 35      （30 条命中 + 5 条未命中，最大 |Δ| = 1e-5 m）
+```
+
+#### 9.1.4 结果：4 个场景 × 1/2/4/8/16 线程（**有效数字**）
+
+全部：`mid360.csv` 连续 30,000 行（第 0 帧）、`max_range=200 m`、z = 0.26 m、min-of-5。
+`µs/ray` = 该线程数下总时间 ÷ 30,000；`frame_30k_ms` = 一帧 30k 条射线的墙钟时间；
+`fits` 判据 = 预算 100 ms/帧（10 Hz）。
+
+| 场景 | 位姿 (x,y,z) | **命中率** | 1 线程 µs/ray → 帧 ms | 2 线程 | 4 线程 | 8 线程 | 16 线程 |
+|---|---|---|---|---|---|---|---|
+| **A1 开阔（南边界）** | (4, −6, 0.26) | **9.82 %** | 0.484 → **14.52 ms** | 0.279 / 8.36 ms (1.74×) | 0.201 / 6.03 ms (2.41×) | 0.113 / 3.40 ms (4.27×) | 0.066 / 1.99 ms (7.30×) |
+| **A2 开阔（西侧）** | (−10, 0, 0.26) | **18.08 %** | 0.471 → **14.14 ms** | 0.294 / 8.83 ms (1.60×) | 0.207 / 6.20 ms (2.28×) | 0.113 / 3.39 ms (4.17×) | 0.068 / 2.05 ms (6.91×) |
+| **B 标称出生点** | (10.925, 2.525, 0.26) | **16.70 %** | 0.417 → **12.50 ms** | 0.261 / 7.84 ms (1.59×) | 0.185 / 5.56 ms (2.25×) | 0.107 / 3.21 ms (3.90×) | 0.063 / 1.89 ms (6.61×) |
+| **C 结构化（命中重）** | (12, 8, 0.26) | **42.81 %** | 0.578 → **17.34 ms** | 0.338 / 10.13 ms (1.71×) | 0.265 / 7.95 ms (2.18×) | 0.152 / 4.56 ms (3.80×) | 0.089 / 2.68 ms (6.46×) |
+| **D 封闭上限（不可达）** | (10, −2, 0.26) | **100.00 %** | 0.978 → **29.35 ms** | 0.628 / 18.84 ms (1.56×) | 0.452 / 13.57 ms (2.16×) | 0.246 / 7.39 ms (3.97×) | 0.140 / 4.21 ms (6.97×) |
+
+> **D 的定位**：`(10,−2)` 的顶只有 0.14 m 高（`SANITY up hit=1 dist=0.140`），**真机（含雷达外壳）塞不进去**，
+> 所以它是"全部命中"的**成本上限**，不是可用位姿；它的 sanity 按设计会 FAIL（`RAY_STRICT=0` 放过）。
+> 本场地的**可用位姿**命中率上限就是 **C 的 42.8 %**（再高只能钻进 0.4 m 高的空腔）。
+
+**线程伸缩（30k 短批 vs 10 帧摊销）**：
+
+| 线程 | A1 30k | C 30k | A1 10 帧（300k 射线） | C 10 帧 |
+|---|---|---|---|---|
+| 1 | 1.00× | 1.00× | 1.00× (0.455 µs/ray) | 1.00× (0.593 µs/ray) |
+| 2 | 1.74× | 1.71× | 1.89× | 1.91× |
+| 4 | 2.41× | 2.18× | 2.73× | 2.98× |
+| 8 | 4.27× | 3.80× | 4.77× | 4.27× |
+| 16 | 7.30× | 6.46× | **8.36×** | **7.25×** |
+
+- **4 线程 5–8 ms/帧、8 线程 3–4.6 ms/帧**，即 10 Hz 预算的 **12–30 倍余量**；连**单线程**都有 3.4–8× 余量。
+- 伸缩**亚线性**是三个原因叠加：①30k 一帧只有 12–17 ms，16 线程的**线程创建/回收 ~0.8 ms** 占比可观
+  （10 帧摊销后 16 线程从 6.6–7.0× 升到 7.3–8.4×）；②本机是 **i7-14700HX（8 P-core + 12 E-core，28 线程）**，
+  超过 8 线程就落到 E-core；③每线程一个 `btDbvtBroadphase` + 共享 BVH 的**内存带宽**瓶颈。
+  ⇒ 真做 R1 时应当用**常驻线程池**（不要每帧建线程），4–8 个工作线程就够。
+
+**敏感性**（标称位姿、1 线程）：
+
+| `max_range` | 10 m | 30 m | 70 m | 200 m |
+|---|---|---|---|---|
+| µs/ray | 0.391 | 0.405 | 0.433 | 0.427 |
+| 命中率 | 16.48 % | 16.70 % | 16.70 % | 16.70 % |
+
+⇒ **射程几乎不影响成本**（BVH 对逃逸射线剪枝很快），所以"为了省钱把 200 m 改小"没有意义；
+反过来，**200 m 的配置不用改**。
+
+| CSV 滚动窗口 | 第 0 帧 | 第 10 帧（start=300000） | 第 20 帧（start=600000） |
+|---|---|---|---|
+| 命中率 | 16.70 % | 17.05 % | 16.72 % |
+| µs/ray（1 线程） | 0.424–0.462 | 0.426–0.431 | 0.437–0.456 |
+
+⇒ **窗口之间命中率稳定在 16.7–17.1 %**，不是"第 0 帧特殊"。
+
+#### 9.1.5 命中率不是成本的主因；"命中射线 vs 未命中射线"分账（1 线程）
+
+| 场景 | 混合 µs/ray | **只打命中的射线** | **只打未命中的射线** | 命中/未命中 |
+|---|---|---|---|---|
+| A1（9.82 %） | 0.484 | **1.985** (n=2,945) | 0.326 (n=27,055) | 6.1× |
+| A2（18.08 %） | 0.471 | **1.382** (n=5,423) | 0.281 (n=24,577) | 4.9× |
+| B（16.70 %） | 0.417 | **1.392** (n=5,009) | 0.264 (n=24,991) | 5.3× |
+| C（42.81 %） | 0.578 | **0.973** (n=12,844) | 0.369 (n=17,156) | 2.6× |
+| D（100 %） | 0.978 | **1.008** (n=30,000) | —（0 条） | — |
+
+三条结论，**和"命中越多越慢"的直觉不完全一样**：
+
+1. **单条命中射线比未命中射线贵 2.6–6.1 倍**：`ClosestRayResultCallback` 只在**命中**时才做
+   精确三角面求交（未命中只走 AABB 剪枝）；
+2. 但**整帧成本并不由命中率单调决定**：A1 的命中率只有 9.82 %，成本（0.484）却**高于**命中率 18.08 % 的 A2（0.471）。
+   原因是 A1 的命中是**长距离掠射地面**（`p95=12.48 m`，见 HITDIST），穿过的 BVH 节点更多、
+   命中的三角面更多；A2 的命中集中在 1.9–4 m。**成本 ≈ Σ(节点访问 + 三角面测试)**，不是命中条数；
+3. 所以**"命中重"和"未命中重"两个场景都要报**（本节 A1/A2 vs C vs D）：可用位姿区间
+   **9.8 % → 42.8 % 命中**对应的成本是 **0.417–0.578 µs/ray（1 线程）**，只差 1.4 倍；
+   真正的成本上限（100 % 命中、0.978 µs/ray）**比标称位姿贵 2.3 倍**。
+
+#### 9.1.6 R1 的判定
+
+**✅ 可行。** 在"真世界 + 真 30k 图案 + 真位姿"下：**1 线程 12.5–29.4 ms/帧**，
+**4 线程 5.6–13.6 ms/帧**，**预算 100 ms 有 3.4–18× 余量**，且**完全不碰渲染器**
+（⇒ 无 GPU 也能跑；连 `--headless-rendering`/EGL 都不需要，CI 里不会再出现
+"渲染器起不来 ⇒ LiDAR 没数据"的耦合）。
+
+**必须一起说的三条边界**：
+
+1. 这里测的是**射线求交**，不含 30k 点/帧的**消息构造 + 序列化 + 传输**
+   （480 KB LaserScan + 960 KB PointCloudPacked，见 §9.2）。R1 与 R0 共用同一条发布路径，
+   所以 **R1 相对 R0 的增量就是这 0.5–13 ms**；
+2. BVH 是**静态世界建一次**（22–24 ms）。**动态障碍**要 refit/rebuild，本节**没测**；
+3. 只算**世界 mesh**，射线会穿过机器人自身（真系统必须处理 self-hit / 传感器安装件）。
+
+### 9.2 R0：30k / 2880 的真实数字（headless 与 GUI）
+
+三个运行都在**同一个盒子**上，世界是 `.tmp_gzsim2/w_30k.sdf` / `w_2880.sdf`
+（规则网格 `gpu_ray`，1000×30 与 360×8），`-r -v 3`，各跑 ≈25 s。RTF 有两个口径：
+**报**= `/stats` 的 `real_time_factor`（瞬时/窗口值，末次采样）；**均**= `sim_time / real_time`
+（含世界加载与 spawn，所以偏低）。两者都列，别混用。
+
+| 运行 | 射线 | 模式 | **RTF 报** | sim/real（均） | 迭代 | **CPU** | **RSS** | **scan Hz** | **points Hz** | `/clock` Hz |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `run_r0_30k_headless` | 1000×30 = 30,000 | `-s --headless-rendering` | **0.9994–1.0** | 23.228 / 25.406 = 0.914 | 23,228 | **24.7 %**（单 ruby） | **375 MB** | **10.064** | 25.218 ⚠️ | **1000.01** |
+| `run_r0_30k_gui` | 30,000 | `-r -v 3`（server+GUI，Xvfb 1280×800） | **0.77–0.88**（末次 0.8325） | 19.745 / 25.348 = 0.779 | 19,745 | **1321 %**（GUI 1295.8 + server 21.5 + Xvfb 4.0） | server 363 MB + **GUI 588 MB** = 1.09 GB | **8.542** | 20.910 ⚠️ | **841.53** |
+| `run_r0_2880_headless` | 360×8 = 2,880 | `-s --headless-rendering` | **1.0** | 23.234 / 25.394 = 0.915 | 23,234 | **23.4 %** | **365 MB** | **10.000** | 28.168 ⚠️ | 999.83 |
+
+载荷与元数据（**扫描与点云是同一份数据的两种编码**）：
+
+| 话题 | 类型 | 字节/帧 | 结构 | `frame_id`（gz 侧） | 桥到 ROS 后 |
+|---|---|---|---|---|---|
+| `/poc/gpu_lidar` | `ignition.msgs.LaserScan` | **480,193**（480 KB） | `count=1000 vcount=30 ranges=30000` | `sensor_rig::link::gpu_lidar` | `sensor_rig/link/gpu_lidar` |
+| `/poc/gpu_lidar/points` | `ignition.msgs.PointCloudPacked` | **960,143**（960 KB） | `width=1000 height=30 point_step=32 row_step=32000` | `frame_id=sensor_rig::link::gpu_lidar` | 同上 |
+| `/livox/lidar`（P1-lite） | LaserScan | 480,221 | `count=1000 vcount=30 ranges=30000` | `p1_robot::base_link::livox_lidar` | `p1_robot/base_link/livox_lidar` |
+| `/livox/lidar/points`（P1-lite） | PointCloudPacked | 960,148 | `width=1000 height=30 point_step=32` | 同上 | 同上 |
+
+⇒ 10 Hz 下 **≈14 MB/s** 进 `ros_gz_bridge`（480 KB + 960 KB 每帧，两路都订阅时），
+`ros_gz_bridge` 进程本身实测 **8.9 % CPU / 70 MB**（`p1_gui/cpu.txt`，第一枪）——**这不是瓶颈**。
+
+**`frame_id` 约定**（迁移必改项，§6.7 的实测补充）：Fortress 默认是
+`<model>::<link>::<sensor>`，**`ros_gz_bridge` 把 `::` 换成 `/`**（实测：
+`frame_id: p1_robot/base_link/livox_lidar`）。所以 TF 树里的 frame 名必须从 Classic 的
+`livox_frame`/`livox_lidar` 改成 `p1_robot/base_link/livox_lidar`（或在 bridge 侧重写）。
+
+⚠️ **表里 points Hz 那三列不要当真**：`25.218 / 20.910 / 28.168` 都是**另一个 15 s 窗口**里
+顺序测的（`run_r0.sh:55-57` 是先 points 后 scan，不是同时），而且今天复现出的
+"每周期多发 2.2–2.6 条"现象会把点云速率抬高（见 §9.3.4）。**同一时刻**同时订阅两路的 P1-lite
+实测是 **10.001 / 10.001 Hz**（`p1_headless/hz_gz_both.txt`），那才是"一帧一路"的真实关系。
+
+### 9.3 "GUI 必看"与"10 Hz 点云"能不能同时成立
+
+第一枪留下的疑问：P1-lite 的 GUI 跑出 **8.350 / 8.428 Hz**（不是 10 Hz），且 `dt_max=0.217 s`。
+**是 RTF 掉了，还是 publisher/sim-clock 耦合错了？** 这决定了"GUI 必看"是不是与"10 Hz 点云"冲突。
+
+#### 9.3.1 受控实验（同世界、同传感器、只改渲染模式）
+
+`.tmp_gzsim2/run_rate.sh`：`p1_lite.sdf`（1000×30 `gpu_ray` + IMU + DiffDrive），
+**server 与 GUI 分成两个进程启动**（`ign gazebo -s` / `ign gazebo -g`）以便**精确归属 CPU**；
+每段 `timeout` 硬上限；每次跑用**独立 `GZ_PARTITION`**（这台机器是共享的，别的任务可能同时在跑 sim，
+同一 partition 上的同名 topic 会互相污染）；`HOME` 每跑一个独立可写目录
+（只读的 `$HOME/.ignition` 会让 GUI 起不来并 SIGKILL server）。
+
+| 模式 | `/clock` Hz | `/stats` RTF | scan **墙钟 Hz** | scan **sim 时间 Hz** | server CPU | GUI CPU | server RSS | GUI RSS |
+|---|---|---|---|---|---|---|---|---|
+| **headless**（`-s --headless-rendering`，无 DISPLAY） | **1000.01** | **0.999** | 22.13 | 22.9 | **≈49 %** | — | 387 MB | — |
+| **GUI 1280×800** | **833.64** | **0.819** | 21.61 | 28.4 | **≈51 %** | **1112–1130 %** | 392 MB | **610 MB** |
+| **GUI 640×480** | **835.43** | **0.879** | 21.28 | 28.4 | **≈51 %** | **1214–1220 %** | 393 MB | **611 MB** |
+
+（CPU/RSS 取 `cpu_samples.txt` 里**真正的 `ign gazebo` 进程**那一行；脚本用 `setsid` 起独立进程组，
+样本里还会混进 `timeout` 包装进程（≈0 %/2 MB），**把两者平均会得到 24 %/195 MB 这种假数**，别用。
+三个模式的 **server CPU（49→51 %）与 RSS（387→393 MB）基本不变** ⇒ **GUI 没有加重 server 的负担**，
+它抢的是整机的核：**GUI 一个进程就吃 11–12 个核**。）
+
+#### 9.3.2 机制：**sim 时钟被整体拖慢**（不是 publisher 的错）
+
+证据链（每一环都是独立测量）：
+
+1. **`/clock` 从 1000.01 Hz 掉到 833.6 Hz**（×0.834）——`/clock` 是"每个 1 ms 步进一条"，
+   所以这直接就是**步进频率**掉了；`/stats` 的 RTF 0.999 → 0.819 独立复现同一结论。
+2. **server 的 CPU 没变**（49 % → 51 %）而 **GUI 一个进程吃 1112–1220 %**（≈11–12 核）⇒ 抢 CPU 的是 GUI 的软件光栅化
+   （llvmpipe，本机无 GPU，FSAA 8 被强制降到 0：`Ogre2RenderTarget.cc:574` 的警告）。
+3. **传感器是按 sim 时间定频的**：gz-sensors 的 `Sensor::Update(_now)` 拿 `_now` 和
+   `nextUpdateTime` 比（`sensors6_Sensor.cc:458-483`，`nextUpdateTime += 1/updateRate`），
+   `GpuLidarSensor::PublishLidarScan(_now)` 用它当 stamp（`sensors6_GpuLidarSensor.cc:283`）。
+   所以 **墙钟 Hz = sim 时间 Hz × RTF**。
+4. **决定性的一步在"每周期恰好 1 条"的那次运行里**：第一枪 `p1_gui` 8.350 Hz / `p1_gui2` 8.428 Hz
+   对 headless 10.001 Hz ⇒ 比值 **0.835 / 0.843**；而 `/clock` 的比值是 **0.834**（本轮）
+   / **0.842**（R0 的 `841.53/1000.01`）。**三个独立量在 1 % 内一致** ⇒ **就是 RTF 掉，
+   不是 publisher/时钟耦合错**。
+5. `dt_max=0.217 s` 也对得上：`100 ms / 0.834 ≈ 120 ms` 的正常周期 + 一次丢帧（≈2 个周期）⇒ 0.217 s。
+6. **今天的墙钟速率不能用来验证这条传递链**：今天每周期发 2.2–2.6 条（§9.3.4），所以墙钟
+   `22.13 → 21.61` 几乎没掉，而 sim 时间速率 `22.9 → 28.4` 反而偏高（倍数不稳）。**倍数把
+   RTF 的效应掩盖了。** 但 `/clock`（1000.01 → 833.64）和 `/stats`（0.999 → 0.819）已经把
+   "整场仿真变慢"这件事直接测出来了，第一枪那组 1.0× 的数据则把"传感器跟着变慢"补上了。
+
+**⇒ 谁在拖慢？** 不是"点云算不动"（server CPU 没变），而是 **GUI 的 llvmpipe 把整机内存带宽/CPU
+抢到 gz-sim 的 1 ms 步进跑不满 1000 步/秒**。这同时解释了 R0 的 GUI：世界更重（有阴影 + 30k），
+GUI 吃 **1296 %**、RTF 0.83、`/clock` 841.5 Hz、scan 8.542 Hz（比值 0.849）。
+
+**⇒ 缩窗口救不回来**：640×480 只把 RTF 从 0.819 抬到 0.879（GUI CPU 反而从 1112 涨到 1216 %）⇒
+GUI 的成本是**固定开销**（场景/合成器/llvmpipe 管线），不是像素数。想省只能**关 GUI** 或换有 GPU 的机器。
+
+#### 9.3.3 对"GUI 必看 + 10 Hz 点云"的裁决
+
+| 问法 | 答案 |
+|---|---|
+| GUI 能不能留 | **能**（独立进程、独立 gz-rendering 实例，§7.6 Q2 已证） |
+| 开了 GUI 还有 10 Hz 点云吗 | **在 sim 时间里是 10 Hz**（SDF 的 `<update_rate>10</update_rate>` 没变；第一枪实测 headless `10.001 Hz` → GUI `8.35–8.43 Hz`，算法侧开 `use_sim_time` 看到的仍是 10 Hz 周期） |
+| 那 8.35 Hz 是什么 | **墙钟频率**：10 Hz × RTF 0.82–0.88。整场仿真一起变慢，**不是点云单独变慢** |
+| 代价是什么 | **墙钟吞吐 0.82–0.88×**：一次 40 s 的跑要 47–49 s；实时性/回归时长要留 ~20 % 余量；`dt_max` 会到 0.2 s（下游 `use_sim_time` 的 TF/odom 也一起变慢，**相对关系不变**） |
+| 要 10 Hz 墙钟怎么办 | **关 GUI**（headless `/clock` 1000.0 Hz、RTF 0.999），或上 GPU |
+
+#### 9.3.4 ⚠️ 必须标注的口径异常：**今天所有模式都多发 2.2–2.6 条/周期**
+
+今天在**所有**模式下都测到"传感器一个周期发了 2–3 条消息"：
+
+| `update_rate` | 1 | 5 | 10 | 20 |
+|---|---|---|---|---|
+| 实测墙钟 Hz | **2.47** | **11.20** | **22.13** | **46.21** |
+| 倍数 | 2.47× | 2.24× | 2.21× | 2.31× |
+
+而判据显示"周期本身是对的"：`dt_max ≈ 1/update_rate`（1 Hz → 1.0034 s；10 Hz → 0.1026 s），
+`dt_min ≈ 0`（成对出现），**单一 publisher**（`ign topic -i` 只有一行），**`dup_stamps=0`**
+（成对的消息 sim stamp 不同），**与射线数无关**（把 30k 降到 300 条，速率仍是 23.6 Hz），
+**与是否 `--headless-rendering` 无关**（`-s` 与 `-s --headless-rendering` 都是 22.2 Hz）。
+
+⇒ **判定**：`<update_rate>` 并没有被当成绝对频率执行（每周期 2–3 次 publish）。
+第一枪在同一世界测到的是 **1.0×**（10.001 Hz，`dt_max=0.1018`），所以这个倍数**依赖环境/负载，不可复现**。
+**因此**：
+
+- **绝对 Hz 数字（本节的 22 Hz、第一枪的 10 Hz）都不能当作"传感器频率"引用**；
+  可信的是 **比值**（GUI/headless）、**`/clock` Hz**、**`/stats` RTF**，以及**同时订阅两路时的 1:1 关系**；
+- 这也正好解释了 §9.2 表里 `points` 那几个 20–28 Hz 的怪值（顺序探测 + 不同窗口）；
+- 机制未查明（见 §9.6 #3）。**在下游用 ROS 侧 `ros2 topic hz` 做验收**，别信 gz 侧的绝对数。
+
+### 9.4 R3：能不能把任意 CSV 图案塞进 OGRE2 的 `GpuRays`
+
+**问题**：Fortress 的 `gpu_ray` 只能配规则网格（`<ray><scan>` 的水平/垂直 samples），
+所以拿不到 MID-360 的逐射线图案。能不能**只换"方向表"**、保留"光栅化 + 一次 pass"的优势？
+
+#### 9.4.1 结论先行
+
+**技术上成立，而且比想象中轻——因为上游代码里"方向表"本来就已经是一张纹理了。**
+但它是**对 `gz-rendering` 公共 API 的扩展**，落地必然是 **fork（2 个包，带 SDF 管道则 3 个）**，
+并且**精度受立方图重采样的硬上限约束**。详见下面。
+
+#### 9.4.2 源码里"方向表"到底在哪（file:line）
+
+上游的实现是**两遍**：
+
+| 环节 | 位置 | 作用 |
+|---|---|---|
+| 第 1 遍：**立方图** | `Ogre2GpuRays.cc:136-207`（`cubeCam[6]`、`kCubeCameraCount=6`）、`Ogre2GpuRays.cc:563-622`（按 FOV 算每个面要多少采样） | 6 个 90° 相机把**整个球面**渲染成 6 张深度图 |
+| 深度 → 距离 | `media/materials/scripts/gpu_rays_1st_pass_fs.glsl:83-86`（`viewSpacePos = cameraDir * d; l = length(viewSpacePos)`） | 每个像素一个"沿该像素方向的射程" |
+| **第 2 遍：方向表** | **`Ogre2GpuRays.cc:661` `CreateSampleTexture()`**，填充循环 **`Ogre2GpuRays.cc:722-745`** | 建一张 **RGBA32F 纹理**，**每个输出像素**打包 `(u, v, faceIdx)`：`R=u`、`G=v`、`B=cube face`（注释在 `Ogre2GpuRays.cc:678-682`） |
+| 方向 → cube UV | **`Ogre2GpuRays.cc:633-660` `SampleCubemap()`** | 世界方向向量 → 面号 + uv |
+| 第 2 遍的着色器 | `media/materials/scripts/gpu_rays_2nd_pass_fs.glsl:26`（`uniform sampler2D cubeUVTex`）、**`gpu_rays_2nd_pass_fs.glsl:66-95`** | `data = texture(cubeUVTex, uv)` → 取 `faceIdx` → 从对应面取 `range/retro` |
+
+**关键**：`Ogre2GpuRays.cc:722-745` 那个双重循环就是"规则网格 → 方向 → cube UV"的**唯一**入口：
+
+```cpp
+double v = vmin;
+for (unsigned int i = 0; i < h2nd; ++i) {          // 垂直行
+  double h = min;
+  for (unsigned int j = 0; j < w2nd; ++j) {        // 水平列
+    math::Vector3d ray(0, 0, 1);
+    math::Quaterniond pitch(math::Vector3d(1,0,0), -v);
+    math::Quaterniond yaw  (math::Vector3d(0,1,0), -h);
+    math::Vector3d dir = yaw * pitch * ray;
+    math::Vector2d uv = this->SampleCubemap(dir, faceIdx);   // ← 方向表
+    pDest[index++] = uv.X(); pDest[index++] = uv.Y();
+    pDest[index++] = faceIdx; pDest[index++] = 1.0;
+    h += hStep;
+  }
+  v += vStep;
+}
+```
+
+⇒ **任意 CSV 图案 = 把 `(i,j)` 换成 CSV 的第 k 行**：`az = csv_az[k]`、`el = 90°−csv_zen[k]`，
+`h2nd` 从 30 改成 1、`w2nd` 从 1000 改成 30000。**不需要改第 1 遍，也不需要改着色器。**
+
+#### 9.4.3 要改哪些地方、多少行（估算）
+
+| # | 包 / 文件 | 改动 | 估算 |
+|---|---|---|---|
+| 1 | **`gz-rendering` 公共 API** `include/gz/rendering/GpuRays.hh:121-156`（当前只有 `SetRayCount/SetVerticalRayCount/SetAngleMin/Max`） | 加 `SetRayDirections(const std::vector<math::Vector3d>&)` + `RayDirectionCount()`；**空 = 现状**（后端兼容） | **30–50 行** |
+| 2 | `gz-rendering` `BaseGpuRays.{hh,cc}` + `Ogre2GpuRays.{hh,cc}` | 存方向表；`CreateSampleTexture()` 里"有方向表就按表填、没有就走原双重循环"；`UpdateFOV` 里 `w2nd = N, h2nd = 1`；`cubeFaceIdx` 照旧收集（决定要渲染哪几个面） | **60–100 行**（**复用** 661–790 的纹理上传代码） |
+| 3 | **`gz-sensors`** `src/GpuLidarSensor.cc:186-240`（`CreateLidar()` 里配网格）+ `src/Lidar.cc:150-163`（`set_count/set_vertical_count`）、`Lidar.cc:233-280`（`PublishLidarScan` 的双层循环） | 读 CSV（`Time,Azimuth,Zenith`），算方向，调新 API；消息改成 `count=N, vertical_count=1`；点云 `width=N, height=1`；`FillPointCloudMsg` 走一维 | **120–200 行** |
+| 4 | **`gz-sim`**（可选） | SDF `<sensor type="gpu_ray">` **没有** CSV 字段（`sdformat-9.7/sdf/Lidar.hh:104-260` 只有 `horizontal/vertical` 的 samples/min/max/resolution）⇒ 要么扩 schema + `Sensors` system（**fork `gz-sim6`**），要么**自己写一个 gz system 直接建传感器**（不动 gz-sim，但仍要 fork gz-sensors 才能定制 `GpuLidarSensor`） | **40–150 行** |
+| | **合计** | **2 个包（必需）/ 3 个包（SDF 顺手）** | **≈250–400 行 + 打包/版本钉子** |
+
+**注意**：给 `GpuRays` 基类**加虚函数会破坏 ABI**（vtable 布局变），所以"装一个 patch 进现成
+`libignition-rendering6`"是不可行的——必须是**整包重编译的 fork**（colcon overlay）。
+这对我们是可接受的（迁移本来就要重建工作区），但**不是"改个配置"**。
+
+#### 9.4.4 精度上限（**这条决定 R3 值不值**）
+
+第 1 遍的立方图分辨率是硬编码 clamp：
+
+```cpp
+// Ogre2GpuRays.cc:615-622
+unsigned int samples1stPass = std::clamp(v, min1stPassSamples /*128*/, max1stPassSamples /*1024*/);
+this->Set1stTextureSize(samples1stPass, samples1stPass);
+```
+
+⇒ **每个立方图面最多 1024²，即 90°/1024 ≈ 0.088°/texel**。任意方向是从这张图里
+**最近邻重采样**出来的，于是：
+
+- **角度量化**：每条射线的方向被吸到 0.088° 的网格上。MID-360 的 30k 图案铺在
+  360°×59°（≈21,240 deg²）上，**平均点间距 ≈0.84°**（`sqrt(21240/30000)`），
+  立方图 texel 比它**细约 10×** ⇒ **量化误差小于图案间距，可接受**；
+- **边缘漏检/重影**：细杆、薄板、栏杆这类目标，命中与否取决于立方图 texel 是否覆盖它
+  ⇒ **同一个世界、同一条射线，R3 与 Classic/R1 可能给出不同答案**（Classic 是精确三角面求交）；
+  这直接影响"感知等价性"验收（§7.4 的判据 ⑤）；
+- **无法保留逐点时间偏移**：CSV 第一列是 `Time`，Classic 插件虽然当前 `offset_time=0`
+  （`livox_points_plugin.cpp:381`），但真机是有帧内运动畸变的；R3 和 R0 一样是"一帧一个位姿"。
+
+⇒ **R3 的保真度是"方向对、距离是重采样的近似"**，介于 R0（方向都不对）和 R1（逐射线精确）之间。
+
+#### 9.4.5 要不要 fork / 能不能上游
+
+| 问 | 答 |
+|---|---|
+| 要 fork 吗 | **要**：`gz-rendering`（必需）+ `gz-sensors`（必需）+ 可选 `gz-sim`；加虚函数 ⇒ 必须整包重编译 |
+| 能上游吗 | **技术上可以**（内部结构已经支持"方向表"，PR 是"把表从规则网格换成外部数组"），但要**跨 3 个 repo + SDF schema 变更 + 一个新的 sensor 配置入口**，且会引入"重采样精度"的产品决策 ⇒ 现实中是**几个月级的多 PR**，赶不上我们的迁移窗口 |
+| 风险 | **高**：①fork 的 ABI/版本钉子（Fortress 一旦打补丁就要 rebase）②重采样精度影响感知等价性验收 ③llvmpipe 下 30k 方向表的纹理带宽未实测（第 1 遍的分辨率不能随便调大） |
+| 与 R1 比 | R1 **不动任何上游包**（只加一个自己的 system）、**逐射线精确**、**纯 CPU**；R3 省的是 CPU（光栅化），但把成本换成"fork + 精度损失" |
+
+#### 9.4.6 R3 判定
+
+**⚠️ 现实但重。** 如果本项目**长期押注 gz**、并且能接受"距离是 0.088° 立方图重采样"的近似，
+R3 是唯一能同时拿到"任意图案 + 光栅化 O(1) 内存"的路线；
+但**对"这一轮迁移"**，它的性价比低于 R1（见 §9.5）。**不建议把它排进 P2。**
+
+> 顺带说明：第一枪下载的 **`igngz6_Sensors.cc`（1037 行）和 `igngz6_RenderUtil.cc`（3838 行）
+> 都不在这条改动路径上**——前者是 gz-rendering 的 sensor 容器（无 `GpuRays`），后者是 OGRE2 场景
+> 构建（材质/可视），全文 grep 不到 `GpuRays`。**`gzsim6_Sensors.cc` 那次下载失败（0 字节）也不影响结论**：
+> 真正要改的是 `Ogre2GpuRays.cc` 的 `CreateSampleTexture()` 和 `GpuRays` 的公共 API。
+
+### 9.5 决策表与推荐
+
+#### 9.5.0 先回答 §7.6 Q1 留下的开放问题（"自研 R1 会不会又变成 O(rays)"）
+
+第一枪的判断是：**"R1 本质上是把 ODE 的活搬到自己手里，很可能又变成 O(rays) 的 CPU 成本"**，
+并说这是 P2 最重要的技术判断。**本节把它量化了**：
+
+- **确实是 O(rays)**：单线程 0.417–0.978 µs/ray，30k 条 = **12.5–29.4 ms/帧**；
+- **但这个"O(rays)"在无 GPU 的 28 线程机器上完全付得起**：4 线程 **5.6–13.6 ms**、8 线程 **3.2–7.4 ms**，
+  10 Hz 预算（100 ms）有 **7–30× 余量**；
+- **内存优势保住了**：R1 只需要存方向向量（30k×3×8 B ≈ 720 KB）+ 一份静态 BVH，
+  **不需要"每射线一个碰撞体"**（Classic 的 2.74 GiB 根因）；
+- **而且它不碰渲染器** ⇒ 顺手解掉"LiDAR 依赖软件 GL"这条刚性耦合（§7.5 的"没有省法"结论对 R1 不成立）。
+
+⇒ **§7.6 Q1 的答案是分层的**：**"R0 已消除射线成本"成立；"R1 会把成本搬回来"也成立，
+但搬回来的量级是 0.5–13 ms/帧，不是 Classic 的 2.74 GiB + 单线程世界更新。**
+
+#### 9.5.1 四条的对照（保真度 × 吞吐 × 无 GPU × 工作量/风险）
+
+| 方案 | **保真度**（能否复现 MID-360 图案 / 距离是否精确） | **吞吐**（30k@10 Hz，本机实测） | **无 GPU 可用** | **工作量 / 风险** | 结论 |
+|---|---|---|---|---|---|
+| **Classic 11（现状）** | **最高**：逐射线 ODE 求交，图案任意 | **最差**：RTF 0.32–0.46（整栈）、RSS 2.74 GiB（每射线一个 ODE 体） | ✅（但吃 444–609 % CPU 的 gzclient） | 0 / **EOL 风险** | 基准台，别动 |
+| **R0：Fortress `gpu_ray` 规则网格** | **低**：方向只能是规则网格，**拿不到非重复图案**；距离精确（光栅化） | **最好**：RTF 0.999（headless）/ 0.82（GUI），RSS 375 MB，CPU **24.7 %**（R0 世界，生命周期均值） | ✅（llvmpipe/EGL，实测） | **0（已跑通）** / 低 | **近期可用的默认档** |
+| **R1：自研 CPU BVH system** | **最高**：CSV 逐射线、三角面精确求交；还能加逐点时间戳/噪声 | **够用**：1 线程 12.5–29.4 ms/帧；4 线程 5.6–13.6；8 线程 3.2–7.4（预算 100 ms） | ✅✅ **纯 CPU，连渲染器都不用** | **中高** / 中（自维护 system + 动态世界 refit） | **P2 推荐** |
+| **R3：fork `gz-rendering`+`gz-sensors` 喂方向表** | **中高**：方向精确，**距离是 0.088° 立方图重采样**（薄物可能漏/重） | **最好**（同 R0，O(1) 内存） | ✅ | **高**（2–3 个 fork，250–400 行 + ABI 钉子） / **高** | **长期选项，不进 P2** |
+
+#### 9.5.2 推荐（**含"保真 vs 速度"这个必须由用户拍板的取舍**）
+
+**我的推荐是 R1（自研 CPU 射线 system）作为 P2 的主线，R0 作为开发/CI 的默认档，R3 只留作长期议题。**
+理由按重要性排序：
+
+1. **保真度是这个仓库的核心资产**：本项目已经有一整套"感知保真度"审计
+   （`docs/tilted_lidar_fidelity.md`、`docs/session_digest.md`、`small_point_lio` 的变换 bug 审计）。
+   R0/R3 都会改变点云的空间分布（R0 连方向都不对，R3 的距离是重采样的），
+   **等于把已经校准好的感知基准作废**；R1 是唯一能保持"同一条射线打到同一个三角面"的路线。
+2. **R1 的成本已经被量出来，而且不贵**：最坏（100 % 命中）单线程 29.4 ms/帧，4 线程 13.6 ms；
+   标称位姿单线程 12.5 ms、4 线程 5.6 ms。**10 Hz 预算（100 ms）下的余量：单线程最坏 3.4×、
+   标称 8.0×；4 线程 7.4–17.9×；8 线程 13.5–31×**，而且这是在一台
+   **没有 GPU** 的机器上、用**纯 C++/Bullet** 得到的。
+3. **R1 是纯加法**：一个 `gz-sim` system 插件（编译成 `.so`，在 world 里 `<plugin>` 加载）
+   ⇒ 不动 `bringup_sim.launch.py` 默认值、不动 xacro、不动 `rm_perception/**`、不动 nav2 params，
+   与 §6.11"保持不动清单"完全兼容。**不 fork 任何上游包**。
+4. **R3 的收益（省 CPU）在本机并不稀缺**：server 侧的 30k `gpu_ray` 只吃 **24.7 %**（R0 世界，
+   生命周期均值；P1-lite 的渲染期样本 ≈49 %），
+   而 GUI 一开就吃掉 1112–1296 %。**真正的瓶颈是 GUI 的软件光栅化（11–13 核），不是射线**。R3 省的那点 CPU
+   解决不了"无 GPU 机器上 GUI 贵 12 倍"这个主要矛盾。
+5. **R1 顺带解掉一个架构耦合**：Classic 和 R0 都是"LiDAR ⇒ 渲染器 ⇒ 软件 GL"，渲染器起不来就没点云；
+   R1 把这条依赖**彻底切断**（CI/无头回归再也不会因为 EGL/llvmpipe 挂掉而丢数据）。
+
+**必须由用户拍板的取舍（我不替你决定）**：
+
+| 取舍 | 选 A | 选 B |
+|---|---|---|
+| **保真 vs 速度** | **A：要 MID-360 的逐射线图案** ⇒ 走 **R1**（多写一个 system，约 1–2k 行；每帧多 0.5–13 ms CPU；换来感知基准可迁移） | **B：只要"有个 30k 点的 3D LiDAR"** ⇒ 走 **R0**（零成本，今天就能跑；但点云分布与真机不同，所有感知阈值/标定要重做） |
+| **GUI vs 10 Hz 墙钟** | **A：GUI 必看** ⇒ 接受 RTF 0.82–0.88（40 s 的跑变 48 s），算法侧 `use_sim_time` 看到的仍是 10 Hz | **B：要 10 Hz 墙钟** ⇒ 关 GUI（headless），调试另开一台/另起一个 GUI 连同一 server |
+| **长期 vs 近期** | **A：长期押 gz** ⇒ 值得为 R3 排一个 fork 的预算（2–3 包） | **B：先把迁移做完** ⇒ R3 只写进 roadmap，P2 用 R1 |
+
+**一句话**：**如果"点云必须和现在一模一样"——答案是 R1，而且它划算；
+如果"点云长得不一样也行"——R0 已经躺在 `.tmp_gzsim2/` 里了，今天就能用。
+R3 是"两个都要"的选项，但它把成本换成了 fork + 重采样精度，不该压在 P2 上。**
+
+### 9.6 诚实清单（本节**新增**的未验证项，接 §8）
+
+| # | 未验证 | 原因 / 现状 |
+|---|---|---|
+| 1 | **R1 接进完整栈后的 RTF** | 本节只测了**射线求交**（12.5–29.4 ms/帧 @1 线程）。不含：从 gz-sim 抽世界几何、消息构造（480 KB + 960 KB/帧）、传输、以及 SLAM/LIO/nav2 的负载。**必须等 P4 的 A/B**。 |
+| 2 | **动态障碍下的 BVH 成本** | 探针把世界 BVH **建一次**（22–24 ms）。移动障碍需要 refit/rebuild，**未测**（Fortress 的 `btBvhTriangleMeshShape` 支持 refit，但代价未知）。 |
+| 3 | **"每周期多发 2.2–2.6 条消息"的机制** | 已排除：多 publisher、重复 stamp、射线数、`--headless-rendering`、窗口大小。**未定位**到具体代码路径（缺 `gz-sim6` 的 `Sensors.cc`，且本沙箱**无外网**：`raw.githubusercontent.com` 解析到非公网 IP，无法下载）。**只有比值可用**。 |
+| 4 | **R3 的原型与重采样精度** | **没有写任何代码**。0.088°/texel 的量化、薄物漏检率、llvmpipe 下方向表的带宽，全部是**推算**，未实测。 |
+| 5 | **`gz::rendering::RayQuery`（第一枪的另一个尝试）** | 它的 `us_per_ray=0.348 / engine_ms=117.3` 与 CPU BVH 的 0-hit 数字**同源**（mm/m 单位错），**同样无效**；本轮**没有重测**（需要 GL 上下文 + 用米制 mesh 重跑）。**不要引用那两个数字。** |
+| 6 | **有 GPU 机器上的对照** | 本机无 `/dev/dri`、NVIDIA 驱动未加载 ⇒ 所有数字都是"无 GPU"的绝对值。有 GPU 时 R0/R3 的成本会大幅下降，R1（纯 CPU）**不变**——这反而让 R1 的相对优势在有 GPU 的机器上变小。 |
+| 7 | **`gz-sim6` 的 `Sensors.cc` 源码** | 上一枪下载失败（0 字节，`.tmp_gzsim2/gzsim6_Sensors.cc`）；本节对 SDF 管道的分析只到 **schema 层**（`sdformat-9.7/sdf/Lidar.hh`）。 |
+| 8 | **16 线程以上的伸缩** | 只测到 16 线程（28 个逻辑核）。E-core/P-core 混合拓扑下的最优线程数未系统扫。 |
+| 9 | **`guismall` 的"窗口真的变小了吗"** | Xvfb 屏幕设成 640×480，但 `ign gazebo -g` 的窗口未必跟着缩（Qt 会 clamp/裁切）；**GUI CPU 没变（1112→1216 %）说明"按像素省钱"这条路本来就不通**，但"窗口实际多大"未取证。 |
+
+---
+
+## 附录 C 第二枪复现命令（全部在 `.tmp_gzsim2/`，**不动任何功能代码**）
+
+```bash
+cd /home/weicheng/HzMi_rmsimulation
+D=.tmp_gzsim2
+MESH=src/rm_simulation/hzmi_rm_simulation/world/RMUC2026_world/meshes/RMUC2026.stl
+CSV=src/rm_simulation/livox_laser_simulation_RO2/scan_mode/mid360.csv
+
+# ---- 0) 编译（R1 探针需要 ignition-common4-graphics 与 ignition-utils1） ----
+g++ -O2 -std=c++17 -Wall $D/cpu_ray_bvh.cc -o $D/cpu_ray_bvh \
+    $(pkg-config --cflags --libs ignition-common4 ignition-common4-graphics ignition-msgs8 ignition-utils1) \
+    $(pkg-config --cflags --libs bullet) -lpthread
+g++ -O2 -std=c++17 -Wall $D/hz_probe2.cc -o $D/hz_probe \
+    $(pkg-config --cflags --libs ignition-msgs8 ignition-transport11 ignition-utils1) -lpthread
+
+# ---- 1) R1：先看 sanity（不 PASS 就不会给计时） ----
+RAY_REPS=3 $D/cpu_ray_bvh "$MESH" "$CSV" 30000 200.0 1 2 4 8 16
+#   RAY_SCALE / RAY_ZOFF / RAY_POSE="x,y,z" / RAY_START（CSV 滚动窗口）/ RAY_ENCLOSED=1
+#   RAY_DUMP=path 可导出逐射线命中距离，用于和 Python 暴力求交交叉验证
+
+# ---- 2) R1：全场景 × 全线程（结果写 $D/r1_final.log） ----
+$D/run_r1.sh
+
+# ---- 3) R0：30k / 2880 × headless / GUI（会写 run_r0_*/ 并做 `ign stats`） ----
+$D/run_r0.sh                      # 第一枪的脚本，产物在 $D/run_r0_*
+#   观察点：stats.txt 的 real_time_factor、cpu.txt、hz_scan.txt / hz_points.txt / hz_clock.txt
+
+# ---- 4) GUI vs 10 Hz：同世界同传感器，headless / GUI 1280x800 / GUI 640x480 ----
+$D/run_rate.sh headless headless
+$D/run_rate.sh gui      gui 1280x800
+$D/run_rate.sh guismall gui 640x480
+#   产物：rate_<label>/{hz_both,hz_clock,hz_stats,pub,cpu_samples}.txt
+#   要点：server 与 GUI 分进程启动（set sid 进程组）以便精确归属 CPU；
+#         每次跑独立 GZ_PARTITION；每段硬 timeout；只 kill 自己的进程组
+
+# ---- 5) 位姿扫描（找"命中重/未命中重"场景；用 30k 行，别用 4k，CSV 是时间排序的） ----
+$D/sweep_poses.sh                 # 2 m 网格，写 $D/r1_pose_sweep.csv
+
+# ---- 6) 收尾检查（只查自己的进程；本沙箱是独立 PID namespace，看不到也不影响别人的进程） ----
+pgrep -a -f "ign gazebo" ; pgrep -a -f Xvfb ; echo "leftovers: (none) 期望为空"
+#   每个脚本都 set sid 起自己的进程组，exit trap 里 `kill -9 -<pgid>` 只杀自己那一组
+```
