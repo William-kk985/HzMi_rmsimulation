@@ -1696,6 +1696,8 @@ this->Set1stTextureSize(samples1stPass, samples1stPass);
 
 #### 9.4.5 要不要 fork / 能不能上游
 
+> **2026-10-18 补充**：R1 的「外面是否已经有人做了」已单独调研，见 [`livox_sensor_prior_art.md`](livox_sensor_prior_art.md) —— **存在 MIT/BSD-3 的现成实现**（`ashduwihch/mid360_gazebo_harmonic` = rmagine/Embree CPU BVH + MID-360 CSV + `CustomMsg`；`uos/rmagine_gazebo_plugins` = BSD-3 且明示 Fortress 已测），**R1 可降级为「移植 + 适配」（S–M）**；关键新事实：Fortress **没有** `components/RaycastData`（那是 `gz-sim8+`），所以"让物理引擎批量求交"在 Fortress 不存在，BVH 必须自己持有。
+
 | 问 | 答 |
 |---|---|
 | 要 fork 吗 | **要**：`gz-rendering`（必需）+ `gz-sensors`（必需）+ 可选 `gz-sim`；加虚函数 ⇒ 必须整包重编译 |
