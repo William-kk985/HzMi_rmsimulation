@@ -1,0 +1,23 @@
+# =============================================================================
+# ros_gz_bridge.yaml —— **这个后端唯一真的需要桥的东西是 /clock**
+# =============================================================================
+# 为什么点云/IMU 不走桥（这是与 Classic 最容易误解的一条，详见
+# docs/fortress_sim_backend.md「与之前的区别」表）：
+#   · MID-360 是**进程内**发布：mid360 插件在 gzserver 进程里直接 rclcpp::Publisher
+#     发 /livox/lidar (CustomMsg) 与 /livox/lidar/pointcloud (PointCloud2)。
+#     ⇒ 没有 PointCloudPacked 中转，也就没有"桥过来的 frame_id 变成 gz scoped name"
+#       的问题（那正是 P3 里点名的高风险项）。
+#   · IMU 同理：gz 的 <sensor type="imu"> → gz transport /mid360/imu_gz → 插件转成
+#     ROS /livox/imu（frame_id 我们钉成 imu_link，与 Classic 一致）。
+#   · **必须**桥的只有 /clock：ROS 侧所有节点都靠 use_sim_time + /clock 走仿真时间。
+#
+# 如果哪天改用 gz 原生 <sensor type="gpu_lidar">（规则网格，不是我们的 CSV 图案），
+# 才需要下面注释掉的那条 PointCloudPacked→PointCloud2；示例留在
+# ros_gz_bridge_pointcloud.example.yaml 里，**默认不启用**（没那个 gz 话题时
+# bridge 会一直报 "Failed to create subscriber"）。
+# =============================================================================
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "ignition.msgs.Clock"
+  direction: GZ_TO_ROS

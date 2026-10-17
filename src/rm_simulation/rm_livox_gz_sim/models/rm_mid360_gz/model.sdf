@@ -1,0 +1,98 @@
+<?xml version="1.0" ?>
+<!-- =============================================================================
+     rm_mid360_gz —— 单独的 MID-360 传感器模型（**台架用**，不含机器人）
+     =============================================================================
+     这一个模型就是「A① 双发布」的实现：**同一个 link、同一个姿态，两个插件实例**
+       · 实例 #1  publish_pointcloud_type=3 → /livox/lidar            (CustomMsg)
+       · 实例 #2  publish_pointcloud_type=2 → /livox/lidar/pointcloud (PointCloud2)
+     两个实例各自 build 一个 rmagine::O1DnSimulatorEmbree，但**共用**同一棵 Embree BVH
+     （BVH 由世界里的 rmagine_embree_map_system 建一次、放进 MapRegistry 的 map_key 下；
+     两个实例的 <map_key> 相同 ⇒ 拿到同一个 EmbreeMapPtr）。实测数据见
+     docs/fortress_sim_backend.md「双实例」一节。
+
+     `<link><pose>` 里的 roll = **-0.523598775598293**（= -30°）就是「30° 斜装」的全部
+     实现（B① 决策）：传感器系**物理上真的倾斜**，因此
+       · 点云数字表达在这个倾斜系里，
+       · header.frame_id 也是这个倾斜系的 livox_frame，
+     与 `robot11_mount:=sensor` 的语义一字不差。下游按既有的重力对齐规则处理
+     （linefit: gravity_aligned_frame=base_link；pcl→laser: target_frame=base_link）。
+
+     ⚠️ **不要**用上游的 <output_yaw>：它只能绕 Z 轴转，表达不了 roll -30°。
+     ⚠️ 模型整体 pose 由世界文件的 <include><pose> 给；z = 0.2595 是 robot11 的
+        雷达离地高度实测值（docs/tilted_lidar_fidelity.md §J），与机器人上那一份对齐。
+     ============================================================================= -->
+<sdf version="1.9">
+  <model name="rm_mid360_gz">
+    <static>true</static>
+    <allow_auto_disable>false</allow_auto_disable>
+
+    <link name="livox_frame">
+      <!-- ★ 30° 斜装：roll = -0.523598775598293 -->
+      <pose>0 0 0 -0.523598775598293 0 0</pose>
+
+      <!-- gz 自己产 IMU（Fortress 的 ignition-gazebo-imu-system 按 <topic> 发），
+           再由 mid360 插件订阅并转成 ROS 的 /livox/imu（frame_id=imu_link）。
+           为什么不让 ros_gz_bridge 直接桥 IMU：① 少一次序列化/反序列化；
+           ② frame_id 必须是我们约定的 imu_link，bridge 只会给 gz 的 scoped name。 -->
+      <sensor name="mid360_imu" type="imu">
+        <always_on>true</always_on>
+        <update_rate>100</update_rate>
+        <topic>/mid360/imu_gz</topic>
+      </sensor>
+    </link>
+
+    <!-- ── 实例 #1：只发 CustomMsg（LIO 要的 /livox/lidar） ─────────────────── -->
+    <plugin filename="libmid360_system.so"
+            name="mid360_simulation_plugin_ros2::Mid360System">
+      <link_name>livox_frame</link_name>
+      <ray_backend>embree</ray_backend>
+      <map_key>default</map_key>
+      <!-- csv_file 由 launch 用 GZSIM_MID360_CSV 环境变量替换（见 launch/gz_sim.launch.py
+           的 _render_sdf：把 @MID360_CSV@ 换成真路径）。仓库里那份 17 MB 的
+           mid360.csv 不复制、不提交副本。 -->
+      <csv_file>@MID360_CSV@</csv_file>
+      <samples>30000</samples>
+      <downsample>1</downsample>
+      <update_rate>10</update_rate>
+      <point_rate>300000</point_rate>
+      <min_range>0.1</min_range>
+      <max_range>40.0</max_range>
+      <topic>/livox/lidar</topic>
+      <publish_pointcloud_type>3</publish_pointcloud_type>
+      <frame_id>livox_frame</frame_id>
+      <imu_topic>/livox/imu</imu_topic>
+      <imu_frame_id>imu_link</imu_frame_id>
+      <gz_imu_topic>/mid360/imu_gz</gz_imu_topic>
+      <publish_imu>true</publish_imu>
+      <output_yaw>0.0</output_yaw>
+      <node_name>mid360_gz_custom</node_name>
+      <qos_reliability>@QOS@</qos_reliability>
+      <ignore_self>@IGNORE_SELF@</ignore_self>
+    </plugin>
+
+    <!-- ── 实例 #2：只发 PointCloud2（linefit 要的 /livox/lidar/pointcloud） ── -->
+    <plugin filename="libmid360_system.so"
+            name="mid360_simulation_plugin_ros2::Mid360System">
+      <link_name>livox_frame</link_name>
+      <ray_backend>embree</ray_backend>
+      <map_key>default</map_key>
+      <csv_file>@MID360_CSV@</csv_file>
+      <samples>30000</samples>
+      <downsample>1</downsample>
+      <update_rate>10</update_rate>
+      <point_rate>300000</point_rate>
+      <min_range>0.1</min_range>
+      <max_range>40.0</max_range>
+      <topic>/livox/lidar/pointcloud</topic>
+      <publish_pointcloud_type>2</publish_pointcloud_type>
+      <frame_id>livox_frame</frame_id>
+      <!-- ⚠️ 只有实例 #1 发 IMU。两个实例都发 = /livox/imu 双倍频率 + 双发布者。 -->
+      <imu_topic>/livox/imu</imu_topic>
+      <publish_imu>false</publish_imu>
+      <output_yaw>0.0</output_yaw>
+      <node_name>mid360_gz_pc2</node_name>
+      <qos_reliability>@QOS@</qos_reliability>
+      <ignore_self>@IGNORE_SELF@</ignore_self>
+    </plugin>
+  </model>
+</sdf>

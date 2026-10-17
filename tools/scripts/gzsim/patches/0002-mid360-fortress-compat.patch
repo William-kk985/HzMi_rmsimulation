@@ -1,0 +1,183 @@
+diff --git a/packages/mid360_simulation_plugin_ros2/CMakeLists.txt b/packages/mid360_simulation_plugin_ros2/CMakeLists.txt
+index c561f20..773cbc0 100644
+--- a/packages/mid360_simulation_plugin_ros2/CMakeLists.txt
++++ b/packages/mid360_simulation_plugin_ros2/CMakeLists.txt
+@@ -11,10 +11,14 @@ find_package(builtin_interfaces REQUIRED)
+ find_package(rclcpp REQUIRED)
+ find_package(sensor_msgs REQUIRED)
+ find_package(std_msgs REQUIRED)
+-find_package(gz-sim8 REQUIRED)
+-find_package(gz-plugin2 REQUIRED COMPONENTS register)
+-find_package(gz-transport13 REQUIRED)
+-find_package(gz-msgs10 REQUIRED)
++# ── HzMi patch (Fortress compat) ─────────────────────────────────────────────
++# Gazebo Fortress = ignition-gazebo6, the generation paired with ROS 2 Humble.
++# Upstream targets Harmonic (gz-sim8).  This block is the only build-side
++# difference; the C++ side differs in exactly two spots, both marked below.
++find_package(ignition-gazebo6 REQUIRED)
++find_package(ignition-plugin1 REQUIRED COMPONENTS register)
++find_package(ignition-transport11 REQUIRED)
++find_package(ignition-msgs8 REQUIRED)
+ find_package(rmagine 2.3 REQUIRED COMPONENTS core embree)
+ find_package(rmagine_gazebo_plugins REQUIRED)
+ find_package(livox_ros_driver2 QUIET)
+@@ -22,16 +26,25 @@ find_package(livox_ros_driver2 QUIET)
+ add_library(mid360_system SHARED src/mid360_system.cpp)
+ target_include_directories(mid360_system PRIVATE include)
+ target_link_libraries(mid360_system
+-  gz-sim8::gz-sim8
+-  gz-plugin2::gz-plugin2
+-  gz-transport13::gz-transport13
+-  gz-msgs10::gz-msgs10
++  ignition-gazebo6::ignition-gazebo6
++  ignition-plugin1::ignition-plugin1
++  ignition-plugin1::register
++  ignition-transport11::ignition-transport11
++  ignition-msgs8::ignition-msgs8
+   rmagine::core
+   rmagine::embree)
+ ament_target_dependencies(mid360_system
+   ament_index_cpp builtin_interfaces rclcpp sensor_msgs std_msgs
+   rmagine_gazebo_plugins)
+ 
++# RMAGINE_GZ_IGNITION_ERA selects IGNITION_ADD_PLUGIN instead of GZ_ADD_PLUGIN
++# (rmagine_gazebo_plugins' gz_compat.hpp reads it).  MID360_HAS_PHYSICS_BACKEND=0
++# disables the physics/`RaycastData` ray backend: gz-sim6 has no
++# components/RaycastData, so only the Embree backend exists on Fortress.
++target_compile_definitions(mid360_system PRIVATE
++  RMAGINE_GZ_IGNITION_ERA=1
++  MID360_HAS_PHYSICS_BACKEND=0)
++
+ if(livox_ros_driver2_FOUND)
+   target_compile_definitions(mid360_system PRIVATE MID360_HAS_LIVOX_CUSTOM_MSG=1)
+   ament_target_dependencies(mid360_system livox_ros_driver2)
+diff --git a/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp b/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
+index c2577ad..866b37f 100644
+--- a/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
++++ b/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
+@@ -18,7 +18,11 @@
+ #include <gz/sim/Model.hh>
+ #include <gz/sim/System.hh>
+ #include <gz/sim/Util.hh>
++// HzMi patch: gz-sim6 (Fortress) has no components/RaycastData; the physics ray
++// backend is gz-sim8+ only (CMakeLists sets MID360_HAS_PHYSICS_BACKEND=0).
++#if !defined(MID360_HAS_PHYSICS_BACKEND) || MID360_HAS_PHYSICS_BACKEND
+ #include <gz/sim/components/RaycastData.hh>
++#endif
+ #include <gz/transport/Node.hh>
+ #include <rclcpp/rclcpp.hpp>
+ #include <sensor_msgs/msg/imu.hpp>
+@@ -31,8 +35,22 @@
+ #include <rmagine/simulation/SimulationResults.hpp>
+ #include <rmagine/types/Memory.hpp>
+ #include <rmagine/types/sensor_models.h>
++#include <rmagine_gazebo_plugins/gz/gz_compat.hpp>
+ #include <rmagine_gazebo_plugins/gz/map_registry.hpp>
+ 
++// HzMi patch: gz-common4 (Fortress) only defines the ignerr/ignwarn/ignmsg/
++// igndbg spellings in <gz/common/Console.hh>; gzerr/gzwarn/gzmsg/gzdbg were
++// added in gz-common5.  Kept local to this translation unit so
++// rmagine_gazebo_plugins itself needs no patch for it.
++#if defined(RMAGINE_GZ_IGNITION_ERA) && RMAGINE_GZ_IGNITION_ERA
++  #ifndef gzerr
++    #define gzerr ignerr
++    #define gzwarn ignwarn
++    #define gzmsg ignmsg
++    #define gzdbg igndbg
++  #endif
++#endif
++
+ #ifdef MID360_HAS_LIVOX_CUSTOM_MSG
+ #include <livox_ros_driver2/msg/custom_msg.hpp>
+ #include <livox_ros_driver2/msg/custom_point.hpp>
+@@ -152,7 +170,13 @@ public:
+     }
+     else if (backendName == "physics")
+     {
++#if !defined(MID360_HAS_PHYSICS_BACKEND) || MID360_HAS_PHYSICS_BACKEND
+       this->rayBackend = RayBackend::Physics;
++#else
++      gzerr << "[MID360] ray_backend=physics needs gz-sim8+; this build only "
++            << "supports ray_backend=embree.\n";
++      return;
++#endif
+     }
+     else
+     {
+@@ -177,12 +201,14 @@ public:
+       return;
+     }
+ 
++#if !defined(MID360_HAS_PHYSICS_BACKEND) || MID360_HAS_PHYSICS_BACKEND
+     if (this->rayBackend == RayBackend::Physics)
+     {
+       gz::sim::components::RaycastDataInfo initialData;
+       ecm.CreateComponent(this->rayEntity,
+         gz::sim::components::RaycastData(std::move(initialData)));
+     }
++#endif
+ 
+     if (!rclcpp::ok())
+     {
+@@ -240,6 +266,7 @@ public:
+     // RaycastData is consumed by the physics system every simulation step.
+     // Clear the previous request immediately so the fallback backend casts
+     // one batch per lidar frame, not the same 20k rays at 1 kHz.
++#if !defined(MID360_HAS_PHYSICS_BACKEND) || MID360_HAS_PHYSICS_BACKEND
+     if (this->rayBackend == RayBackend::Physics)
+     {
+       auto raycast = ecm.Component<gz::sim::components::RaycastData>(this->rayEntity);
+@@ -249,6 +276,7 @@ public:
+         raycast->Data().results.clear();
+       }
+     }
++#endif
+ 
+     if (info.simTime < this->nextScanTime)
+       return;
+@@ -289,6 +317,7 @@ public:
+       return;
+     }
+ 
++#if !defined(MID360_HAS_PHYSICS_BACKEND) || MID360_HAS_PHYSICS_BACKEND
+     auto raycast = ecm.Component<gz::sim::components::RaycastData>(this->rayEntity);
+     if (!raycast)
+       return;
+@@ -302,11 +331,13 @@ public:
+         sample.direction * this->maxRange});
+     }
+     this->scanRequested = true;
++#endif
+   }
+ 
+   void PostUpdate(const gz::sim::UpdateInfo &,
+                   const gz::sim::EntityComponentManager &ecm) override
+   {
++#if !defined(MID360_HAS_PHYSICS_BACKEND) || MID360_HAS_PHYSICS_BACKEND
+     if (!this->configured || this->rayBackend != RayBackend::Physics ||
+         !this->scanRequested)
+       return;
+@@ -326,6 +357,7 @@ public:
+     }
+     this->PublishCloud(this->physicsPoints);
+     this->scanRequested = false;
++#endif
+   }
+ 
+ private:
+@@ -629,13 +661,13 @@ private:
+ };
+ }  // namespace mid360_simulation_plugin_ros2
+ 
+-GZ_ADD_PLUGIN(
++RMAGINE_GZ_ADD_PLUGIN(
+   mid360_simulation_plugin_ros2::Mid360System,
+   gz::sim::System,
+   gz::sim::ISystemConfigure,
+   gz::sim::ISystemPreUpdate,
+   gz::sim::ISystemPostUpdate)
+ 
+-GZ_ADD_PLUGIN_ALIAS(
++RMAGINE_GZ_ADD_PLUGIN_ALIAS(
+   mid360_simulation_plugin_ros2::Mid360System,
+   "mid360_simulation_plugin_ros2::Mid360System")

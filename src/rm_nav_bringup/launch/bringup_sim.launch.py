@@ -1208,6 +1208,27 @@ def generate_launch_description():
         default_value='RMUL2026',
         description='Select world (map file, pcd file, world file share the same name prefix as the this parameter)')
 
+    # ★ 2026-10-18：**仿真后端**槽位（`classic` | `gz`）。**纯增量**：
+    #   · 不传（默认 `classic`）⇒ 本文件里每一个 Action、每一条命令行、每一处时序
+    #     **逐字节不变**（`start_rm_simulation` 的 condition 恒为真 = "加了门但门一直开"）；
+    #   · `gz` ⇒ 只把「起仿真世界」这一件事换成 Gazebo Fortress（ignition-gazebo6）：
+    #     `rm_livox_gz_sim/launch/gz_sim.launch.py` 起 ign gazebo + /clock 桥 + TF，
+    #     感知 / LIO / nav2 全部**原样**复用本文件后面的节点（契约对照见
+    #     docs/fortress_sim_backend.md）。
+    #   ⚠️ `gz` 档的两个硬要求（缺了**明确报错**，不静默跑错）：
+    #     ① `robot:=robot11` —— 只有这个槽位在 gz 侧有 Fortress 化的模型生成路径；
+    #     ② `robot11_mount:=sensor` —— 倾角必须在 URDF 里（TF 才与物理一致）。gz 侧生成的
+    #        `<link><pose>` 也真的带 roll −0.5236 ⇒ 点云数字在**斜的传感器系**里，
+    #        与 Classic 的 `robot11_mount:=sensor` 语义一字不差。
+    declare_sim_backend_cmd = DeclareLaunchArgument(
+        'sim_backend',
+        default_value='classic',
+        choices=['classic', 'gz'],
+        description='仿真后端：classic（默认；Gazebo Classic 11，本文件现行行为逐字节不变）'
+                    '| gz（opt-in；Gazebo Fortress = ignition-gazebo6。需先跑 '
+                    'tools/scripts/gzsim/fetch_and_patch_mid360.sh，且必须 '
+                    'robot:=robot11 robot11_mount:=sensor）')
+
     # ★ 2026-10-07：机器人模型槽位（**opt-in**，默认值 = 本仓现行模型 ⇒ 现有行为不变）。
     declare_robot_cmd = DeclareLaunchArgument(
         'robot',
@@ -1557,7 +1578,30 @@ def generate_launch_description():
             # ★ 2026-10-07：Gazebo GUI / 在线模型库开关（默认值 = 改造前行为）
             'gui': gui,
             'gazebo_offline': gazebo_offline,
-            'rviz': 'False'}.items()
+            'rviz': 'False'}.items(),
+        # ★ 2026-10-18：sim_backend 的门。默认 classic ⇒ 条件恒真 ⇒ 这个 IncludeLaunch-
+        #   Description 的参数/命令行/时序与改造前逐字节相同（证据：
+        #   `tools/scripts/gzsim/launch_increment_diff.py` 对比 HEAD 前后 --show-args 与
+        #   整棵 Action 树的转储）。选 gz 时它整块不执行，由下面的 start_gz_simulation 接手。
+        condition=LaunchConfigurationEquals('sim_backend', 'classic'),
+    )
+
+    # ★ 2026-10-18：`sim_backend:=gz` 的仿真世界入口（**只在 gz 档执行**）。
+    #   它只负责"把世界起起来 + /clock + TF"，本文件后面的感知/LIO/nav2 节点全部原样复用。
+    start_gz_simulation = IncludeLaunchDescription(
+        # 用 _PackageShareFile 做**惰性**路径解析：没装 rm_livox_gz_sim 时，只要不选
+        # sim_backend:=gz，这个路径就永远不会被 perform ⇒ 默认路径零影响（--show-args 也是）。
+        PythonLaunchDescriptionSource(
+            [_PackageShareFile('rm_livox_gz_sim', 'launch', 'gz_sim.launch.py')]),
+        launch_arguments={
+            'world': world,
+            'robot': LaunchConfiguration('robot'),
+            'robot_description': robot_description,
+            'robot11_mount': LaunchConfiguration('robot11_mount'),
+            'gui': gui,
+            'use_sim_time': use_sim_time,
+        }.items(),
+        condition=LaunchConfigurationEquals('sim_backend', 'gz'),
     )
 
     bringup_imu_complementary_filter_node = Node(
@@ -2419,6 +2463,7 @@ def generate_launch_description():
     ld.add_action(declare_robot_cmd)
     ld.add_action(declare_spin_speed_cmd)
     ld.add_action(declare_world_cmd)
+    ld.add_action(declare_sim_backend_cmd)
     ld.add_action(declare_turret_yaw_deg_cmd)
     ld.add_action(declare_turret_pitch_deg_cmd)
     # ★ 2026-10-07：robot:=robot11 的雷达安装轴（roll | pitch；上游两份材料矛盾 ⇒ 不猜）
@@ -2498,6 +2543,8 @@ def generate_launch_description():
     #   顺序反了 ⇒ mesh 解析根晚一步，gzclient 照样会回落到在线模型库并卡住（本 Task 的回归点）。
     ld.add_action(OpaqueFunction(function=_gazebo_model_path_setup))
     ld.add_action(start_rm_simulation)
+    # 只有 sim_backend:=gz 才执行；classic 档它是一个 condition 为假的空 Action。
+    ld.add_action(start_gz_simulation)
     ld.add_action(bringup_imu_complementary_filter_node)
     # 地面分割槽位：两个节点都进 LaunchDescription，但各自的 condition 保证**只有一个**真的被启动
     #（⇒ /segmentation/obstacle 与 /segmentation/ground 恒定只有一个发布者）。

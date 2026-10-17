@@ -1,0 +1,20 @@
+# =============================================================================
+# ros_gz_bridge_pointcloud.example.yaml —— **仅示例，默认不加载**
+# =============================================================================
+# 只有当你把 MID-360 换回 gz 原生的规则网格雷达（`<sensor type="gpu_lidar">` /
+# `gpu_ray`）时才用得上：那条路的点云是 gz transport 上的
+# `ignition.msgs.PointCloudPacked`，需要桥成 ROS `sensor_msgs/msg/PointCloud2`。
+#
+# 三条已知代价（都实测过，见 docs/gazebo_sim_migration_plan.md §3.4 / §6.7）：
+#   ① 图案只能是规则网格 —— 拿不到 mid360.csv 那种非重复扫描图案；
+#   ② 桥出来的 header.frame_id 是 gz 的 scoped name，形如
+#      `<model>/<link>/<sensor>`（ROS 侧的 `/` 分隔），**不是** `livox_frame`
+#      ⇒ 要么下游改成用这个帧名，要么再加一层 frame 重写；
+#   ③ 多一次序列化/反序列化 + 一次进程间拷贝（点云是 30000 点量级）。
+# 所以本仓的 gz 后端**不用**它，只用进程内发布。
+# =============================================================================
+- ros_topic_name: "/gz/livox/lidar/pointcloud"
+  gz_topic_name: "/world/rmuc2026_gz/model/robot11/link/livox_frame/sensor/mid360/scan/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "ignition.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS

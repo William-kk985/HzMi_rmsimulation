@@ -1835,3 +1835,28 @@ $D/sweep_poses.sh                 # 2 m 网格，写 $D/r1_pose_sweep.csv
 pgrep -a -f "ign gazebo" ; pgrep -a -f Xvfb ; echo "leftovers: (none) 期望为空"
 #   每个脚本都 set sid 起自己的进程组，exit trap 里 `kill -9 -<pgid>` 只杀自己那一组
 ```
+
+---
+
+## 11. **最终状态**（2026-10-18）：P0–P2 落地为 opt-in 的 `sim_backend:=gz`
+
+> 本节是上面 P0–P4 计划的**收口指针**，不重复内容。
+
+**一句话**：`sim_backend:=gz` 已经是一个**可用的 opt-in 后端**（默认仍是 `classic`，
+不传该参数时节点集合/命令行/时序逐字节不变）。详细交付物、契约对照表、实测数字、
+"会坏的地方"与回退方法全部在 **[`docs/fortress_sim_backend.md`](fortress_sim_backend.md)**。
+
+| 计划项 | 状态 | 落在哪 |
+|---|---|---|
+| **P0 可行性** | ✅ 完成（§1–§5 的 spike + §9/§10 的实测） | `livox_sensor_prior_art.md` §10 |
+| **P1 机器人** | ⚠️ **部分**：模型能进 Fortress（从本仓 URDF 运行期派生 SDF，保留 **113 个真碰撞体**、`livox_frame` 的 roll −0.5236、IMU 传感器），但**底盘不动**（Fortress 无 `planar_move` 对应物 ⇒ 世界里的机器人是 `<static>`） | `src/rm_simulation/rm_livox_gz_sim/scripts/make_robot_gz_sdf.py` |
+| **P2 传感器系统** | ✅ 完成：R1（自有 CSV 图案 + 30000 束 CPU 射线）在 Fortress 上跑通，**双发布 = 两个插件实例**（`/livox/lidar` CustomMsg + `/livox/lidar/pointcloud` PC2，逐点相同） | `tools/scripts/gzsim/`（取上游 + 我们的 3 个补丁）+ `rm_livox_gz_sim/` |
+| **P3 桥接** | ✅ 完成，但**比计划小得多**：只有 `/clock` 需要 `ros_gz_bridge`；点云/IMU 是插件**进程内** rclcpp 直发，所以没有 `PointCloudPacked`、也没有 "frame_id 变成 gz scoped name" 那个高风险项 | `rm_livox_gz_sim/config/ros_gz_bridge.yaml` |
+| **P4 A/B 验收** | ⚠️ **部分**：gz 侧全部实测（10.0000 Hz 仿真 / 0.97 RTF / 328–652 MB / 逐点一致 / 自机排除 A/B）；**Classic 侧没有同轮对照**；**LIO 端到端未通过**（`small_point_lio` 在 gz 档持续 `imu loop back`，不发 `odom→base_link`）；`/scan` 链路已打通（418 条有限波束、`frame_id=base_link`） | `fortress_sim_backend.md` §2.8 / §8 / §10 |
+
+**与计划的一处口径修正**：计划里 P2 建议"新增独立包 `rm_livox_gz`、自写 `Mid360System`"
+（B 方案，200–300 行）。实际走的是 A 方案（用上游 `ashduwihch/mid360_gazebo_harmonic`
++ 我们的 3 个补丁），因为 §10 已经证明它在 Fortress 上**零 API 障碍**（只差 2 个宏），
+自写一遍的收益不足以抵消"再维护一份 300 行 C++"的成本。代价是**多一条构建期依赖链**
+（三个上游 + Embree 构建期下载），因此把它做成了**一键脚本 + 补丁 + 独立前缀**，
+不 vendor、不污染默认路径。

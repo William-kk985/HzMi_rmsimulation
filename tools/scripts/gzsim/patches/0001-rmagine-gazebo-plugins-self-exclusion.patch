@@ -1,0 +1,71 @@
+diff --git a/include/rmagine_gazebo_plugins/gz/map_registry.hpp b/include/rmagine_gazebo_plugins/gz/map_registry.hpp
+index e587c8d..dd8626f 100644
+--- a/include/rmagine_gazebo_plugins/gz/map_registry.hpp
++++ b/include/rmagine_gazebo_plugins/gz/map_registry.hpp
+@@ -7,6 +7,7 @@
+ #include <cstdint>
+ #include <string>
+ #include <unordered_map>
++#include <unordered_set>
+ 
+ #include <gz/sim/Entity.hh>
+ 
+@@ -66,6 +67,31 @@ public:
+     return nullptr;
+   }
+ 
++  // ── HzMi addition (our patch 0001, Fortress backend) ──────────────────────
++  // A sensor plugin can register the model entity that owns it here; the map
++  // system then excludes every visual below that entity from the BVH.  This
++  // is what makes "the robot must not see its own chassis" work without
++  // hard-coding a model name (Gazebo may suffix `<model name>` with `_0` when
++  // the same model is included twice, so a name-based `ignore_model` list is
++  // not reliable for a robot that appears more than once in a world).
++  void AddIgnoredModelEntity(gz::sim::Entity entity)
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    ignored_model_entities_.insert(entity);
++  }
++
++  void RemoveIgnoredModelEntity(gz::sim::Entity entity)
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    ignored_model_entities_.erase(entity);
++  }
++
++  bool IsIgnoredModelEntity(gz::sim::Entity entity) const
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    return ignored_model_entities_.count(entity) != 0;
++  }
++
+   uint64_t GetEmbreeMapRevision(const std::string &key) const
+   {
+     std::lock_guard<std::mutex> lock(mutex_);
+@@ -112,6 +138,7 @@ private:
+   std::unordered_map<std::string, uint64_t> embree_revisions_;
+   std::unordered_map<std::string, std::shared_ptr<const ObjectEntityMap>> object_entities_;
+   std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> map_mutexes_;
++  std::unordered_set<gz::sim::Entity> ignored_model_entities_;
+ };
+ 
+ }  // namespace rmagine_gazebo_plugins
+diff --git a/src/gz/rmagine_embree_map_system.cpp b/src/gz/rmagine_embree_map_system.cpp
+index d32ff99..497ba45 100644
+--- a/src/gz/rmagine_embree_map_system.cpp
++++ b/src/gz/rmagine_embree_map_system.cpp
+@@ -968,6 +968,14 @@ bool RmagineEmbreeMapSystem::IsIgnoredVisual(
+   std::string link_name;
+   while(current != gz::sim::kNullEntity)
+   {
++    // HzMi addition (our patch 0001): a sensor plugin registered this model
++    // entity via MapRegistry::AddIgnoredModelEntity() -> drop it and all of
++    // its descendants from the BVH (self-exclusion).
++    if(MapRegistry::Instance().IsIgnoredModelEntity(current))
++    {
++      return true;
++    }
++
+     if(_ecm.Component<gz::sim::components::Link>(current))
+     {
+       if(auto nameComp = _ecm.Component<gz::sim::components::Name>(current))

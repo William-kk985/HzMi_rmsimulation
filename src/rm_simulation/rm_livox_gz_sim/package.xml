@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm_livox_gz_sim</name>
+  <version>0.1.0</version>
+  <description>
+    Opt-in Gazebo Fortress (ignition-gazebo6) Livox MID-360 backend for this repo.
+    Ships only OUR assets: the SDF world/model (SDF &lt;= 1.9), the ros_gz_bridge
+    config and the `sim_backend:=gz` launch entry. The third-party sensor system
+    (uos/rmagine + uos/rmagine_gazebo_plugins + ashduwihch/mid360_gazebo_harmonic)
+    is NOT vendored here: tools/scripts/gzsim/fetch_and_patch_mid360.sh fetches it
+    at pinned revisions, applies our patches and builds it into a separate prefix.
+  </description>
+  <maintainer email="hzmi@example.com">HzMi</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 运行期依赖：桥 + TF 发布。刻意**不**依赖 rmagine / mid360_simulation_plugin_ros2 /
+       livox_ros_driver2 —— 这样 colcon build 本仓时，即使用户没有安装 gz 后端
+       （没跑 tools/scripts/gzsim/fetch_and_patch_mid360.sh），这个包也照编不误，
+       默认路径（sim_backend:=classic）不受任何影响。缺后端时由 launch 给出可操作的报错。 -->
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

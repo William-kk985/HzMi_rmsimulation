@@ -1,0 +1,125 @@
+diff --git a/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp b/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
+index 866b37f..e7cadcc 100644
+--- a/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
++++ b/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
+@@ -153,6 +153,29 @@ public:
+     this->maxRange = std::max(this->minRange, SdfValue<double>(sdf, "max_range", 40.0));
+     this->pointRate = std::max(1.0, SdfValue<double>(sdf, "point_rate", 200000.0));
+     this->publishPointcloudType = SdfValue<int>(sdf, "publish_pointcloud_type", 2);
++    // ── HzMi patch (ROS contract) ─────────────────────────────────────────────
++    // qos_reliability: best_effort (default) == rclcpp::SensorDataQoS().
++    //   RELIABLE is the bug Classic was cured of on 2026-09-23: a reliable
++    //   writer with a slow/queued reader blocks inside Publisher::publish(),
++    //   which here runs on gz's PostUpdate thread => the cloud stops and never
++    //   recovers.  best_effort can never block.  `reliable` is kept only as a
++    //   reproduction switch for that failure mode.
++    // node_name: two sensor instances in one world each create an rclcpp node;
++    //   distinct names keep `ros2 node list` / `ros2 topic info -v` readable.
++    // publish_imu: the IMU stream must be published by exactly ONE instance
++    //   when the point cloud is split over two instances (see docs).
++    this->qosReliability = SdfValue<std::string>(sdf, "qos_reliability", "best_effort");
++    this->nodeName = SdfValue<std::string>(sdf, "node_name", "mid360_gz_sim");
++    this->publishImu = SdfValue<bool>(sdf, "publish_imu", true);
++    // imu_frame_id: Classic 的 gazebo_ros_imu_sensor 用 <frame_name>imu_link</frame_name>
++    //   发 /livox/imu；这里默认退回 <frame_id>，但我们的模型显式给 imu_link，
++    //   保证两代后端的 /livox/imu.header.frame_id 一字不差。
++    this->imuFrameId = SdfValue<std::string>(sdf, "imu_frame_id", "");
++    // ignore_self: register this plugin's owning model in MapRegistry so the map
++    //   system drops it (and every descendant) from the BVH => the robot never
++    //   sees its own chassis.  `false` is the CONTROL switch used to measure
++    //   that the exclusion actually does something (same world, same pose).
++    this->ignoreSelf = SdfValue<bool>(sdf, "ignore_self", true);
+     this->mapKey = SdfValue<std::string>(sdf, "map_key", "default");
+     this->outputYaw = SdfValue<double>(sdf, "output_yaw", 0.0);
+     this->outputCos = std::cos(this->outputYaw);
+@@ -165,8 +188,11 @@ public:
+     {
+       this->rayBackend = RayBackend::Embree;
+       this->modelEntity = entity;
+-      rmagine_gazebo_plugins::MapRegistry::Instance().AddIgnoredModelEntity(entity);
+-      this->modelRegisteredForIgnore = true;
++      if (this->ignoreSelf)
++      {
++        rmagine_gazebo_plugins::MapRegistry::Instance().AddIgnoredModelEntity(entity);
++        this->modelRegisteredForIgnore = true;
++      }
+     }
+     else if (backendName == "physics")
+     {
+@@ -216,22 +242,33 @@ public:
+       char **argv = nullptr;
+       rclcpp::init(argc, argv);
+     }
+-    this->node = std::make_shared<rclcpp::Node>("mid360_gz_sim");
+-    // Match livox_ros_driver2 and FAST-LIO's reliable CustomMsg/IMU subscribers.
+-    // Reliable publishers also support best-effort visualization subscribers.
+-    const auto qos = rclcpp::QoS(rclcpp::KeepLast(20)).reliable();
++    this->node = std::make_shared<rclcpp::Node>(this->nodeName);
++    // Cloud QoS = best effort (SensorDataQoS) by default: dropping the oldest
++    // sample for a slow consumer is correct, blocking the simulator is not.
++    const auto cloudQos = (this->qosReliability == "reliable")
++      ? rclcpp::QoS(rclcpp::KeepLast(20)).reliable()
++      : rclcpp::SensorDataQoS();
++    // The IMU stays RELIABLE on purpose: FAST-LIO subscribes /livox/imu with
++    // the default depth-10 QoS (FAST_LIO/src/laserMapping.cpp), and a
++    // best-effort writer is QoS-incompatible with a reliable reader.  IMU
++    // frames are ~250 B at 200 Hz and are published from the gz transport
++    // callback (not PostUpdate), so they are not a back-pressure source.
++    const auto imuQos = rclcpp::QoS(rclcpp::KeepLast(20)).reliable();
+     if (this->publishPointcloudType == 2)
+     {
+       this->cloudPublisher = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(
+-        this->topic, qos);
++        this->topic, cloudQos);
++    }
++    if (this->publishImu)
++    {
++      this->imuPublisher = this->node->create_publisher<sensor_msgs::msg::Imu>(
++        this->imuTopic, imuQos);
+     }
+-    this->imuPublisher = this->node->create_publisher<sensor_msgs::msg::Imu>(
+-      this->imuTopic, qos);
+ #ifdef MID360_HAS_LIVOX_CUSTOM_MSG
+     if (this->publishPointcloudType == 3)
+     {
+       this->customPublisher =
+-        this->node->create_publisher<livox_ros_driver2::msg::CustomMsg>(this->topic, qos);
++        this->node->create_publisher<livox_ros_driver2::msg::CustomMsg>(this->topic, cloudQos);
+     }
+ #else
+     if (this->publishPointcloudType == 3)
+@@ -239,11 +276,11 @@ public:
+       gzwarn << "[MID360] output type 3 requires livox_ros_driver2; "
+              << "temporarily publishing PointCloud2 until it is installed.\n";
+       this->cloudPublisher = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(
+-        this->topic, qos);
++        this->topic, cloudQos);
+     }
+ #endif
+ 
+-    if (!this->gzImuTopic.empty())
++    if (this->publishImu && !this->gzImuTopic.empty())
+     {
+       this->gzNode.Subscribe(this->gzImuTopic, &Mid360System::OnImu, this);
+     }
+@@ -559,7 +596,7 @@ private:
+     if (!this->imuPublisher)
+       return;
+     sensor_msgs::msg::Imu output;
+-    output.header.frame_id = this->frameId;
++    output.header.frame_id = this->imuFrameId.empty() ? this->frameId : this->imuFrameId;
+     if (input.has_header() && input.header().has_stamp())
+     {
+       output.header.stamp.sec = input.header().stamp().sec();
+@@ -640,6 +677,11 @@ private:
+   std::string imuTopic;
+   std::string gzImuTopic;
+   std::string mapKey{"default"};
++  std::string qosReliability{"best_effort"};
++  std::string imuFrameId;
++  bool ignoreSelf{true};
++  std::string nodeName{"mid360_gz_sim"};
++  bool publishImu{true};
+   std::chrono::steady_clock::duration nextScanTime{0};
+   std::chrono::steady_clock::duration scanStamp{0};
+   std::vector<RayPoint> physicsPoints;
