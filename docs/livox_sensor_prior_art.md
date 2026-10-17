@@ -297,3 +297,211 @@
 
 12. [`gazebo_sim_migration_plan.md`](gazebo_sim_migration_plan.md) —— Humble↔Fortress、`gpu_lidar` 图案裁决、无 GPU 裁决、R0/R1/R3 决策表、**我们自己的 Bullet BVH 实测**（§9）
 13. `src/rm_simulation/livox_laser_simulation_RO2/` —— 我们 Classic 插件的 CSV 读取、方向公式、滚动窗口（本轮 F7 的对拍基线）
+
+---
+
+## §10 编译与运行实测 —— A 方案在 Fortress 6.18 上打通（2026-10-18）
+
+> **本节是 §8「没验证」清单的第一手回填。** 上一轮只读代码，本轮**真编译、真运行、真对拍**。
+> 全部工作在未跟踪草稿目录 `.tmp_gzlivox/`（匹配 `.tmp_*/`）；**仓库内除本节外零改动**。
+> **一句话结论：GO。** `ashduwihch` 的 MIT 插件在 `ignition-gazebo6` 6.18 上**能编过、能跑、能发 30k@10 Hz、几何与 Bullet 参考一致到 49 µm**，
+> 代价是 **4 类源码/CMake 改动**（CMake 包名、注册宏、physics backend `#if`、**Console 宏**）+ **2 项资产修正**（SDF 必须 ≤1.9、`model.config` 的空 `<sdf>` 必须补文件名），
+> 而**不是** §5 原先估计的 3 处 —— 多出来的两项见 §10.4.5 / §10.4.6 / §10.4.7。
+
+### 10.0 实测环境（一手）
+
+| 项 | 值 |
+|---|---|
+| Gazebo | `libignition-gazebo6` **6.18.0**（`ign gazebo --versions` = 6.18.0） |
+| 依赖版本 | `ignition-plugin1` 1.4.0 / `ignition-msgs8` 8.7.1 / `ignition-transport11` 11.4.2 / `ignition-common4` 4.9.0 / `sdformat12` 12.9.0 |
+| Embree | **4.4.0**（apt 无 4.x；rmagine 首次 configure 用 `FetchContent` 从 GitHub 下载预编译 `embree-4.4.0.x86_64.linux.tar.gz`，**成功**，13 s 完成整包构建） |
+| 机器 | 28 核 / 31 GiB（可用 16 GiB）/ 无 GPU |
+| ROS | Humble；`livox_ros_driver2` 由本仓 `install/` 提供（`MID360_HAS_LIVOX_CUSTOM_MSG=1` 生效） |
+| 抓取到的候选（git rev） | `ashduwihch/mid360_gazebo_harmonic` @ **`497149a`**（v0.2.0）；`uos/rmagine_gazebo_plugins` @ **`c6dc04e`**；候选内置 `rmagine` **2.4.3** |
+| 世界/图案 | 真 `RMUC2026.stl`（45,900 面，mm，`scale 0.001`，z 抬 1.6413436）+ 我们自己的 `scan_mode/mid360.csv`（800,000 采样） |
+| 传感器位姿 | `(10.925, 2.525, 0.26)`（= `.tmp_gzsim2/cpu_ray_bvh` 的 RMUC2026 出生点），`output_yaw=0`，`min/max_range=0.1/40` |
+
+### 10.1 底座 `uos/rmagine_gazebo_plugins`：**原样编过，README 的 Fortress 口径属实**
+
+**未改一行**（连 CMake 都没改）直接 `colcon build`：
+
+```
+Starting >>> rmagine_gazebo_plugins
+Finished <<< rmagine_gazebo_plugins [9.19s]
+```
+
+- 它的 `CMakeLists.txt:29-55` 自动探测：`find_package(gz-sim8 QUIET)` 失败 → `find_package(ignition-gazebo6 REQUIRED)` 命中，CMake 输出 `-- Looking for ignition-gazebo6 -- found version 6.18.0`；`RMAGINE_GZ_IGNITION_ERA=1` 自动置位。
+- 产出 `librmagine_embree_map_system.so` + `librmagine_embree_sensor_system.so`，`ldd` 里 **11 个 `libignition-*`** 依赖，无 `libgz-*`。
+- `rmagine::optix` / `rmagine::vulkan` 找不到 → 自动跳过对应 backend（只有警告，不是错误）。
+- `rmagine` 本体（无任何 gz 依赖）13.4 s 编完；**Embree 4 的"首次构建联网下载"在本机可行**（CI 需缓存，见 §10.9）。
+
+⇒ **§2 表格第 1 行"Fortress+Humble 直接可用 ✅"从 B 级（README）升到 A 级（本机实测）**，也顺带证伪了 §8 最后一条"Fortress + rmagine 没有 CI 证据"的疑虑（至少本机成立）。
+
+### 10.2 最小补丁集（A 方案，逐条 file:line）
+
+> 全部补丁都在 `.tmp_gzlivox/` 的克隆里；`git diff` 合计 **+82 / −18 行**，涉及 5 个文件
+> （其中 `rmagine_embree_map_system.cpp` 那 8 行**只是计时打印**，不属于功能补丁，见 §10.3 的"BVH 构建"一行）。
+> 下表 "原" 指 `ashduwihch@497149a` 的原文，"改" 指本次实际动手。
+
+| # | 文件:行 | 改什么 | 依据 |
+|---|---|---|---|
+| **P1** | `packages/rmagine_gazebo_plugins/CMakeLists.txt:8-11, 20-24` | `gz-sim8`→`ignition-gazebo6`；`gz-plugin2`→`ignition-plugin1 COMPONENTS register`；`gz-common5 COMPONENTS graphics`→`ignition-common4 COMPONENTS graphics`；target 名同步（`ignition-common4::ignition-common4-graphics` 而不是 `::graphics`） | 本机只装了 `ignition-common4`（**不是** `gz-common5`，§5 清单里没点明这条） |
+| **P2** | 同上 `CMakeLists.txt:27-28` | `RMAGINE_GZ_IGNITION_ERA=0` → `=1` | 让 `gz_compat.hpp` 选 `IGNITION_ADD_PLUGIN` |
+| **P3** | `packages/rmagine_gazebo_plugins/include/.../gz/gz_compat.hpp:12, 18-25` | **新增**：`#include <gz/common/Console.hh>` + `#if RMAGINE_GZ_IGNITION_ERA` 下把 `gzerr/gzwarn/gzmsg/gzdbg` 映射到 `ignerr/ignwarn/ignmsg/igndbg` | ⚠️ **这是 §5 清单漏掉的第二处 C++ 层改动**，见 §10.4.5 |
+| **P4** | `packages/mid360_simulation_plugin_ros2/CMakeLists.txt:14-18, 26-30` | `gz-sim8/gz-plugin2/gz-transport13/gz-msgs10` → `ignition-gazebo6/plugin1/transport11/msgs8`（target 名同步，补 `ignition-plugin1::register`） | §5 第 1 项 |
+| **P5** | 同上 `CMakeLists.txt:37-42` | 新增 `target_compile_definitions(... RMAGINE_GZ_IGNITION_ERA=1 MID360_HAS_PHYSICS_BACKEND=0)` | 注册宏开关 + 关掉 physics backend |
+| **P6** | `src/mid360_system.cpp:21-25` | `#include <gz/sim/components/RaycastData.hh>` 用 `#if !defined(MID360_HAS_PHYSICS_BACKEND) …` 包住 | F1 |
+| **P7** | 同上 `:38` | 新增 `#include <rmagine_gazebo_plugins/gz/gz_compat.hpp>` | 复用 P3 的宏 |
+| **P8** | 同上 `:160-168` | `ray_backend=physics` 分支：Fortress 下改为 `gzerr` + `return`（明确报"需要 gz-sim8+"），不再静默 | F1/§5 第 3 项 |
+| **P9** | 同上 `:192-198` / `:257-266` / `:308-321` / `:328-347` | 四处 physics 路径（初始 `RaycastData` 组件、PreUpdate 清空、PreUpdate 填 ray、PostUpdate 读结果）全部 `#if` 掉 | 同上 |
+| **P10** | 同上 `:652-663` | `GZ_ADD_PLUGIN` / `GZ_ADD_PLUGIN_ALIAS` → `RMAGINE_GZ_ADD_PLUGIN` / `…_ALIAS` | F5（§5 第 2 项） |
+| **P11** | SDF（**新写的** `mid360_rmuc.sdf`，改的是配置不是代码） | `<csv_file>` 指到 `src/rm_simulation/livox_laser_simulation_RO2/scan_mode/mid360.csv`；`samples 30000`；`point_rate 300000`；`min/max_range 0.1/40`；`frame_id livox_frame`；`output_yaw 0`；`publish_pointcloud_type 3` | F7 + §5 第 5/6 项 |
+
+**没有动的**（比预期少）：
+- `components/RaycastData` 之外的 `gz::sim`/`gz::math`/`gz::msgs`/`gz::transport` API **一处都没改**——`worldPose()`、`Model::LinkByName()`、`ISystemPostUpdate` 签名、`<sensor type="custom">` 在 gz-sim6 全部存在（F4 复核通过）。
+- **map system 的 C++ 一行没改**（它建 BVH 走 `<collision>`，我们世界 visual≈collision，等价；§5 第 4 项不需要动手）。
+- `ros_gz_bridge` 不需要（进程内 `rclcpp` 直发）。
+
+### 10.3 实测：headless（`-s`，无 GUI）
+
+命令形态：`ign gazebo -r -v 3 -s <world>`，`HOME`/`XDG_*` 全部重定向到 `.tmp_gzlivox/home`（**必须**：本机 `~/.ignition` 是 `drwxr--r--` 只读，正是已知那个"GUI 启动即 SIGKILL 服务器"的坑）。
+订阅端是自写探针（`.tmp_gzlivox/tools/mid360_probe.py`），200 帧。
+
+| 指标 | 实测值 |
+|---|---|
+| **是否发布** | ✅ `/livox/lidar` = `livox_ros_driver2/CustomMsg`（`publish_pointcloud_type=3`）；同时 `/livox/imu` = `sensor_msgs/Imu` 实测 **197.4–200.1 Hz** |
+| **频率（仿真）** | **10.0000 Hz**（200 帧 header 戳的线性回归，误差 <1e-12） |
+| **频率（墙钟）** | **9.87–9.91 Hz**（3 次运行：9.88 / 9.91 / 9.87） |
+| **每帧点数** | `min 4979 / median 5074 / max 5244`（**30000 条射线里只有有效回波被发**，命中率 16.7–17.3%） |
+| **frame_id** | `livox_frame`（可配） |
+| **`offset_time` 跨度** | 每帧 `77.5–81.6 ms`；全跑最大 `offset_time = 99,996,667 ns`（= 29999/300000，**≤100 ms ✅**）；**严格单调 ✅** |
+| `line` 字段 | 恒为 `{0,1,2,3}`（`index % 4`）✅ |
+| **Embree 逐帧求交** | **0.464–0.489 ms / 30000 rays**（插件自带计量，每 100 帧打印一次；6 次采样） |
+| **BVH 构建** | assimp 解析 STL + 单 mesh Embree BVH = **14.4–14.7 ms**（冷文件系统首跑 20.6 ms）；顶层 scene commit = **0.024–0.032 ms**；bootstrap 合计 **15.5 ms** |
+| **CSV 解析** | **204–207 ms**（800,000 行，`LoadScanPattern`，一次性） |
+| **启动 → 首帧点云** | **2.03 s** |
+| **server RSS** | **213.3 MB 稳态**（`VmHWM 213,304 kB`，47 线程），运行 70 s 不增长 |
+| **CPU** | gzserver **36–38%**（≈0.37 核；含 physics + 求交 + DDS） |
+| **RTF** | **0.985–0.993**（`/world/mid360_rmuc/stats`：iterations 3804→4103，RTF 0.985/0.989/0.993/0.993） |
+| 泄漏/残留 | 每次运行结束 `leftovers: (none)`（只按自己 PID 树 `kill`，无 `pkill`） |
+
+**对照 Classic（§1 的痛点行）**：RSS **3.2 GiB → 213 MB（−93%）**；RTF **0.32–0.46 → 0.99（+2.4×）**；2.74 GiB 的 ODE 逐射线 collision 变成**常驻一棵 Embree BVH（15 ms 建一次，0 refit）**。
+
+### 10.4 实测：GUI（Xvfb `:98`，1280×800，llvmpipe）与三个"Fortress 化"资产坑
+
+GUI **跑得起来**（上一轮有 agent 死在 GUI 上，所以这次用硬超时 + 分进程计量）：
+
+| 指标 | 值 |
+|---|---|
+| 墙钟频率 | **9.77 Hz**（200 帧 / 20.37 s） |
+| RTF | **0.962 / 0.992 / 0.9999 / 0.9999** |
+| 进程 RSS | gzserver **197 MB** / `ign gazebo gui` **584 MB** / Xvfb 70 MB ⇒ 合计 **843 MB** |
+| 进程 CPU | gzserver **35%**；GUI **758%**（llvmpipe 吃 7.6 核）；Xvfb 3.5% |
+| 点云契约 | 与 headless 完全一致（同 200 帧、同 median 5074、同 offset_time） |
+
+> 注意：本世界**没有 camera/gpu_ray 传感器**，所以 GUI 只是"多画一个视图"，对 RTF 影响 ≈0。真正会掉 RTF 的是**渲染类传感器**（§迁移计划 §4 的无 GPU 裁决），与本节结论不冲突。
+
+#### 10.4.5 新增坑①：`gz-common4` **没有 `gzerr/gzwarn/gzmsg` 宏**（推翻 F5"唯一必改是注册宏"）
+
+原 `mid360_system.cpp` 用 `gzerr/gzwarn/gzmsg` 输出。Fortress 的 `/usr/include/ignition/common4/gz/common/Console.hh` **只定义 `ignerr/ignwarn/ignmsg/igndbg`**（`gz*` 拼法是 gz-common5+ 才加的）。首轮编译因此直接失败 8 处：
+
+```
+mid360_system.cpp:120:7: error: 'gzerr' was not declared in this scope
+mid360_system.cpp:240:5: error: 'gzmsg' was not declared in this scope; did you mean 'ignmsg'?
+mid360_system.cpp:276:9: error: 'gzwarn' was not declared in this scope; did you mean 'ignwarn'?
+```
+
+⇒ **P3 补丁**（4 个 `#define`）。这是 §0.1 F5 的**修正**：Fortress 化的**必改 C++ 项是 2 个不是 1 个**（注册宏 + Console 宏），前者 3 行、后者 4 行。
+好消息：把它放进 `gz_compat.hpp` 这个"版本差异隔离头"里，与我们/上游的既有设计一致，没有扩散。
+
+#### 10.4.6 新增坑②：**SDF 版本 1.10 在 Fortress 上整份世界加载失败**
+
+候选的 `worlds/mid360_test.sdf` 与 `models/mid360/model.sdf` 都是 `<sdf version="1.10">`（Harmonic 写法）。`sdformat12` 只能到 **1.9**：
+
+```
+Error [Converter.cc:156] Unable to convert from SDF version 1.10 to 1.9
+```
+实测：把我们的世界改成 `1.10` 后，**一帧点云都不出**（probe `frames_received: 0`）；改回 `1.9` 立刻恢复。⇒ 迁移清单要加一条：**所有 SDF 必须 ≤1.9**（`ign sdf -k` 可预检）。
+
+#### 10.4.7 新增坑③：**本仓 `RMUC2026_world/model.config` 的 `<sdf>` 是空的，Fortress 直接拒收整个世界**
+
+本仓 `src/rm_simulation/hzmi_rm_simulation/meshes/RMUC2026_world/model.config` 里写的是：
+
+```xml
+<sdf version="1.7"></sdf>
+```
+
+Classic 容忍（它按目录名找 `model.sdf`），`sdformat12` **不容忍**：
+
+```
+Error [parser.cc:1183] Failure to detect an sdf tag in the model config file for model: RMUC2026_world
+Error Code 13: .../include[0]/uri:...: Unable to resolve uri[model://RMUC2026_world] to model path [.../meshes/RMUC2026_world] since it does not contain a model.config file.
+```
+
+修法是一行：`<sdf version="1.9">model.sdf</sdf>`。本次为了**不动仓库资产**，在 `.tmp_gzlivox/models/RMUC2026_world/` 放了一份 `model.sdf` **逐字节相同（sha1 `674e8e8…`）** 的副本 + 合法 `model.config`，`meshes/` 用软链指回仓库。
+⇒ **P2 必须先修这个 `model.config`（1 行）**，否则 Fortress 里连世界都进不去——这是"资产层"的阻断，与传感器插件无关。
+
+### 10.5 几何对拍：与 Bullet BVH 参考**逐束一致**（最强证据）
+
+对拍对象 = `.tmp_gzsim2/cpu_ray_bvh`（Bullet `btBvhTriangleMeshShape`，**同一份 STL、同一份 CSV、同一套方向公式、同一个位姿**，独立实现）。
+对拍方法：把插件发的点归一化成方向，在 CSV 图案里反查出它对应的**射线编号**（匹配 dot = 1.00000000，索引严格单调），再用编号去查 Bullet 的逐射线距离——**这样绕开了"两套窗口起点是否对齐"的任何假设**。
+
+| 帧（CSV 窗口起点） | 插件点数 | Bullet 命中数 | 命中集合一致 | \|Δ距离\| p50 | p90 | p95 | p99 | **max** | 系统偏差（均值） |
+|---|---|---|---|---|---|---|---|---|---|
+| frame 0（row 0） | 5009 | 5009 | **5009/5009** | 2.55 µm | 5.05 µm | 5.79 µm | 15.9 µm | **48.5 µm** | +0.7 µm |
+| frame 1（row 30,000） | 5112 | 5112 | **5112/5112** | 2.56 µm | 5.12 µm | 5.98 µm | — | **68.9 µm** | +0.8 µm |
+| frame 5（row 150,000） | 5181 | 5182 | 29999/30000（**1 束**） | 2.63 µm | 5.09 µm | 5.82 µm | — | **49.4 µm** | +0.7 µm |
+
+- 差异量级 = **float32 的 1e-7 相对精度**（26 m 处 1 ulp ≈ 2 µm ⇒ 实测 2.5–69 µm 完全解释得通），**没有任何系统性偏移**。
+- **没有 0.1 m 射线起点 bug**：`min_range=0.1` 只是 rmagine 的距离下限，`orig={0,0,0}`，与 Classic 修好后的语义（`point = (minDist+range)·axis`）数值等价；Bullet 参考也是从原点起算，三者对齐。
+- frame 5 那 **1/30000** 的差异是一束**擦边射线**（方向 z=−0.056，几乎水平掠过墙顶棱）：Embree 判 miss、Bullet 判命中（4.604 m）。30k 束里 1 束、且是几何退化情形 ⇒ 不构成阻塞。若要更严格，可给 `Embree` 打开 `RTC_SCENE_FLAG_ROBUST`/提高 build quality。
+- **单位/朝向/缩放全部正确**：插件点云的 `z ∈ [−0.26, +1.27] m`、`range p01/p50/p95/max = 2.17 / 3.74 / 7.41 / 26.64 m`，与 Bullet 参考**同分布同数值**（参考自己打印的 `p01=2.17 p05=2.49 p50=3.74 p95=7.41 max=26.64`）。**mm→m 那个坑在 Embree 这条路上没有复发**（scale 0.001 与 z 抬升都由 SDF `<scale>`/`<pose>` 正确进入 BVH）。
+- **没有跑 Classic 本体**：Classic 侧要拉起整套 `bringup_sim.launch.py`（gzserver + 机器人 + 世界），且它的真相早已由迁移计划 §9 和 `.tmp_gzsim2/cpu_ray_bvh` 锚定；用**同 CSV 同姿态的 Bullet BVH 参考**做 oracle 比"和 Classic 比"更强（逐束、无 ODE 数值噪声、可复算）。**这是本轮唯一"用参考代替真机"的地方，明确记为未验证项。**
+
+### 10.6 与 Classic 的契约差异（P2 必须逐条决定的 6 件事）
+
+| # | 项 | Classic（我们现在的） | 候选插件 | 处理建议 |
+|---|---|---|---|---|
+| 1 | `/livox/lidar` | `CustomMsg` | `CustomMsg` ✅ | 直接可用 |
+| 2 | `PointCloud2` | **另一个话题** `/livox/lidar/pointcloud`，字段 **xyz+rgb**，`setPointCloud2FieldsByString(2,"xyz","rgb")` | **同一话题** `/livox/lidar`，字段 **x,y,z(f32) + intensity(f32) + tag(u8) + line(u8) + timestamp(f64)**，`point_step=26`（实测） | `publish_pointcloud_type` 是**单选**（2 或 3），**不能同时发两种**。若 nav 侧仍要 `PointXYZRGB`：要么改下游成 `PointXYZI`，要么给插件加"同时发两路 + 第二路 rgb"（约 15 行） |
+| 3 | `frame_id` | `raySensor->Name()`（如 `livox_lidar`） | 可配，我们设 `livox_frame` | 配成与 TF 树一致的 `livox_frame`（或改 TF 发布） |
+| 4 | 安装姿态 | 有 `<tilt_rpy>`（robot11 斜装 30° roll）与 `<cloud_frame>` 两套补偿 | **只有 `output_yaw`（绕 Z）**，没有 tilt/roll 参数 | **推荐把倾角写进 SDF 的 `<link><pose>`**（更物理、射线真斜），不要照搬 `tilt_rpy`；`output_yaw` 只用于 180° 朝向那类安装 |
+| 5 | 逐点时间 | 一帧一个时刻（帧内无运动，`offset_time` 恒等于帧内偏移 0） | `offset_time = i·1e9/point_rate`，**跨 100 ms 单调**；帧内无位姿插值（≠ 真机的帧内运动） | 接受（FAST-LIO 去畸变按真机语义用），或照 `jongbob1918` 的思想自己加 30 行 `scanFraction` 位姿插值 |
+| 6 | 只发有回波点 | ✅ 2026-09-23 起只发有效回波（约 20.8% 命中） | ✅ 同样只发有效回波（16.7–17.3%，差异来自窗口/`max_range`） | 一致，无需改 |
+
+### 10.7 未验证 / 未做（诚实清单）
+
+- **自机排除**：bench 的 sensor model 只有 IMU、无几何，所以"打到自己"这条路径**没有真正被触发**。代码路径（`MapRegistry::AddIgnoredModelEntity` → map 侧按 entity 祖先剔除）存在且编译通过，但**没有实测数据**。
+- **动态模型 refit**：世界全静态，`delta_trans/delta_rot` 分支没被走到；即"机器人/对手在动时 BVH 增量更新"未测（§8 原有疑问仍在）。
+- **`<dart><collision_detector>bullet</collision_detector></dart>`**（候选 demo world 里有）在 Fortress 上是否被接受**未单独验证**（我们的世界没用它）。
+- **`GZ_SIM_SYSTEM_PLUGIN_PATH` vs `IGN_GAZEBO_SYSTEM_PLUGIN_PATH`**：Fortress 6.18 的二进制里两套拼写都出现（`strings` 可见 `GZ_SIM_SYSTEM_PLN`/`IGN_GAZEBO_SYSTEGZ_SIM_…` 的交错伪影），本机是**两个都设**才跑通的，**没有做单变量隔离**。P2 里建议两个都设（或直接 `LD_LIBRARY_PATH`）。
+- **多传感器/多实例**（同一世界两台北斗）未测。
+- **Classic 本体点云**未参与对拍（用 Bullet 参考替代，理由见 §10.5）。
+- **CPU 峰值 vs 均值**：表里是 1 s 采样的瞬时值，未做 `perf`/火焰图。
+
+### 10.8 许可证动作（本轮）
+
+- **没有把任何第三方源码拷进仓库**。`.tmp_gzlivox/` 是未跟踪草稿（`.tmp_*/` 忽略），里面的 `ah/`、`rgp/` 保留原始 `LICENSE`（MIT / BSD-3）与 `THIRD_PARTY.md`。
+- 仓库里只落**本节**：精确 revision（`497149a` / `c6dc04e` / rmagine `2.4.3`）+ **可复现的补丁表**（§10.2）+ 实测数字。这样许可上只"描述"不"再分发"。
+- **Embree 4.4.0 是 Apache-2.0、构建期从 GitHub 下载**：CI/离线环境要么预置 tar、要么 `-DRMAGINE_DEPENDENCY_MODE=Local` 配系统 Embree 4（**apt 的 3.12 不可用**）。
+- 我们自己的 `mid360.csv` 没有外发；**没有**引入候选自带的 `mid360-real-centr.csv`（避免"图案数据再分发"的法务问题，§6 已提示）。
+
+### 10.9 裁决：**GO for Fortress**（P2 可以按 A 方案推进）
+
+**证据链（三条独立、都可复算）**：
+1. **能编**：底座 `uos/rmagine_gazebo_plugins` **零改动**编过（9.2 s）；MID-360 插件用 **4 类补丁（+82/−18 行，含 1 个纯计时文件）** 编过，产物导出 `IgnitionPluginHook`，`CustomMsg` 类型支持已链入。
+2. **能跑**：headless **10.000 Hz / RTF 0.985–0.993 / 213 MB / 36–38% CPU**；GUI（Xvfb+llvmpipe）**9.77 Hz / RTF 0.96–1.0**；`offset_time` 单调且 ≤100 ms；`line ∈ {0..3}`；IMU 197–200 Hz。
+3. **算得对**：与独立 Bullet BVH 参考**逐束命中集合一致**（5009/5009、5112/5112、29999/30000），距离差 **p50 2.6 µm / p95 6 µm / max 69 µm**，**无系统偏移**。
+
+**如果坚持要 NO-GO 的话，唯一的候选理由是"工作量"而不是"能力"**：不是 (a) API/ABI（只差 2 个宏）、不是 (b) 缺 Fortress 特性（`RaycastData` 缺失已被 Embree 后端绕过）、不是 (c) 网络/依赖（Embree 4 能下、能编），而是 **(d)**：还要做 §10.6 的 6 项契约对齐 + §10.4.6/10.4.7 的 2 项资产修正 + §10.7 的 4 项补测。
+
+**P2 建议顺序（每步都可独立验收）**：
+1. **修资产**（0.5 h）：`RMUC2026_world/model.config` 的 `<sdf version="1.9">model.sdf</sdf>`；全仓 SDF 版本 ≤1.9（`ign sdf -k` 扫一遍）。
+2. **落地补丁**（0.5 d）：把 §10.2 的 P1–P11 做成我们自己的 `livox_simulation_gz` 包（**不 vendor**，只 vendored-patch 记录 + 从候选/上游取包），包名避开 `rmagine_gazebo_plugins` 冲突。
+3. **契约对齐**（1 d）：`/livox/lidar`(CustomMsg) + `/livox/lidar/pointcloud`(PointCloud2) 同时发（§10.6 #2）、`frame_id` 对齐 TF、倾角走 `<link><pose>`、`min/max_range` 与 Classic 配置一致（我们世界 40 m？Classic 侧要核对）。
+4. **补测**（1 d）：自机排除、动态模型 refit、双传感器、Classic 同姿态同窗口点云对拍（这次真跑 Classic）。
+5. **接入 bringup**（1 d）：新增 opt-in launch（不动现有 `bringup_sim.launch.py`），跑一遍 FAST-LIO 端到端，看 `/Odometry` 与地图是否与 Classic 同量级。
+
+**若第 3 步卡住**，退路不是回 Classic，而是**B 方案**（只用上游 BSD-3 的 `rmagine_gazebo_plugins` + 自写 ~200–300 行 `Mid360System`）——因为 §10.1 已经证明上游那条地基在 Fortress 上是**零改动可编**的，风险比 A 方案更低。
+
+---
