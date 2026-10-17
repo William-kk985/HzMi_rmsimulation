@@ -506,7 +506,10 @@ python3 tools/scripts/gzsim/launch_increment_diff.py \
 | **消失/被改** | 1 个 —— 就是 ③ 的那个 `start_rm_simulation`：**内容一字未改，只多了一个默认恒真的门** |
 | `--strip-conditions` 后的净变化 | **+2 新增 / 0 删除 / 顺序一致** ⇒ **纯增量 ✅** |
 | 共有 Action 的相对顺序 | **一致**（时序不变） |
-| `ros2 launch … --show-args` | 默认参数值全部不变（只多一个 `sim_backend`） |
+| `ros2 launch … --show-args` | 默认参数值全部不变（只多一个 `sim_backend`）。实测输出：`'sim_backend': … (default: 'classic')`，`Valid choices are: ['classic', 'gz']` |
+
+> ⚠️ 本机 `$HOME` 只读，`ros2 launch --show-args` 会先在 `~/.ros/log` 建目录并 OSError
+> （**与本次改动无关**，改造前也一样）。跑这类命令前把 `HOME`/`ROS_LOG_DIR` 指到可写目录即可。
 
 另外：`sim_backend:=gz` 那条 `IncludeLaunchDescription` 的 launch 文件路径用的是
 本文件既有的惰性 substitution 机制（`_PackageShareFile`）⇒ **没装 `rm_livox_gz_sim`
