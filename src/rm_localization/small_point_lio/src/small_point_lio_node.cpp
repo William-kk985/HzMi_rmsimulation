@@ -51,12 +51,23 @@ namespace small_point_lio {
         return t;
     }
 
+    // ===================== 本仓新增：外参预条件守卫（§N.5 #1/#2） =====================
+    // 阈值与两个守卫函数的**实现**在独立 TU `src/extrinsic_guard.cpp` 里；
+    // 本文件只负责 (a) odom 回调末尾把两个**已发布的 msg** 存成快照、(b) 点云回调开头调用它们。
+    // ★ 为什么单独一个 TU（反直觉，但 A/B 实测逼出来的；见历史与 §O.2）：
+    //   本包编了 `-ffast-math -march=native`。把守卫的浮点代码放在**本 TU**（odom 回调所在文件）
+    //   里、哪怕它并不在 odom 回调里执行（实测：放在点云回调里，同样是 1 ulp 差），GCC 对这个 TU
+    //   的 IPA/内联决策就会变 ⇒ odom 回调里 `tf2::Transform` 乘法的 FMA 收缩随之变 ⇒
+    //   `/odom` 与 `odom→base_link` 出现 ≤1.11e-16（1 ulp）的差（`/cloud_registered` 仍逐位相同）。
+    //   搬到独立 TU 后，**同一输入流（bag 重放）与改动前二进制逐位 0 差异**。
+    //   ⇒ "守卫只诊断、不动数值"不是口头承诺，是可以逐位验的（§O.2 的 A/B 表）。
     SmallPointLioNode::SmallPointLioNode(const rclcpp::NodeOptions &options)
         : Node("small_point_lio", options) {
         std::string lidar_topic = declare_parameter<std::string>("lidar_topic");
         std::string imu_topic = declare_parameter<std::string>("imu_topic");
         std::string lidar_type = declare_parameter<std::string>("lidar_type");
         std::string lidar_frame = declare_parameter<std::string>("lidar_frame");
+        lidar_frame_ = lidar_frame;   // §N.5 守卫 #1 的日志要用（out-of-line 函数里读成员）
         bool save_pcd = declare_parameter<bool>("save_pcd");
         small_point_lio = std::make_unique<small_point_lio::SmallPointLio>(*this);
         odometry_publisher = create_publisher<nav_msgs::msg::Odometry>("/Odometry", 1000);
@@ -173,8 +184,29 @@ namespace small_point_lio {
 
             tf_broadcaster->sendTransform(transform_stamped);
             odometry_publisher->publish(odometry_msg);
+
+            // ============== 本仓新增（§N.5 守卫 #2）：每帧位姿一致性断言的**取数点** ==============
+            // 插入点 = odom 回调**末尾**（`sendTransform` + `publish` 之后）：这里只把两个**已发布的
+            //   msg** 存成快照（14 个 double 的 POD 拷贝，**不引入任何新的浮点表达式/函数调用**）。
+            //   这样 odom 回调（本节点的浮点 hot path）的代码生成与改动前逐位一致；断言本身在
+            //   独立 TU 的 `check_pose_consistency()` 里做（见 src/extrinsic_guard.cpp 与 §O.2）。
+            guard_T_ob_ = transform_stamped.transform;
+            guard_T_bl_ = base_link_to_lidar_frame_transform.transform;
         });
         small_point_lio->set_pointcloud_callback([this, save_pcd, lidar_frame](const std::vector<Eigen::Vector3f> &pointcloud) {
+            // ============== 本仓新增（§N.5 守卫 #2）：每帧位姿一致性断言 `T_ob·T_bl⁻¹ ≈ T_ol` ==============
+            // 插入点 = **点云发布路径与 TF 发布路径之间**：LIO 的 handle_once() 先调 odometry 回调
+            //   （= 发布 TF/odom，并把本帧的 T_ob/T_bl 存成快照），紧接着调本回调 ⇒ 这里检查的正是
+            //   刚刚发布的那一帧，且**在点云发布之前**（`get_subscription_count()` 分支之外 ⇒
+            //   有没有订阅者都会查）。
+            // ★ 只用 odom 回调**已经存下**的快照 + `last_odometry`：**不新增 TF 查询、不新增订阅、
+            //   不新增定时器/线程**（这是 §N.5 第 2 条的硬约束 —— 在点云回调里再查一次 TF 正是 bug ② 的形状）。
+            // ★ 为什么"取数"在 odom 回调、而"算"在这里（独立 TU）：本包 `-ffast-math -march=native`，
+            //   把守卫的浮点代码放进 odom 回调所在 TU 会让 GCC 改变那段 hot path 的 FMA 收缩 ⇒
+            //   发布数值出现 1 ulp 差（实测 ≤1.11e-16；§O.2 有 A/B 表）。本回调里没有浮点表达式
+            //   （只是把 float 原样拷进 PointCloud2）⇒ 加这两次跨 TU 调用不影响任何发布字节。
+            log_extrinsic_readout_once();
+            check_pose_consistency();
             if (pointcloud_publisher->get_subscription_count() > 0) {
                 const builtin_interfaces::msg::Time time_msg = double_to_msg_time(last_odometry.timestamp);
 

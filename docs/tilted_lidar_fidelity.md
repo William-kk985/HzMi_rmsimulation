@@ -2828,3 +2828,160 @@ grep -rn "lookupTransform" third_party/fast_lio/src third_party/point_lio/src \
 sed -n '60,70p' src/rm_localization/lio_tf_adapter/src/lio_tf_adapter_node.cpp
 grep -n "lio.*!=.*small_point_lio" src/rm_nav_bringup/launch/bringup_sim.launch.py | head
 ```
+
+---
+
+## O. 2026-10-18：§N.5 守卫的**实现** —— 让 `R_bl ≠ I` 从"设计里喊"变成"在线喊"
+
+§N.5 当时只设计了 6 条候选（并明确"一行都没实现"），本节交付其中**推荐组合的三件**：
+**#1 启动期 readout + #2 每帧位姿一致性断言 + #4 单测第 6 条**。
+验收口径沿用任务书：**只加日志/计数，不改任何默认数值、不中止节点**（用户已明确否决"停/联锁"）。
+
+### O.1 实现清单与插入点（file:line）
+
+| 项 | 位置 | 内容 |
+|---|---|---|
+| 阈值常量 | `src/rm_localization/small_point_lio/src/extrinsic_guard.cpp:36-52` | `k_extrinsic_warn_rpy_rad=1e-3`、`k_extrinsic_error_rpy_rad=0.05`、`k_consistency_rot_tol_rad=1e-6`、`k_consistency_trans_tol_m=1e-4` |
+| **#1 启动 readout** | 同上 `:66-109` | `log_extrinsic_readout_once()`：`rpy(T_bl)`（度）+ `\|t\|`，**每次启动恰好 1 条**，级别按 `max\|rpy\|` 取 INFO/WARN/ERROR |
+| **#2 每帧断言** | 同上 `:131-176`（违例分支 `:157`） | `check_pose_consistency()`：`T_ob·T_bl⁻¹` vs `T_ol`，旋转残差（度/rad）+ 平移残差（m），**只计数 + 限速 ERROR（1 条/5 s）** |
+| #2 取数点（odom 回调末） | `src/small_point_lio_node.cpp:193-194` | `guard_T_ob_ = transform_stamped.transform; guard_T_bl_ = base_link_to_lidar_frame_transform.transform;`（14 个 double 的 POD 拷贝） |
+| #2 检查点（点云回调首） | `src/small_point_lio_node.cpp:208-209` | `log_extrinsic_readout_once(); check_pose_consistency();` —— 在 `get_subscription_count()` 分支**之外**，有没有订阅者都查 |
+| 成员 | `src/small_point_lio_node.hpp:44-63` | 快照、计数、限速时间戳、`lidar_frame_`、两个函数声明 |
+| 构建 | `src/rm_localization/small_point_lio/CMakeLists.txt:74-78` | 显式 `list(APPEND SOURCE src/extrinsic_guard.cpp)`（GLOB 在 configure 时求值，不显式列会在**已有 build/** 的工作区里 undefined symbol） |
+| 单测第 6 条 | `tools/scripts/tiltmount/tf2_compose_order_test.cpp:155-201` | ⑥a/⑥b/⑥c（见 §O.3） |
+
+**为什么 #2 不在 odom 回调里直接算**（这是本次最反直觉的一处，实测逼出来的，见 §O.2 的 A/B 表）：
+odom 回调所在的 TU 里只要多出这段浮点代码（**放在回调里、或放在同 TU 的点云回调里都试过**），
+`/odom` 与 `odom→base_link` 就会出现 **≤1.11e-16（1 ulp）** 的差；搬到独立 TU
+（`extrinsic_guard.cpp`）+ odom 回调只留 14 个 double 的拷贝后，**逐位 0 差异**。
+⇒ 取舍：守卫的"算"放在独立 TU、由点云回调（该回调里没有任何浮点表达式）驱动；
+odom 回调的浮点 hot path **一个字节都不动**。**没有新增 TF 查询、没有新增订阅/定时器/线程**。
+
+### O.2 三级日志、阈值、断言公式与成本
+
+**#1 启动 readout（每次启动 1 条，级别 = 三者取最大，三个级别都带 `rpy°` 与 `\|t\|`）**：
+`T_bl = lookupTransform(lidar_frame, "base_link") = T(livox_frame ← base_link)`（**节点本来就在用的同一条 TF**，
+与合成 `T_ol·T_bl` 同一个矩阵；本仓 `plugin` 档实测 `|t| = 0.204443 m`）：
+
+| 条件 | 级别 | 本仓实测（`robot:=robot11`） |
+|---|---|---|
+| 恒打 | `INFO` | `plugin` 档：`rpy=[0.000000, -0.000000, 0.000000]° (0.000000 rad)、\|t\|=0.204443 m` ⇒ "旋转≈单位，两个 latent bug 在数值上不可见" |
+| `max\|rpy\| > 1e-3 rad`（≈0.057°） | `WARN` | 本仓无档位落在这里（`plugin` 是 0，`urdf/sensor` 是 30°） |
+| `max\|rpy\| > 0.05 rad`（≈2.9°） | `ERROR` | `urdf` 档：`rpy=[30.000000, -0.000000, 0.000000]° (=0.523599 rad)、\|t\|=0.204443 m` ⇒ "请核对 odom→base_link 合成序与点云帧一致性；odom 自身斜时该倾角出现在 base_link 的 roll/pitch 上是物理事实" |
+
+**#2 每帧位姿一致性断言**：`T_ob ⊗ T_bl⁻¹ ≈ T_ol`（= 链式法则 `p_odom = T_ol·p_livox = T_ol·T_bl·p_base`）。
+判据拆成两个分量（**这是本实现与 §N.5 原文的一处必要偏离，理由在下面**）：
+
+* **旋转**：`R_ob·R_bl⁻¹ == R_ol`，残差 `2·acos(\|w\|)`，容差 **1e-6 rad**（≈5.7e-5°）→ **严格断言**。
+  合成写法下逐位成立（单测 ⑥a 实测 **0.000e+00°**、平移 1.41e-17 m）；共轭回归（bug ③）会给出
+  **30.000000°**（单测 ⑥b）⇒ 这一项就是"防 §N.5 第 2 条要防的那个回归"。
+* **平移**：本仓按 §J.5 **有意**保留旧平移 ⇒ 等式在平移上**永远不成立**（与合成真值差 `|t_pub−t_composed| = 0.204267 m`，
+  单测 ⑥c）。所以平移用**双合法值白名单**：`min(|t_pub−t_composed|, |t_pub−t_legacy|) <= 1e-4 m`。
+  两条合法值都由本仓代码显式算出（不是"放宽"），**谁写了第三套平移公式**才会触发。
+* 违例行为：`++consistency_violations_` + **限速 ERROR（1 条/5 s，墙钟 steady_clock）**，
+  日志带 `平移 %.9f m / 旋转 %.6f° (%.3e rad)` 与"累计违例 N 帧"；**不抛、不中止、不改发布**。
+  没有加 latched 计数话题（会改话题契约），计数放在同一条 ERROR 里。
+
+**成本（实测 + 论证）**：
+* 独立微基准（`.tmp_guard/guard_bench.cpp`，与守卫同一套 tf2 运算、2e6 次、非恒定输入、`-O3 -march=native -ffast-math`）：
+  **24.4 ns/次**（两次跑 24.4 / 24.7）。加上 odom 回调里 14 个 double 的拷贝（~5 ns），量级 **<0.1 µs/帧**；
+  相对点云回调本身（几万点拷贝 + 发布，几十 µs 级）可忽略。
+* 相对 §N.5 原估的"1 次 4×4 乘法 ≈100 ns"：本实现是 **≈4 次 4×4 乘法 + 四元数乘/normalize/acos**（因为要同时算出
+  `t_composed` 与 `t_legacy` 两个合法值）⇒ **实测 24.4 ns 比原估还小一个量级**（原估是保守量级）。
+* 无新 TF 查询（§N.5 明确反对"在点云回调里再查一次 TF"——那正是 bug ② 的形状）。
+
+**A/B：为什么必须有独立 TU**（同一输入流 bag 重放，30 条 `/cloud_registered` / 31 条 `/odom` / 31 条 TF）：
+
+| 守卫放法 | `/cloud_registered` | `/odom` + `odom→base_link` |
+|---|---|---|
+| 内联在 odom 回调里 | 30/30 逐位相同 | **31/31 条有差，最大 1.11e-16（1 ulp）** |
+| 同 TU、但在点云回调里调用（odom 回调只留 14 个 double 拷贝） | 逐位相同 | **31/31 条有差，最大 1.11e-16** |
+| **独立 TU `extrinsic_guard.cpp` + 同一取数点** | **逐位相同** | **逐位相同（0 差异）** |
+| 语义中性对照：只加一行整数自增 | 逐位相同 | 逐位相同（0 差异） |
+| 语义中性对照：只加 14 个 double 成员拷贝 | 逐位相同 | 逐位相同（0 差异） |
+
+读法：不是"任何改动都会差"，而是**这段浮点代码在 odom 回调所在 TU 里就会让 GCC 的 IPA/内联预算变**
+（本包 `-ffast-math -march=native`，`tf2::Transform::operator*` 的 FMA 收缩随之变）⇒ 1 ulp。
+反过来，**"守卫只诊断、不动数值"是可逐位验证的**，而不是承诺。
+
+### O.3 单测第 6 条（`tools/scripts/tiltmount/tf2_compose_order_test.cpp`，不进 colcon）
+
+编译/运行（§J.1 的命令不变）：`g++ -O0 -o /tmp/tf2order tools/scripts/tiltmount/tf2_compose_order_test.cpp -I/opt/ros/humble/include/tf2 -L/opt/ros/humble/lib -ltf2 -Wl,-rpath,/opt/ros/humble/lib && /tmp/tf2order`
+⇒ **`全部断言通过（exit=0）`**，①~⑤ 全部保持成立，新增 ⑥（`T_bl = Rx(30°)`，**非单位**）三个子判据：
+
+| 子判据 | 实测 | 结论 |
+|---|---|---|
+| ⑥a 纯合成 `(T_ol·T_bl)·T_bl⁻¹` | 旋转残差 **0.000e+00°**、平移残差 **1.412e-17 m** | 合成写法满足等式（守卫不响）✓ |
+| ⑥b 共轭（bug ③ 回归） | 旋转残差 **30.000000°**、平移残差 **0.204443 m**（`\|p\| = 0.2044`） | 共轭违反等式（守卫必 ERROR）✓ |
+| ⑥c 现在发布的（姿态合成 + 平移取旧值） | 旋转残差 **0.000e+00°**、`\|t_pub−t_composed\| = 0.204267 m`、`\|t_pub−t_legacy\| = 0.000e+00 m` | 姿态满足等式、平移落在"有意保留"白名单内（守卫不响）✓ |
+
+这一条把 §O.2 里"为什么平移不是严格断言"钉成**可执行的判据**（不是注释）。
+
+### O.4 三段回归证据（全部实测）
+
+**协议（本节的"同一跑协议"）**：仿真里用新二进制跑一跑（同 §J 的世界/出生点/LIO/命令），
+把 `/livox/lidar`（CustomMsg）与 `/livox/imu` **逐字节序列化**录下来（`inputs.bin`），
+再把同一份输入流**重放**给两个二进制（改动前 = `git HEAD` 源码单独构建的对照二进制；改动后 = 本提交），
+逐条比 `/cloud_registered`（sha256(data)）、`/odom`、`/tf(odom→base_link)`（浮点 `float.hex()` 逐位）。
+为什么不用"两次仿真跑对比"：本仓跑间噪声可达 0.4°（§J.2 第 2 条），**两次仿真跑不可能逐位相同**；
+重放同一输入流才是"同一跑协议"下能把差异归因到二进制的那把尺子。
+（同一源码、不同 build 目录的两次构建对照：`old vs old2` = **0 差异** ⇒ 构建本身是可复现的。）
+
+**(a) 默认档（`plugin`，`R_bl = I`）逐位可比 —— 两个独立输入袋，全部 0 差异**：
+
+| 输入袋 | `/cloud_registered` | `/odom` | `/tf(odom→base_link)` | 判决 |
+|---|---|---|---|---|
+| 袋 1（`g_live_plugin`，12 s 窗） | 30 条，0 条不一致 | 31 条，0 条不一致 | 31 条，0 条不一致 | **逐位一致（0 差异）** |
+| 袋 2（`g_live_plugin2`，12 s 窗，最终二进制） | 33 条，0 条不一致 | 34 条，0 条不一致 | 34 条，0 条不一致 | **逐位一致（0 差异）** |
+
+⇒ 与"改动前"相比，**发布的数值逐位不变**；差异只有多出来的那条 `INFO` 守卫日志：
+`外参守卫(§N.5#1)：T_bl=T(livox_frame←base_link) rpy=[0.000000, -0.000000, 0.000000]° (=0.000000 rad)、|t|=0.204443 m ⇒ 外参**旋转≈单位**（R_bl=I 档）…`
+（默认档 0 条一致性违例 —— 与 `R_bl=I` 时残差 ~1e-16 一致。）
+
+**(b) 斜装档：守卫**真的会喊**（`robot11_mount:=urdf`，非单位 `T_bl = Rx(30°)`）**：
+
+1. **启动期**（live 仿真 `world:=RMUL2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 robot11_mount:=urdf spin_speed:=0.0`，
+   `.tmp_tiltmount/gq_urdf/launch.log:64`，原文摘录）：
+   `[ERROR] … 外参守卫(§N.5#1)：T_bl=T(livox_frame←base_link) rpy=[30.000000, -0.000000, 0.000000]° (=0.523599 rad)、|t|=0.204443 m ⇒ **外参大旋转**（>0.05 rad≈2.9°）…`
+2. **每帧断言（故障注入的正面证据）**：把 `T_odom←base = T_ol·T_bl` **故意改回共轭**（bug ③，只改
+   `.tmp_guard/` 里的临时副本，不提交）+ 30° 静态外参，同一输入流重放的 3 条限速 ERROR（30 帧里 3 条，
+   时间戳间隔 5.0~5.2 s ⇒ 限速生效）：
+   * `残差 平移 0.207297637 m / 旋转 30.000000° (5.236e-01 rad)；累计违例 1 帧`
+   * `残差 平移 0.210500683 m / 旋转 30.000000° (5.236e-01 rad)；累计违例 29 帧`（末条）
+   * 三条的平移残差 0.2073 / 0.2074 / 0.2105 m（≈ 杆臂 `|p| = 0.2044` 的同量级，逐帧随姿态略变），旋转残差恒 30.000000°。
+3. **反向对照（正确代码 + 同一个 30° 外参）**：启动 ERROR 照打（外参确实有 30°），但
+   **一致性违例 0 条**（`grep -c 位姿一致性断言失败 = 0`）⇒ 守卫不是"见 30° 就喊"，而是**等式被破坏才喊**。
+
+**(c) 两个老 bug 仍修好（同一次 `gq_urdf` live 跑，`probe.json`）**：
+
+| 判据 | 本次实测 | 说明 |
+|---|---|---|
+| **bug ③：假俯仰** | `odom→base_link rpy = [30.452, **-0.082**, 0.211]°` ⇒ **假俯仰 0.082° < 0.5°** | 30° 出现在 **roll** 上 = odom 定义在斜的初始传感器系（物理事实，§I.8 原则 4）；修前同档是 **4.890°** |
+| **bug ②：`/cloud_registered` 多转 30°** | 最大平面角 **0.046 / 0.367 / 0.420°**；若按 bug ② 假设（把 raw 云再乘一次 `T(base←livox)`）应为 **29.977°**；`raw` 云本身 **0.023 / 0.030 / 0.074°**；Kabsch(raw→published) 旋转 **0.087°**、平移 `[-0.0069, 0.0031, 0.0504] m` | 发布出来的云与 raw 云只差一个平移、**没有 30° 旋转** ⇒ bug ② 未复发 |
+| 旁证 | `raw_via_TF.base_link = 29.977°`（raw 云用 TF 搬到 `base_link` 后确实斜 30°） | 与 `robot11_mount:=urdf` 的语义（点云在水平的父 link 系、`livox_frame` 帧自己斜）自洽 |
+
+> ⚠️ **与 §J 的 `1.054°` 不一致，原因已查明（诚实记录）**：本轮最大平面到传感器的高度 `d = 0.103 m`，
+> 而 §J 那一轮（`.tmp_tiltmount/j2_urdf`）是 `d = 0.26 m`（真地面）；且本轮出生朝向真值 yaw **0.01°**、
+> §J 那一轮是 **10.12°** ⇒ **两次跑的"最大平面"不是同一块面、出生姿态也不同**（世界/出生点在本仓
+> 2026-10-09 之后被改过；本轮未动任何 `src/rm_simulation/**`）。所以本轮**不主张"绝对角 = 1.05°"**，
+> 只主张**判决性签名**：bug ② 的 30° 签名不存在（0.046° vs 29.977°）。若要与 §J 逐数对齐，
+> 需要回到 §J 那个世界/出生点版本（本任务禁改 `src/rm_simulation/**`）。
+
+### O.5 未验证 / 诚实清单（本节）
+
+1. **没有真机、没有 MID-360**：本节所有数字来自本仓仿真 + bag 重放。真机上 `R_bl` 由谁提供（URDF 关节
+   vs 用户 `static_transform_publisher`）仍未核实（§N.6 第 5 条同款）。
+2. **微基准是纯算术热缓存**（24.4 ns/次）：没有在节点里做 `perf` 级剖析；`14 个 double 拷贝 + 成员读取`
+   的额外开销按量级估 `<0.1 µs/帧`，未单独实测。
+3. **限速用墙钟 `steady_clock`**（不用 ROS 时钟）：`use_sim_time:=true` 且仿真暂停时仍按真实时间限速；
+   这是有意的（"别刷屏"是运维需求，不是仿真语义）。
+4. **一致性断言只在"有点云输出的帧"上跑**（点云回调驱动）：若某帧 `pointcloud_odom_frame` 为空
+   （LIO 没有出点），该帧不做断言；`/odom` 仍照发。这是**覆盖率的缺口**，不是数值风险。
+5. **没有加 latched `std_msgs/UInt64` 违例计数话题**：会改变话题契约（§J.3 的"每话题恰好 1 个发布者"
+   检查里会多一条），计数改为写进同一条限速 ERROR 的"累计违例 N 帧"。
+6. **故障注入只在 `.tmp_guard/` 的临时副本里做过**（不提交）：仓库源码里没有共轭写法，也没有任何
+   注入开关。注入版的重放日志见 §O.4(b) 第 2 条。
+7. **`urdf` 档本轮的绝对地面角（0.28°）与 §J 的 1.054° 不可直接比**（原因见 §O.4 末尾的 ⚠️）；
+   本轮没有重新跑 `plugin`/`sensor` 两档的 probe 做三档对齐（预算），只有 §O.4(a) 的逐位回归。
+8. **没有验证 `R_bl` 缓慢变化**（比如机械臂关节/云台）：守卫按"固定外参"设计，`T_bl` 每帧都从 TF 重查，
+   但 `#1` 只打一次；若外参是时变的，`#2` 会喊（这是对的），`#1` 的 readout 只是开机快照。

@@ -23,10 +23,16 @@
 //        ⇒ 本测试**显式断言**这个偏差存在且等于 −p（防"顺手改回去"而不看代价图）。
 //   ④ 逐点坐标恒等式（对"纯合成"成立）：`(T_ol·T_bl)·p_base == T_ol·(T_bl·p_base)`；
 //   ⑤ 默认档（T_bl 纯平移）⇒ 现在的写法与旧写法**姿态与平移逐位相同**（默认行为不变的保证）。
+//   ⑥ **在线守卫（§N.5 #2）用的位姿一致性等式** `T_ob·T_bl⁻¹ == T_ol`（T_bl = Rx(30°)，非单位）：
+//      a) 纯合成 ⇒ 旋转/平移都逐位成立（守卫不响）；
+//      b) 共轭（bug ③ 回归）⇒ 旋转残差 30°、平移残差 ≈ |p| = 0.207 m（守卫必 ERROR）；
+//      c) 现在发布的（姿态=合成、平移=有意取旧值）⇒ 旋转满足等式，平移落在"双合法值白名单"内
+//         （守卫不响）—— 这一条把 §O.2 里"为什么平移不是严格断言"钉死成可执行的判据。
 // =============================================================================
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -145,6 +151,51 @@ int main() {
   check((now_p.getOrigin() - old_p.getOrigin()).length() < 1e-12,
         "plugin 档平移：新旧逐位相同");
   check(std::fabs(rpy_of_deg(now_p, 1)) < 0.5, "plugin 档假俯仰 < 0.5°");
+
+  // ---------- ⑥ 在线守卫（§N.5 #2）用的**位姿一致性等式**：非单位 T_bl 下 T_ob·T_bl⁻¹ == T_ol
+  //   这一条就是把"离线单测"提升成"在线断言"的那条判据（small_point_lio_node 的
+  //   check_pose_consistency，实现在 src/extrinsic_guard.cpp；见 §O.2）。
+  //   ⑥a 纯合成 ⇒ 旋转+平移都**逐位**满足等式（守卫不响）；
+  //   ⑥b 共轭回归（bug ③）⇒ 等式**被违反**：旋转残差 30°、平移残差 ≈ |p| = 0.207 m（守卫会 ERROR）；
+  //   ⑥c 现在发布的那一版（姿态合成 + 平移取旧值）⇒ 旋转满足等式、平移偏差恰为"有意保留"的杆臂量级
+  //      ⇒ 守卫的"双合法值白名单"放行（这正是 §J.5 那个有意的取舍，不是漏改）。
+  std::printf("\n⑥ 在线守卫的等式 T_ob·T_bl⁻¹ == T_ol（非单位 T_bl = Rx(30°)）\n");
+  {
+    // 与检查函数里完全相同的算法：残差旋转角 = 2·acos(|w|)，残差平移 = |Δt|
+    auto rot_res_deg = [](const tf2::Transform &a, const tf2::Transform &b) {
+      tf2::Quaternion q = a.getRotation() * b.getRotation().inverse();
+      q.normalize();
+      return 2.0 * std::acos(std::min(1.0, std::fabs(q.w()))) * 180.0 / M_PI;
+    };
+
+    // ⑥a 纯合成
+    tf2::Transform lhs_a = tf_comp * Tbl30.inverse();
+    double rot_a = rot_res_deg(lhs_a, Tol);
+    double tr_a = (lhs_a.getOrigin() - Tol.getOrigin()).length();
+    std::printf("  ⑥a 纯合成      : 旋转残差 %.3e° / 平移残差 %.3e m\n", rot_a, tr_a);
+    check(rot_a < 1e-9 && tr_a < 1e-12, "⑥a 合成写法满足等式（守卫不响）");
+
+    // ⑥b 共轭（bug ③ 回归）
+    tf2::Transform lhs_b = Tob_old30 * Tbl30.inverse();
+    double rot_b = rot_res_deg(lhs_b, Tol);
+    double tr_b = (lhs_b.getOrigin() - Tol.getOrigin()).length();
+    std::printf("  ⑥b 共轭(bug)   : 旋转残差 %.6f° / 平移残差 %.6f m（|p| = %.4f）\n",
+                rot_b, tr_b, p_livox.length());
+    check(rot_b > 4.0 && tr_b > 0.1, "⑥b 共轭写法违反等式（守卫会 ERROR）");
+
+    // ⑥c 现在发布的（姿态=合成、平移=旧值）—— 守卫的判据必须放行
+    tf2::Transform lhs_c = tf_now * Tbl30.inverse();
+    double rot_c = rot_res_deg(lhs_c, Tol);
+    double tr_c_vs_truth = (tf_now.getOrigin() - tf_comp.getOrigin()).length();
+    tf2::Transform lbl_c_legacy = Tbl30.inverse() * Tol * Tbl30;
+    double tr_c_vs_legacy = (tf_now.getOrigin() - lbl_c_legacy.getOrigin()).length();
+    double tr_c = std::min(tr_c_vs_truth, tr_c_vs_legacy);
+    std::printf("  ⑥c 现在发布    : 旋转残差 %.3e° / |t_pub − t_composed| = %.6f m、"
+                "|t_pub − t_legacy| = %.3e m ⇒ 白名单残差 = %.3e m\n",
+                rot_c, tr_c_vs_truth, tr_c_vs_legacy, tr_c);
+    check(rot_c < 1e-9 && tr_c < 1e-4,
+          "⑥c 现在发布的姿态满足等式、平移落在\"有意保留\"白名单内（守卫不响）");
+  }
 
   std::printf("\n%s（exit=%d）\n", g_fail ? "**有断言失败**" : "全部断言通过", g_fail);
   return g_fail;

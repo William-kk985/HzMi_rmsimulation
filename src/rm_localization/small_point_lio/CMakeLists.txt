@@ -71,6 +71,11 @@ endif()
 configure_file(include/param_deliver.h.in include/param_deliver.h @ONLY)
 
 file(GLOB_RECURSE SOURCE src/*.cpp 3rdparty/*.c 3rdparty/*.cpp)
+# ★ 本仓新增（docs/tilted_lidar_fidelity.md §N.5/§O）：外参守卫的实现在独立 TU 里。
+#   显式列一遍是**必需**的：GLOB 在 configure 时求值，已有 build/ 的工作区拉到本提交后
+#   不会自动重新 glob ⇒ 否则会 undefined symbol。这里显式加入并去重（新工作区两者相同）。
+list(APPEND SOURCE src/extrinsic_guard.cpp)
+list(REMOVE_DUPLICATES SOURCE)
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
 target_precompile_headers(${PROJECT_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/include/pch.h>")
