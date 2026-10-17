@@ -44,6 +44,8 @@ while [ $# -gt 0 ]; do
 done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$REPO/tools/scripts/lib/scoped_cleanup.sh"
 OUT="$REPO/.tmp_robotslot/$TAG"
 mkdir -p "$OUT"
 
@@ -98,16 +100,18 @@ cleanup() {
       '{linear: {x: 0.0}, angular: {z: 0.0}}' >/dev/null 2>&1 || true
   [ -n "${LAUNCH_PID:-}" ] && kill -INT "$LAUNCH_PID" 2>/dev/null || true
   sleep 3
-  # /odom 与 /cmd_vel_chassis 的契约不受影响；这里只清本 MASTER_URI 上的 gazebo 进程。
-  pkill -f "gzserver.*$GZ_PORT" 2>/dev/null || true
-  pkill -f "gzclient.*$GZ_PORT" 2>/dev/null || true
+  # 作用域：只清本 MASTER_URI / 本进程组上的 gazebo 进程。
+  #   （原来的 `pkill -f "gzserver.*$GZ_PORT"` 是**空操作**：gzserver/gzclient 的 cmdline 里没有端口，
+  #    URI 在环境变量里 ⇒ 永远匹配不到；`pkill -f rviz2` 则会把别人的 rviz2 一起杀。）
+  sc_kill_own_gz 9
   [ -n "${LAUNCH_PID:-}" ] && kill -9 "$LAUNCH_PID" 2>/dev/null || true
-  pkill -f "rviz2" 2>/dev/null || true
+  sc_kill_own_pattern 9 'rviz2' || true
   sleep 1
   [ -n "$XVFB_PID" ] && kill -9 "$XVFB_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
-pkill -f "gzserver.*$GZ_PORT" 2>/dev/null || true
+# 跑前只清**本 master URI** 上的残留 gzserver/gzclient（别人的栈不动）
+sc_kill_own_gz 9
 sleep 1
 
 # ⚠️ `nav_rviz` 的取值必须与 launch 里的比较逐字一致（`'mapping' and 'True'`）——
@@ -122,10 +126,11 @@ LAUNCH_PID=$!
 # ---- 等 gzclient/rviz2 真的起来（软件 GL 下 gzserver 加载世界很慢）再开始采样窗口 ----
 WAIT_MAX=180
 for i in $(seq 1 "$WAIT_MAX"); do
-  pgrep -x gzclient >/dev/null && pgrep -x rviz2 >/dev/null && break
+  # 作用域：只看本 run 自己的 gzclient/rviz2（全机 pgrep 会把别人的窗口当成本 run "起来了"）
+  [ -n "$(sc_own_pids_by_pattern 'gzclient')" ] && [ -n "$(sc_own_pids_by_pattern 'rviz2')" ] && break
   sleep 1
 done
-echo "[gui] 窗口起点：等了 ${i}s（gzclient=$(pgrep -x gzclient >/dev/null && echo up || echo down) rviz2=$(pgrep -x rviz2 >/dev/null && echo up || echo down)）"
+echo "[gui] 窗口起点：等了 ${i}s（gzclient=$([ -n "$(sc_own_pids_by_pattern 'gzclient')" ] && echo up || echo down) rviz2=$([ -n "$(sc_own_pids_by_pattern 'rviz2')" ] && echo up || echo down)）"
 
 # ---- 采样：RSS + 存活 + 截图 ------------------------------------------------
 echo "t_s,rss_gzclient_kb,rss_gzserver_kb,rss_rviz2_kb,alive_gzclient,alive_rviz2" > "$OUT/rss.csv"
@@ -135,8 +140,8 @@ for t in $(seq 1 "$SECONDS_WIN"); do
   gc=$(ps -o rss= -C gzclient 2>/dev/null | sort -rn | head -1 | tr -d ' ')
   gs=$(ps -o rss= -C gzserver 2>/dev/null | sort -rn | head -1 | tr -d ' ')
   rv=$(ps -o rss= -C rviz2 2>/dev/null | sort -rn | head -1 | tr -d ' ')
-  agc=0; pgrep -x gzclient >/dev/null && agc=1
-  arv=0; pgrep -x rviz2 >/dev/null && arv=1
+  agc=0; [ -n "$(sc_own_pids_by_pattern 'gzclient')" ] && agc=1
+  arv=0; [ -n "$(sc_own_pids_by_pattern 'rviz2')" ] && arv=1
   echo "$t,${gc:-0},${gs:-0},${rv:-0},$agc,$arv" >> "$OUT/rss.csv"
   if [ "$t" = "$SECONDS_WIN" ]; then
     xwd -root -silent > "$OUT/shot-final.xwd" 2>/dev/null || true

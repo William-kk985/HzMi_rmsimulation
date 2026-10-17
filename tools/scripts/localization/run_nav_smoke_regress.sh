@@ -14,6 +14,8 @@
 # =============================================================================
 set -u
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG="regress"; DOMAIN=151; PORT=11821; LOC="gicp"; NAV="rpp"; PLANNER="navfn"
 LIO="small_point_lio"; WORLD="RMUC2026"; GOAL="-1.0 2.0"; SPIN="0.0"; YAW="auto"; SETTLE="5"
 OUT_ROOT="$WS/.tmp_gicp_ab/regress"
@@ -41,7 +43,8 @@ export HOME="/tmp/gzhome-$TAG" ROS_DOMAIN_ID="$DOMAIN" ROS_LOG_DIR="$OUT/roslog"
 export GAZEBO_MASTER_URI="http://127.0.0.1:$PORT" RCUTILS_COLORIZED_OUTPUT=0 MPLCONFIGDIR="/tmp/mpl-$TAG"
 mkdir -p "$ROS_LOG_DIR"; unset DISPLAY; cd "$WS" || exit 2
 
-LEFT=$(pgrep -a -x gzserver || true); [ -n "$LEFT" ] && { echo "[regress] 残留 gzserver：$LEFT"; pkill -9 -x gzserver; sleep 2; }
+# 作用域：只认 `/proc/<pid>/environ` 里 GAZEBO_MASTER_URI == 本 run 的 gzserver/gzclient（别人的不动）
+LEFT=$(sc_own_gz_pids); [ -n "$LEFT" ] && { echo "[regress] 残留 gzserver（本 master URI）：$LEFT"; sc_kill_own_gz 9; sleep 2; }
 command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ":$PORT " && { echo "[regress] ❌ 端口 $PORT 被占"; exit 3; }
 echo "[regress] tag=$TAG world=$WORLD lio=$LIO localization=$LOC nav=$NAV planner=$PLANNER goal=($GOAL) spin=$SPIN"
 
@@ -57,9 +60,11 @@ cleanup() {
   [ -n "${PGID:-}" ] && kill -INT -- "-$PGID" 2>/dev/null
   for _ in $(seq 1 12); do kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   [ -n "${PGID:-}" ] && kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -x gzserver 2>/dev/null || true
-  pkill -9 -f 'gicp_registration_node|small_point_lio|controller_server|planner_server|bt_navigator|map_server|ros2 launch' 2>/dev/null || true
-  sleep 2; echo "[regress] 残留："; pgrep -a -x gzserver || echo "  （无 gzserver）"
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'gicp_registration_node|small_point_lio|controller_server|planner_server|bt_navigator|map_server'
+  sc_kill_own_ros2_launch 9
+  sleep 2; echo "[regress] 残留（本 master URI/进程组）：$(sc_own_leftovers_desc 'gzserver|gzclient|ros2 launch')"
 }
 trap cleanup EXIT
 for i in $(seq 1 120); do

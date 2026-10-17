@@ -37,6 +37,8 @@
 # =============================================================================
 set -u
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG="${1:?用法: run_dropab.sh <tag> [--set k=v ...] [--route r.json] [--odom lio|truth]}"; shift
 CFG_DST="$WS/src/rm_localization/slam_toolbox/config/mapper_params_online_async_sim.yaml"
 OUT="$WS/.tmp_cache/dropab/$TAG"
@@ -145,10 +147,12 @@ cleanup() {
   kill -INT -- "-$PGID" 2>/dev/null
   for _ in $(seq 1 12); do kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -x gzserver 2>/dev/null; pkill -9 -x gzclient 2>/dev/null
-  pkill -9 -f 'slam_toolbox|small_point_lio_node|pointcloud_to_laserscan|ground_segmentation|spawn_entity|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform|truth_odom_tf_bridge|coverage_drive' 2>/dev/null
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'slam_toolbox|small_point_lio_node|pointcloud_to_laserscan|ground_segmentation|spawn_entity|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform|truth_odom_tf_bridge|coverage_drive'
+  sc_kill_own_ros2_launch 9
   sleep 2
-  pgrep -af 'gzserver|slam_toolbox|ros2 launch|truth_odom' || echo "[dropab] （无残留）"
+  echo "[dropab] 残留（本 master URI/进程组）：$(sc_own_leftovers_desc 'gzserver|gzclient|slam_toolbox|ros2 launch|truth_odom')"
 }
 trap 'cleanup; restore' EXIT
 

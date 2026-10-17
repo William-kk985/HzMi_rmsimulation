@@ -19,6 +19,8 @@
 # =============================================================================
 set -u
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG=""; MAP_PREFIX=""; OUT_DIR=""; GOAL="0.5 3.0"; WORLD="RMUC2026"
 DOMAIN=98; PORT=11508; PLANNER=navfn; NAV=rpp; LOCALIZATION=""
 PLAN_GOALS=()
@@ -62,10 +64,11 @@ cleanup() {
   kill -INT -- "-$PGID" 2>/dev/null
   for _ in $(seq 1 12); do kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -f 'ros2 launch' 2>/dev/null
-  pkill -9 -x gzserver 2>/dev/null; pkill -9 -x gzclient 2>/dev/null
-  pkill -9 -f 'small_point_lio_node|slam_toolbox|map_server|planner_server|controller_server|bt_navigator|amcl|gicp_registration|lifecycle_manager|waypoint_follower|velocity_smoother' 2>/dev/null
-  pkill -9 -f 'spawn_entity.py|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform|pointcloud_to_laserscan' 2>/dev/null
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_ros2_launch 9
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'small_point_lio_node|slam_toolbox|map_server|planner_server|controller_server|bt_navigator|amcl|gicp_registration|lifecycle_manager|waypoint_follower|velocity_smoother'
+  sc_kill_own_pattern 9 'spawn_entity.py|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform|pointcloud_to_laserscan'
   sleep 2
   rm -f "$PGM" "$YML"
   echo "[navab] 还原核对：pgm存在=$([ -e "$PGM" ] && echo YES || echo no) yaml存在=$([ -e "$YML" ] && echo YES || echo no)"

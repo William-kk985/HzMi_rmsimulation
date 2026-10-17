@@ -20,6 +20,8 @@
 # =============================================================================
 set -o pipefail
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG=""; DOMAIN=165; PORT=11865; WORLD=RMUC2026; MAP_NAME="RMUC2026_lt"; OUT_DIR=""
 TIMEOUT=300; SPEED=0.35; GROUND=linefit; PRIOR_MAP=""
 
@@ -60,8 +62,8 @@ set -u
 cd "$WS" || exit 2
 
 echo "[remap:$TAG] ==== 残留检查 $(date '+%F %T') ===="
-LEFT=$(pgrep -a -x gzserver || true)
-if [ -n "$LEFT" ]; then echo "[remap:$TAG] ⚠️ 残留 gzserver："; echo "$LEFT"; pkill -9 -x gzserver || true; sleep 2; fi
+LEFT=$(sc_own_gz_pids)
+if [ -n "$LEFT" ]; then echo "[remap:$TAG] ⚠️ 残留 gzserver（本 master URI）："; echo "$LEFT"; sc_kill_own_gz 9; sleep 2; fi
 if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$PORT "; then
   echo "[remap:$TAG] ❌ 端口 $PORT 被占用"; ss -ltnp 2>/dev/null | grep ":$PORT "; exit 3
 fi
@@ -75,11 +77,12 @@ cleanup() {
   [ -n "${PGID:-}" ] && kill -INT -- "-$PGID" 2>/dev/null
   for _ in $(seq 1 12); do [ -n "${LPID:-}" ] && kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   [ -n "${PGID:-}" ] && kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -f 'ros2 launch rm_nav_bringup' 2>/dev/null || true
-  pkill -9 -x gzserver 2>/dev/null || true; pkill -9 -x gzclient 2>/dev/null || true
-  pkill -9 -f 'small_point_lio|slam_toolbox|spawn_entity|robot_state_publisher|complementary_filter|fake_vel_transform|pointcloud_to_laserscan|ground_segmentation_node|coverage_drive' 2>/dev/null || true
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_ros2_launch 9 'ros2 launch rm_nav_bringup'
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'small_point_lio|slam_toolbox|spawn_entity|robot_state_publisher|complementary_filter|fake_vel_transform|pointcloud_to_laserscan|ground_segmentation_node|coverage_drive'
   sleep 2
-  echo "[remap:$TAG] 残留："; pgrep -a -x gzserver || echo "  （无 gzserver）"
+  echo "[remap:$TAG] 残留（本 master URI/进程组）：$(sc_own_leftovers_desc 'gzserver|gzclient|ros2 launch')"
 }
 trap cleanup EXIT INT TERM
 

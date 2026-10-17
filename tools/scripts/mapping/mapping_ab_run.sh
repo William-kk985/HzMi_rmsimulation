@@ -36,6 +36,8 @@
 set -u
 
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG=""; OUT_DIR=""; ROUTE=""; SAVE_2D=""; WORLD="RMUC2026"; LIO="small_point_lio"
 DOMAIN=97; PORT=11507; SPEED=0.20; TIMEOUT=300; WARMUP=15; POSE_SOURCE=lio
 P2L_TF=""; SLAM_TT=""; SLAM_MTI=""; SLAM_SQS=""; TIMING_PROBE=0
@@ -103,13 +105,14 @@ restore() {
 cleanup() {
   echo "[ab] ---- cleanup ----"
   kill -INT -- "-$PGID" 2>/dev/null
-  pkill -f 'ramp_section_probe|map_odom_jump_gate' 2>/dev/null
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_pattern 15 'ramp_section_probe|map_odom_jump_gate'
   for _ in $(seq 1 15); do kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -f 'ros2 launch' 2>/dev/null
-  pkill -9 -x gzserver 2>/dev/null; pkill -9 -x gzclient 2>/dev/null
-  pkill -9 -f 'small_point_lio_node|fastlio_mapping|pointlio|slam_toolbox|map_saver' 2>/dev/null
-  pkill -9 -f 'ground_segmentation_node|pointcloud_to_laserscan_node|spawn_entity.py|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform' 2>/dev/null
+  sc_kill_own_ros2_launch 9
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'small_point_lio_node|fastlio_mapping|pointlio|slam_toolbox|map_saver'
+  sc_kill_own_pattern 9 'ground_segmentation_node|pointcloud_to_laserscan_node|spawn_entity.py|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform'
   sleep 2
   restore
 }

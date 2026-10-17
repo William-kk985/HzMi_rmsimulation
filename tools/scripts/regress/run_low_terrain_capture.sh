@@ -21,6 +21,8 @@
 # =============================================================================
 set -o pipefail
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG=""; DOMAIN=161; PORT=11861; WORLD=RMUC2026; GROUND=patchwork; OUT_DIR=""
 SECONDS_LIVE=75; SECONDS_LAUNCH_WAIT=180; DRIVE_SECS=110
 
@@ -58,10 +60,11 @@ set -u
 cd "$WS" || exit 2
 
 echo "[cap:$TAG] ==== 残留检查 $(date '+%F %T') ===="
-LEFT=$(pgrep -a -x gzserver || true)
+LEFT=$(sc_own_gz_pids)
 if [ -n "$LEFT" ]; then
-  echo "[cap:$TAG] ⚠️ 发现残留 gzserver（会抢 GAZEBO_MASTER_URI）："; echo "$LEFT"
-  pkill -9 -x gzserver 2>/dev/null || true; sleep 2
+  echo "[cap:$TAG] ⚠️ 发现残留 gzserver（本 master URI，会抢 GAZEBO_MASTER_URI）："; echo "$LEFT"
+  # 作用域：只认 `/proc/<pid>/environ` 里 GAZEBO_MASTER_URI == 本 run 的（别人的栈不动）
+  sc_kill_own_gz 9; sleep 2
 fi
 if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$PORT "; then
   echo "[cap:$TAG] ❌ 端口 $PORT 被占用"; ss -ltnp 2>/dev/null | grep ":$PORT "; exit 3
@@ -74,15 +77,17 @@ cleanup() {
   timeout 10 ros2 topic pub -r 5 /cmd_vel geometry_msgs/msg/Twist \
     '{linear: {x: 0.0}, angular: {z: 0.0}}' >/dev/null 2>&1 || true
   sleep 1
-  pkill -INT -f "bag record" 2>/dev/null || true
+  # 作用域：bag record 是本脚本起的（本 master URI/后代）才发 SIGINT
+  sc_kill_own_pattern 2 'bag record' || true
   [ -n "${PGID:-}" ] && kill -INT -- "-$PGID" 2>/dev/null
   for _ in $(seq 1 12); do [ -n "${LPID:-}" ] && kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   [ -n "${PGID:-}" ] && kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -f 'ros2 launch rm_nav_bringup' 2>/dev/null || true
-  pkill -9 -x gzserver 2>/dev/null || true; pkill -9 -x gzclient 2>/dev/null || true
-  pkill -9 -f 'small_point_lio|slam_toolbox|spawn_entity|robot_state_publisher|complementary_filter|fake_vel_transform|pointcloud_to_laserscan|ground_segmentation_node|patchwork_ground_segmentation_node|low_terrain_ab|low_terrain_drive|ros2 bag record' 2>/dev/null || true
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_ros2_launch 9 'ros2 launch rm_nav_bringup'
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'small_point_lio|slam_toolbox|spawn_entity|robot_state_publisher|complementary_filter|fake_vel_transform|pointcloud_to_laserscan|ground_segmentation_node|patchwork_ground_segmentation_node|low_terrain_ab|low_terrain_drive|ros2 bag record'
   sleep 2
-  echo "[cap:$TAG] 残留："; pgrep -a -x gzserver || echo "  （无 gzserver）"
+  echo "[cap:$TAG] 残留（本 master URI/进程组）：$(sc_own_leftovers_desc 'gzserver|gzclient|ros2 launch')"
 }
 trap cleanup EXIT INT TERM
 

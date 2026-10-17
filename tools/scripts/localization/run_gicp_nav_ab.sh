@@ -42,6 +42,8 @@
 set -u
 
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG=""; DOMAIN=141; PORT=11811; GOAL="-12.64 -0.31"; LOC="gicp"; NAV="mppi"; PLANNER="smac2d"
 LIO="small_point_lio"; WORLD="RMUC2026"; POST=150; SETTLE=10; READY=300; NO_GOAL=0
 EXTRA=""; OUT_ROOT="$WS/.tmp_gicp_ab/out"; KVS=()
@@ -89,11 +91,11 @@ cd "$WS" || exit 2
 
 # ---------------- 残留守卫（别人/上次的 gzserver 会抢 GAZEBO_MASTER_URI） ----------------
 echo "[run] ==== 残留检查（tag=$TAG domain=$DOMAIN port=$PORT）$(date '+%F %T') ===="
-LEFT=$(pgrep -a -x gzserver || true)
+LEFT=$(sc_own_gz_pids)
 if [ -n "$LEFT" ]; then
-  echo "[run] ⚠️ 发现有残留 gzserver："; echo "$LEFT"
-  # 只杀"本命名空间里"的（本环境每条命令一个 PID namespace，跨调用看不见 ⇒ 这里的必然是残留）
-  pkill -9 -x gzserver 2>/dev/null || true
+  echo "[run] ⚠️ 发现有残留 gzserver（本 master URI）："; echo "$LEFT"
+  # 作用域：只认 `/proc/<pid>/environ` 里 GAZEBO_MASTER_URI == 本 run 的（别人的栈不动）
+  sc_kill_own_gz 9
   sleep 2
 fi
 if command -v ss >/dev/null 2>&1; then
@@ -112,10 +114,12 @@ cleanup() {
   [ -n "${PGID:-}" ] && kill -INT -- "-$PGID" 2>/dev/null
   [ -n "${LPID:-}" ] && for _ in $(seq 1 12); do kill -0 "$LPID" 2>/dev/null || break; sleep 1; done
   [ -n "${PGID:-}" ] && kill -9 -- "-$PGID" 2>/dev/null
-  pkill -9 -x gzserver 2>/dev/null || true
-  pkill -9 -f 'gicp_registration_node|small_point_lio|pointcloud_to_laserscan|ground_segmentation|spawn_entity|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform|controller_server|planner_server|bt_navigator|map_server|amcl|ros2 launch' 2>/dev/null || true
+  # 作用域：名字只用来挑候选，必须过归属判定（本进程组 / 本 master URI / 本脚本后代）才杀
+  sc_kill_own_gz 9
+  sc_kill_own_pattern 9 'gicp_registration_node|small_point_lio|pointcloud_to_laserscan|ground_segmentation|spawn_entity|robot_state_publisher|joint_state_publisher|complementary_filter|fake_vel_transform|controller_server|planner_server|bt_navigator|map_server|amcl'
+  sc_kill_own_ros2_launch 9
   sleep 2
-  echo "[run] 残留："; pgrep -a -x gzserver || echo "  （无 gzserver）"
+  echo "[run] 残留（本 master URI/进程组）：$(sc_own_leftovers_desc 'gzserver|gzclient|ros2 launch')"
 }
 trap cleanup EXIT
 

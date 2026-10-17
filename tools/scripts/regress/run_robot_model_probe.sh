@@ -31,6 +31,8 @@ for a in "$@"; do
 done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 收尾只杀「本 run 自己的」进程：进程组 + /proc/<pid>/environ 的 GAZEBO_MASTER_URI 核对（见该文件）
+. "$REPO/tools/scripts/lib/scoped_cleanup.sh"
 OUT="$REPO/.tmp_robotslot/$TAG"
 mkdir -p "$OUT"
 
@@ -76,22 +78,29 @@ cleanup() {
       '{linear: {x: 0.0}, angular: {z: 0.0}}' >/dev/null 2>&1 || true
   [ -n "${LAUNCH_PID:-}" ] && kill -INT "$LAUNCH_PID" 2>/dev/null || true
   sleep 3
-  pkill -f "gzserver.*$GZ_PORT" 2>/dev/null || true
-  pkill -f "gzclient.*$GZ_PORT" 2>/dev/null || true
+  # 作用域：只杀 `/proc/<pid>/environ` 里 GAZEBO_MASTER_URI == 本 run 的 gzserver/gzclient。
+  #   （原来写的 `pkill -f "gzserver.*$GZ_PORT"` 是**空操作**：gzserver 的 cmdline 里只有 world 文件，
+  #    URI 在环境变量里 ⇒ 永远匹配不到；全机 `pkill -x gzserver` 又会误伤别人。）
+  sc_kill_own_gz 9
   [ -n "${LAUNCH_PID:-}" ] && kill -9 "$LAUNCH_PID" 2>/dev/null || true
+  [ -n "${PGID:-}" ] && kill -9 -- "-$PGID" 2>/dev/null || true
+  # 作用域：组杀之后可能还有被 launch 落下/脱组的节点 ⇒ 再按"本 run 的 URI/血缘"清一遍
+  sc_kill_own_ros2_launch 9
+  sc_kill_own_pattern 9 'spawn_entity|robot_state_publisher|joint_state_publisher|slam_toolbox|small_point_lio|ground_segmentation|pointcloud_to_laserscan|controller_server|planner_server|bt_navigator|map_server|amcl|lifecycle_manager|rviz2'
   sleep 1
-  echo "[run] 残留 gzserver: $(pgrep -fa "gzserver.*$GZ_PORT" | wc -l) 个"
+  echo "[run] 残留 gzserver（本 master URI）: $(sc_own_gz_count) 个"
 }
 trap cleanup EXIT
 
-# 跑前清一次（同一 master URI / 同 domain 的残留）
-pkill -f "gzserver.*$GZ_PORT" 2>/dev/null || true
-pkill -f "gzclient.*$GZ_PORT" 2>/dev/null || true
+# 跑前清一次：只清**本 master URI / 本进程组**上的残留（别人的栈不动）
+sc_kill_own_gz 9
 sleep 1
 
-ros2 launch rm_nav_bringup bringup_sim.launch.py nav_rviz:=False lio_rviz:=False \
+# 作用域：setsid ⇒ 整栈（launch + gzserver/gzclient + 各节点）进自己的进程组，收尾按组杀最干净
+setsid ros2 launch rm_nav_bringup bringup_sim.launch.py nav_rviz:=False lio_rviz:=False \
     "${LAUNCH_ARGS[@]}" > "$OUT/launch.log" 2>&1 &
 LAUNCH_PID=$!
+PGID=$(ps -o pgid= -p "$LAUNCH_PID" 2>/dev/null | tr -d ' ')
 echo "[run] launch pid=$LAUNCH_PID → $OUT/launch.log"
 
 sleep 3
