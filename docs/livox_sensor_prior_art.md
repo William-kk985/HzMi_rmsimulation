@@ -468,6 +468,7 @@ Error Code 13: .../include[0]/uri:...: Unable to resolve uri[model://RMUC2026_wo
 | 4 | 安装姿态 | 有 `<tilt_rpy>`（robot11 斜装 30° roll）与 `<cloud_frame>` 两套补偿 | **只有 `output_yaw`（绕 Z）**，没有 tilt/roll 参数 | **推荐把倾角写进 SDF 的 `<link><pose>`**（更物理、射线真斜），不要照搬 `tilt_rpy`；`output_yaw` 只用于 180° 朝向那类安装 |
 | 5 | 逐点时间 | 一帧一个时刻（帧内无运动，`offset_time` 恒等于帧内偏移 0） | `offset_time = i·1e9/point_rate`，**跨 100 ms 单调**；帧内无位姿插值（≠ 真机的帧内运动） | 接受（FAST-LIO 去畸变按真机语义用），或照 `jongbob1918` 的思想自己加 30 行 `scanFraction` 位姿插值 |
 | 6 | 只发有回波点 | ✅ 2026-09-23 起只发有效回波（约 20.8% 命中） | ✅ 同样只发有效回波（16.7–17.3%，差异来自窗口/`max_range`） | 一致，无需改 |
+| 7 | **QoS** | **`rclcpp::SensorDataQoS()`（best-effort）**，2026-09-23/24 两次修复的结论是"写者永不阻塞" | **`rclcpp::QoS(KeepLast(20)).reliable()`**（`mid360_system.cpp:196`） | ⚠️ **同一个坑会复发**：RELIABLE 写者 + 慢消费者（slam_toolbox / RViz / STVL）会**堵在 gz 的 PreUpdate 线程里**，表现就是我们 Classic 上见过的"/livox/lidar 与 /pointcloud 一起停更且不自恢复"。P2 必须改成 best-effort（或改成非阻塞发送/独立线程）|
 
 ### 10.7 未验证 / 未做（诚实清单）
 
@@ -498,7 +499,7 @@ Error Code 13: .../include[0]/uri:...: Unable to resolve uri[model://RMUC2026_wo
 **P2 建议顺序（每步都可独立验收）**：
 1. **修资产**（0.5 h）：`RMUC2026_world/model.config` 的 `<sdf version="1.9">model.sdf</sdf>`；全仓 SDF 版本 ≤1.9（`ign sdf -k` 扫一遍）。
 2. **落地补丁**（0.5 d）：把 §10.2 的 P1–P11 做成我们自己的 `livox_simulation_gz` 包（**不 vendor**，只 vendored-patch 记录 + 从候选/上游取包），包名避开 `rmagine_gazebo_plugins` 冲突。
-3. **契约对齐**（1 d）：`/livox/lidar`(CustomMsg) + `/livox/lidar/pointcloud`(PointCloud2) 同时发（§10.6 #2）、`frame_id` 对齐 TF、倾角走 `<link><pose>`、`min/max_range` 与 Classic 配置一致（我们世界 40 m？Classic 侧要核对）。
+3. **契约对齐**（1 d）：`/livox/lidar`(CustomMsg) + `/livox/lidar/pointcloud`(PointCloud2) 同时发（§10.6 #2）、**QoS 改 best-effort**（§10.6 #7，这是会"冻死整条感知链"的那条）、`frame_id` 对齐 TF、倾角走 `<link><pose>`、`min/max_range` 与 Classic 配置一致（Classic 侧要核对）。
 4. **补测**（1 d）：自机排除、动态模型 refit、双传感器、Classic 同姿态同窗口点云对拍（这次真跑 Classic）。
 5. **接入 bringup**（1 d）：新增 opt-in launch（不动现有 `bringup_sim.launch.py`），跑一遍 FAST-LIO 端到端，看 `/Odometry` 与地图是否与 Classic 同量级。
 
