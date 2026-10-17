@@ -1,6 +1,6 @@
 # 外参到底该在哪一步乘一次：FAST-LIO / Point-LIO / LIO-SAM / Livox 驱动 源码调研 + 本仓 `small_point_lio` 两处变换的判决（2026-10-18）
 
-> **本文要settle的问题**（用户原话）："对『已配准的点』又乘了一次外参这个上网查一下吧，这个外参是不是来矫正倾斜点云的，对齐到重力系"。
+> **本文要定论的问题**（用户原话）："对『已配准的点』又乘了一次外参这个上网查一下吧，这个外参是不是来矫正倾斜点云的，对齐到重力系"。
 >
 > 具体四问：① LiDAR→IMU/body 外参在 LIO 里到底干什么、在哪一步乘；② 有没有任何实现会把外参**乘到已经配准到 odom/world 的点上**；③ 社区认为的正确 pattern 是什么（点云发哪个帧、谁发 `odom→base_link`、外参乘几次）；④ "重力对齐" 是不是外参的活。
 >
@@ -13,7 +13,7 @@
 ## 0. 一句话结论（先给判决）
 
 1. **外参（LiDAR→IMU/body）的唯一职责 = 把"传感器系里的量测"搬到"算法 body 系"，且必须在流水线里只乘一次**；它**不是**重力对齐工具，也**不是**安装位姿的运行时修正量。FAST-LIO 的 README 把它定义成"LiDAR 在 IMU body 系里的位姿"，代码在 `pointBodyToWorld` 里乘**恰好一次**。［引用 C1/C3］
-2. **找不到任何 LIO 实现会对"已经配准到 odom/world 的点"再乘一次 `T(base←lidar)`**。FAST-LIO / Point-LIO / LIO-SAM 三条线在这件事上完全一致；社区维护者在 FAST-LIO #433 里把这种写法直接点名成 bug 形状："an extra TF can effectively rotate the frame twice"。⇒ **本仓 bug ② 是 bug，不是"约定差异"**。［引用 C1/C2/C10/C11/C6］
+2. **找不到任何 LIO 实现会对"已经配准到 odom/world 的点"再乘一次 `T(base←lidar)`**。FAST-LIO / Point-LIO / LIO-SAM 三条线在这件事上完全一致；社区维护者在 FAST-LIO #433 里把这种写法直接点名成 bug 形状："an extra TF can effectively rotate the frame twice"。⇒ **本仓 bug ② 是 bug，不是"约定差异"**。［引用 C1/C2′/C11/C6］
 3. **`odom→base_link` 的正确写法是合成 `T_ol·T_bl`（右乘），共轭 `T_bl⁻¹·T_ol·T_bl` 是"同一变换换基"，只在 `T_bl` 为纯平移时姿态碰巧对**。LIO-SAM 用的是**同样方向的 `lookupTransform(lidarFrame, baselinkFrame)`**，写的是 `tCur = tCur * lidar2Baselink` —— 与我们的修法逐字同构，与共轭相反。⇒ **bug ③ 是 bug**。［引用 C10］
 4. **倾斜挂装导致"odom 自己斜"是 FAST-LIO 系的常规约定，不是 bug**：世界系取"初始化那一刻的 IMU 系"，重力只作为**状态向量**存着，初始姿态**不**被重力纠正（`init_state.grav = ...`，而 `rot` 那行被注释掉）。FAST-LIO 维护者的建议是"初始化时做一次重力对齐，把这个矩阵在**发布点云时**用一次"。⇒ 我们 `small_point_lio` 的行为（`rotation = Identity()` + 把均值加速度写进 `gravity`）**与上游同构，属正常约定**；要重力对齐的 `odom`，得**另加一步**，而不是怪外参。［引用 C2/C5］
 
@@ -184,7 +184,7 @@ imu_msg.header.frame_id = "livox_frame";        // :481
 1. **消息契约**：`sensor_msgs/PointCloud2` 的 header 定义就是"3D 点的坐标帧" ——
    `# Time of sensor data acquisition, and the coordinate frame ID (for 3d points).`（<https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/PointCloud2.msg>）［引用 C16］。
    点乘了 `T(base←lidar)` 之后**不再是 odom 系的点**，标签就成了假话。
-2. **上游三条实现都没有这个动作**：FAST-LIO/Point-LIO 在"出点公式里乘一次、发布时直接发"（§1.3a/b），LIO-SAM 在"IMU 边界乘一次、发布时只乘 `odom←lidar` 位姿"（§1.3c）。**没有任何实现会在发布点云时再乘一次 `T(base←sensor)`**。［引用 C1/C2/C11］
+2. **上游三条实现都没有这个动作**：FAST-LIO/Point-LIO 在"出点公式里乘一次、发布时直接发"（§1.3a/b），LIO-SAM 在"IMU 边界乘一次、发布时只乘 `odom←lidar` 位姿"（§1.3c）。**没有任何实现会在发布点云时再乘一次 `T(base←sensor)`**。［引用 C1/C2′/C11］
 3. **社区维护者把它点名成 bug 形状**：FAST-LIO #433 的回复逐字——"**TF duplication**: Make sure you are not applying an additional rotation via TF (e.g., a static transform between os_sensor, os_imu, or base_link). **FAST-LIO already applies the extrinsic_R/T internally, so an extra TF can effectively rotate the frame twice.**"（<https://github.com/hku-mars/FAST_LIO/issues/433>）［引用 C6］
 
 **"外参到底是不是来矫正倾斜点云的"** —— #433 同一段还给了反面答案："FAST-LIO **does not perform automatic horizontal leveling**. It assumes the sensor frame is already consistent with the gravity direction from the IMU. If the LiDAR is mounted with a tilt (roll/pitch), **the estimator will build the map from that orientation**."［引用 C6］⇒ 外参不矫正倾斜；倾斜照原样进地图。
@@ -261,7 +261,7 @@ tfOdom2BaseLink.sendTransform(odom_2_baselink);          // :130
 
 | 项 | 判决 | 依据 |
 |---|---|---|
-| bug ② 对已配准点再乘 `T(base←lidar)` | **是 bug**（帧语义错误：标签 `odom` ≠ 内容） | 消息契约［C16］+ 三条实现对照［C1/C2/C11］+ 维护者原话"rotate the frame twice"［C6］+ 本仓 30.970° 实测［B1］ |
+| bug ② 对已配准点再乘 `T(base←lidar)` | **是 bug**（帧语义错误：标签 `odom` ≠ 内容） | 消息契约［C16］+ 三条实现对照［C1/C2′/C11］+ 维护者原话"rotate the frame twice"［C6］+ 本仓 30.970° 实测［B1］ |
 | bug ③ 共轭 `T_bl⁻¹·T_ol·T_bl` | **是 bug**（数学错误：换基 ≠ 位姿合成） | 链式法则 + LIO-SAM 同方向 lookup 的合成写法［C10］+ 本仓 4.890° 假俯仰［B1］ |
 | "倾斜挂装 ⇒ odom 自己斜" | **不是 bug，是 FAST-LIO 系约定** | `init_state.grav` + 纠偏行被注释［C1］+ 维护者建议"初始化时做重力对齐"［C5］ |
 | `extrinsic_R = I`（内置 IMU）能否免除 ②③ | **不能** | 自变量是 `base_link↔livox_frame` 这条 TF，与 `T_IL` 无关［B1 §N.3.1］ |
@@ -272,9 +272,9 @@ tfOdom2BaseLink.sendTransform(odom_2_baselink);          // :130
 
 ### 4.1 五条原则（每条都有上面的出处）
 
-1. **外参只在"量测进入 body 系"时乘一次**，之后任何环节都不再碰它（FAST-LIO/Point-LIO 的出点公式、LIO-SAM 的 `imuConverter` 都是这个形状）。［C1/C2/C12］
+1. **外参只在"量测进入 body 系"时乘一次**，之后任何环节都不再碰它（FAST-LIO/Point-LIO 的出点公式、LIO-SAM 的 `imuConverter` 都是这个形状）。［C1/C2′/C12］
 2. **点云上乘的矩阵 = `T_{header.frame_id ← 点当前所在帧}`**，不多不少（§3.4 的恒等式）。［C16］
-3. **估计器只发它拥有的帧**（`odom→传感器/IMU body`），**不发 `base_link`**——FAST-LIO/Point-LIO 全仓 `base_link` 出现 0 次；需要 `base_link` 时用一个**独立适配节点**（LIO-SAM 的 `transformFusion`、本仓的 `lio_tf_adapter`）。［C1/C2/C10/本仓源码］
+3. **估计器只发它拥有的帧**（`odom→传感器/IMU body`），**不发 `base_link`**——FAST-LIO/Point-LIO 全仓 `base_link` 出现 0 次；需要 `base_link` 时用一个**独立适配节点**（LIO-SAM 的 `transformFusion`、本仓的 `lio_tf_adapter`）。［C1/C2′/C10/本仓源码］
 4. **`odom→base_link` 永远是合成 `T_ol·T_lb`**（右乘）；共轭只用于"同一算子的换基"，不用于位姿链。［C10］
 5. **外参不承担重力对齐**；重力对齐是"初始姿态"或"额外的对齐变换"的事。［C5/C6/C2］
 
@@ -358,7 +358,7 @@ tfOdom2BaseLink.sendTransform(odom_2_baselink);          // :130
 | C21 | 上游 `small_point_lio`（`Yancey2023@688d75c`，= 本仓 `third_party/cod_nav_2026` 副本） | <https://github.com/Yancey2023/small_point_lio>（本仓副本逐字：`third_party/cod_nav_2026/src/small_point_lio/src/small_point_lio_node.cpp:75`、`:107-124`、`:159`） | §2、§3.0、§3.2 |
 | **B1** | **本仓实测账本**：`docs/tilted_lidar_fidelity.md` §I.5.1/§I.5.3/§J.1/§J.2/§J.5/§N.2/§N.3 | `docs/tilted_lidar_fidelity.md` | §3 全部数字 |
 
-> 计数：**外部引用 20 条（C1–C20）+ 上游代码 1 条（C21）+ 本仓实测 1 条（B1）**。其中 C2/C8/C9/C20 只作背景/旁证，判决只依赖 C1/C2′/C5/C6/C10/C11/C12/C16 + B1。
+> 计数：**引用 22 条** = 外部 URL 20 条（C1–C21，其中 C7 为空号；C21 是上游仓库 + 本仓副本逐字）＋ 本仓实测账本 1 条（B1）＋ 本仓源码/适配节点 1 条（§2 末两行的“本仓源码”）。其中 C2/C8/C9/C20 只作背景/旁证，**判决只依赖 C1/C2′/C5/C6/C10/C11/C12/C16 + B1**。
 
 ### 5.2 打不通 / 降级替代（诚实清单）
 
