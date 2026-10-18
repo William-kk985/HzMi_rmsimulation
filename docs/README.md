@@ -1,115 +1,199 @@
 # `docs/` 文档索引（唯一入口）
 
-> **先看这里**：本文件是 `docs/` 的总入口。每条给出「一句话定位 + 状态 + 什么时候看」。
-> 约定：**不移动既有文件**（移动会破坏跨文档引用与外部链接），只在本文件与各子目录 `README.md` 里标注状态与主次。
->
-> **调试记录命名约定**：按"**哪一套方案**"一份，文件名 = `debug_<lio>_<mapper>[_<mode>].md`，
-> 例：`debug_fastlio_cartographer.md`（`lio:=fastlio` + `mapper:=cartographer`，默认 `mode:=mapping`）、
-> 以后换方案就照此新增 `debug_pointlio_slam_toolbox.md` / `debug_fastlio_icp.md` …
-> 内容固定包含：**启动命令 + 这套链路的节点/话题/文件清单 + 实测基线数字 + 症状→判据→处置 + 踩坑清单 + 未决项**，
-> 见 `debug_fastlio_cartographer.md` §0.1 的模板。
+> **2026-10 仓库整理**：覆盖**全仓 102 份自有 Markdown**（旧索引漏收 39 份）。每条 = 「链接 + 解决什么问题 + 状态」；**不移动、不改写**任何既有文档（只在 5 份顶部加了一行 `STATUS`）。
+> 状态四值：`现行` / `历史（结论仍有效）` / `已被取代（见 X）` / `参考（非本仓结论）`。逐份明细见 [`inventory.md`](inventory.md)；不再成立的说法见 [取代表](#取代表不再成立的说法)。
 
----
+## 先看这三份
 
-## 快速入口（按你现在的目的找）
-
-| 我想… | 看这份 | 跳到 |
+| # | 文档 | 为什么先看它 |
 |---|---|---|
-| **想从零把"卡尔曼滤波 → LIO → SLAM → 定位"这套数学学一遍**（要真推导 + 数值算例 + 落到本仓每一条数字） | **`slam_lio_primer.md`（教材式讲义）** | §0 读法与证据分级 → §2 高斯代数工具箱（配方推导）→ §3/§4/§5 KF·EKF·ESKF/IEKF + IMU 预积分 → §6 LIO（点到面残差/退化/外参/两个 TF bug）→ §7 SLAM（位姿图 GN 手算/回环/栅格化）→ §8 定位（AMCL vs GICP vs 地点识别）→ **§9 本仓实例对照表**（TF 链/mode/槽位/高度带/时间戳，逐条给 `§` 与 commit）→ §10 易错点清单 → §11 延伸阅读 |
-| **想"慢慢学一遍"卡尔曼滤波与 SLAM 本身**（渐进式：为什么需要 → 它是什么 → 公式怎么来的 → 算一遍 → 留下什么坑 → 下一个算法怎么补；每章 2–3 道练习附答案） | **`kalman_slam_tutorial.md`（循序渐进教学读本（卡尔曼 + SLAM））** | 第 0 章 怎么读（预备知识清单 / 记号约定 / 三条阅读路线 A原理·B会算·C工程 / 与 primer 的章节对照 / 数字订正说明）→ 第 1–8 章 **卡尔曼滤波**（为什么滤波 · 贝叶斯→高斯 · 两条递推的来历（含一维高斯配方）· KF 五步算法卡片 · 算例一 `100±10 ⊕ 96±2` 逐步算术 · 算例二 二维 CV 完整矩阵 · EKF 测距测角算例与"先验差 10 倍"判决 · 演化线 UKF→ESKF→IEKF→IMU 预积分）→ 第 9–20 章 **SLAM**（鸡生蛋与相关性 · MAP→最小二乘 · EKF-SLAM · FastSLAM · 图优化与高斯-牛顿 · 一维链+回环手算 · 二维平移回环手算 · `SE(2)/SE(3)` 点到为止 · 前端/回环/节点密度 · 占据栅格 log-odds · AMCL vs GICP · 滤波线与图优化线分工）→ 第 21–24 章（公式速查表 · 符号总表 · 25 条常见误解 · 自检清单）+ 附录 A 全部数字的复现脚本、附录 B 与任务书原值的差异清单 |
-| **只想读一份就把本工作期（2026-10-05~10-08，161 个提交）的所有改动看懂**（`robot:=robot11` 全程 + 感知/LIO/导航/建图/资产） | **`session_digest.md`（总汇总，先看这份）** | §0 一页速查（帧语义/两条代价图链/参数归属/能力一览）→ §1.2 推翻过哪些结论 → §2 逐项改动（统一模板）→ §4 总账表 + 被否掉的候选 → §5 诚实边界 → §6 命令与回退 → §7 提交索引 |
-| **只想读一份就把本轮（2026-10-18）四条线看懂**（LIO 外参守卫 / 机器卫生 + 收尾作用域 / Fortress `sim_backend:=gz` / COD 帧架构对账） | **`round_summary_gz_frames.md`（本轮合并总结）** | §0 一句话结论（能不能用）→ **§2 ⭐ 与之前的区别（17 行大表 + QoS）** → §3 实测数字（gz vs Classic，含"非同轮 A/B"的口径警告）→ §4 **24 条**缺口与未验证 → §5 回退表 → §6 用法速查 → §7 文档索引 → §8 待办 |
-| 把仿真跑起来、判断对不对 | `smoke_test_runbook.md` | §0.9 五分钟上手 → §9.1 就绪检查 |
-| 知道"现在有哪些算法、能不能跑" | `algorithm_matrix.md` | §一 槽位 / §三 资产 / §四 实测状态 |
-| 理解"为什么这样分层、为什么降维" | `architecture.md` | §3.2.1–§3.2.7 |
-| 查某个名词是什么意思 | `glossary.md` | 按主题四组检索 |
-| 排查某个诡异现象 | `issues_and_findings.md` + `smoke_test_runbook.md` §10.1 | 「现象 → 归属」表 |
-| 改感知/代价图层、换 3D→2D 做法 | `3d_to_2d_survey.md` | §二 两种降维哲学 / §三 共性旋钮 / §七 本工程分布 |
-| 想加"坡度 / 落空 / 净空"这类 2D 表示不了的东西（**先看这份**） | `traversability_plan.md` | §1 问题定义 / §2 表示选型 / §3 三个派生层 / §5 STL 真值验证 / §7 分阶段计划（**plan only，未实现**） |
-| 想知道**地图/先验资产哪一份是当前的**，或者要换图 / 回滚 / 清理存档 | `map_assets.md` | §0 速查 / §1 命名规范 / §2 逐个文件清单 / §3 实测对照 / §4 换图与回滚 |
-| 挑算法（选型池） | `rm_algorithm_catalog.md` | §〇.0 前端 vs 系统 / 各章候选 |
-| 评估"**外部纯 C++ 规划库**（如 `tdt-nav-kit`）怎么接进 nav2"、或想知道**插件化 vs 独立节点 vs 独立进程**的效率代价 | `nav2_vs_custom_planner.md` | §0 决策表 / §1 插件契约（1.1.20 逐字）/ §2 带时间的轨迹放哪 / §3 效率账（含须自测清单）/ §5 落地坑 / §6 CMake 骨架与推荐 |
-| 想知道"**建图算法会不会用重定位**"、我们缺哪一级（回环 / 地点识别 / 多会话锚定） | `mapping_relocalization_survey.md` | §0 一句话结论 / §2 会用的系统 / §3 不会用的系统（纯 LIO）/ §4 我们栈的现状 / §5 该补什么（排序+成本）/ §6 决策表 |
-| 改 TF/话题契约 | `tf_interface_contract.md` | T1–T5 已实施、T6 撤销 |
-| 判断"这个改动会不会上实车 / 是不是为仿真妥协" | `sim_real_contract.md` | §一 分界点与替身 / §四 三分类判据 / §五 禁止清单 |
-| 地图跟着车转 / 建图丢帧 / SLAM 不稳，想一步步查 | `debug_fastlio_cartographer.md` | §1 分层判读法 → §4 症状速查表 → §6 踩过的坑 |
-| 换/加**里程计**（`lio` 槽）、想知道某个 LIO 吃什么话题什么时间戳 | `lio_slots.md` | §0 一句话结论 / §2 契约表 / §4.1 **launch 的"缺包不再挡住所有组合"修复** / §5 节点级验证 + **§5.9 全栈 A/B 实测** / §7 跑起来；**现状**：`small_point_lio` = **离线已调参（30.2 m → 6.9 m）+ 全栈已跑通**（PASS/SUCCEEDED，与 `lio:=fastlio` 同命令对照逐项同量级），⚠️ 但**全栈逐点精度、`spin_speed≠0`、其它场地/重定位槽组合仍未验**；`pointlio` 从未全栈验证（`algorithm_matrix.md` §一/§四）；**该包两处变换 bug（②③）与 1 ns 截断的来源审计**（上游原样代码 vs 本仓集成 · 上游 launch 的单位静态 TF 为何掩盖了它 · 真机内置 IMU 能不能免除 · 爆炸半径 · 守卫设计）见 `tilted_lidar_fidelity.md` §N |
-| 想**从上游源码判"外参该在哪一步乘一次"**（用户质疑"对已配准的点又乘了一次外参 / 这个外参是不是用来矫正倾斜点云、对齐重力的"） | **`lio_extrinsic_application_survey.md`** | §0 四条判决 / §1 外参的角色 + 代表系统的流水线位置（FAST-LIO · Point-LIO · LIO-SAM · livox 驱动，逐字源码）/ §2 七行对照表 / **§3 bug②③ 的判决**（帧语义恒等式 + 共轭 vs 合成 + identity 外参下的不可观测性）/ §4 我们 bench 的推荐 pattern（点云发哪个帧 / 谁发 `odom→base_link` / 重力对齐三条路线）/ §5 引用 20 条外部 + 打不通清单 |
-| **换机器人模型**（`robot:=<模型>` 槽）、或想评估用户给的那份哨兵 URDF | `robot_models.md` | §1 上游逐字事实（**它没有惯性 ⇒ 直接 spawn 是空模型**、"雷达斜放"在文件里不存在）/ §2 provenance 表 + 实测几何 / §3 **雷达安装决策**与"0.8 m + MID360 −7.22° ⇒ 6.3 m 近场盲环"的实测后果 / §4 需跟着改的配置（**默认值未改**）/ §5 旧新对照实测 / §6 试与回滚 / §7 未验证 |
+| 1 | [`round_summary_gz_frames.md`](round_summary_gz_frames.md) | 上一轮（2026-10-18）四条线的合并总结 + **24 条缺口/未验证** —— 先知道"现在能用到哪一步" |
+| 2 | [`frame_contract_v3.md`](frame_contract_v3.md) | **现行规范性契约**：三层参数 / 最终 TF 树（无 `odom_grav`）/ 不变式 I1–I7 / 重力契约 E1 / 重定位契约 |
+| 3 | [`frame_contract_v3_measurements.md`](frame_contract_v3_measurements.md) | 该契约的**实测账**：13.75 vs 5.75 ms/帧、精度、逐位回归 —— 规范落地要付多少 |
 
----
+> 3 分钟路径：这三份的 §0/§1 → 要动手看 [`smoke_test_runbook.md`](smoke_test_runbook.md) 与 [`map_assets.md`](map_assets.md) → 要改帧/TF 先读 [`tf_interface_contract.md`](tf_interface_contract.md) 与 [取代表](#取代表不再成立的说法)。
 
-## 一、现行核心（维护中，是真值来源）
+## ① 入门 / 总览
 
-| 文档 | 定位 | **它是什么的真值来源** |
+| 文档 | 看它解决什么问题 | 状态 |
 |---|---|---|
-| `slam_lio_primer.md` | **教材式讲义（2026-10-09 新增）**：KF→EKF→ESKF/IEKF（含全部推导与数值算例：`100±10/96±2`、2D 常速度、极坐标 EKF 偏差、4 节点位姿图手算 GN、走廊退化 `H`、占据栅格 log-odds、AMCL 粒子算例）、LIO（点到面残差雅可比/退化/去畸变/外参 `∝` 距离/两个 TF bug）、SLAM（MAP→位姿图→回环→栅格化）、定位（AMCL vs GICP vs 地点识别 + 三件套架构）；**§9 把每条落到本仓的 TF 链 / 三种 `mode` / 全部 `localization` 槽位 / GICP 三道判据与低增益滤波 / slam_toolbox 节点密度 / 1 ns 时间戳 / 两处高度过滤与两个代价图层**，逐条给 `§` 与 commit；§11 带 URL 的延伸阅读（含"哪些正文没抓到"的诚实清单） | **"这些算法到底怎么推、为什么这么调、本仓那条数字对应哪个理论"的入口**；**概念/公式**的真值来源（算法现状仍以 `algorithm_matrix.md` 为准，本仓数字逐条指向原文档） |
-| `robot_models.md` | **机器人模型槽位 `robot`（默认模型 \| `hzmirm` \| `robot11`）**：上游 URDF 的逐字事实与 provenance、我们补了什么、雷达安装决策与"近场盲环"实测、几何差异影响的配置清单、旧新对照实测、试与回滚；**§9–§11 `robot11`**（真 mesh 资产包 / 槽位接入 / 碰撞挖视锥让雷达看得见）；**§12 Phase 4**（带 GUI 的代价表、自击掩膜不再污染限速、横幅改成运行期读生效值）；**§13 Phase 5**（`<visual>` 的 QEM 视觉 LOD：预算/容差/逐 mesh 量化验证、`robot11_visual:=decimated\|full` 开关、**上网查到的标准做法带 URL**、GUI 代价实测与不一致的诚实记录） | **"换成哪台车、换了会怎样、哪些配置要跟着改"的唯一真值**（2026-10-07 新增；默认模型行为未改） |
-| `smoke_test_runbook.md` | **怎么跑 / 怎么判 / 错了怎么查**（原生命令，无封装脚本） | 操作步骤、判据、错误对照 |
-| `algorithm_matrix.md` | **算法组合总表**：槽位 × 实现 × 资产 × 实测状态 × 阻塞 × 扩展位 | **算法现状（含实跑结果）的唯一真值** |
-| `architecture.md` | 目录架构 + 分层概念（§3.2.1–3.2.7 是概念长文） | 目录/分层/参数清单 |
-| `glossary.md` | 术语表：一句话定义 + 指向详述 | 名词定义 |
-| `issues_and_findings.md` | 实际踩到的故障（根因/修复/证据）+ 静默失效坑 + 待办 | 故障根因库 |
-| `3d_to_2d_survey.md` | 各家 3D→2D 实现对照（p2l / nav2 / STVL / cartographer / octomap） | 降维机制与参数 |
-| `stvl_local_costmap.md` | **局部代价地图也上 STVL**（`local_obstacle:=stvl`）：槽位/机制、参数来源（COD `singlenav2_params.yaml:200-262`）、A/B 四次跑、代价与未验证清单 | 槽位取值、参数、实测数字 |
-| `tf_interface_contract.md` | TF / 接口契约（**T1–T5 已实施，T6 撤销**） | 帧树与话题契约 |
-| `params_ownership_checklist.md` | 参数归属清单（R1–R5 逐项状态） | 参数该放哪个包 |
-| `sim_real_contract.md` | **仿真 ↔ 实车契约**：分界点/替身清单、共用接口、参数分家、三分类判据、禁止清单、验收判据 | **"改动会不会上实车 / 该不该为仿真动算法"的唯一真值** |
-| `debug_fastlio_cartographer.md` | **调试手册（针对 `mode:=mapping`+`lio:=fastlio`+`mapper:=cartographer` 这套链路，§0.1 有范围声明）**：分层判读法（L0–L6）、诊断工具、实测基线数字、症状→判据→处置速查表、踩坑清单；**§5.2.4 = "留不住"的离线复现结论与参数扫描表** | **"SLAM/建图异常怎么查"的方法论真值** |
-| `cartographer_2d_occupancy_semantics.md` | **cartographer 2D 占据栅格语义逐行考据**（2.0.9004/2.0.9002，与上游 master 逐字节相同）：命中/清除写入顺序与"同周期先写者胜"、`missing_data_ray_length` 只在超距回波分支生效、`kMin/kMaxProbability=0.1/0.9`、LaserScan 两级过滤（`inf` 被丢弃）、**`/map` 取值上限 75 的完整推导**（含 pycairo/C++ 两路复算） | 改 cartographer 参数前的**源码级依据**；§5.2.4 与 `cartographer.lua` 注释都引用它 |
-| `mapping_small_point_lio.md` | **`lio:=small_point_lio` 的建图链**：接线审计（file:line + 运行时 `/map` 单发布者证据）/ 3D 先验怎么导（`/map_save` 存在、`save_pcd` 必须构造期打开、落盘路径硬编码、`/cloud_registered` 的常值杆臂错位实测）/ RMUC2026 实跑产物（2D 图 + PCD 统计）/ `localization:=gicp` 验证（fitness 0.0017 m²、880/880 帧、PASS）/ A/B / 回滚 / 未验证 | **small_point_lio 建图与产物的唯一真值**（含「仿真底盘会在窄口硬卡」等实测坑） |
-| `mapping_2d_from_cloud.md` | **2D 先验图改从 3D 点云投影**（+ 建图稳健性 A/B）：`/scan` 丢帧量化与 四个变体 A/B（根因 = slam_toolbox `scan_queue_size=1`）/ `map→odom` 跳变哨兵（alert-only 的理由 + 实测抓到的跳变）/ 坡道段（23° 坡 + 1.05 m 无顶棚走廊）同时间轴证据与判定 / `pcd_to_nav2_map.py` 的判据与用法 / 两张 2D 先验的区域计数 A/B + 回归 / 跑图规程 / 回滚 / 未验证 | **「2D 图从哪来」与「坡道为什么在 2D 图里消失」的唯一真值** |
-| `slam_toolbox_scan_drops.md` | **`/scan` 丢帧（Message Filter … queue is full）的根因考证**（接 `mapping_2d_from_cloud.md` §9 的待做项）：`scan_queue_size` 上游考证（默认 1 / 语义 / #526 引入 / README 口径）、tf2 `MessageFilter` 的 `QueueFull` 源码语义、上游 issue/PR 与**未合入的根治补丁 geometry2#544**、可比项目（COD / TurtleBot4 / uOttawa）配置、**本仓时间戳链实测**（`/scan` 端到端延迟 ~55 ms、LIO TF 有效 8.94 Hz / 跳帧 11.7%、92.6~100% 的扫描"到达时查不到自己那一戳的 TF"、等待分布）、**丢帧影响量化**（58.6% 被处理门证明无害、其余 ≤0.1 s / 2 cm）、**`scan_queue_size` 1/5/10 的 A/B**（4.2% → 0）、结论（**不改默认**）与"要改就改这一行"的可逆配方 | **「这条丢帧日志要不要管」的唯一真值** |
-| `ground_segmentation_slots.md` | **地面分割槽位 `ground`（`linefit` \| `patchwork`）**：上游/许可证/pinned commit 考证（BSD-2-Clause，pin `3e6903a1` = v1.4.1；上游 `ros/**` 因 `package.xml`(GPL-3.0) 与 `LICENSE`(MIT) 矛盾而**不 vendor**）、与 linefit 的**逐字段契约表**、参数表（每个默认值的来源；`th_dist` 0.125→0.08 的实测理由）、`ground` 槽位 diff 与 `--show-args` 证据、**互斥真值表**（LaunchDescription 求值 + 运行期 `/segmentation/obstacle` 单发布者实证）、离线 A/B（真实帧 + RMUC2026.stl 实测几何代理）、整栈建图 smoke A/B、结论与回退 | **地面分割槽位的唯一真值**（含「22~35° 缓坡：linefit 判障碍 35.7~44.3% → patchwork 2.5~3.0%」与「p2l `max_height 0.1` 砍掉 0.33 m 以上护墙」两条实测量） |
-| `map_assets.md` | **地图/先验资产的规范与清单**：命名约定（`map/<world>.pgm\|yaml` / `PCD/<world>.pcd` / 存档 `<world>_<tag>.*` / 备份 `.prev-<ts>`、`.bak-<日期>` / `attic/`）、逐个文件（是什么 / 哪来的 / 实测多好 / 谁在引用它）、**当前默认对**（2026-10-07 提升到 `RMUC2026_v3` 那次会话的 2D + 3D，含提升前的旧份与回滚命令）、换图流程、入库策略、未验证清单 | **`map/` 与 `PCD/` 里"哪一份是当前默认"的唯一真值**（含 `verify_low_terrain.py` + GICP 离线探针 + 整栈无头的实测对照） |
-| `lio_drift_diagnosis.md` | **LIO 漂移分段诊断（"才跑一小会儿里程计就飘"到底合不合理）**：分段脚本化路线（直线/原路返回/慢转/快转/窄沟/角速度扫频）+ 50 Hz 同步时间轴 + 逐段 ATE；**指令角速度 → 实际角速度的传递曲线**（仿真底盘权威只有指令的 0.4~0.8、小指令几乎死区）；"卡死+几何退化"与"温和/大角速度转弯"逐条对账；**唯一复现出来的失效模式 = 高角速度甩转（6 次坏 3 次，且与地图冷热无关；轻的 slam 能补、重的 1:1 跟着飘）**；续建污染存档的复测（`pcd_stats` 复现 z 到 +23.10 m，但**实时位姿不受影响**）；跑法护栏（脏 spawn / 采样饥饿） | **「LIO 到底会不会飘、什么时候飘」与「续建存档会不会让位姿飘」的唯一真值** |
-| `worlds.md` | **整场世界资产（`RMUC2026`，由附件 STL 生成）**：资产清单 / mm→m 与 z 抬升的依据 / 出生点怎么选 / 2D 图与先验 PCD 怎么来 / 无头实测（建图·AMCL·GICP）/ 场地对本车的坑 + `tools/scripts/world/stl_to_world.py` 一条命令复跑（§4.4） | **场地世界资产与生成口径的唯一真值**（含"可通行 ≈176 m²"等实测量） |
+| [`仓库根 README.md`](../README.md) | 仓库总入口：来源与致谢、话题接口、Docker/原生两种环境、启动示例 | `现行` |
+| [`本索引 docs/README.md`](README.md) | 本文件 —— 全仓 md 的唯一索引（含取代表与待决清单） | `现行` |
+| [`round_summary_gz_frames.md`](round_summary_gz_frames.md) | 上一轮（10-18）四条线合并总结：外参守卫 / 机器卫生 / Fortress 后端 / COD 帧对账，含 24 条缺口 | `现行` |
+| [`architecture.md`](architecture.md) | 目录结构 + 分层概念：为什么这么切 2D/2.5D/3D、参数在哪 | `现行` |
+| [`glossary.md`](glossary.md) | 名词一句话定义 + 指向详述章节 | `现行` |
+| [`algorithm_matrix.md`](algorithm_matrix.md) | 槽位 × 实现 × 资产 × 实测状态：算法现状的唯一真值 | `现行` |
+| [`algorithm_axes.md`](algorithm_axes.md) | 按"正交轴"索引整个 bench：一次只动一个轴、轴的拓扑与选项 | `现行` |
+| [`rm_algorithm_overview.md`](rm_algorithm_overview.md) | 早期"角色 × 一体性 × 两场景"总结（推理过程仍有价值） | `已被取代（见 architecture.md §3.2.1 / algorithm_matrix.md §一）` |
+| [`slam_lio_primer.md`](slam_lio_primer.md) | 教材式讲义：KF→EKF→ESKF→预积分→LIO→SLAM→定位，每条公式落到本仓数字 | `现行` |
+| [`kalman_slam_tutorial.md`](kalman_slam_tutorial.md) | 循序渐进读本：24 章 + 练习，从"为什么需要滤波"到 SLAM/AMCL/GICP | `现行` |
+| [`mapping/README.md`](mapping/README.md) | `docs/mapping/` 子索引：现行落盘步骤 + 旧快照清单 | `现行` |
+| [`package/README.md`](package/README.md) | `docs/package/` 子索引：离线配置包多版本的主次 | `现行` |
 
-## 二、选型与路线（参考）
+## ② 契约 / 规范
 
-| 文档 | 定位 | 状态 |
+| 文档 | 看它解决什么问题 | 状态 |
 |---|---|---|
-| `rm_algorithm_catalog.md` | 候选算法池（2D/3D 建图、重定位、相机；含 §〇.0 前端 vs 系统） | **现行**，加新候选算法时更新 |
-| `traversability_plan.md` | **3D 派生可通行性的设计计划**（坡度/落空/净空三层：表示选型取舍 + 包可用性核对 + 三个派生层设计 + 动作怎么接 BT + **用 STL 当真值做逐格验证** + RViz/PNG 怎么看 + 三步计划与"不做什么"） | **plan only（未实现、无代码/参数改动）**；本文只写设计与"要量什么"，不写实测结论 |
-| `rm_bench_refactor_plan.md` | 实验台改造路线（M0–M4 设计草案） | **部分完成**：M0/M1 相关项已在 `issues_and_findings.md` 落地；**未完成项看 `algorithm_matrix.md` §五/§六** |
-| `gazebo_sim_migration_plan.md` | **Gazebo Classic 11 → 新 Gazebo（`gz sim`/`ros_gz`）迁移可行性调研 + 迁移清单**：Humble↔Fortress 配对与 EOL（带 URL）· apt 实测（`ros-humble-ros-gz` 已装；`gzharmonic` 会 `Remv` 掉 Classic）· **传感器图案裁决**（任意逐射线 MID-360 CSV **不支持**，附 SDF `<lidar>` 规范全文 + Jetty `cpu_lidar` 源码）· **无 GPU 裁决**（Xvfb+llvmpipe 与 `--headless-rendering` 双路径实测跑通）· **PoC 实测**（GUI 窗口 / 30000 射线 RTF≈1.0 / 内存 0.218 KiB/条 vs Classic 94.8 KiB/条）· 逐类迁移清单（S/M/L）· P0–P4 分阶段与出入口判据 · 诚实未验证清单 | **spike 已完成，plan only（未改任何功能代码/配置）**；后续落地从 **P1 机器人** 起，P2 传感器系统是成败点 |
-| `livox_sensor_prior_art.md` | **Livox（非重复扫描）在新 Gazebo 上的既有实现调研 + 「复用/适配/自研」裁决**：8 个候选（`ashduwihch/mid360_gazebo_harmonic`=**MIT**、`uos/rmagine_gazebo_plugins`=**BSD-3 且 README 明示 Humble+Fortress 已测**、`DHA-Tappuri/livox_ignition`=无许可 Fortress、`jongbob1918`=**专有**、`FZ-XiaoXi`=Apache-2.0、Classic 家族、Jetty `cpu_lidar`）× 许可/版本/图案/性能/可复用性逐项裁决 + **7 条一手硬事实**（Fortress 无 `RaycastData`、`GZ_ADD_PLUGIN` 不存在、`CustomSensor` 在 Fortress 可用、`ros_gz_bridge` 有 `PointCloudPacked` 转换、CSV 方向公式与我们逐字一致…）+ **Fortress 化的 8 条文件级改动** + 逐项许可影响 + 「CPU 批量射线求交算不算常规做法」的四条先例 + 诚实未验证清单 | **调研完成（2026-10-18），未编译未运行**；结论：**R1 从「写」降级为「移植+适配」（S–M）**，首选 MIT 骨架 + BSD-3 BVH 底座 |
-| `gravity_alignment_ownership_survey.md` | **重力对齐归谁**（IMU/INS · LIO/SLAM · 重定位 · 感知 四层调研，30 条引用（URL + 本仓源码） + 本仓 file:line）：`R_grav←odom` 的数学（只 2 DoF、yaw 不归重力管）· 四层各自"自带/不带"与它假设了什么 · REP-103/105 + Nav2 + robot_localization + Autoware 的约定 · AMCL 把 tilt 藏进 `map→odom` 的代码级机制 · 地面分割的 z-up 依赖（linefit / Patchwork++ / TRAVEL）· **本仓最小做法：一条冻结静态旋转 + REP-105 中间帧，无需新算法**；并**更正两处前提**（Point-LIO 其实会做重力对齐；FAST_LIO #433 那句是社区回答、非维护者） | **调研完成（2026-10-19），纯文献/源码，未改代码未跑仿真**；结论：重力对齐是**标准接线**而不是新算法，但**在当前 Nav2+LIO 栈里是无主孤儿** |
-| `relocalization_practice_survey.md` | **全局重定位 vs 局部跟踪的工业实践调研 + `map→odom` 归谁**（回答"局部/全局要不要区分"）：术语判决表（global localization / relocalization / tracking / loop closure / kidnapped robot）· 13 个包的能力表（AMCL/beluga/slam_toolbox/Cartographer/GICP/NDT/描述子/hdl_graph_slam/robot_localization/fuse）· 工业四形态（Autoware `pose_estimator_arbiter`+MRM · Nav2 的 AMCL/SLAM 互斥 · Cartographer `published_frame` · SICK NAV350 的 initial→continuous→virtual 三段式）· **REP-105 只规定"权威唯一"、tf2 不强制单发布者**（负证据）· 丢失后"有界外推/停"的工业默认 · 混合 vs 单一判决 · 本仓能力分解（`map_source`/`global_relocalizer`/`local_tracker`/`arbiter`） | **调研完成（2026-10-19），30 条外部引用（URL + pin 住的 sha）+ 8 条本仓证据，未改代码/配置/launch、未跑仿真**；结论：**"全局+局部"是常态，但 `map→odom` 发布权必须唯一**；我们的缺口是"能力分层/运行期仲裁/健康信号+互锁"，不是重定位算法 |
-| `odom_base_link_practice_survey.md` | **`odom→base_link` 在斜装 / 云台时变挂装下的开源实践调研**（回答"冻结的重力中间帧 `odom_grav` 是不是必要"）：三件事拆开（静态偏置 / 时变挂装 / 漂移，谁治得了谁）· **15 行对照表**（pb2025_sentry_nav · XDU IRobot · HNU · laohao78 · small_point_lio 上游 · COD_NAV · LIO-SAM · FAST-LIO · Point-LIO · autoware_imu_corrector · imu_transformer · robot_localization · cartographer_ros · hdl_graph_slam · linefit）逐条逐字引文（谁发 `odom→base_link`、外参在哪一步乘、重力写在哪、云台怎么发 TF）· **「重力对齐中间帧」判决 = 缺席（0 例）**，只有消费者侧帧名参数（`gravity_aligned_frame`）与估计器内部 `rot_init` 两种真身 · 三种时变实现档位（常数参数 / 逐帧 lookup / 关节链）+ 症状表 · 漂移的三类纠正源 · 本仓建议（**E1 初始化对齐重力** 首选、E2 摆平 IMU 次选且需同步归零 adapter 外参、E4 不管用；**不自研包**；`odom_grav` 只覆盖静态偏置且与 URDF 重复） | **调研完成（2026-10-19），36 条外部引用（URL + 行号）+ 10 条本仓证据（file:line），未改代码/配置/launch、未跑仿真**；结论：`odom_grav` **不是别人在用的模式**，真实栈把倾斜放在估计器参数/初始化 + 按戳查 TF 的合成里 |
-| `frame_contract_v3.md` | **帧 / 契约规范 v3（规范性，设计定稿·未实施）**：五条原则（三层分离 / 唯一事实 / 唯一发布者由 launch 强制 / 能力声明 / `check_contract` 可解释）· 三层参数（描述层 `robot`；仿真显示层 8 项；算法层 8 槽）· **最终 TF 帧树（无 `odom_grav`）**+ 每条边的 owner/速率/失败模式 · 不变式 I1–I7 · 重力契约 E1（`gravity_align_mode` 默认 `off`、推荐 `hybrid`、200 帧门、验收 **<0.7°**）· 重定位契约（能力分层 / `initial_pose:=known\|unknown\|continue` / 状态机 / M1–M4 / 健康字段 / `tf_watchdog`）· 校验矩阵 + 三条错误文案 · 兼容层别名表 · `check_contract:=True` 输出样例 · 验收测试（含 `SIGSTOP` 与 C1–C4）· 删除清单与回退 | **设计定稿（2026-10-19），documentation only：未改代码/配置/launch、未跑仿真**；`robot11_mount*` / `camera_init→map` 零桥 / 插件 `<tilt_rpy>`·`<cloud_frame>` / `localization` 双重身份 四项列为 v3b 删除（含前置条件） |
-| `frame_contract_v3_rationale.md` | 同一契约的**详细理由记录**：30° 必须被吸收 + 四个注入点与四条判据 · 为什么只有**估计器初始化（E1）**让世界系本身 z 朝上（适配器只改表示；压扁 **13.17%** 实测；`sensor` 档 `/scan` 与 odom 倾角无关 <2%）· 业界证据（18 仓库 **0 例**中间重力帧、top-3 模式、pb2025 五件事五个主人、FAST-LIO #284 原话、Point-LIO `Set_init`、adapter 的 S/L 档）· 被否方案逐条（`odom_grav` / 只填 `gravity` / E2 / E4 / 删 200 帧门）· **18 变体矩阵全文** · 三个意外发现 · **8 条自我更正**（`odom_grav` 标准说、pb2025 参数法可行、Autoware `imu_corrector` 估 roll/pitch、共轭代码归 COD、LIO-SAM `transformFusion.cpp`、41.2% 丢束、发散计数、`world_grav` 推荐）· 诚实边界 · 四条决策记录 | 想知道"为什么这么定 / 我们改过哪些说法"读这份；每条数字标【实测】/【引用】/【推断】，并给 `§` 与 commit |
+| [`frame_contract_v3.md`](frame_contract_v3.md) | **规范性**：三层参数、最终 TF 树（无 `odom_grav`）、I1–I7、重力契约 E1、重定位契约 | `现行` |
+| [`frame_contract_v3_rationale.md`](frame_contract_v3_rationale.md) | 上述契约的理由记录：为什么只有 E1 让世界系 z 朝上、18 仓库 0 例、8 条自我更正 | `现行` |
+| [`tf_interface_contract.md`](tf_interface_contract.md) | TF/话题契约（T1–T5 已实施、T6 撤销）：谁发哪条边、谁供哪个话题 | `现行` |
+| [`sim_real_contract.md`](sim_real_contract.md) | 仿真↔实车契约：分界点/替身、三分类判据、禁止清单 | `现行` |
+| [`params_ownership_checklist.md`](params_ownership_checklist.md) | 参数归属清单（R1–R5）：算法参数该放哪个包 | `现行` |
+| [`odom_base_link_practice_survey.md`](odom_base_link_practice_survey.md) | `odom→base_link` 斜装/云台 15 行开源对照 + §9 重力初始化 18 变体实测（E1 的证据） | `现行` |
+| [`lio_extrinsic_application_survey.md`](lio_extrinsic_application_survey.md) | 外参该在哪一步乘一次：四家源码对照 + 本仓两处变换判决 | `现行` |
+| [`gravity_alignment_ownership_survey.md`](gravity_alignment_ownership_survey.md) | 重力对齐归谁（IMU/LIO/重定位/感知四层调研） | `已被取代（见 frame_contract_v3.md §2/§4）` |
+| [`relocalization_practice_survey.md`](relocalization_practice_survey.md) | 全局重定位 vs 局部跟踪的工业实践 + `map→odom` 到底归谁 | `现行` |
+| [`cod_vs_ours_frame_architecture.md`](cod_vs_ours_frame_architecture.md) | COD 实车 vs 本仓帧架构对账：base_link 约定分叉、共轭 bug 为何被掩盖 | `已被取代（§2「C 型」，见取代表 #11）` |
 
-> **§9 第二枪速查**（`gazebo_sim_migration_plan.md` §9，`.tmp_gzsim2/`）：真世界 `RMUC2026.stl` + 真 30k MID-360 图案的**纯 CPU BVH 实测**（1 线程 12.5–29.4 ms/帧、4 线程 5.6–13.6 ms、命中率 9.8–100 %）、**修掉一个 mm/m 单位 bug（0 % 命中却"通过"）**、R0 的 30k/2880 × headless/GUI 全量数字、**GUI 把 10 Hz 拖到 8.35 Hz 的机制=RTF 掉（不是 publisher 耦合）**、R3 能否吃 CSV 的源码级裁决（2–3 个 fork、250–400 行、重采样精度上限）与**四方案决策表**。
+## ③ 算法 / 原理
 
-## 三、专题子目录
-
-| 目录 | 内容 | 索引 |
+| 文档 | 看它解决什么问题 | 状态 |
 |---|---|---|
-| `mapping/` | 建图相关操作指南（含 cartographer pbstream） | `mapping/README.md`（含"多处为状态快照，现行以 runbook §1/§5/§6 为准"的说明） |
-| `package/` | 离线配置包（分发/使用）说明 | `package/README.md`（指明主文档与重复版本） |
+| [`3d_to_2d_survey.md`](3d_to_2d_survey.md) | 各家 3D→2D 实现对照与两种降维哲学 | `现行` |
+| [`mapping_relocalization_survey.md`](mapping_relocalization_survey.md) | 建图算法会不会用重定位、我们缺哪一级（回环/地点识别/多会话锚定） | `现行` |
+| [`nav2_vs_custom_planner.md`](nav2_vs_custom_planner.md) | 纯 C++ 规划库接进 nav2 的三种接法、插件契约、效率账与落地坑 | `现行` |
+| [`nav_strategy_taxonomy.md`](nav_strategy_taxonomy.md) | 导航策略全图：9 个设计轴 × 81 个族，本仓与 COD 放在同一张地图上 | `参考（非本仓结论）` |
+| [`rm_algorithm_catalog.md`](rm_algorithm_catalog.md) | 候选算法池（2D/3D 建图、重定位、相机），含"前端 vs 系统"之辨 | `现行` |
+| [`ground_segmentation_slots.md`](ground_segmentation_slots.md) | 地面分割槽位（linefit ↔ Patchwork++）：上游事实、逐字段契约、A/B | `现行` |
+| [`lio_slots.md`](lio_slots.md) | 里程计槽位：各 LIO 吃什么话题/时间戳、small_point_lio 接线与实测 | `现行` |
+| [`localization_slots.md`](localization_slots.md) | 重定位槽位登记表：一个槽位值一行，选一个就跑 | `现行` |
+| [`mapping_small_point_lio.md`](mapping_small_point_lio.md) | `lio:=small_point_lio` 建图链：接线审计、3D 导出、RMUC2026 产物 | `现行` |
+| [`gicp_backend_small_gicp.md`](gicp_backend_small_gicp.md) | gicp 两个配准后端（pcl / small_gicp）的对等支持 | `现行` |
+| [`stvl_local_costmap.md`](stvl_local_costmap.md) | 局部代价地图上 STVL（`local_obstacle:=stvl`）：机制、参数来源、A/B | `现行` |
+| [`slope_speed_limiting.md`](slope_speed_limiting.md) | 前瞻坡度/台阶限速：物理推导 + 整栈 A/B | `现行` |
+| [`traversability_plan.md`](traversability_plan.md) | 3D 派生可通行性（坡度/落空/净空）设计计划，未实现 | `现行（plan only）` |
+| [`scan_context_plan.md`](scan_context_plan.md) | Scan Context 类全局地点识别接入方案，未落地 | `现行（plan only）` |
+| [`cartographer_2d_occupancy_semantics.md`](cartographer_2d_occupancy_semantics.md) | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导） | `现行` |
+| [`livox_sensor_prior_art.md`](livox_sensor_prior_art.md) | 非重复扫描 Livox 在新 Gazebo 上的既有实现调研 + REUSE/ADAPT/WRITE 裁决 + §10 编译实测 | `现行` |
+| [`kinodynamic_esdf_mpc_notes.md`](kinodynamic_esdf_mpc_notes.md) | `865749/Kinodynamic_esdf_mpc` 调研笔记（外部仓库） | `参考（非本仓结论）` |
+| [`slam_nav_goal_strategies.md`](slam_nav_goal_strategies.md) | "目标怎么给"四种方式的外部调研 | `参考（非本仓结论）` |
+| [`cod_nav_comparison.md`](cod_nav_comparison.md) | COD_NAV 2025 与本仓的逐项对照（两套架构之辨） | `参考（非本仓结论）` |
+| [`cod_nav_2026_deep_dive.md`](cod_nav_2026_deep_dive.md) | COD_NAV `rmul2026` 分支深读：逐环节参数 + 可采纳/不采纳 | `参考（非本仓结论）` |
+| [`cod_nav_2026_params_review.md`](cod_nav_2026_params_review.md) | cod_nav_2026 逐块参数评审（singlenav2/multiplenav2/approach/CSV） | `参考（非本仓结论）` |
+| [`cod_nav_2026_integration_plan.md`](cod_nav_2026_integration_plan.md) | 把 COD(2026) 架构融进本 bench 的规划（未实施） | `历史（结论仍有效）` |
+| [`cod_nav_2026_migration_worksheet.md`](cod_nav_2026_migration_worksheet.md) | COD(2026)→本仓的移植工单（只登记，不动手） | `历史（结论仍有效）` |
+| [`cod_nav_macro_integration.md`](cod_nav_macro_integration.md) | 宏观融入分析：small_point_lio 溯源、静态 `map→odom` 深挖、能力地图 | `参考（非本仓结论）` |
+| [`cod_nav_design_thinking.md`](cod_nav_design_thinking.md) | COD(2026) 思路整理，重点"定位层为什么特殊" | `参考（非本仓结论）` |
+| [`cod_nav_nav_stack_inventory.md`](cod_nav_nav_stack_inventory.md) | COD 战队导航开源资料完整清单 | `参考（非本仓结论）` |
+| [`cod_nav_open_source_materials.md`](cod_nav_open_source_materials.md) | COD 及兄弟仓库的公开资料清单（哪个真开源、在哪） | `参考（非本仓结论）` |
 
-## 四、历史草案（保留供回溯，**不要当现行依据**）
+## ④ 测量 / 实验记录
 
-| 文档 | 说明 |
-|---|---|
-| `rm_algolab_plan.md` | 宏架构早期规划（2026-08/09 草案）；现行架构看 `architecture.md` |
-| `rm_algorithm_overview.md` | 早期"角色 × 一体性 × 场景"总结；**已被 `architecture.md` §3.2.1 与 `algorithm_matrix.md` §一 取代**（保留其推理过程） |
-| `mapping/建图操作指南.md`、`mapping/立即开始建图.md` | 写于当时会话的**状态快照**（开头写"✅ 已启动…"）；现行流程看 runbook §1/§1.1 |
-| `mapping/快速参考卡片.txt` | 内容其实是**离线配置包**的快速参考（分类归属应为 `package/`，未移动） |
+| 文档 | 看它解决什么问题 | 状态 |
+|---|---|---|
+| [`frame_contract_v3_measurements.md`](frame_contract_v3_measurements.md) | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 | `现行` |
+| [`tilted_lidar_fidelity.md`](tilted_lidar_fidelity.md) | 雷达斜 30° 的逐帧点云账本 + 代价图归因 + bug①② 的判决性签名 | `现行` |
+| [`lio_drift_diagnosis.md`](lio_drift_diagnosis.md) | LIO 漂移分段诊断："才跑一会儿就飘"是否合理（唯一复现 = 高角速度甩转） | `现行` |
+| [`lio_divergence_no_impact.md`](lio_divergence_no_impact.md) | "没撞击里程计自己飘"的整栈归因 + 限速 A/B | `现行` |
+| [`path_clearance_and_contact.md`](path_clearance_and_contact.md) | 贴膨胀边→撞进去→定位跟着坏：实测、归因、修复 | `现行` |
+| [`gicp_divergence_and_jitter.md`](gicp_divergence_and_jitter.md) | GICP 重定位"发散 + 抖动"的复现、机制与修复 | `现行` |
+| [`gicp_initialpose_latency.md`](gicp_initialpose_latency.md) | `/initialpose` 的延迟/饥饿问题：修复设计与实测 | `现行` |
+| [`slam_drops_loopclosure_odom.md`](slam_drops_loopclosure_odom.md) | 建图丢帧 × 回环 × 里程计：两个假设的实测裁决 | `现行` |
+| [`slam_toolbox_scan_drops.md`](slam_toolbox_scan_drops.md) | `/scan` 丢帧（MessageFilter queue full）的根因考证与 `scan_queue_size` A/B | `现行` |
+| [`slam_toolbox_tuning.md`](slam_toolbox_tuning.md) | slam_toolbox 建图漂移调参：上游语义考证 + 本机 A/B | `现行` |
+| [`mapping_2d_from_cloud.md`](mapping_2d_from_cloud.md) | 2D 先验图改从 3D 点云投影 + 建图稳健性 A/B（坡道段判定） | `现行` |
+| [`scan_context_probe_report.md`](scan_context_probe_report.md) | A1 资产可行性探针：Scan Context 路线的准入判定 | `现行` |
+| [`scan_context_samesource_gate_report.md`](scan_context_samesource_gate_report.md) | Scan Context 同源性硬门（真 `/scan` → PCD 库）实测 | `现行` |
+| [`gazebo_sim_migration_plan.md`](gazebo_sim_migration_plan.md) | Classic→新 Gazebo 迁移 spike + §9 纯 CPU 射线 BVH 实测（含单位 bug 修正） | `历史（结论仍有效）` |
+| [`livox_viewer2_launch_notes.md`](livox_viewer2_launch_notes.md) | LivoxViewer2 在 22.04 启动即崩的取证 + ROS2 驱动替代路线 | `现行（未入库）` |
 
----
+## ⑤ 历史 / 审计
+
+| 文档 | 看它解决什么问题 | 状态 |
+|---|---|---|
+| [`session_digest.md`](session_digest.md) | 2026-10-05~08（161 提交）的总汇总 | `历史（结论仍有效）` |
+| [`timestamp_construction_audit.md`](timestamp_construction_audit.md) | 全仓时间戳构造审计：1 ns 截断类 bug 及其它戳/队列/QoS 风险 | `历史（结论仍有效）` |
+| [`build_optimization.md`](build_optimization.md) | 构建配置审计（colcon 默认不设 `CMAKE_BUILD_TYPE`）与实测 | `历史（结论仍有效）` |
+| [`research_p2l_scan_stall.md`](research_p2l_scan_stall.md) | 旧链（livox→linefit→p2l）`/scan` 永久停发的调研（两条本仓缺陷） | `历史（结论仍有效）` |
+| [`rm_algolab_plan.md`](rm_algolab_plan.md) | 宏架构早期规划（2026-08/09 草案） | `已被取代（见 architecture.md）` |
+| [`rm_bench_refactor_plan.md`](rm_bench_refactor_plan.md) | 实验台改造路线 M0–M4 设计草案 | `历史（结论仍有效）` |
+| [`cartographer_map_stability_report.md`](../cartographer_map_stability_report.md) | 英文报告：cartographer 2D 地图"墙被擦掉/不稳"的源码级根因 | `待定（未入库）` |
+| [`建图操作指南.md`](mapping/建图操作指南.md) | 当时会话的建图操作步骤（状态快照，现行看 runbook §1） | `历史（结论仍有效）` |
+| [`立即开始建图.md`](mapping/立即开始建图.md) | 当时会话的"立即开始"简明指南（状态快照） | `历史（结论仍有效）` |
+| [`CARTOGRA_PBSTREAM_GUIDE.md`](mapping/CARTOGRA_PBSTREAM_GUIDE.md) | `.pbstream` 生成指南（含"需谨慎对待"的旧做法） | `历史（结论仍有效）` |
+| [`配置包使用说明.md`](package/配置包使用说明.md) | 离线配置包使用说明（2026-09-08 状态） | `历史（结论仍有效）` |
+| [`如何分发配置包.md`](package/如何分发配置包.md) | 如何把项目打包分发（2026-09-08） | `历史（结论仍有效）` |
+| [`HZMI_RMSIMULATION_CONFIG_GUIDE.md`](package/HZMI_RMSIMULATION_CONFIG_GUIDE.md) | 配置包使用指南（另一版本） | `历史（结论仍有效）` |
+| [`README_PACKAGE.md`](package/README_PACKAGE.md) | 配置包 README（另一版本） | `历史（结论仍有效）` |
+| [`pbstream_生成完成报告.md`](../archive/pbstream_生成完成报告.md) | pbstream 生成成功报告（2026-09 归档） | `历史（结论仍有效）` |
+| [`README.md`](../archive/reality_frozen/README.md) | 真车配置冻结快照说明（R5） | `历史（结论仍有效）` |
+| [`FROZEN.md`](../archive/reality_frozen/FROZEN.md) | 该目录"已冻结"的六行声明 | `历史（结论仍有效）` |
+
+## ⑥ 资产 / 流程
+
+| 文档 | 看它解决什么问题 | 状态 |
+|---|---|---|
+| [`smoke_test_runbook.md`](smoke_test_runbook.md) | 怎么跑 / 怎么判 / 错了怎么查（原生命令，无封装脚本） | `现行` |
+| [`map_assets.md`](map_assets.md) | `map/` 与 `PCD/` 里哪一份是当前默认资产 + 换图/回滚/清理 | `现行` |
+| [`worlds.md`](worlds.md) | 场地世界资产（RMUC2026 由 STL 生成）：来源、出生点、坑与复跑脚本 | `现行` |
+| [`robot_models.md`](robot_models.md) | 机器人模型槽位 `robot`：provenance、几何、安装决策、新旧对照、回滚 | `现行` |
+| [`fortress_sim_backend.md`](fortress_sim_backend.md) | `sim_backend:=gz`（Fortress）后端的 opt-in 用法与验证 | `现行` |
+| [`machine_hygiene_runbook.md`](machine_hygiene_runbook.md) | swap / zram / systemd-oomd 与收尾作用域的机器卫生 runbook | `现行` |
+| [`gazebo_gui_troubleshooting.md`](gazebo_gui_troubleshooting.md) | gzclient 加载不出来的取证、机理与修法 | `现行` |
+| [`debug_fastlio_cartographer.md`](debug_fastlio_cartographer.md) | 建图链路调试手册：分层判读 L0–L6 + 症状速查 + 踩坑 | `现行` |
+| [`continue_mapping.md`](continue_mapping.md) | 在上次基础上续建 + 存档 + 场地隔离的操作流程 | `现行` |
+| [`issues_and_findings.md`](issues_and_findings.md) | 实际踩到的故障根因库 + 静默失效坑 + 待办 | `现行` |
+| [`README.md`](../tools/README.md) | 工具脚本根目录索引 | `现行` |
+| [`ATTRIBUTION.md`](../tools/scripts/gzsim/ATTRIBUTION.md) | gzsim 后端的上游 pin 与许可证/署名 | `现行` |
+| [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) | 第三方组件署名与许可证清单 | `现行` |
+| [`README.md`](../third_party/README.md) | `third_party/` 的"只读对照"规则与当前内容 | `现行` |
+| [`map/attic/README.md`](../src/rm_nav_bringup/map/attic/README.md) | `map/attic/` 退役资产规则（只搬不删） | `现行` |
+| [`PCD/attic/README.md`](../src/rm_nav_bringup/PCD/attic/README.md) | `PCD/attic/` 退役资产规则（只搬不删） | `现行` |
+| [`geometry.md`](../src/rm_simulation/robot11_description/inventory/geometry.md) | robot11 几何量测（逐 link 包围盒、地面/雷达高度），自动生成 | `现行` |
+| [`mesh_inventory.md`](../src/rm_simulation/robot11_description/inventory/mesh_inventory.md) | robot11 mesh 清单（自动生成，勿手改） | `现行` |
+| [`rm_livox_gz_sim/doc/README.md`](../src/rm_simulation/rm_livox_gz_sim/doc/README.md) | `sim_backend:=gz` 的 opt-in 后端资产用法与编译步骤 | `现行` |
+| [`small_point_lio/README.md`](../src/rm_localization/small_point_lio/README.md) | vendored small_point_lio 的上游 README（含本仓联系方式补丁） | `参考（非本仓结论）` |
+| [`rm_ground_traversability/README.md`](../src/rm_perception/rm_ground_traversability/README.md) | header-only 坡度/台阶判定包：为什么有它、判据是什么 | `现行` |
+
+## 取代表（不再成立的说法）
+
+> 一行一条「旧说法 → 新结论」。**旧文档不改写**，只在有必要的几份顶部加 `STATUS`。看到左列，按右列理解；有冲突时**以新文档/新 commit 为准**。
+
+| # | 旧说法 | 出处（doc:line） | 新结论（doc § / commit） |
+|---|---|---|---|
+| 1 | **「插入一条冻结的重力中间帧（`odom_grav` / `world_grav`）是标准做法」** | `docs/gravity_alignment_ownership_survey.md:421`（§6.3 选项②）、`:516` | **18 个仓库/包 0 例**（`odom_base_link_practice_survey.md` §3.1；`frame_contract_v3_rationale.md` §3.1）。已被 **E1 估计器初始化对齐**取代：`frame_contract_v3.md` §2（无 `odom_grav`）/ §4；commit `952a6da` |
+| 2 | **pb2025 式「只填 `gravity` 参数」可行** | `docs/odom_base_link_practice_survey.md:889`（§9.4(1)(3)） | **不转世界系**：参数对且稳的 `v2b` 仍 **30.670°**；喂 pb2025 字面值**发散 897 m**（同文 §9.3 #5/#7、§9.4(2)；`frame_contract_v3_rationale.md` §7②）。必须动**初始旋转** |
+| 3 | **Autoware `imu_corrector` 会估 roll/pitch 并摆平 IMU** | 早期任务书前提；`docs/odom_base_link_practice_survey.md:365` 记为「对任务书前提的更正」 | **它不估、不做重力对齐**：只修 yaw rate 零偏/尺度 + 用 TF 把量测旋到 `base_link` + 协方差**只膨胀不旋转**（同文 R10/§3.4；`frame_contract_v3_rationale.md` §7③） |
+| 4 | **共轭代码出自 COD_NAV** | `docs/frame_contract_v3.md:176`（仍写「上游 `qza36/COD_NAV` 的 `small_point_lio_node.cpp:75`」） | `qza36/COD_NAV` **master 不含** `small_point_lio`（master = FAST-LIO 栈，`cod_nav_nav_stack_inventory.md:58`）；写法属上游 **`Yancey2023/small_point_lio@688d75c`**，COD 只是 vendor（`frame_contract_v3_rationale.md` §7④；本仓 `2a5a8b6` 修为合成） |
+| 5 | **LIO-SAM 的 `odom→base_link` 合成在 `src/transformFusion.cpp`** | 二手资料/早期稿的引用（`frame_contract_v3_rationale.md` §7⑤ 收口） | 现行 `master` **已无该文件**（只剩 `featureExtraction/imageProjection/imuPreintegration/mapOptmization` 四个 cpp），`TransformFusion` 类并入 **`imuPreintegration.cpp:46-51/124-130`**（`odom_base_link_practice_survey.md:754`） |
+| 6 | **波束出带率 41.2%** | `docs/session_digest.md:132`（亦见 `:155`、`:863`、`:1300`） | **39.6 / 40.4**：`sensor` 档 p2l 不丢束（<2%），出带的是**代价图高度带**；独立复跑 0.396（`tilted_lidar_fidelity.md` §K.1.3:1509）、首测 0.404（§J.5:1154）；`frame_contract_v3_rationale.md` §7⑥ |
+| 7 | **`0.348 µs/ray`（RayQuery 探针）** | `docs/gazebo_sim_migration_plan.md:1342`（§9.1.2 / 附录 A） | **无效**：`hit=0%` + mm/m 单位 bug（同文 §9.1.2、§9.6 #5 明写「不要引用」）。有效值 = CPU BVH **0.417–0.978 µs/ray**（§9.1.4）。⚠️ 该数字**不在** `livox_sensor_prior_art.md` §10（见待决 ⑤） |
+| 8 | **§J 那轮地面倾角 ≈1.05°（绝对值）** | `docs/tilted_lidar_fidelity.md:23`（§A）、`:85` | 世界/出生点在 2026-10-09 后已改，**该绝对值未复现**（`round_summary_gz_frames.md` §4 U7:380；`frame_contract_v3_rationale.md` §8 末）。只保留判决性签名：最大平面角 **0.046°** vs bug② 预测 **29.977°**（`tilted_lidar_fidelity.md:2961`） |
+| 9 | **`robot11_mount_axis` 参数** | 任务书命名；`docs/frame_contract_v3.md:105`、§10.1:577 记为「本仓不存在」 | 本仓**不存在**（全仓 grep 无命中）；实际是 **`livox_tilt_axis`**（`bringup_sim.launch.py:1407-1416`）。注：v3 引的 `L:1257-1268` 是旧行号，当前文件已偏移 |
+| 10 | **swap 已满（`SwapFree` ≈1 MiB）** | `docs/gazebo_gui_troubleshooting.md:155`（亦见 `:727`、`:824`、`:851`） | 实测 **used 194 / free 3901 MiB**（总 4095），旧快照来自**上一次开机**（`machine_hygiene_runbook.md:23`、`:35`） |
+| 11 | **COD 的 `base_link ≡ livox_frame`（C 型，`T_bl≡I`）** | `docs/cod_vs_ours_frame_architecture.md:420`（§6.1）、§3.3:202 | 实车实测 **A 型**：`T_bl` rpy ≈ **(−46.238°, −1.684°, 0)**、`odom→base_link` ≈ **0.030°** ⇒ **共轭 bug 真实生效**，不再被 `T_bl≡I` 掩盖。⚠️ 该实测**本仓尚无落盘文档**（见待决 ⑤） |
+| 12 | **`small_point_lio` 更快（所以用它的理由）** | `docs/cod_nav_macro_integration.md:124`（F3）、`docs/cod_nav_2026_deep_dive.md:71` | 本仓调参下实测 **慢 2.4×**：**13.75 vs 5.75 ms/帧**（`frame_contract_v3_measurements.md` §1、§3.1、§6.2）。**核心是否更快未证**（同工作量 A/B 未做） |
+| 13 | **「`fix=false` 组 6 例中 4 例发散」** | `952a6da` 的 commit message | **8 个 `fix=false` 变体：5 发散 + 2 云被拖花**，唯一稳的是把 init 推迟的 `v2b`（`0ee92b6`；`frame_contract_v3_rationale.md` §7⑦；`odom_base_link_practice_survey.md` §9.3 末） |
+
+## 待决（本次不删任何东西）
+
+**① 未跟踪的 md（内容有价值，建议 `git add` / 确认归属）**
+- `cartographer_map_stability_report.md`（仓库根，455 行英文）—— 与已入库的 [`cartographer_2d_occupancy_semantics.md`](cartographer_2d_occupancy_semantics.md)（624 行）**主题重叠**（同一批源码取证），二者择一或合并。
+- [`livox_viewer2_launch_notes.md`](livox_viewer2_launch_notes.md)（255 行）—— LivoxViewer2 崩溃取证 + ROS2 替代路线，独立信息，建议入库。
+
+**② 近重复（同一件事的多份文档）**
+- `docs/package/` 四份说明（`配置包使用说明` / `HZMI_RMSIMULATION_CONFIG_GUIDE` / `README_PACKAGE` / `README`）—— 2026-09-08 的四个版本。
+- `docs/mapping/建图操作指南.md` 与 `立即开始建图.md` —— 同一会话的两份状态快照。
+- `cod_nav_nav_stack_inventory.md` 与 `cod_nav_open_source_materials.md` —— 同一批 COD 仓库清单。
+- `cod_nav_comparison.md` 是 `cod_nav_design_thinking.md` 的素材，内容大幅重叠。
+
+**③ 主题已被更新文档覆盖（保留供回溯，不当现行依据）**
+- `rm_algorithm_overview.md` → [`architecture.md`](architecture.md) §3.2.1 + [`algorithm_matrix.md`](algorithm_matrix.md) §一；`rm_algolab_plan.md` → [`architecture.md`](architecture.md)
+- `docs/mapping/` 三份快照 → [`smoke_test_runbook.md`](smoke_test_runbook.md) §1/§5；`gravity_alignment_ownership_survey.md` 的 `world_grav` 推荐 → [`frame_contract_v3.md`](frame_contract_v3.md) §4
+
+**④ 入链情况**
+- 旧索引漏收 **39 份**（`cod_nav_*` 9、`gicp_*` 3、`scan_context_*` 3、`package/` 4、`continue_mapping` / `localization_slots` 等）；本次**全部收录**，本索引无孤儿。
+- 绝对零入链 4 份：`archive/pbstream_生成完成报告.md`、`archive/reality_frozen/FROZEN.md`、`robot11_description/inventory/mesh_inventory.md`、`tools/scripts/gzsim/ATTRIBUTION.md` —— 现已在 §⑤/§⑥ 收链。
+
+**⑤ 需要补的证据（是仓库缺数据，不是文档格式问题）**
+- 取代表 **#11** 的**实车实测原始数据**（`T_bl` rpy、`odom→base_link` 残差）在本仓**没有任何落盘文档**；建议补 `docs/cod_real_frame_measurement.md` 或并入 `odom_base_link_practice_survey.md` §10。
+- 取代表 **#7** 的引用位置：`livox_sensor_prior_art.md` §10 **没有**该数字，真实位置是 `gazebo_sim_migration_plan.md` §9.1.2 / §9.1.4。
+- `frame_contract_v3.md` 里的 `L:xxxx` 行号已随 launch 变长而偏移（例：`livox_tilt_axis` 标 `L:1257`，实际在 `:1407-1416`）。
+
+## 附录：清单与口径
+
+**102** 份自有（docs 86 / 根 3 / tools 2 / archive 3 / src 自有 7 / third_party 索引 1）· **119** 份第三方与子模块（src vendored 27 + `third_party/**` 92，**不进索引**，清单见 [`inventory.md`](inventory.md) 附录 B）· **124** 份临时/构建产物（`.tmp_*`、`.venv`、`install/`，**不计入**）。
 
 ## 维护约定
 
-| 变化 | 更新哪份 |
-|---|---|
-| 跑通一个组合 / 发现阻塞 | `algorithm_matrix.md` §四 / §五 |
-| 修好一个 bug | `issues_and_findings.md`（根因/修复/证据）+ `smoke_test_runbook.md` §10（现象表） |
-| 新增/替换算法、加装配级开关 | `algorithm_matrix.md` §一（+ §一.1 维度） |
-| 改动目录结构、分层、参数语义 | `architecture.md` |
-| 新名词 | `glossary.md` |
-| 3D→2D 做法/阈值变化 | `3d_to_2d_survey.md` |
-| TF 帧树/话题契约变化 | `tf_interface_contract.md` |
-
-> 规则：**同一件事只在一处维护**（例如实测状态只在 `algorithm_matrix.md` §四），其他地方只放指针。
+> **同一件事只在一处维护**，其它地方只放指针：跑通/阻塞 → `algorithm_matrix.md` §四/§五；修 bug → `issues_and_findings.md`；契约 → `tf_interface_contract.md`（规范性以 `frame_contract_v3.md` 为准）；推翻旧结论 → 本文件 [取代表](#取代表不再成立的说法) 加一行 + 旧文档加 `STATUS`；新增文档 → 本文件分组 + 重新生成 `inventory.md`。
