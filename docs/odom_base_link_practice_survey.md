@@ -762,3 +762,206 @@ README 说得很直白：
 ---
 
 *本文只做调研，不含任何代码/配置/launch 改动，未运行仿真。*
+
+---
+
+## 9. 本仓实测（2026-10-19）：斜装该怎么被「初始化」吸收 —— `gravity` 参数 vs `Set_init`
+
+> **本节是受控实验**（`gui:=False`、`robot:=robot11 robot11_mount:=sensor` 的**诚实斜装链**、
+> 静止、同一世界 `RMUL2026` / 出生点 / `spin_speed:=0.0`、`lio:=` 三档 + `small_point_lio` 五种初始化档）。
+> 原始数据全部在 `.tmp_gravtest/`（gitignored；每个变体一个目录：`probe.json` / `clouds.npz` /
+> `launch.log` / `params.txt` / `log_grep.txt`），汇总脚本同目录（`grav_probe.py`、`raw_world_fit.py`、
+> `squash.py`、`summarize.py`、`experiment.patch`）。
+> ⚠️ 本文档末尾那句「不含任何代码改动」是 2026-10-19 之前写的；§9 带了一个**默认 off** 的补丁（见 §9.5），
+> 默认路径实测与未打补丁的二进制**同值**（§9.3 的 `v0_base` vs `smoke0`）。
+
+### 9.1 先读代码：参数该覆盖什么、在哪个系（file:line）
+
+| 事实 | 落点 | 推论 |
+|---|---|---|
+| 传播用 `v += (R·acc + g)·dt` | `src/rm_localization/small_point_lio/src/small_point_lio/eskf.h:103` | `x.gravity` 是**世界系**重力；`x.acceleration` 是**body(IMU) 系**比力（`z = a_meas·scale − acc − ba`，`estimator.cpp:113`） |
+| `fix_gravity_direction: true` ⇒ `g = −|g|·Σacc/|Σacc|`（200 帧） | `small_point_lio.cpp:50-57`（HEAD） | **只借参数的模长**，方向来自 IMU；产出的正是"世界=初始传感器系"里的世界系重力 |
+| `false` ⇒ `g = parameters.gravity` 逐字 | `small_point_lio.cpp:57-59`（HEAD） | 参数被当成**世界系**用（R=I 时与世界=body 不可分 ⇒ pb2025 那种"body 系读法"在数值上也能自洽） |
+| 初始化**从不写** `rotation`；`x.rotation` 只在 `eskf.h:30` 初始化成 `Identity()` | `eskf.h:30`、`small_point_lio.cpp:45-79`（整块 `!is_init` 里没有 `rotation =`） | **世界系 = 初始化时刻的传感器系**（斜 30°）。参数再怎么写都不能把世界 z 摆正 |
+| 参数已存在：`parameters.cpp:22-25`；三份配置 `gravity: [0,0,-9.810]` + `fix_gravity_direction: true` | `config/mid360*.yaml` | **不需要新增参数名**；缺的是"初始旋转" |
+| 初始化把 `point_deque`（**雷达系**点）直接塞进 ivox | `small_point_lio.cpp:49-52`（HEAD） | 等价于假设 init 时 `R=I, t=0`。**一旦设 R≠I，初始地图会被整体转过 R** ⇒ E1 在 small_point_lio 里不是"5 行"，初始地图那 3 行必须一起改 |
+| 对照：`Set_init` 把 `rot_init`（实测重力→世界 −z 的最小旋转）写进 `x_.rot`，且 `x_.acc = −rot_init^T·g` | `point_lio/src/IMU_Processing.cpp:34-56`、`laserMapping.cpp:466-478` | point_lio 的 `mapping.gravity` 是**世界系目标**；它同时有"参数 + 初始旋转"两件事 |
+
+**⇒ STEP 0 的答案**：`gravity` 参数必须覆盖 **`state.gravity`（世界系）**，但**光覆盖它不够** ——
+必须**同时**覆盖 `state.rotation`（初始姿态）与 `state.acceleration`（body 系比力，`= −Rᵀg`），
+否则 `v̇ = R·acc + g ≠ 0`。`gravity` 参数本身的系：**世界系**（`fix_gravity_direction=false` 时逐字使用）。
+
+### 9.2 测量方法与它的标定（先证明能量出 0° vs 30°）
+
+**主指标（统一口径，跨 LIO 可比）**：把**同一朵原始云** `/livox/lidar/pointcloud`（~11.8k 点、`livox_frame`）
+经 TF 搬进 LIO 自己的世界系：
+`p_world = T_world←base · T_base←livox · p_raw`（前一条 = `odom→base_link`，后一条 = URDF 静态 `base_link→livox_frame`），
+然后在 **r∈[0.8, 8] m、且平面离世界原点 0.05–0.60 m** 的点上做 RANSAC（700 次、0.03 m）+ 内点 SVD 精修，
+**残差 = 地面法向 vs 该世界系 +z 的夹角**（法向朝 z>0），同时报内点数、内点残差 p50/p95、倾角轴。
+
+*为什么这样选点*（三点，都可复核）：
+1. **不能只用"正前方锥"**：物理斜装 −30° 下这台 Mid-360 的可见地面只落在**左侧/左后**（本次实测内点方位
+   **36°–167°**、r 0.6–5.5 m），正前方锥里地面点不足 ⇒ 会拟到竖直面。改用"可见地面 swath + 地面是唯一
+   离原点 0.05–0.60 m 的大平面"（传感器离地 0.216 m；墙/车身的 \|d\| ≥ 3 m 或内点跨度 < 1 m 被排除）。
+2. **自击/车身**：近场点团簇在 r<0.2 m、跨度 <0.1 m ⇒ 被 `r>0.8` + 内点跨度下限（max 1.5 m / min 1.0 m）排除。
+3. 同一帧另报一个**无先验**的"整帧最大平面"角作交叉检查（两者差 <0.06°）。
+
+**次指标**：`/cloud_registered` 自己 `frame_id` 上的同类拟合。只有 `small_point_lio` 的云够密（11917 点/帧）；
+`pointlio`/`fastlio` 的 `/cloud_registered` 只有 **145/146 点/帧**（`filter_size_*: 0.5` + `point_filter_num: 3`）⇒ 拟不出，
+所以主指标用原始云（这对三档 LIO 是同一份输入，反而更公平）。
+
+**标定（必须能分开 0° 与 30°，否则指标不能用）**：
+
+| 对照 | 主指标（原始云→TF） | 次指标（`/cloud_registered`） | `odom→base_link` rpy（独立证人） |
+|---|---|---|---|
+| `pointlio`（原生 `Set_init`，正向对照） | **0.166°** | 拟不出（145 点） | [-0.22, -0.07, 0.02]° |
+| `small_point_lio`（现状，基线） | **30.110°** | 30.057° | [30.03, -0.09, -0.13]° |
+| 同上，**未打补丁**的二进制（`smoke0`） | 30.129° | 30.053° | [30.05, -0.08, -0.14]° |
+| `fastlio`（不做对齐，负向对照） | **30.464°** | 拟不出（146 点） | [30.44, -0.39, -0.33]° |
+| 真值：`/odom_ground_truth` 的 base_link rpy | — | — | [0.017, 0.000, 0.004]°（车真的水平） |
+| IMU 加速度均值在 **base_link** 里 vs +z | — | — | **0.019°**（安装角是真的 −30°：在 imu 系里 29.98°） |
+
+⇒ **指标分辨力 = 30.1° / 0.17° ≈ 180×**，三个独立证人（原始云→TF、`/cloud_registered`、TF rpy）互相一致；
+指标自身的系统偏差 ≲0.15°（30.11° 比 IMU 实测倾角 29.98° 高 0.13°）。
+
+**障碍物压扁（§6.1 的 ~13%）—— 用数据量，不靠推**：取同一朵云的地面内点，随机 20 万对，比较
+**3D 距离 L3**（odom 是刚体变换 ⇒ L3 = 真值）与**投影到世界 z=0 的 2D 距离 L2**，按"与坡向的夹角"分箱：
+
+| 与坡向夹角 | 0–15° | 15–30° | 30–45° | 45–60° | 60–75° | 75–90° |
+|---|---|---|---|---|---|---|
+| 现状（残差 30.05°）的 L2/L3 中位 | **0.8683** | 0.8866 | 0.9181 | 0.9531 | 0.9823 | 0.9980 |
+| 已对齐（`v6b`，残差 0.55°） | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+
+⇒ 沿坡向 **压缩 13.17%**，垂直坡向 0.2%；理论值 `1−cos(30.05°)=13.44%` ⇒ 与"~13%"一致（差 0.27 个百分点）。
+**这就是 nav2 局部代价图（`global_frame: odom`）看到的那个压缩**：一个贴地、沿坡向 1 m 的足迹在 odom 里只剩 0.868 m。
+
+### 9.3 矩阵表（同一世界/出生点/时长；`gui:=False`、`spin_speed:=0.0`、静止）
+
+`fix` = `fix_gravity_direction`；`align` = 本补丁的 `gravity_align_mode`；残差单位 deg。
+`—` = 该档云太稀拟不出；「发散」= odom 位置在 15 s 内跑到百米量级、地面拟合无解。
+
+| # | 变体 | lio / align | gravity / fix | 残差（主，原始云→TF） | 残差（次，`/cloud_registered`） | `odom→base_link` rpy | 判决 |
+|---|---|---|---|---|---|---|---|
+| 1 | `v0_base`（现状） | spl / off | (0,0,−9.810) / true | **30.110** | 30.057 | [30.03,−0.09,−0.13] | 稳定，未对齐（= 安装角） |
+| 2 | `smoke0`（**未打补丁**二进制） | spl / — | 同上 | 30.129 | 30.053 | [30.05,−0.08,−0.14] | 回归基准：与 #1 同值 |
+| 3 | `v3_pointlio`（正向对照） | pointlio（原生 Set_init） | (0,0,−9.81) | **0.166** | — | [−0.22,−0.07,0.02] | 稳定，已对齐 |
+| 4 | `v4_fastlio`（负向对照） | fastlio | — | **30.464** | — | [30.44,−0.39,−0.33] | 稳定，未对齐 |
+| 5 | `v1_worldparam` | spl / off | **(0,−4.905,−8.495)** / false（pb2025 字面值） | **发散** | 发散 | [110.67,−27.07,−49.54] | **发散**：odom 平移 (−716,−530,−275) m |
+| 6 | `v2_bodyparam` | spl / off | (0,+4.905,−8.495) / false（= 代码自动算出的那一个） | **发散** | 发散 | [43.08,−0.95,−25.22] | **发散**：(212,−933,−848) m |
+| 7 | `v2b_lateinit` | spl / off | (0,+4.905,−8.495) / false + `init_map_size=120000` | **30.670** | 30.597 | [30.62,−0.23,0.16] | **稳定、仍 30.6°** ⇒ 参数本身不转世界系 |
+| 8 | `v5_imu` | spl / **imu** | (0,0,−9.810) / true | **0.519** | 0.615 | [0.39,−0.33,−0.26] | 稳定，已对齐 |
+| 9 | `v5d_imu`（重跑） | spl / **imu** | 同上 | **0.564** | 0.566 | [0.37,−0.30,−0.28] | 稳定；日志 `rot=(-30.005,−0.012,0.003)°` |
+| 10 | `v5b_ginit` | spl / imu + `gravity_init` | (0,0,−9.810) / false | **发散** | 发散 | [−142.8,1.4,37.1] | **发散** 546 m（早期初始化） |
+| 11 | `v5c_deque` | spl / imu（deque 均值） | (0,0,−9.810) / false | **发散** | 发散 | [75.2,51.0,−8.4] | **发散**（早期初始化） |
+| 12 | `v6_urdf` | spl / **urdf** (−30,0,0) | (0,0,−9.810) / false | **3.132**（p95 25 mm） | 0.893 | [0.57,−0.61,0.19] | 未发散但**云被拖花**（早期初始化） |
+| 13 | `v6b_urdf` | spl / **urdf** (−30,0,0) | (0,0,−9.810) / true | **0.474**（p95 4.8 mm） | 0.562 | [0.27,−0.32,−0.12] | 稳定；**本表最优** |
+| 14 | `v7_hybrid` | spl / hybrid (−30,0,0) | (0,0,−9.810) / false | **2.995**（p95 26 mm） | 0.951 | [0.65,−0.60,0.09] | 云被拖花（早期初始化） |
+| 15 | `v7b_hybrid` | spl / **hybrid** (−30,0,0) | (0,0,−9.810) / true | **0.581**（p95 4.0 mm） | 0.581 | [0.44,−0.24,−0.12] | 稳定；日志 `Δ(URDF,IMU)=0.011° ⇒ INFO/URDF` |
+| 16 | `v8_hybrid_bad` | spl / hybrid (**0,+30,0** 错轴) | (0,0,−9.810) / false | **发散** | 发散 | [23.4,−28.8,−133.5] | 早期初始化 + 那次**没有 IMU 可用** ⇒ 跳过互检 ⇒ 发散 |
+| 17 | `v8b_hybrid_bad` | spl / hybrid (**0,+30,0** 错轴) | (0,0,−9.810) / true | **0.646** | 0.685 | [0.45,−0.35,−0.09] | 日志 `Δ=42.206° ≥ 5° ⇒ ERROR，改用 IMU` ⇒ **恢复**（否则会是 30°） |
+| 18 | `v6c_urdf_long` | spl / urdf (−30,0,0) | (0,0,−9.810) / true，**settle 45 s** | 见下 | 见下 | 见下 | 漂移检验（同档、更长窗） |
+
+**每档的 STEP-3 附带量**（表格太长，只列结论；逐档数字在 `.tmp_gravtest/<tag>/probe.json`）：
+
+| 量 | 实测（各档共同） | 读法 |
+|---|---|---|
+| `/cloud_registered` | `frame_id` = `odom`（spl）/ `camera_init`（pointlio、fastlio）；**9.999–10.000 Hz**；11917 点/帧（spl）/ 145–147（pointlio、fastlio） | 帧名随槽位变（`camera_init` 与 `odom` 同向，adapter 只做杆臂），频率/点数与 LIO 无关 |
+| `/scan` | `frame_id` = `base_link`（`robot11_mount:=sensor`）；**1462 束 / 676–687 有限 / 跨度 5.672–5.686 m**（lo 0.189、hi 5.861） | **odom 斜不斜都不改 `/scan` 的波束集合** —— 这一档 linefit `gravity_aligned_frame:=base_link`、p2l `target_frame:=base_link`，两者都在 base_link 里算 ⇒ 「odom 斜 ⇒ 丢掉哪些波束」只在默认/`urdf` 档成立（§I 的表：755 vs 948） |
+| RTF | 0.400–0.409（pointlio 0.405、fastlio 0.375） | 对齐/未对齐**同量级**（本实验静止、无导航栈） |
+| RSS（`small_point_lio`） | 33–35 MB（`off`/`imu`/`urdf`/`hybrid` 全一样）；pointlio 83 MB | 补丁**零运行时成本** |
+| 初始化耗时（墙钟代理：首个 gzserver 插件日志 → LIO 首条日志） | `fix=true`（200 帧门）**7.6–8.2 s**；`fix=false`（第一帧就 init）**3.5–4.2 s**；`v2b`（点云数门 120k）7.0 s | 200 帧门 ≈ 2.0 s 机时（仿真 RTF≈0.4 ⇒ 约 4 s 墙钟）；这是"要不要省这 2 s"的实测代价 |
+| 话题发布者数 | `/livox/lidar`、`/cloud_registered`、`/scan`、`/odom`、`/segmentation/obstacle` **各 = 1**（每档都查） | 契约不变 |
+| 不稳定性 | 见 §9.3 的「发散」6 例 + 2 例「云被拖花」 | 全都发生在 `fix=false`（早期初始化）那一组 |
+
+### 9.4 判决
+
+**(1) 代码期望哪个约定？** `state.gravity` = **世界系**（`eskf.h:103`）；`fix_gravity_direction=false` 时
+`parameters.gravity` 被**逐字当世界系重力**用。pb2025 的 `[0.0, −4.9, −8.487]` 在数值上
+= `R_x(−30°)·(0,0,−9.81)`（把"世界向下"按安装角转一次），它在**我们的**代码里恰好是**错的那一边**：
+- 我们的代码自动算出的正确世界系重力 = **(0, +4.905, −8.495)**（= `R_x(+30°)·(0,0,−9.81)`，因为世界=传感器系）；
+- 把 pb2025 的字面值喂进去（`v1`）⇒ 与实测比力差 ~9.8 m/s² ⇒ **15 s 发散 897 m**；
+- 即使喂**对的**那一个（`v2`/`v2b`）⇒ 世界 z **不会**被摆正：`v2b`（把初始化推迟到落定后）稳稳停在 **30.67°**。
+
+**(2) pb2025 的"gravity 当初始化参数"能复现他们的结果吗？** 在我们的 `small_point_lio` 里 **不能**。
+他们那套能成立，是因为 point_lio 里 `gravity` 参数**只是 Set_init 的目标**、真正摆正世界的是
+`kf.x_.rot = rot_init`（`laserMapping.cpp:472-477`）—— 也就是"参数 + 初始旋转"两件事。**单搬数字不行**。
+
+**(3) 只设参数 vs 设初始旋转**：`v2b`（只设参数、值还对、稳定）**30.67°**；`v6b`（urdf 先验 + 初始旋转）**0.474°**。
+⇒ **必须动初始旋转**，且（因为 §9.1 那条初始地图的假设）必须**同时**把初始地图放进世界系。
+
+**(4) 残差 < 0.5° 吗？** **勉强，只有 urdf 先验这一档过线**：`v6b` **0.474°**（边际）；
+`imu` 0.519–0.564°；`hybrid` 0.581°；pointlio 0.166° 才是干净地 < 0.5°。
+而且这 0.5° **不是初始化误差**：`v5d` 的日志显示初始旋转 `R_world_body rpy = (-30.005, −0.012, 0.003)°`
+（准到 0.005°），`v6b` 的先验更是精确的 −30.000° —— 残差却仍有 0.47–0.56° ⇒ 误差产生在**初始化之后**
+（本 LIO 用 0.2 m 体素地图 + 单时间戳帧的固有姿态偏置/漂移；pointlio 的 0.166° 说明链路本身能到 0.2°）。
+`v6c`（同档、settle 45 s）见下。
+
+**(5) 三个来源怎么选**：
+| 来源 | 需要什么 | 本仓实测残差 | 优点 | 风险 |
+|---|---|---|---|---|
+| `imu`（200 帧均值，= Set_init） | IMU + 静止 2 s | 0.519–0.564° | **不需要任何安装参数**；真机通用 | 必须静止；起步就在动 ⇒ 均值带误差（`v5c` 用 1 s 内的 deque 均值 ⇒ 发散） |
+| `urdf`（先验 rpy） | URDF（或手填 `gravity_align_rpy`） | **0.474°** | **不需要 IMU、不需要静止**，瞬时 | 先验错（换支架/轴写错）⇒ 世界按错的角度摆正、**没有任何告警** |
+| `hybrid`（先验 + IMU 互检） | 两者 | 0.581°（Δ=0.011°） | 先验给精度，**Δ 当健康信号**：≥5° ERROR + 回退 IMU（`v8b`：Δ=42.2° ⇒ 恢复 0.646°，否则 30°） | 需要 IMU（无 IMU 时退回纯先验、跳过互检：`v8_hybrid_bad` 就是这么发散的） |
+
+**推荐 = hybrid + 保留 200 帧门**（本仓）。仿真里 Δ=0.011° ⇒ 走 URDF、0.58°；
+故意把轴写错 Δ=42.2° ⇒ ERROR + 回退 IMU、0.65°。真机"倾角已知到 ±1°"落在 Δ<2° 的 INFO 带（用先验），
+若 URDF 与实际差 3°（换支架）则落进 2–5° 的 WARN 带（改用 IMU）⇒ 正好覆盖两种现实。
+
+**(6) 200 帧门是**独立**的第二件事（本实验最意外的发现）**：`fix_gravity_direction=false` 会把初始化提前到
+**第一帧点云**（≈0.1–1 s），正好落在 Gazebo 出生时的**掉落/落定窗口** ⇒ 6 个早期初始化变体里
+**4 个发散**（v1、v2、v5b、v5c，v8 也发散）；另 2 个（v6、v7）没发散但**云被拖花**（平面 p95 25–26 mm
+vs 稳定档 4–8 mm、原始云残差 3.0–3.1°、与 TF rpy 自相矛盾）。把**同一条** `fix=false` 路径的初始化
+推迟到落定之后（`v2b`：`init_map_size 10 → 120000`）就**稳定、不发散**（30.67°）。
+⇒ 早期初始化的问题与重力值无关，是"静态初始化"这个前提被破坏。
+**落地含义**：`fix_gravity_direction=false` 这条"省掉 2 s"的路在本仓仿真里**不可用**；E1 应当挂在
+"机器人已经静止"这个门上（仿真=200 帧 IMU 均值；真机建议换成显式的静止检测，见 §9.6）。
+
+### 9.5 补丁、代价、回滚
+
+补丁（`.tmp_gravtest/experiment.patch`，`git diff --stat` = **3 文件 / +211 −5 行**）：
+`parameters.h`（+9）、`parameters.cpp`（+14）、`small_point_lio.cpp`（+193，其中 ~120 行是注释/日志/回退分支）。
+新参数三个，**全部带默认值**（现有 YAML 一个字节都不用改）：
+```yaml
+gravity_align_mode: "off"      # off | urdf | imu | hybrid   （默认 off = 原行为）
+gravity_align_rpy:  [-30.0, 0.0, 0.0]   # URDF 先验：车体水平时雷达在世界里的 rpy(度)
+gravity_init:       [0.0, 4.893, -8.481]  # 可选：body 系重力向下（免得等 200 帧；= 静止时加速度均值的反向）
+```
+核心数学只有 12 行（其余是 fallback/日志）：
+```cpp
+// down_body: (a) gravity_init 参数 / (b) fix_gravity_direction 的 200 帧均值 / (c) IMU deque 均值
+const Eigen::Vector3d axis = down_body.cross(down_world);       // down_world = parameters.gravity
+const double s = axis.norm(), c = down_body.dot(down_world);
+Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+if (s > 1e-12) R = exp<double>(axis / s * std::atan2(s, c));    // 最小旋转：body 重力 → 世界 −z
+estimator.kf.x.rotation = R;                                    // ★ 缺的就是这一行
+estimator.kf.x.gravity = R * down_body;                          // ≈ (0,0,−|g|)
+estimator.kf.x.acceleration = -(R.transpose() * estimator.kf.x.gravity);   // body 系比力
+```
+**外加 3 行**（`gravity_aligned` 时）把初始地图按出点公式放进世界系（`R·(R_L_I·p+T_L_I)+t`），
+否则初始地图被整体转过 R（§9.1 最后一条）。
+
+*代价*：RSS **33–35 MB 不变**；RTF 0.40–0.41 与基线同量级（静止、无导航栈，未量导航下的差别）；
+初始化多等 200 帧（真机 2.0 s；本仿真墙钟 ~4 s @RTF 0.4）。
+*风险*：`urdf`/`hybrid` 的先验若与实物不符，会**按错的角度把 odom 摆正**（urdf 档无告警，hybrid 有 Δ 门槛）。
+*默认路径不变*：`v0_base`（已打补丁、`mode=off`）30.110°/30.057° vs `smoke0`（未打补丁）30.129°/30.053°，
+TF rpy [30.03,−0.09,−0.13] vs [30.05,−0.08,−0.14] ⇒ 差在跑间噪声内。
+*回滚*：`git checkout -- src/rm_localization/small_point_lio/src/small_point_lio/{parameters.h,parameters.cpp,small_point_lio.cpp}`
+（或反向应用 `.tmp_gravtest/experiment.patch`）；不删任何槽位、不动契约（五个关键话题发布者数仍各 = 1）。
+
+### 9.6 没能验证 / 诚实边界
+
+1. **0.5° 的组成（漂移 vs 稳态偏置）**：`v6c`（同档、settle 45 s）只给一个时间点的对照，
+   没有逐帧姿态序列 ⇒ 不能把 0.47–0.58° 拆成"init 后立刻就有"与"随时间长大"两份。
+2. **早期初始化发散的确切机理**：只证明了与"初始化落在出生掉落窗口"的相关性（4/6 发散、把同一个
+   `fix=false` 的 init 推迟就稳定），**没有**做逐帧归因（哪一帧开始偏、是 IMU 更新踢的还是点更新拉的）。
+3. **真机**：全部数据来自仿真（gazebo、静止、无噪声 IMU、URDF 精确）。真机上"倾角已知到 ±1°"的
+   先验误差、IMU 零偏/噪声、起步就在动，都会改变 §9.4 的表；`hybrid` 的 Δ 门槛（2°/5°）在真机上
+   应当按你们的安装公差重定（±1° ⇒ 2° 门槛偏松还是偏紧，需实测定）。
+4. **`/scan` 侧的压缩**：本实验的 `robot11_mount:=sensor` 档把 linefit/p2l 都放在 base_link 里，
+   所以 odom 斜不斜 **不改** `/scan` 的波束集合（实测差 <2%）。"odom 斜 ⇒ 丢掉哪些波束"只在
+   默认/`urdf` 档成立（§I 的 755 vs 948），本轮**没有**重测那两档。
+5. **pb2025 的真机/上游代码**：本节只判"在我们 vendored 的 small_point_lio 里，这种参数式做法成立吗"（不成立）；
+   他们仓库里的 `gravity` 到底是"世界系目标"还是"body 系实测值"，仍以
+   `docs/gravity_alignment_ownership_survey.md` §7.3 的"未验证"为准 —— 我们的实验能解释**为什么**
+   两种读法在他们那儿都能自洽（有 Set_init 时，参数=实测值 ⇒ rot_init≈I ⇒ 世界不转也是"自洽"的，
+   但 odom 就是斜的；参数=世界目标 ⇒ rot_init 真的把世界转正）。

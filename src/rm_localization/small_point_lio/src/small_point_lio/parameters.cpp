@@ -23,6 +23,20 @@ namespace small_point_lio {
         gravity << gravity_temp[0], gravity_temp[1], gravity_temp[2];
         check_satu = node.declare_parameter<bool>("check_satu");
         fix_gravity_direction = node.declare_parameter<bool>("fix_gravity_direction");
+        // ===== 实验补丁（三个键都用**带默认值**的声明 ⇒ 现有 YAML 一个字节都不用改）=====
+        gravity_align_mode = node.declare_parameter<std::string>("gravity_align_mode", "off");
+        {
+            auto rpy_temp = node.declare_parameter<std::vector<double>>("gravity_align_rpy", std::vector<double>{});
+            if (rpy_temp.size() == 3) {
+                gravity_align_rpy << rpy_temp[0], rpy_temp[1], rpy_temp[2];
+                gravity_align_rpy_set = true;
+            }
+            auto gravity_init_temp = node.declare_parameter<std::vector<double>>("gravity_init", std::vector<double>{});
+            if (gravity_init_temp.size() == 3) {
+                gravity_init << gravity_init_temp[0], gravity_init_temp[1], gravity_init_temp[2];
+                gravity_init_set = true;
+            }
+        }
         satu_acc = node.declare_parameter<double>("satu_acc") * 0.99;
         satu_gyro = node.declare_parameter<double>("satu_gyro") * 0.99;
         acc_norm = node.declare_parameter<double>("acc_norm");
