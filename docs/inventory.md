@@ -3,24 +3,26 @@
 > **口径**：`git ls-files '*.md'` + `find`（含未跟踪/子模块内部），排除 `.git/`。
 > **行数** = `wc -l`；**最后提交** = `git log -1 --format='%h %ad' --date=short -- <file>`（`未入库` = 尚无提交）。
 > 生成于 2026-10 仓库整理；本清单是 [`README.md`](README.md) 的明细附表，**不移动/不改写任何文档**。
+> 「最后提交」= `本次整理` 的行属于本次文档整理提交，记录的是**整理后**的行数；其余行为该文件最近一次实质提交。
 
 ## 计数
 
 | 类别 | 份数 | 处置 |
 |---|---:|---|
-| 本仓自有（docs / 根 / tools / archive / src 自有 / third_party 索引） | **102** | 收入本清单 A 表 + `README.md` 索引 |
+| 本仓自有（docs / 根 / tools / archive / src 自有 / third_party 索引） | **103** | 收入本清单 A 表 + `README.md` 索引 |
 | 第三方 vendored + 子模块内部 | **119** | 附录 B（**不进索引**，只列出） |
 | 临时 / 构建产物（`.tmp_*`、`.venv`、`install/`） | **124** | 附录 C（不计入仓库文档） |
-| 合计 | **345** | — |
+| 合计 | **346** | — |
 
-## A. 本仓自有文档（102 份，按索引分组）
+## A. 本仓自有文档（103 份，按索引分组）
 
-### ① 入门 / 总览（12 份）
+### ① 入门 / 总览（13 份）
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
 | `README.md` | 362 | `51ba382 2026-09-20` | 仓库总入口：来源与致谢、话题接口、Docker/原生两种环境、启动示例 |
-| `docs/README.md` | 199 | `本次整理` | 本文件 —— 全仓 md 的唯一索引（含取代表与待决清单） |
+| `docs/README.md` | 200 | `本次整理` | 本文件 —— 全仓 md 的唯一索引（含取代表与待决清单） |
+| `docs/inventory.md` | 288 | `本次整理` | 本清单：逐份文档的行数 / 最后提交 / 一行定位（本索引的明细附表） |
 | `docs/round_summary_gz_frames.md` | 512 | `68d936f 2026-10-18` | 上一轮（10-18）四条线合并总结：外参守卫 / 机器卫生 / Fortress 后端 / COD 帧对账，含 24 条缺口 |
 | `docs/architecture.md` | 658 | `b2c8e1a 2026-10-05` | 目录结构 + 分层概念：为什么这么切 2D/2.5D/3D、参数在哪 |
 | `docs/glossary.md` | 76 | `aa64817 2026-09-21` | 名词一句话定义 + 指向详述章节 |
@@ -43,9 +45,9 @@
 | `docs/params_ownership_checklist.md` | 95 | `712741f 2026-10-07` | 参数归属清单（R1–R5）：算法参数该放哪个包 |
 | `docs/odom_base_link_practice_survey.md` | 970 | `c996365 2026-10-19` | `odom→base_link` 斜装/云台 15 行开源对照 + §9 重力初始化 18 变体实测（E1 的证据） |
 | `docs/lio_extrinsic_application_survey.md` | 371 | `92992ab 2026-10-18` | 外参该在哪一步乘一次：四家源码对照 + 本仓两处变换判决 |
-| `docs/gravity_alignment_ownership_survey.md` | 515 | `3017355 2026-10-19` | 重力对齐归谁（IMU/LIO/重定位/感知四层调研） |
+| `docs/gravity_alignment_ownership_survey.md` | 516 | `本次整理` | 重力对齐归谁（IMU/LIO/重定位/感知四层调研） |
 | `docs/relocalization_practice_survey.md` | 456 | `e065107 2026-10-19` | 全局重定位 vs 局部跟踪的工业实践 + `map→odom` 到底归谁 |
-| `docs/cod_vs_ours_frame_architecture.md` | 607 | `057294c 2026-10-18` | COD 实车 vs 本仓帧架构对账：base_link 约定分叉、共轭 bug 为何被掩盖 |
+| `docs/cod_vs_ours_frame_architecture.md` | 608 | `本次整理` | COD 实车 vs 本仓帧架构对账：base_link 约定分叉、共轭 bug 为何被掩盖 |
 
 ### ③ 算法 / 原理（27 份）
 
@@ -83,8 +85,8 @@
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
-| `docs/frame_contract_v3_measurements.md` | 344 | `8152e57 2026-10-19` | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 |
-| `docs/tilted_lidar_fidelity.md` | 2987 | `fe0dc31 2026-10-18` | 雷达斜 30° 的逐帧点云账本 + 代价图归因 + bug①② 的判决性签名 |
+| `docs/frame_contract_v3_measurements.md` | 345 | `8152e57 2026-10-19` | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 |
+| `docs/tilted_lidar_fidelity.md` | 2988 | `本次整理` | 雷达斜 30° 的逐帧点云账本 + 代价图归因 + bug①② 的判决性签名 |
 | `docs/lio_drift_diagnosis.md` | 598 | `6ca978e 2026-10-07` | LIO 漂移分段诊断："才跑一会儿就飘"是否合理（唯一复现 = 高角速度甩转） |
 | `docs/lio_divergence_no_impact.md` | 505 | `95846c3 2026-10-07` | "没撞击里程计自己飘"的整栈归因 + 限速 A/B |
 | `docs/path_clearance_and_contact.md` | 615 | `819160c 2026-10-07` | 贴膨胀边→撞进去→定位跟着坏：实测、归因、修复 |
@@ -103,7 +105,7 @@
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
-| `docs/session_digest.md` | 1323 | `51d2240 2026-10-11` | 2026-10-05~08（161 提交）的总汇总 |
+| `docs/session_digest.md` | 1324 | `本次整理` | 2026-10-05~08（161 提交）的总汇总 |
 | `docs/timestamp_construction_audit.md` | 571 | `5c3d7af 2026-10-06` | 全仓时间戳构造审计：1 ns 截断类 bug 及其它戳/队列/QoS 风险 |
 | `docs/build_optimization.md` | 552 | `6ae2ada 2026-10-05` | 构建配置审计（colcon 默认不设 `CMAKE_BUILD_TYPE`）与实测 |
 | `docs/research_p2l_scan_stall.md` | 523 | `9c487ad 2026-09-23` | 旧链（livox→linefit→p2l）`/scan` 永久停发的调研（两条本仓缺陷） |

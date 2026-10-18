@@ -1,6 +1,6 @@
 # `docs/` 文档索引（唯一入口）
 
-> **2026-10 仓库整理**：覆盖**全仓 102 份自有 Markdown**（旧索引漏收 39 份）。每条 = 「链接 + 解决什么问题 + 状态」；**不移动、不改写**任何既有文档（只在 5 份顶部加了一行 `STATUS`）。
+> **2026-10 仓库整理**：覆盖**全仓 103 份自有 Markdown**（旧索引漏收 39 份）。每条 = 「链接 + 解决什么问题 + 状态」；**不移动、不改写**任何既有文档（只在 4 份顶部加了一行 `STATUS`）。
 > 状态四值：`现行` / `历史（结论仍有效）` / `已被取代（见 X）` / `参考（非本仓结论）`。逐份明细见 [`inventory.md`](inventory.md)；不再成立的说法见 [取代表](#取代表不再成立的说法)。
 
 ## 先看这三份
@@ -19,6 +19,7 @@
 |---|---|---|
 | [`仓库根 README.md`](../README.md) | 仓库总入口：来源与致谢、话题接口、Docker/原生两种环境、启动示例 | `现行` |
 | [`本索引 docs/README.md`](README.md) | 本文件 —— 全仓 md 的唯一索引（含取代表与待决清单） | `现行` |
+| [`inventory.md`](inventory.md) | 本清单：逐份文档的行数 / 最后提交 / 一行定位（本索引的明细附表） | `现行` |
 | [`round_summary_gz_frames.md`](round_summary_gz_frames.md) | 上一轮（10-18）四条线合并总结：外参守卫 / 机器卫生 / Fortress 后端 / COD 帧对账，含 24 条缺口 | `现行` |
 | [`architecture.md`](architecture.md) | 目录结构 + 分层概念：为什么这么切 2D/2.5D/3D、参数在哪 | `现行` |
 | [`glossary.md`](glossary.md) | 名词一句话定义 + 指向详述章节 | `现行` |
@@ -192,7 +193,7 @@
 
 ## 附录：清单与口径
 
-**102** 份自有（docs 86 / 根 3 / tools 2 / archive 3 / src 自有 7 / third_party 索引 1）· **119** 份第三方与子模块（src vendored 27 + `third_party/**` 92，**不进索引**，清单见 [`inventory.md`](inventory.md) 附录 B）· **124** 份临时/构建产物（`.tmp_*`、`.venv`、`install/`，**不计入**）。
+**103** 份自有（docs 87 / 根 3 / tools 2 / archive 3 / src 自有 7 / third_party 索引 1）· **119** 份第三方与子模块（src vendored 27 + `third_party/**` 92，**不进索引**，清单见 [`inventory.md`](inventory.md) 附录 B）· **124** 份临时/构建产物（`.tmp_*`、`.venv`、`install/`，**不计入**）。
 
 ## 维护约定
 
