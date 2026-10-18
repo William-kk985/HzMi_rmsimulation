@@ -69,10 +69,68 @@ namespace small_point_lio {
         std::string lidar_frame = declare_parameter<std::string>("lidar_frame");
         lidar_frame_ = lidar_frame;   // §N.5 守卫 #1 的日志要用（out-of-line 函数里读成员）
         bool save_pcd = declare_parameter<bool>("save_pcd");
+        // ===================== 本仓新增：统一输出契约（选项 U，2026-10-20）=====================
+        // 两个键都**带默认值** ⇒ 现有 YAML（三份 config + 所有 launch 路径）一个字节都不用改。
+        //   publish_tf      = true  ：现状（本节点广播 odom→base_link）
+        //   odom_convention = "body"：现状（/Odometry = 合成 T_ob，与 TF 逐位同值）
+        // 组合约定（**写死在这里，launch 也按这里传**）：
+        //   body   + publish_tf=true   → 完全现状（默认路径）。
+        //   body   + publish_tf=false  → /Odometry 仍是合成 T_ob，但**不广播 TF**（adapter 可拿它当输入）。
+        //   sensor + publish_tf=false  → /Odometry 是 T_ol、不广播 TF（**选项 U 的正式形态**：
+        //                                adapter 用同一份 URDF 外参合成 odom→base_link）。
+        //   sensor + publish_tf=true   → **矛盾组合**（本节点发 odom→base_link 与 adapter 撞车；
+        //                                发 odom→livox_frame 又会和 URDF 的 base_link→livox_frame
+        //                                争夺同一个 child）⇒ 记 ERROR，强制按 false 执行（不中止节点，
+        //                                与 §N.5 守卫的"只诊断不联锁"口径一致）。
+        {
+            const auto logger = rclcpp::get_logger("small_point_lio");
+            const std::string odom_convention = declare_parameter<std::string>("odom_convention", "body");
+            const bool publish_tf = declare_parameter<bool>("publish_tf", true);
+            if (odom_convention == "sensor") {
+                odom_convention_sensor_ = true;
+                odom_child_frame_ = lidar_frame;
+                publish_tf_ = false;
+                if (publish_tf) {
+                    RCLCPP_ERROR(logger,
+                                 "参数组合矛盾：odom_convention=sensor 与 publish_tf=true 不能同时成立 —— "
+                                 "sensor 档本节点**不发任何 TF**（odom→base_link 归 lio_tf_adapter，"
+                                 "契约 v3 I2；发 odom→%s 则会与 URDF 的 base_link→%s 争夺同一个 child）。"
+                                 "已强制按 publish_tf:=false 执行；若这是有意的请显式传 publish_tf:=false",
+                                 odom_child_frame_.c_str(), odom_child_frame_.c_str());
+                }
+                RCLCPP_INFO(logger,
+                            "统一输出契约：odom_convention=sensor ⇒ /Odometry 发**原始状态** T_ol"
+                            "（frame_id=odom、child_frame_id=%s）、本节点**不广播 TF**；"
+                            "odom→base_link 由 lio_tf_adapter 用同一份 URDF 外参合成"
+                            "（T_ob = T_ol·T_bl，一次右乘）。本档**不再查询** %s↔base_link 的 TF ⇒ "
+                            "那条静态 TF 缺失时 /Odometry 照发（旧实现会连里程计一起丢）",
+                            odom_child_frame_.c_str(), odom_child_frame_.c_str());
+            } else {
+                if (odom_convention != "body") {
+                    RCLCPP_ERROR(logger,
+                                 "odom_convention=%s 不是可用取值（body | sensor）⇒ 按 body 处理"
+                                 "（/Odometry = 合成 T_ob=T_ol·T_bl；publish_tf=%s）。"
+                                 "若你是想启用统一输出契约，请传 odom_convention:=sensor",
+                                 odom_convention.c_str(), publish_tf ? "true" : "false");
+                }
+                odom_convention_sensor_ = false;
+                odom_child_frame_ = "base_link";
+                publish_tf_ = publish_tf;
+                RCLCPP_INFO(logger,
+                            "统一输出契约：odom_convention=body（默认）⇒ /Odometry = 合成 T_ob"
+                            "（与 odom→base_link 逐位同值）、publish_tf=%s%s",
+                            publish_tf_ ? "true（广播 odom→base_link，= 改动前行为）" : "false（**不广播 TF**）",
+                            publish_tf_ ? "" : " ⇒ 需要另一个节点（lio_tf_adapter）来发 odom→base_link");
+            }
+        }
         small_point_lio = std::make_unique<small_point_lio::SmallPointLio>(*this);
         odometry_publisher = create_publisher<nav_msgs::msg::Odometry>("/Odometry", 1000);
         pointcloud_publisher = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 1000);
-        tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        if (publish_tf_) {
+            // sensor 档/显式 publish_tf:=false 时**不创建** broadcaster：图里连 /tf 的 publisher 都
+            // 不出现 ⇒ "谁在发 odom→base_link" 用 `ros2 node info` 就能一眼看穿（契约 I1/I2 的可查性）。
+            tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        }
         tf_buffer = std::make_unique<tf2_ros::Buffer>(get_clock());
         tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
         if (save_pcd) {
@@ -182,7 +240,13 @@ namespace small_point_lio {
             // odometry_msg.twist.twist.angular.y = odometry.angular_velocity.y();
             // odometry_msg.twist.twist.angular.z = odometry.angular_velocity.z();
 
-            tf_broadcaster->sendTransform(transform_stamped);
+            // ★ 本仓新增（选项 U）：publish_tf=false 时**不广播**（/Odometry 照发，内容仍是合成 T_ob）。
+            //   只把**一次调用**包进分支：上面那些浮点表达式（tf2::Transform 的两次乘法、toMsg）
+            //   一个字符都没动 ⇒ 默认路径（publish_tf_ 为 true）的数值与改动前逐位相同
+            //   （bag 重放 A/B 见 docs/frame_contract_v3_measurements.md §4）。
+            if (publish_tf_) {
+                tf_broadcaster->sendTransform(transform_stamped);
+            }
             odometry_publisher->publish(odometry_msg);
 
             // ============== 本仓新增（§N.5 守卫 #2）：每帧位姿一致性断言的**取数点** ==============
@@ -205,8 +269,16 @@ namespace small_point_lio {
             //   把守卫的浮点代码放进 odom 回调所在 TU 会让 GCC 改变那段 hot path 的 FMA 收缩 ⇒
             //   发布数值出现 1 ulp 差（实测 ≤1.11e-16；§O.2 有 A/B 表）。本回调里没有浮点表达式
             //   （只是把 float 原样拷进 PointCloud2）⇒ 加这两次跨 TU 调用不影响任何发布字节。
-            log_extrinsic_readout_once();
-            check_pose_consistency();
+            // ★ 本仓新增（选项 U）：sensor 档**跳过**这两条守卫 —— 它们断言的是"本节点发布的
+            //   T_ob"（`guard_T_ob_` 只在合成回调里填，sensor 档那个回调根本不执行）⇒ 不跳过就会
+            //   拿一个零初始化的 T_ob 去断言、每帧刷 ERROR。sensor 档的等价保障搬到 adapter 侧：
+            //   外参由 launch 从 URDF 算出（`_lio_adapter_robot11`），且 odom→base_link 与
+            //   /Odometry 的合成关系在 docs/frame_contract_v3_measurements.md §2 里给出。
+            //   ⚠️ 只是两扇门：默认路径（body）照样每帧执行，行为不变。
+            if (!odom_convention_sensor_) {
+                log_extrinsic_readout_once();
+                check_pose_consistency();
+            }
             if (pointcloud_publisher->get_subscription_count() > 0) {
                 const builtin_interfaces::msg::Time time_msg = double_to_msg_time(last_odometry.timestamp);
 
@@ -275,6 +347,18 @@ namespace small_point_lio {
                 }
             }
         });
+        // ============ 本仓新增（选项 U）：sensor 档**覆写** odom 回调（2026-10-20）============
+        // ★ 为什么"先装合成回调、再覆写"而不是把两档写成一个带 if 的回调：上面那个合成回调是
+        //   本节点的浮点 hot path，**一个字都不改**它（连缩进都不动）⇒ 默认路径的代码生成不受影响。
+        //   `SmallPointLio` 只有一个 `odometry_callback` 槽位 ⇒ 覆写后旧 lambda 再也不会被调用；
+        //   默认路径（body）**根本不装**第二个 lambda。
+        // ★ sensor 档的实现在独立 TU（src/odometry_convention.cpp）：本 TU 只多一个 std::function
+        //   的赋值，没有任何新的浮点表达式。
+        if (odom_convention_sensor_) {
+            small_point_lio->set_odometry_callback([this](const common::Odometry &odometry) {
+                publish_odometry_sensor_convention(odometry, double_to_msg_time(odometry.timestamp));
+            });
+        }
         if (lidar_type == "livox_custom_msg") {
 #ifdef HAVE_LIVOX_DRIVER
             lidar_adapter = std::make_unique<LivoxCustomMsgAdapter>();

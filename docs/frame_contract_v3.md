@@ -648,3 +648,53 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 
 > **一句话**：v3 只承诺 **"帧树 + 参数归属 + 重力语义 + 谁发 TF + 怎么发现自己坏了"** 这五件事；
 > 精度、多机、动态地图、时变挂装、漂移估计**都不在里面**——写清楚"不做什么"与写清楚"做什么"同等重要。
+
+---
+
+## §13 实现状态（2026-10-20：选项 U 落地 + 实测）
+
+> 本节只回答两件事：**§2/§3/§4 的哪几条现在真的在代码里**、**哪几条仍是设计**。
+> 实测数字全部在 **`docs/frame_contract_v3_measurements.md`**（效率 + 精度三列表、命令、方法、未验证项）。
+
+### 13.1 现在**已实现**（有代码 + 有实测）
+
+| 契约条目 | 实现 | 证据 |
+|---|---|---|
+| **§2.1 `odom→base_link` 唯一 owner = `lio_tf_adapter`** | `lio:=small_point_lio` 且 `gravity_align_mode != off` 时：LIO 传 `publish_tf:=false`、`odom_convention:=sensor`，并且**给这个槽位也起 adapter**（此前被显式排除）⇒ 该边全栈恰好一个发布者 | `small_point_lio_node.cpp`（新参数 + `publish_tf_` 分支）、`odometry_convention.cpp`（sensor 档发布）、`bringup_sim.launch.py`（两个互斥 Node + `lio_tf_adapter_spl_node`）；实测：`ros2 node info /small_point_lio` **无 `/tf` 发布者**、`/lio_tf_adapter` 有（M §3.3） |
+| **§3 I2（`odom→base_link` 只由 adapter 发）** | 同上；默认档（`off`）仍由 LIO 自己发 = **已知例外保留**（`check_contract` 未实现，所以它仍会 WARN 而不是 ERROR） | 同上 |
+| **§4 E1 重力对齐（`urdf|imu|hybrid`）接入 launch** | `gravity_align_mode:=off|urdf|imu|hybrid`（默认 `off`）；**`gravity_align_rpy` 由 launch 从 URDF 自动算**（`_GravityAlignRpy` → `_urdf_livox_mount_rpy_deg`，与 `_lio_adapter_robot11` 同源同一条安装边） | `bringup_sim.launch.py`；日志实测 `R_world_body rpy=[-30.000 0.000 0.000]`、`Δ(URDF,IMU)=0.006/0.024/0.007° ⇒ INFO/URDF`（M §3.2） |
+| **§4.5 验收线 < 0.7°** | 主指标（原始云→TF→世界系拟合）实测：`hybrid` **0.346/0.488/0.384°**、`urdf` **0.613°**、基线 **30.08–30.38°**、`pointlio` 0.111/0.267° | M §3.1 |
+| **§2.1 `T_ol·T_bl` 的**一次**合成 + 三方 `T_bl` 记账** | launch 里写成**注释块**（LIO-internal 点一次 · E1 先验 `R_bl⁻¹` 一次 · adapter `T_bl` 一次，三者都来自 URDF 的同一条边） | `bringup_sim.launch.py`「三方 `T_bl` 记账」注释；数值交叉验证：`/Odometry` rpy −29.735° + adapter rpy +30° = TF rpy **0.265°**（M §3.2） |
+| **§4.4 200 帧门保留** | 未动（`fix_gravity_direction` 逻辑一行未改） | 代码 diff；实测 init 2.1–2.2 s 仿真 / 11.2–11.7 s 墙钟（与 E1 的 7.6–8.2 s 差异见 M §6） |
+| **默认路径零改动**（§11 总则） | `off` 档：节点集合/参数/顺序不变（launch 增量证明），**同一输入流重放逐位相同**（141 行全等） | M §4 |
+
+### 13.2 仍是**设计**（本轮没做，别当成已实现）
+
+| 未实现项 | 现状 | 阻塞点 |
+|---|---|---|
+| **`check_contract:=True`**（§6/§8 的静态校验矩阵） | **不存在**（本轮明确不做）。当前的替代品 = launch 期组合检查（`_check_gravity_align_contract`：选错组合直接**报错停机**）+ `gravity_align_mode` 的 `choices` | 需要一条"静态求值 launch 条件"的评估器；`launch_increment_diff.py` 只做到"比较两棵 Action 树" |
+| **I1 全笛卡尔积静态证明** | 只做了**点坐标**上的节点集合证明（`lio∈{small_point_lio}×gravity_align_mode∈{off,urdf,imu,hybrid}×robot∈{robot11}`） | 同上 |
+| **I3/I4/I5/I6/I7** | 原样：`local_tracker` 唯一 `map→odom` 已由"选的时候唯一"保证；健康信号仍只有 `gicp`/`small_gicp`；`tf_watchdog` 未实现 | 与本轮无关项 |
+| **§10 删除清单（v3b）** | 一项未删：`robot11_mount` 三档、`camera_init→map` 桥、插件 `<tilt_rpy>`/`<cloud_frame>` 全在 | 本任务**明令不删槽位** |
+| **`odom` 重力对齐成为默认** | 默认仍是 `off`（= `odom` 不重力对齐 = **grandfathered**，按 §2 的合规窗口报 WARN） | v3b 才把默认改成 `hybrid` |
+| **`odom_convention:=sensor` 下的守卫 #2** | 该档**跳过** `T_ob·T_bl⁻¹ ≈ T_ol` 断言（`T_ob` 不在本节点产生了）；等价保障改由 **adapter + launch 的 URDF 外参**承担 | 要断言就得在 adapter 侧加；本轮未加 |
+| **点云/外参的 `pub` 边界**（`/cloud_registered` 仍发 `odom`，不是 sensor 帧） | 未改动（仍发 `odom`、内容 = `p_odom`） | §4.2 的结论不变：主路径保持发 `odom` |
+
+### 13.3 三个容易踩的**实施细节**（写在这里，省下一次返工）
+
+1. **`publish_tf` / `odom_convention` 是"发布契约"参数，不是"算法"参数**：它们放在节点层
+   （`small_point_lio_node.cpp` 构造期 `declare_parameter`，与 `save_pcd` 同一层），**不进** `Parameters` 类
+   ⇒ 算法侧（`preprocess/eskf/ivm`）一行未动，`mid360_sim_tuned.yaml` 一个键都不用加。
+2. **`odom_convention:=sensor` 的 `child_frame_id` = `lidar_frame`（默认 `livox_frame`），不是 `base_link`**：
+   估计器状态严格说是 `odom←IMU body`（点先经 `extrinsic_T/R` 搬进 IMU 系），本包历史上把它当 `T_ol` 用；
+   那 5 cm（livox↔imu）由 adapter 的 `xyz`（`T_imu←base_link`，URDF 几何算出）吸收 ⇒ 全链路只算一次。
+   把 `base_link` 写进 LIO 的 `/Odometry` 会是**第二个所有者**（违 I1/I2）。
+3. **sensor 档下本节点不再查询 `base_link→livox_frame`**：那条静态 TF 缺失时 `/Odometry` 照发
+   （旧实现 `lookupTransform` 失败会连里程计一起丢，§4.3 A 的"强依赖"由此解除）——
+   但代价是 `publish_tf:=false` 时**不再有外参守卫 #1 的 readout**（它依赖那次 lookup）。
+
+### 13.4 与 §2 合规窗口的关系（一句话）
+
+`gravity_align_mode:=off` 仍**不**满足 §2 的"`odom` 必须重力对齐"（实测倾角 **30.08–30.38°**）——
+本轮把**合规档做成可一键启用**（`gravity_align_mode:=hybrid` 即满足 §4.5 与 I2），
+但**没有把默认值改成合规**。默认改 `hybrid` 是 v3b 的动作，且要先解决"没有 IMU / 起步就在动"的降级语义（R §9(a)）。

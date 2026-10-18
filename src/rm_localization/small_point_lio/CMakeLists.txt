@@ -75,6 +75,10 @@ file(GLOB_RECURSE SOURCE src/*.cpp 3rdparty/*.c 3rdparty/*.cpp)
 #   显式列一遍是**必需**的：GLOB 在 configure 时求值，已有 build/ 的工作区拉到本提交后
 #   不会自动重新 glob ⇒ 否则会 undefined symbol。这里显式加入并去重（新工作区两者相同）。
 list(APPEND SOURCE src/extrinsic_guard.cpp)
+# ★ 本仓新增（docs/frame_contract_v3.md §13，选项 U）：`odom_convention:=sensor` 的发布实现，
+#   同样必须是**独立 TU**（理由见该文件头：本包 `-ffast-math`，把新浮点代码放进 odom 回调所在
+#   TU 会让默认路径出现 1 ulp 差，口径见 docs/tilted_lidar_fidelity.md §O.2）。
+list(APPEND SOURCE src/odometry_convention.cpp)
 list(REMOVE_DUPLICATES SOURCE)
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})

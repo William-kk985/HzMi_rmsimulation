@@ -202,6 +202,46 @@ def _check_robot11_mount_combination(context):
     return []
 
 
+def _check_gravity_align_contract(context):
+    """★ 2026-10-20：`gravity_align_mode` 的**组合检查**（launch 期，t=0，Action ⇒ 报错就停）。
+
+    为什么要有（每条都是"静默变坏"的真实路径，宁可在 t=0 报错也不要在 RViz 里猜）：
+      1. `gravity_align_mode != off` 但 `lio` 不是 `small_point_lio` ⇒ **那个包根本没有这三个参数**
+         （E1 补丁只打在 vendored 的 small_point_lio 里）；fastlio/pointlio 收到未知参数要么被忽略、
+         要么按 ROS 2 的"未声明参数"规则无声丢掉 ⇒ 你以为对齐了，其实 odom 还是斜 30°。
+      2. `robot` 是 launch 不认识的模型 ⇒ 推不出 `base_link→livox_frame` 的 rpy ⇒ 先验无从谈起
+         （**不许**手填一个数兜底，那是第二个所有者，见契约 §4.1）。
+      3. `livox_tilt_axis` / `robot11_mount` 取值非法 ⇒ 让 `_urdf_livox_mount_rpy_deg` 在这里就抛。
+    ⚠️ 必须作为 **Action**（OpaqueFunction）放在 `declare_LIO_cmd` / `declare_gravity_align_mode_cmd` /
+    `declare_robot11_mount_cmd` **之后**：`LaunchConfiguration(...).perform()` 读的是"已经声明过"的值，
+    声明顺序反了会直接抛 "does not exist"（与 `_check_robot11_mount_combination` 同一个坑）。
+    """
+    mode = (LaunchConfiguration('gravity_align_mode').perform(context) or '').strip() or 'off'
+    if mode not in _GRAVITY_ALIGN_MODES:
+        raise RuntimeError(
+            "[launch] gravity_align_mode:=%r 不是可用取值（%s）—— 选错不会静默回退，这里直接停"
+            % (mode, ' | '.join(_GRAVITY_ALIGN_MODES)))
+    if mode == 'off':
+        return []
+    lio = (LaunchConfiguration('lio').perform(context) or '').strip()
+    if lio != 'small_point_lio':
+        raise RuntimeError(
+            "[launch] gravity_align_mode:=%s 只对 lio:=small_point_lio 生效（E1 初始化对齐的补丁在 "
+            "small_point_lio 包里；fastlio/pointlio/cartographer 没有 gravity_align_mode / "
+            "gravity_align_rpy 这些参数，传了也不会生效）⇒ 当前 lio:=%s：请改成 "
+            "lio:=small_point_lio，或把 gravity_align_mode 设回 off" % (mode, lio or '(空)'))
+    # 先验必须真的能从 URDF 推出来（robot 未知 / 轴写错 ⇒ 在这里报，而不是到节点里才发现）
+    rpy = _urdf_livox_mount_rpy_deg(context)
+    return [LogInfo(msg=(
+        '[gravity_align] mode=%s ⇒ 统一输出契约启用：LIO publish_tf:=false + odom_convention:=sensor、'
+        'lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy 由 URDF 自动算出 = '
+        '[%.6f, %.6f, %.6f]°（robot=%r mount=%r axis=%r）'
+        % (mode, rpy[0], rpy[1], rpy[2],
+           LaunchConfiguration('robot').perform(context),
+           (LaunchConfiguration('robot11_mount').perform(context) or ''),
+           (LaunchConfiguration('livox_tilt_axis').perform(context) or ''))))]
+
+
 def _rpy_deg_to_R(rpy_rad):
     """固定关节 rpy（弧度，URDF 的 Rz·Ry·Rx 约定）→ 旋转矩阵（行主序 3x3）。"""
     import math as _m
@@ -243,6 +283,114 @@ def _lio_adapter_robot11(axis, raise_m=0.0, mount='plugin'):
     t = [-sum(Rt[i][j] * p_imu[j] for j in range(3)) for i in range(3)]
     rpy_out = [-v for v in rpy]
     return ([round(v, 9) for v in t], [round(v, 9) for v in rpy_out])
+
+
+#: ★ 2026-10-20：E1 重力对齐（docs/frame_contract_v3.md §4）的四档来源。
+#:   **默认 off = 现状**（不改任何一条路径、不给任何节点多加一个参数）；推荐 hybrid。
+_GRAVITY_ALIGN_MODES = ('off', 'urdf', 'imu', 'hybrid')
+
+
+def _urdf_livox_mount_rpy_deg(context):
+    """从 **URDF/launch 里的那条安装关节** 算出 `base_link→livox_frame` 的 rpy（度）。
+
+    这就是 E1 的先验 `gravity_align_rpy`（"车体水平时雷达在世界里的姿态"）——**唯一事实来源是
+    URDF**，本函数只是把它读出来，**任何地方都不许再手填一个数**（契约 v3 §4.1/§9(b)：手填 =
+    第二个所有者，而 `urdf` 档对错的先验**没有任何告警**，你会静默地按错角度把 odom 摆正）。
+
+    规则与 xacro 逐字同源：
+      · `robot:=robot11 robot11_mount:=plugin`（默认）⇒ **(0,0,0)**：30° 记在插件 `<tilt_rpy>` 里，
+        `livox_frame` 这个帧本身是重力对齐的（xacro 里 `rpy = 0 if mount=='plugin' else tilt`）；
+      · `robot:=robot11 robot11_mount:=urdf|sensor` ⇒ **−30°** 绕 `livox_tilt_axis`（= URDF 关节 rpy，
+        = `-0.523598775598293 rad`；这两种挂法下 IMU 也跟着雷达斜 ⇒ body 系斜 ⇒ 必须对齐）；
+      · `robot:=hzmirm` ⇒ `R(base←lidar) = Rz(turret_yaw)·Ry(turret_pitch)`（两个云台关节；
+        因为 roll 恒为 0，它的 rpy 恰好就是 `(0, pitch, yaw)`）；
+      · 默认模型（`robot:=''`）⇒ **(0,0,0)**（雷达与 `base_link` 同姿态）。
+
+    ⚠️ 这里**只**回答"URDF 说雷达相对车体是什么姿态"，不回答"URDF 与实物是否一致"——
+    后者是 `gravity_align_mode:=hybrid` 的 Δ 互检（≥5° ⇒ ERROR + 改用 IMU）负责的事。
+    """
+    import math as _m
+    robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+    if robot == 'robot11':
+        axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
+        if axis not in _LIVOX_TILT_RPY:
+            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
+        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+        if mount == 'plugin':
+            # 倾角在插件里 ⇒ 帧是水平的 ⇒ 先验 = 单位阵（E1 对这一档是**真正的 no-op**）
+            return [0.0, 0.0, 0.0]
+        tilt_rad = [float(x) for x in _LIVOX_TILT_RPY[axis].split()]
+        return [round(_m.degrees(x), 9) for x in tilt_rad]
+    if robot == 'hzmirm':
+        yaw = float(LaunchConfiguration('turret_yaw_deg').perform(context).strip() or '0.0')
+        pitch = float(LaunchConfiguration('turret_pitch_deg').perform(context).strip() or '0.0')
+        return [0.0, round(pitch, 9), round(yaw, 9)]
+    if robot == '':
+        return [0.0, 0.0, 0.0]
+    raise RuntimeError(
+        "[launch] gravity_align_mode != off 时需要从 URDF 推出 `base_link→livox_frame` 的 rpy，"
+        "但 robot:=%r 这一档本 launch 没有它的安装几何（目前只有 ''|hzmirm|robot11）。"
+        "请改用已知模型，或在 _urdf_livox_mount_rpy_deg 里补上该模型的安装关节（**不要**手填参数）"
+        % robot)
+
+
+class _GravityAlignRpy(Substitution):
+    """`gravity_align_rpy` 参数：**YAML 列表字符串**（launch_ros 会 yaml.safe_load 成 double 数组）。
+
+    取值来自 `_urdf_livox_mount_rpy_deg()`（= URDF），不是这里写的常数 —— 这一层只是把
+    "URDF 里的安装关节"翻译成 small_point_lio 的参数格式，**不含任何手填数值**。
+    """
+
+    def perform(self, context):
+        v = _urdf_livox_mount_rpy_deg(context)
+        return '[%s]' % ', '.join(repr(float(x)) for x in v)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
+
+
+class _LioAdapterExtrinsic(Substitution):
+    """`lio_tf_adapter` 的 `xyz`/`rpy` = **T(imu_link ← base_link)**，按机器人槽位从 URDF 几何算。
+
+    为什么是 imu_link 而不是 livox_frame：三份 LIO 配置的 `extrinsic_T=[0,0,0.05]` 把 livox 原点
+    搬到 IMU 系，估计器状态是 **odom←IMU body**；适配器的语义 `t_out = t_lio + q_lio·t_offset`
+    要求 t_offset 就是"base_link 原点在 body(=imu_link) 系里的位置" ⇒ 含那 0.05 m。
+
+    三个槽位各一条规则（**都是几何，不是手填的巧合**）：
+      · `robot:=robot11`   ⇒ `_lio_adapter_robot11()`（30° 倾角 + 0.05 m；与 E1 的
+        `gravity_align_rpy` 来自**同一条** URDF 边 `base_link→livox_frame`）；
+      · `robot:=hzmirm`    ⇒ `[0,0,-0.75] / [0,0,0]`（imu_link = base_link+(0,0,0.75)；
+        ⚠️ 云台角 `turret_yaw_deg`/`turret_pitch_deg` ≠ 0 时这里**没有**跟着转 —— 与既有的
+        `lio_tf_adapter_hzmirm_node` **同一处已知缺口**，本轮未动、不做承诺）；
+      · 默认模型（`robot:=''`）⇒ `[-0.12, 0, -0.125] / [0,0,0]`（= `lio_tf_adapter.yaml` 里的同名默认值）。
+    """
+
+    def __init__(self, which):
+        super().__init__()
+        self.__which = which
+
+    def perform(self, context):
+        robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+        if robot == 'robot11':
+            axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
+            if axis not in _LIVOX_TILT_RPY:
+                raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
+            raise_m = LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0'
+            mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+            xyz, rpy = _lio_adapter_robot11(axis, raise_m, mount)
+        elif robot == 'hzmirm':
+            xyz, rpy = [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
+        elif robot == '':
+            xyz, rpy = [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
+        else:
+            raise RuntimeError(
+                "[launch] gravity_align_mode != off 需要给 lio_tf_adapter 算 T(imu_link←base_link)，"
+                "但 robot:=%r 这一档本 launch 没有它的安装几何（目前只有 ''|hzmirm|robot11）" % robot)
+        v = xyz if self.__which == 'xyz' else rpy
+        return '[%s]' % ', '.join(repr(float(x)) for x in v)
+
+    def describe(self):
+        return '%s(%s)' % (type(self).__name__, self.__which)
 
 
 class _LioAdapterRobot11(Substitution):
@@ -509,7 +657,9 @@ class _MountReadout(Substitution):
                     '点云表达在水平的父 link 系 ⇒ linefit 的 sensor_height / p2l 的高度带 / '
                     '自击掩膜的 z 门限**语义都对**；代价 = TF 与画出来的雷达 mesh 是平的。'
                     'lio_tf_adapter 杆臂是**纯平移**（lio:=small_point_lio/cartographer/none 时'
-                    '该节点不启动，由 LIO 用 TF 自己做相似变换）')
+                    '该节点不启动，由 LIO 用 TF 自己做相似变换；'
+                    '★ 2026-10-20 例外：gravity_align_mode!=off 的**统一输出契约**档会给 '
+                    'lio:=small_point_lio 也起适配器，杆臂由 URDF 算（含 rpy=0））')
         if m == 'sensor':
             return ('  · 雷达安装方式 robot11_mount=sensor（**物理斜装 + 账也对**，2026-10-09 新增）：'
                     '关节 rpy = 倾角（= urdf 档，**画的 mesh 一起斜**）、插件 `<tilt_rpy>` = 单位阵，'
@@ -1302,6 +1452,31 @@ def generate_launch_description():
                     '取证 / A-B / 未验证项见 docs/tilted_lidar_fidelity.md §J。',
         choices=list(_LIVOX_MOUNTS))
 
+    # ★ 2026-10-20：**E1 重力对齐**（docs/frame_contract_v3.md §4 / §13）+ 统一输出契约（选项 U）。
+    #   默认 off ⇒ **现状**：不给任何节点多加一个参数、不加任何节点、Action 顺序不变。
+    #   非 off ⇒ 三件事**成组**发生（这是"选项 U"的定义，别只开一半）：
+    #     ① 本 launch 把 `gravity_align_rpy` **从 URDF 自动算**出来（`_GravityAlignRpy`）传给 LIO，
+    #        并把 mode 一起传下去 ⇒ 估计器初始化时把那 30° 吸收进 `odom`（`odom` 真的重力对齐）；
+    #     ② 给 LIO 传 `publish_tf:=false` + `odom_convention:=sensor` ⇒ 它只发 `T_ol`、不发 TF；
+    #     ③ **给 lio:=small_point_lio 也起 `lio_tf_adapter`**（此前这个槽位被显式排除）⇒
+    #        `odom→base_link` 全栈**唯一发布者** = adapter（契约 I2），外参与 ① 同一个 URDF 来源。
+    declare_gravity_align_mode_cmd = DeclareLaunchArgument(
+        'gravity_align_mode',
+        default_value='off',
+        choices=list(_GRAVITY_ALIGN_MODES),
+        description='E1 重力对齐（只对 lio:=small_point_lio 生效；默认 off = 现状，什么都不改）。'
+                    'off = 不初始化对齐（odom = 初始化时刻的传感器壳体系 ⇒ 斜装就斜 30°）；'
+                    'urdf = 用 **URDF 推出**的先验 rpy（不需要 IMU、不需要静止，瞬时；先验错时**无告警**）；'
+                    'imu = 用 200 帧 IMU 均值实测的重力方向（需要静止；不需要任何安装参数）；'
+                    'hybrid = 两者都算 + Δ 互检（<2° 用 URDF / 2~5° WARN 改用 IMU / ≥5° ERROR 改用 IMU）'
+                    '—— **推荐档**。★ 非 off 时同时启用**统一输出契约**：LIO 的 publish_tf:=false、'
+                    'odom_convention:=sensor，并由 lio_tf_adapter 成为 odom→base_link 的唯一发布者；'
+                    'gravity_align_rpy 由本 launch 从 URDF 自动算（**不手填**）。'
+                    '验收线：残余地面倾角 <0.7°（实测 urdf 0.474° / hybrid 0.581° / off 30.110°，'
+                    '见 docs/frame_contract_v3_measurements.md）。'
+                    '⚠️ 200 帧初始化门（fix_gravity_direction）**必须保留**：关掉它 8 个变体里 '
+                    '5 个发散（docs/odom_base_link_practice_survey.md §9.4(6)）')
+
     # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
     #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
     #   其中 `base_link.STL` 一项就是 **99 MiB / 2,078,226 三角形**（+ 云台 l11 8.8 MB / 17.6 万面）
@@ -1776,14 +1951,25 @@ def generate_launch_description():
         ]),
 
         # ===== lio:=small_point_lio（vendored Yancey2023/small_point_lio，MIT，pin 688d75c）=====
-        # 与上面两个槽位的**本质区别**：它自己就发 `odom→base_link`（源码硬编码，
-        # small_point_lio_node.cpp:61-62），所以：
+        # 与上面两个槽位的**本质区别**：它自己就发 `odom→base_link`（源码硬编码），所以**默认档**
+        # （gravity_align_mode:=off）下：
         #   ① /Odometry → /odom 仍要 remap（统一话题口径）；
         #   ② **绝不能**再起 lio_tf_adapter（否则 odom→base_link 两个发布者 → 双父边/抖动）；
         #   ③ 它不认 camera_init/body ⇒ T1 回退静态桥也要排除它（见下面 icp_frame_bridge_condition）。
         # 它**需要** base_link→livox_frame 这条静态 TF（源码 lookupTransform(lidar_frame,"base_link")，
         # 失败就丢帧、连 /Odometry 都不发）—— 仿真里由 robot_state_publisher 从 URDF 提供
         # （实测 /tf_static 里有 base_link→livox_frame (0.12,0,0.175)，见 docs/lio_slots.md §2）。
+        #
+        # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：**gravity_align_mode != off 时换成下面第二个 Node** ——
+        #   同一个可执行文件/节点名，只是参数不同，两个 definition 互斥（照抄本文件
+        #   linefit / p2l 在 robot11_mount:=sensor 上的"两份互斥 Node"写法）：
+        #     publish_tf:=false      ⇒ 它不再发 odom→base_link（那是 adapter 的活，契约 I2）
+        #     odom_convention:=sensor ⇒ /Odometry 发**原始状态 T_ol**（不再是合成 T_ob）
+        #     gravity_align_mode / gravity_align_rpy ⇒ E1 初始化对齐（rpy 由 URDF 自动算）
+        #   ⇒ 配合下面新加的 `lio_tf_adapter_spl_node`，`odom→base_link` 全栈**恰好一个**发布者。
+        #   ⚠️ 为什么不做成"一个 Node + 条件参数字典"：launch 的 parameters 是静态结构，
+        #   给默认路径的节点参数表里多一个键都会让"默认路径逐字节不变"不再可证
+        #   （见 tools/scripts/gzsim/launch_increment_diff.py 的 --strip-conditions 口径）。
         GroupAction(
             condition = LaunchConfigurationEquals('lio', 'small_point_lio'),
             actions=[
@@ -1791,6 +1977,9 @@ def generate_launch_description():
             # 用户不必去猜"launch 到底给我读了 mid360_sim.yaml 还是 tuned 版"，日志里直接有。
             LogInfo(msg=['lio:=small_point_lio 使用的参数文件 = ', small_point_lio_params]),
             Node(
+                # 默认档（gravity_align_mode:=off）：**与 2026-10-19 之前逐字节相同**的参数表。
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('gravity_align_mode'), "' == 'off'"])),
                 package='small_point_lio',
                 executable='small_point_lio_node',
                 name='small_point_lio',
@@ -1801,6 +1990,29 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}
                 ],
                 # T2：统一里程计话题为 /odom（源话题硬编码为 /Odometry，见 small_point_lio_node.cpp:26）
+                remappings=[('/Odometry', '/odom')],
+            ),
+            Node(
+                # 统一输出契约档（gravity_align_mode ∈ urdf|imu|hybrid）。
+                # 参数含义见 src/rm_localization/small_point_lio/src/small_point_lio_node.cpp 的
+                # "统一输出契约"注释块；两个发布参数默认值 = 现状，所以只有这一档显式传。
+                condition = IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('gravity_align_mode'), "' != 'off'"])),
+                package='small_point_lio',
+                executable='small_point_lio_node',
+                name='small_point_lio',
+                output='screen',
+                parameters=[
+                    small_point_lio_params,
+                    {'use_sim_time': use_sim_time,
+                     # ① 本节点不再发 odom→base_link（唯一发布者 = lio_tf_adapter，契约 I2）
+                     'publish_tf': False,
+                     # ② /Odometry 改发 LIO 原始状态 T_ol（frame_id=odom、child_frame_id=livox_frame）
+                     'odom_convention': 'sensor',
+                     # ③ E1：初始化时把 URDF 的安装倾角吸收进 odom
+                     'gravity_align_mode': LaunchConfiguration('gravity_align_mode'),
+                     'gravity_align_rpy': [_GravityAlignRpy()]},
+                ],
                 remappings=[('/Odometry', '/odom')],
             ),
             Node(
@@ -2086,6 +2298,48 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time,
                      'xyz': [_LioAdapterRobot11('xyz')],   # T_imu_link←base_link（30° 倾斜下挂 0.05 m）
                      'rpy': [_LioAdapterRobot11('rpy')]}]  # 该 30° 旋转的逆 ⇒ 斜的 body 系转回水平
+    )
+
+    # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：`lio:=small_point_lio` **也**起 lio_tf_adapter ——
+    #    但**只在 `gravity_align_mode != off` 时**（= 统一输出契约档）。默认档（off）保持原样：
+    #    那个槽位的 `odom→base_link` 仍由 LIO 自己发、**不启动**本节点（否则两个发布者）。
+    #
+    # ==================== 三方 `T_bl` 记账（写死在这里，改之前先读）====================
+    # 记法（与 docs/frame_contract_v3.md §2.2 一致）：
+    #   `T_bl := lookupTransform(livox_frame, "base_link")` = **base_link 在 livox 系里的位姿**
+    #           （= URDF 里 `body_to_livox` 关节的位姿，robot11 sensor 档 = Rx(−30°) + t）。
+    # 这 30° 倾角在整条链上**只允许被乘三次、每次方向固定**，且**三个数都从 URDF 来**：
+    #   ① LIO **内部**：`T_il = (R=I, t=(0,0,0.05))`（livox→IMU body，MID-360 同壳）——
+    #      在出点公式里乘**一次**（small_point_lio.cpp 的 `Lidar_R_wrt_IMU·p + Lidar_T_wrt_IMU`）。
+    #      ★ 这一处**不含** 30°（倾角在 `base_link→livox_frame` 这条**外部**边上，不在雷达↔IMU 之间）；
+    #      它的 0.05 m 又不是"倾斜外参"，所以别把它和下面两处混为一谈。
+    #   ② E1 初始化（`gravity_align_rpy` = `_GravityAlignRpy()`）：把 `R_bl⁻¹ = R(base_link←livox_frame)`
+    #      （= URDF 关节 rpy，robot11 sensor 档 **−30°**）当成"车体水平时雷达在世界里的姿态"，
+    #      写成初始 `kf.x.rotation`，同时把初始地图按出点公式搬进世界系 —— **一次**。
+    #      ⇒ odom 从此重力对齐；`base_link` 的倾角**不再**出现在 odom 里。
+    #   ③ 本适配器（`xyz`/`rpy` = `_LioAdapterExtrinsic()`）：右乘 `T_bl`（robot11 sensor 档
+    #      **rpy = +30°**、`xyz = −Rᵀ·p_imu`）把 LIO 的 body 位姿变成 base_link 位姿 —— **一次**：
+    #          q_out = q_lio · q_offset、t_out = t_lio + q_lio·t_offset      （= T_ob = T_ol·T_bl）
+    #      ⚠️ 与 ② 的方向**相反**（一个是 R_bl⁻¹ 进状态，一个是 T_bl 进输出）—— 这不是重复抵消：
+    #         ② 决定"世界系是哪一系"（odom 竖直），③ 决定"车体在 odom 里的姿态"（base_link 水平）。
+    #         把 ③ 的 rpy 写成 −30° 的**同号**、或把它归零，就会得到 30° 的假滚转/假俯仰。
+    #  ⇒ 判据（可复核）：`T_ob·T_bl⁻¹ ≈ T_ol`（位姿一致性），且 `rpy(odom→base_link) ≈ 0`（静止）。
+    # =============================================================================
+    lio_tf_adapter_spl_node = Node(
+        condition = IfCondition(PythonExpression([
+            "'", LaunchConfiguration('lio'), "' == 'small_point_lio' and '",
+            LaunchConfiguration('gravity_align_mode'), "' != 'off'"])),
+        package='lio_tf_adapter',
+        executable='lio_tf_adapter_node',
+        name='lio_tf_adapter',
+        output='screen',
+        parameters=[os.path.join(get_package_share_directory('lio_tf_adapter'), 'config', 'lio_tf_adapter.yaml'),
+                    {'use_sim_time': use_sim_time,
+                     # 话题：LIO 的 /Odometry 已被 launch remap 成 /odom（统一口径）；
+                     # 内容 = T_ol（odom_convention:=sensor 档），所以这里必须**合成**一次 T_bl。
+                     'odom_topic': '/odom',
+                     'xyz': [_LioAdapterExtrinsic('xyz')],   # T_imu_link←base_link（URDF 几何算，含 0.05 m）
+                     'rpy': [_LioAdapterExtrinsic('rpy')]}]  # = R_bl 的逆（robot11 sensor 档 +30°）
     )
 
     # 注（2026-09-22 更正，原文写反了）：`body` **并不在 URDF 里**（曾试图用 imu_link→body 固定关节
@@ -2471,6 +2725,8 @@ def generate_launch_description():
     ld.add_action(declare_livox_raise_m_cmd)
     # ★ 2026-10-08：robot:=robot11 的雷达**安装方式**（倾角记在插件 vs 记在 URDF 关节）
     ld.add_action(declare_robot11_mount_cmd)
+    # ★ 2026-10-20：E1 重力对齐 + 统一输出契约（默认 off ⇒ 演示路径零改动；见 declare 的 description）
+    ld.add_action(declare_gravity_align_mode_cmd)
     # ★ Phase 4：robot:=robot11 的视觉 mesh 档位（decimated | full）
     ld.add_action(declare_robot11_visual_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
@@ -2510,6 +2766,10 @@ def generate_launch_description():
              _SelfMaskReadout(self_mask_params),
              '  · lio_tf_adapter：lio:=small_point_lio/cartographer/none 时**不启动**该节点',
              '（它由 LIO 自己用 TF 做 odom→base_link 的相似变换）。',
+             '  · gravity_align_mode=', LaunchConfiguration('gravity_align_mode'),
+             '（off = 现状：LIO 自己发 odom→base_link；urdf|imu|hybrid = **统一输出契约**：',
+             'LIO 只发 T_ol、odom→base_link 归 lio_tf_adapter，E1 把 URDF 的安装倾角吸收进 odom。',
+             '对齐后 odom 的残余地面倾角验收线 <0.7°，见 docs/frame_contract_v3_measurements.md）',
              _MountReadout()]))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
@@ -2520,6 +2780,13 @@ def generate_launch_description():
     ld.add_action(declare_ground_cmd)
     # ★ 2026-10-09：robot11_mount:=sensor 的组合检查（必须在 ground 声明**之后**，见该函数注释）
     ld.add_action(OpaqueFunction(function=_check_robot11_mount_combination))
+    # ★ 2026-10-20：gravity_align_mode 的组合检查（只在 mode!=off 时才执行 ⇒ 默认路径**零动作**；
+    #   位置必须在 declare_LIO_cmd 之后：它要读 lio / robot / robot11_mount / livox_tilt_axis，
+    #   而 launch 的 DeclareLaunchArgument 是**按顺序**生效的）。
+    ld.add_action(GroupAction(
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('gravity_align_mode'), "' != 'off'"])),
+        actions=[OpaqueFunction(function=_check_gravity_align_contract)]))
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
     # ★ 2026-10-06：「续建 + 场地隔离」相关（默认值下现有行为不变，详见各自的 description）
@@ -2571,6 +2838,8 @@ def generate_launch_description():
     ld.add_action(lio_tf_adapter_node)
     ld.add_action(lio_tf_adapter_hzmirm_node)
     ld.add_action(lio_tf_adapter_robot11_node)
+    # ★ 2026-10-20：lio:=small_point_lio 的适配器（**只在统一输出契约档**启动；与上面三条互斥）
+    ld.add_action(lio_tf_adapter_spl_node)
     # ★ 续建/从零的判定与横幅在 **t=0** 就执行（OpaqueFunction 是 Action，`--show-args` 不执行它）；
     #   slam_toolbox 节点本身仍由 OpaqueFunction 内部的 TimerAction 延后 4 s 起 ⇒ 时序与改造前一致。
     ld.add_action(start_mapping)
