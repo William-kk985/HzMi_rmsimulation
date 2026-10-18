@@ -773,7 +773,7 @@ python3 tools/scripts/gzsim/ab_probe.py --backend <b> --duration 20 \
 | RTF（`/clock` 仿真/墙钟） | **0.431** | **0.973** | **×2.26** |
 | `/livox/lidar` 仿真 Hz | 10.000 | 10.000 | 一致 |
 | `/livox/lidar` 墙钟 Hz | 4.315 | 9.725 | ×2.25 |
-| 每帧点数（中位 / min / max） | 11365 / 10999 / 11511 | 8050 / 7893 / 8204 | −29%（命中率 + `max_range` 口径，见 §13.2） |
+| 每帧点数（中位 / min / max） | 11365 / 10999 / 11511 | 8050 / 7893 / 8204 | −29%（含 Classic 的自机回波 + `max_range` 口径差，见 §13.2-2） |
 | **逐帧求交 ms**（插件插桩，中位） | **无插桩**（ODE 逐射线，见下行） | **0.243**（min 0.231 / max 0.264，10 次采样，双实例合计 ≈0.49 ms/帧） | — |
 | **gzserver CPU ms / 帧**（统一口径，两个后端可比） | **176.2** | **57.0** | **−68%** |
 | gzserver RSS 中位（MB） | **3071** | **297** | **−90%** |
@@ -782,7 +782,7 @@ python3 tools/scripts/gzsim/ab_probe.py --backend <b> --duration 20 \
 | 整棵树 CPU%（单核） | 87.1 | 159.7 | +83%（下游在同一台机器上跑得更快 ⇒ 吃更多 CPU） |
 | 启动 → 首帧（s） | 7.06 | **3.65** | −48% |
 | `/scan` 有限波束数（中位） | 465 | 402 | −14% |
-| `/scan` range min / max（m） | **0.19 / 9.92** | **2.64 / 9.87** | 见 §13.2 第 2 条 |
+| `/scan` range min / max（m） | **0.19 / 9.92** | **2.64 / 9.87** | 见 §13.2 第 2 条（Classic 含自机回波） |
 | `/cloud_registered` 条数（20 s 窗口） | 67（3.3 Hz） | 1730（86.5 Hz） | 见 §13.2 第 3 条 |
 | `/cloud_registered` width 中位（点/条） | 11388 | 841 | 同上 |
 | 端到端 LIO | ✅ `odom→base_link` 10.00 Hz | ✅ `odom→base_link` 100.00 Hz | 两个后端都通 |
@@ -797,11 +797,18 @@ python3 tools/scripts/gzsim/ab_probe.py --backend <b> --duration 20 \
    "gzserver CPU 秒 / 帧"这个**统一口径**（176 ms/帧 vs 57 ms/帧）。**结论只能写到
    "gz 的求交本体是 0.24 ms/帧量级、Classic 的服务端每帧成本高 3 倍"**，不能写
    "0.24 ms vs 176 ms 是同一种测量"。
-2. **`/scan` 近距差异的主因是"障碍物模型没进 gz 世界"**，不是传感器：Classic 的
-   `RMUC2026.world` 里还有 `meshes/obstacles/*` 的实体障碍（docs 里那张"正前方 0.42 m"的
-   就是它），gz 世界**只有**场地 STL + 机器人（§10-4 的既有缺口）⇒ Classic 的 `/scan`
-   能打到 0.19 m 的近物、gz 最近的只有 2.64 m。**这条差异会随"把障碍物搬进 gz 世界"消失**，
-   与 LIO/驱动无关。
+2. **`/scan` 近距差异（0.19 m vs 2.64 m）的主因是"自机回波"，不是传感器坏了**：
+   Classic 的 ray 插件挂在 `livox_frame` 上，`livox_frame` 自己没有 collision，但**同模型其它
+   link（底盘/轮/云台）有** ⇒ Classic 的 `/livox/lidar/pointcloud` 里**含自身回波**（正因为
+   如此 linefit 才有那份"113 个自身 collision AABB"的**自击掩膜**；掩膜只作用于判据/限速，
+   **不动** `/segmentation/*` ⇒ `/scan` 里仍然有近距自击点）；
+   gz 侧是**模型级**排除（`ignore_self` 把整车 113 个碰撞体从 BVH 里剔掉，§6 的 A/B 实测
+   0 点）⇒ gz 的 `/scan` 里没有自击点，最近的 2.64 m 是**真障碍**。
+   ⚠️ 两个世界的**其它资产是同一份**：Classic 的 `RMUC2026_world.world` 里也只有场地 STL
+   （没有额外障碍模型，本轮已用源码核对），所以这条差异**不是**"世界不同"造成的。
+   点数差（11365 vs 8050，差 3315 ≈ 11% 射线）与"Classic 打到自己"的量级相符，但本轮
+   **没有**做逐点归因（列为未验证）。另有一处**配置口径**不同（未在本轮统一）：
+   Classic 的 ray `<range>` 是 **min 0.1 / max 200**，gz 插件是 `min_range 0.1 / max_range 40`。
 3. **`/cloud_registered` 的粒度差异有明确机理**：gz 的 `CustomMsg` 每个点带
    `offset_time = i·1e9/point_rate`（跨 **100 ms**，像真机），Classic 的 `offset_time` **恒 0**。
    `small_point_lio` 的 `handle_once()` 在 `imu.front().timestamp < point.back().timestamp`
@@ -867,8 +874,9 @@ imu_link:    parent 'livox_frame' rate 10000.000 (static)
 ## 15. 更新后的「未实现 / 未验证」清单（**替代 §10**）
 
 **仍未实现**
-1. **障碍物模型没进 gz 世界**（§10-4 仍在）：Classic 的 `meshes/obstacles/*` 没有对应 SDF
-   ⇒ gz 档的 `/scan` 近距离回波比 Classic 少（§13.2-2）。这是**当前两后端最大的"世界不同"**。
+1. **障碍物模型没进 gz 世界**（§10-4 仍在）：`meshes/obstacles/*` 没有对应的 gz SDF
+   ⇒ 若将来在 Classic 世界里放了障碍物，gz 世界不会有。（本轮核对了 `RMUC2026_world.world`：
+   它**只**含场地 STL，所以**本轮 A/B 的 `/scan` 差异不是这一条造成的**，而是自机回波，见 §13.2-2。）
 2. **底盘无碰撞响应**（§12.5）：运动学穿墙；要等价得把模型改动态 + 造轮子/接触。
 3. **加速度计无向心/切向项**（§12.5）。
 4. 多场地（只有 `RMUC2026`）、其它机器人槽位（只有 `robot11`）——§10-2/§10-3 不变。
