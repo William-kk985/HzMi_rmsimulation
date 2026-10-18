@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm_gz_planar_move</name>
+  <version>0.1.0</version>
+  <description>
+    `sim_backend:=gz` 的底盘驱动：Classic 的 libgazebo_ros_planar_move.so 在
+    Gazebo Fortress 上的对应实现（运动学底盘 + `/odom_ground_truth` 真值）。
+    仅当本机装了 ignition-gazebo6（Fortress）才会编出 .so；没有则本包**空过**，
+    Classic 路径与 colcon build 完全不受影响。
+  </description>
+  <maintainer email="hzmi@example.com">HzMi</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <!-- 刻意**不**写 <depend>ignition-gazebo6</depend>：它不是 rosdep key，写在这里会让
+       `rosdep install` 在只有 Classic 的机器上失败。构建期用 find_package(... QUIET) 探测。 -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

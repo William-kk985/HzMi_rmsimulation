@@ -545,3 +545,385 @@ python3 tools/scripts/gzsim/launch_increment_diff.py \
 11. **`ign sdf -k` 全仓预检**：只对本文件涉及的两个世界做了，没有扫全仓 SDF。
 12. **多实例 >2 / 多传感器同世界**：只测了 2 个实例。
 13. **CPU 峰值**：`rss.txt` 里的 CPU 是 0.5 s 采样的累计 tick 差，没有 `perf` 火焰图。
+
+---
+
+# 第二轮（2026-10-18）：把 gz 后端从"传感器台架"补成"能定位 + 能开的仿真"
+
+> **本节是追加的**，不改上面任何一行历史记录；凡是与本节冲突的旧结论，以本节为准。
+> 本节修订/替代的旧条目（逐条点名）：
+>
+> | 旧条目 | 旧结论 | 现在 |
+> |---|---|---|
+> | §2.9-6 | `/cmd_vel_chassis` 不驱动底盘，车是静态的 | **已实现**（§12）：运动学底盘驱动 + `/odom_ground_truth` |
+> | §8.1 / §10-5 | gz 侧 LIO 不明原因 `imu loop back`、不出 odom | **两个根因都找到了**（§11.1 / §11.2），三个 LIO 槽位实测在 §11.3 |
+> | §10-1 | 未实现：底盘运动 | 已实现（§12），**权威 100%**，与 Classic 的 5–16% 不是同一个数（§12.5） |
+> | §10-8 | 没有同轮 Classic vs gz A/B | **做了**（§13）：同一会话、同一探针、同一时长 |
+> | §10-5 末句 | "单发布者契约没有被真正考到" | **考到了**（§14）：`map→odom` / `odom→base_link` 各 1 个发布者、0 个同 stamp 冲突 |
+> | §9 | 默认路径零改动的证据（61→63 Action） | **仍然成立且更强**：本轮的 `bringup_sim.launch.py` 与 HEAD **逐字节相同**（`launch_increment_diff.py`：`新增 0 / 消失 0 / 顺序一致`） |
+>
+> **本轮新增/改动的文件**（全部在 gz opt-in 路径里，Classic 一行未动）：
+>
+> | 文件 | 性质 |
+> |---|---|
+> | `src/rm_simulation/rm_gz_planar_move/`（新包） | 我们的底盘驱动 `librm_gz_planar_move.so`（自有代码，Apache-2.0，无第三方源码） |
+> | `src/rm_simulation/rm_livox_gz_sim/launch/gz_sim.launch.py` | + `gz_partition`（每次运行唯一）、+ `gz_drive`、+ `gz_custom_msg_tag`、+ 驱动插件目录进 `GZ_SIM_SYSTEM_PLUGIN_PATH` |
+> | `src/rm_simulation/rm_livox_gz_sim/config/ros_gz_bridge.yaml` | + `/cmd_vel_chassis`（`geometry_msgs/Twist` → `ignition.msgs.Twist`，ROS_TO_GZ） |
+> | `src/rm_simulation/rm_livox_gz_sim/scripts/make_robot_gz_sdf.py` | + `--drive` / `--drive-odom-rate` / `--custom-msg-tag` |
+> | `src/rm_simulation/rm_livox_gz_sim/models/rm_mid360_gz/model.sdf` | + `<custom_msg_tag>0</custom_msg_tag>`（台架世界也一致） |
+> | `tools/scripts/gzsim/patches/0004-mid360-custommsg-tag.patch` | 新补丁（上游 ③，`+13/−1`） |
+> | `tools/scripts/gzsim/{gz_stamp_probe,gz_contract_check,drive_probe,ab_probe}.py`、`ab_backends.sh` | 新工具（探针/契约/A-B） |
+
+## 11. LIO 在 gz 侧为什么不动 —— **两个独立根因**，都不是 LIO 的锅
+
+> 症状（旧记录）：`small_point_lio` 在 gz 档每条 IMU 都打 `imu loop back`（`preprocess.cpp:67`），
+> 且即使不打，也**没有** `odom→base_link`、没有 `/cloud_registered`。本轮证明这是**两件事**。
+
+### 11.1 根因 A：`imu loop back` = **gz transport partition 没隔离**（同机另一个 Fortress 世界串进来了）
+
+**判据链（三条，逐条可复算）**
+
+1. **旧日志里的铁证**（`.tmp_gzlivox2/runs/e5_e2e/launch.log`）：
+   ```
+   [Wrn] [SimulationRunner.cc:662] Found additional publishers on /stats, using namespaced stats topic only
+   [Wrn] [SimulationRunner.cc:695] Found additional publishers on /clock, using namespaced clock topic only
+   ```
+   这两行只在"**同一个 gz transport partition 上还有别的 gz publisher**"时出现。
+   同一轮里 `/clock` 的 ROS 侧实测 **0 条**（`hz_clock.txt` 为空）——因为 gz 见冲突后把钟改发
+   **namespaced 话题**，我们的桥订的是 `/clock` ⇒ 静默收不到。这同时解释了那轮
+   `use_sim_time` 为什么形同虚设。
+2. **判决性实验（本轮新增，可复现）**：故意在**同一个 partition** 上再起一个 Fortress 世界
+   （台架世界，`robot:=none`，ROS 换 domain 99 以免 ROS 侧混淆），用**插桩版** LIO 打印每条
+   IMU 的 `(ts, last)`：
+   ```
+   [DBG] imu #5  ts=3.670000000 last=6.170000000 BACK      ← 外来世界的仿真钟（落后 2.5 s）
+   [DBG] imu #6  ts=6.180000000 last=6.170000000 ok        ← 我们自己的
+   [DBG] imu #7  ts=3.680000000 last=6.180000000 BACK
+   ...
+   ```
+   ⇒ `/livox/imu` 上变成**两个仿真钟交错**；LIO 把"落后的那一路"全判为倒退
+   （≈100 条/s，与旧轮 e5 的 **94.3 条/s** 同量级）。同时刻同进程的 rclpy 探针只看我们自己的流
+   ⇒ 完全单调（这就是旧轮"发布端测不出问题"的原因：**探针与 LIO 订阅的是同一个 ROS 话题，
+   但旧轮的量测窗口/时机不同；污染是"别的进程往同一个 gz 话题里也发"**）。
+3. **修好后**：`GZ_PARTITION` 唯一 ⇒ 20 s 内 `imu loop back` **0 条**、IMU 戳严格 `+10 ms`、
+   `n_back=0`（§11.3 的表）。
+
+**修在哪**（我们的集成层，不碰 LIO）：
+`src/rm_simulation/rm_livox_gz_sim/launch/gz_sim.launch.py`
+* 新增 `gz_partition` 参数（默认**空 = 本次运行随机** `rm_gz_<uuid10>`），
+  同时设 `GZ_PARTITION` 与 `IGN_PARTITION`（Fortress 读 `IGN_PARTITION`，gz-transport12+ 读
+  `GZ_PARTITION`；与既有的 "两个插件路径都设" 同一套策略），作用域覆盖 `ign gazebo`
+  **和** `ros_gz_bridge`（桥必须同 partition 才收得到 `/clock`）；
+* 想复现"污染"就显式给同一个名字：`gz_partition:=shared_x`（用于对照实验）。
+
+### 11.2 根因 B：`tag=0x10` ⇒ `small_point_lio` 把**每一帧的每个点**都丢掉（所以就算 IMU 干净也不出 odom）
+
+**机理（源码级，逐字）**
+* gz 插件（上游 ③）在 `PublishCloud()` 里给每个点写死 `const std::uint8_t tag = 0x10;`
+  （PC2 的 `tag` 字段与 CustomMsg 共用这个值）。
+* `small_point_lio` 的 `lidar_adapter/livox_custom_msg.h` 只保留
+  `(point.tag & 0b00111111) == 0` 的点 ⇒ `0x10 & 0x3f = 0x10 ≠ 0` ⇒ **0 个点入队**。
+* `Preprocess::on_point_cloud_callback` 于是永远不往 `point_deque` 里放东西；而
+  `SmallPointLio::handle_once()` 的初始化条件是
+  `point_deque.size() >= init_map_size (=10)` **且** `imu_deque.size() >= 200`
+  ⇒ `is_init` 永远 false ⇒ 既不 `publish_odometry()`（无 `/Odometry`、无 `odom→base_link`），
+  也不 `pointcloud_callback()`（无 `/cloud_registered`）。
+* **Classic 侧为什么没这个问题**：`libros2_livox.so` 只填 `x/y/z/reflectivity/offset_time`，
+  `tag`/`line` 留默认 **0**（`livox_points_plugin.cpp` 的 `CustomPoint p;` 之后没有写 `p.tag`）。
+  ⇒ 本仓既有契约就是 `tag=0`。
+* **为什么 FAST-LIO / Point-LIO 收 0x10**：它们的 preprocess 条件是
+  `(tag & 0x30) == 0x10 || (tag & 0x30) == 0x00`（`FAST_LIO/src/preprocess.cpp:120`、
+  `point_lio/src/preprocess.cpp:106`）⇒ `0x10` 在白名单里。所以这个 bug **只打 small_point_lio**。
+
+| 消费者 | 接受的 tag | `0x10`（上游写死） | `0x00`（Classic / 现在） |
+|---|---|---|---|
+| `small_point_lio` | `(tag & 0x3f) == 0` | ❌ 全丢 | ✅ |
+| `FAST_LIO` | `(tag & 0x30) ∈ {0x00,0x10}` | ✅ | ✅ |
+| `point_lio` | 同上 | ✅ | ✅ |
+
+**修在哪**（我们的 gz 集成层，不碰 `small_point_lio`）：
+* 新补丁 `tools/scripts/gzsim/patches/0004-mid360-custommsg-tag.patch`：插件读
+  `<custom_msg_tag>`、**默认 0**（上游值 16 可复现）；
+* `make_robot_gz_sdf.py` 生成的 SDF 与 `models/rm_mid360_gz/model.sdf` 都显式写
+  `<custom_msg_tag>0</custom_msg_tag>`（两个出口 PC2/CustomMsg 仍然**同值**，§3 的"逐点相同"
+  结论不受影响）；
+* `fetch_and_patch_mid360.sh` 打 0004（幂等，`git apply --reverse --check` 判定）。
+
+> **为什么不在 `small_point_lio` 里放宽 tag 过滤**：那会让"Classic 契约 = 0"这条隐式约定
+> 变成"两个后端各有各的 tag"，而 `src/rm_localization/small_point_lio/**` 也不是本轮的写入面。
+> 让 gz 侧发**和 Classic 逐字节一致**的东西，是唯一不需要给下游加分支的修法。
+
+### 11.3 三个 LIO 槽位在 gz 侧的实测（同一世界、同一 spawn、`mode:=mapping`）
+
+| 槽位 | 结果 | 关键证据 | 为什么 |
+|---|---|---|---|
+| `lio:=small_point_lio` | ✅ **通过**（需 A+B 两个修） | `odom→base_link` **100.00 Hz**；`/odom` 1 发布者；`/cloud_registered` 有数据（86–97 Hz）；`map→odom` 10.2 Hz；TF 链 `map→odom→base_link` 解得开（§13/§14） | 它自己发 TF；A 修好 IMU 单调、B 修好点云入队 |
+| `lio:=fastlio` | ✅ **通过**（本来就能过 A） | `odom→base_link` **10.00 Hz**（由 `lio_tf_adapter` 发）、`/cloud_registered` 发布者 `laser_mapping`、`camera_init→body` 10 Hz、`/livox/imu` 订阅是 **reliable depth-10**（与我们的 reliable IMU 写者兼容） | FAST-LIO 的 tag 白名单含 `0x10`；它的 IMU 订阅 QoS 与我们的写者匹配 |
+| `lio:=pointlio` | ✅ **通过**（但要先补一个目录，**与 gz 无关**） | 未补目录时：节点在**第一帧**就 `terminate called after throwing ... pcl::IOException ... [pcl::PCDWriter::writeBinary] Error during open!` —— 因为 `pointlio_mid360_sim.yaml` 是 `pcd_save.pcd_save_en: true` + `interval: 100`，而它写的是**编译期** `ROOT_DIR`=`src/rm_localization/point_lio/` 下的 `PCD/`，该目录在本次 checkout 里不存在。**`mkdir -p src/rm_localization/point_lio/PCD` 之后**：`odom→base_link` **10.00 Hz**（`lio_tf_adapter` 发）、`/cloud_registered` 发布者 `laserMapping`、`camera_init→aft_mapped` 10 Hz、`/odom` 1 发布者、`imu n_back=0`（1168 条） | Point-LIO 的 `(tag & 0x30)` 白名单含 `0x10`，所以它**不需要** 0004 那个修；阻塞它的只是自己的落盘路径 |
+
+**IMU 侧的统一结论**：三个槽位共用同一条 `/livox/imu`（发布者 `mid360_gz_custom`，reliable
+keep_last 20；`small_point_lio` 用 best-effort 订、FAST-LIO 用 reliable 订，两种都兼容）。
+本轮在 **20 s 窗口内 1900+ 条样本上 `n_back=0`、`dt_med=dt_min=dt_max=10 ms`**（§14.3）。
+
+## 12. 底盘运动：`/cmd_vel_chassis` → 车体运动（**新实现**）
+
+### 12.1 为什么是"我们自己的运动学系统插件"（四条候选逐条否掉）
+
+| 候选 | 能不能用 | 判决理由 |
+|---|---|---|
+| `gz::sim::systems::DiffDrive` | ❌ | 要**轮子关节**。robot11 的 URDF 里 `j2..j11` 是云台/炮管（`.xacro` 自己写着"不加轮子控制器"），没有可驱动的轮子 |
+| `gz::sim::systems::JointController` | ❌ | 同上（没有轮子关节；只能控已有关节） |
+| `gz::sim::systems::VelocityControl` | ❌（实测机理） | 它写 `LinearVelocityCmd/AngularVelocityCmd` 让物理引擎积分。这条在 Classic 上被实测否过：多刚体 + 接触约束每步把速度"掰回来"，角速度执行率被吃到 1% 量级（`tilted_lidar_fidelity.md` §M.3）。本仓 gz 侧的模型是 `<static>`（URDF 派生的 SDF 只保留 `livox_frame`/`imu_link` 两个 fixed 子 link），改动态要重建整套关节/惯量/接触 |
+| `libgazebo_ros_planar_move.so` | ❌ | Classic 专有（`gazebo/physics`），Fortress 加载不了 |
+| **自写 `librm_gz_planar_move.so`（本轮）** | ✅ | 运动学、平面、与 planar_move **同话题/同单位/同语义**；不需要关节、不需要接触；权威可精确复算 |
+
+### 12.2 机制（以及一个必须知道的坑：**只能在 `Update` 阶段写**）
+
+gz-sim 的一步是 `PreUpdate(所有系统) → Update(所有系统) → PostUpdate(所有系统)`，而**物理系统在
+`Update` 里"步进 + 把 link/sensor 的 `WorldPose`/`AngularVelocity`/`LinearAcceleration` 从物理
+引擎写回"**（gz-sim6 `Physics::Update` → `PhysicsPrivate::UpdateSim`，`src/systems/physics/Physics.cc:841`）。
+本轮**踩过**：第一版把角速度写在 `PreUpdate`，物理系统随后把它覆盖成"静止车 = 0" ⇒ 实测
+`wz=0.5 rad/s` 命令下 `/livox/imu` 的陀螺均值 **0.0000** ⇒ LIO 会认为车没转。
+改到本插件自己的 `Update`（模型插件后加载 ⇒ 在物理之后、所有 PostUpdate 之前）后，陀螺均值
+**0.4000/0.4988**（对应命令 0.4/0.5）。
+
+每步写四类 ECM 数据（`<static>true</static>` 保持不动，物理引擎不参与）：
+1. `components::Pose`（**model**，世界系）—— 射线插件用 `gz::sim::worldPose()`（沿父链读 `Pose`）
+   算传感器位姿，读的就是它；
+2. `components::WorldPose`（model 的每个 link）；
+3. `components::WorldPose` + `components::AngularVelocity`（**IMU 传感器实体**：
+   `ignition-gazebo-imu-system` 读的是传感器实体的这两个组件，不写陀螺恒 0）；
+4. `/odom_ground_truth`（`nav_msgs/Odometry`，**本进程内** rclcpp 直发，与 mid360 插件同一做法）。
+
+积分：`yaw += wz·dt`；`p += R(yaw)·(vx,vy,0)·dt`（`vx` 在**车体系**，与 planar_move 一致）。
+
+### 12.3 命令通道（ROS 2 → gz，**过桥**）
+
+```yaml
+# src/rm_simulation/rm_livox_gz_sim/config/ros_gz_bridge.yaml（追加）
+- ros_topic_name: "/cmd_vel_chassis"
+  gz_topic_name:  "/cmd_vel_chassis"
+  ros_type_name:  "geometry_msgs/msg/Twist"
+  gz_type_name:   "ignition.msgs.Twist"
+  direction:      ROS_TO_GZ
+```
+插件订阅的是 **gz** 的 `/cmd_vel_chassis`（`gz::transport`），所以
+`ros2 topic info -v /cmd_vel_chassis` 看到 ROS 侧的发布者（nav2/脚本）**和桥**，
+`ign topic -i -t /cmd_vel_chassis` 看到 gz 侧的桥发布者 —— 两边各自可查。
+**为什么命令过桥、而 IMU/点云不过桥**：输入侧只有这一条命令，过桥让"ROS↔gz 边界"只有一处；
+输出侧的 IMU/点云留在进程内是为了 QoS/frame_id/零拷贝（理由见 §1）。
+
+### 12.4 实测权威（`tools/scripts/gzsim/drive_probe.py`，真值 = `/odom_ground_truth`）
+
+协议：阶段 A 只发 `wz`、阶段 B 只发 `vx`，各按**仿真时间** 4 s（用消息戳做尺，RTF<1 也公平）。
+命令以 200 Hz 持续发（`command_timeout: 0.0` ⇒ 与 planar_move 一样"最后一条命令一直生效"）。
+
+| 量 | 命令 | 实测 | 比率 |
+|---|---|---|---|
+| 角速度（`wz=0.5 rad/s`） | 28.65 °/s | **28.65 °/s**（Δyaw 114.59°/4.0 s） | **1.000** |
+| 角速度（`wz=0.4 rad/s`） | 22.92 °/s | **22.92 °/s**（Δyaw 91.67°/4.0 s） | **1.000** |
+| 线速度（`vx=0.3 m/s`） | 0.300 m/s | **0.3000 m/s**（Δs 1.2030 m/4.01 s） | **1.000** |
+| `/livox/imu` 陀螺 z（`wz=0.4` 期间 399 条均值） | 0.4 rad/s | **0.4000 rad/s** | **1.000** |
+| **LIO 的 `/odom` 同期 Δyaw**（同一次 run） | 91.67°（真值） | **89.70°**（97.9%） | — |
+
+第三、四行是"车真的动了 + 传感器真的看见了"的闭环证据：**驱动写的角速度进了 IMU，
+LIO 用点云 + 陀螺把 91.7° 的旋转估成 89.7°**。
+
+### 12.5 与 Classic 的**不同**（诚实清单，别当成"对齐了"）
+
+| 项 | Classic（`libgazebo_ros_planar_move.so` + 焊接底盘） | gz（本轮） |
+|---|---|---|
+| 命令语义 | `/cmd_vel_chassis`（Twist）→ 车体 | **同**（同话题、同单位、`vx` 车体系、最后命令生效） |
+| **权威（执行率）** | 实测 **5.15%**（整栈 `wz=1.0`×12 s：+35.42°/687.5°，`tilted_lidar_fidelity.md` §M.7）；台架焊接单刚体 **16.2–16.5%**（§M.3） | **100%**（运动学直接积分，无摩擦/接触） |
+| 碰撞响应 | 有（设速度让 ODE 积分 ⇒ 撞墙被挡） | **没有**（运动学穿墙）——要让 gz 等价就得把模型改动态 + 造轮子/接触，等于把 §M 已修好的事再坏一次 |
+| 加速度计 | 有向心/切向项 | **没有**（只保留 gz 物理给的重力项）；陀螺有 |
+| 真值里程计 | `/odom_ground_truth`（planar_move 发） | **同名同语义**（本轮补上，§2.9-9 的缺口） |
+| 其它 | — | 平面（z、roll、pitch 恒定），无差速/阿克曼/悬挂 |
+
+## 13. 同一轮 Classic vs gz 的 A/B（**首次**）
+
+### 13.0 协议与命令（两个后端逐字相同，只换 `sim_backend`）
+
+```bash
+# 一条命令跑完两个后端（顺序执行，各自独占 domain/URI/partition/HOME；只杀自己的进程）
+tools/scripts/gzsim/ab_backends.sh ab_1840 20
+
+# 它内部就是这一条（每个后端各跑一次）：
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+    sim_backend:=<classic|gz> world:=RMUC2026 mode:=mapping lio:=small_point_lio \
+    robot:=robot11 robot11_mount:=sensor gui:=False spin_speed:=0.0 \
+    nav_rviz:=False lio_rviz:=False gz_partition:=<唯一名>
+# 同一个探针（launch 那一刻就开始等首帧，然后量 20 墙钟秒）：
+python3 tools/scripts/gzsim/ab_probe.py --backend <b> --duration 20 \
+    --launch-epoch <launch 的 time.time()> --pid <launch pid> \
+    --log <launch.log> --out <b>/metrics.json
+```
+
+* 机器：同一台、同一个 20 s 窗口、先后各一次（**不并发**，并发会互相抢 CPU）；
+* 世界：**同一份**场地资产 `RMUC2026_world`（同一 STL）、同一起始点 `x=10.925, y=2.525, yaw=0`；
+  ⚠️ **两处已知不同**（不是本轮引入的）：(a) 起始 `z`：Classic 0.2（落地一下），gz 0.1025
+  （静态直接到位）；(b) Classic 世界里**额外**有 `meshes/obstacles/*` 的障碍物模型，gz 世界
+  **还没有**（§10-4 的既有缺口）——这正是 `/scan` 近距回波差异的来源（见下）。
+* 采样窗口 = 收到首帧之后的 20 墙钟秒；RTF 用 `/clock` 的 Δ仿真/Δ墙钟。
+
+### 13.1 并排表（`ab_1840`，2026-10-18 18:40 本地）
+
+| 指标 | **Classic 11** | **gz / Fortress 6.18** | 变化 |
+|---|---|---|---|
+| RTF（`/clock` 仿真/墙钟） | **0.431** | **0.973** | **×2.26** |
+| `/livox/lidar` 仿真 Hz | 10.000 | 10.000 | 一致 |
+| `/livox/lidar` 墙钟 Hz | 4.315 | 9.725 | ×2.25 |
+| 每帧点数（中位 / min / max） | 11365 / 10999 / 11511 | 8050 / 7893 / 8204 | −29%（命中率 + `max_range` 口径，见 §13.2） |
+| **逐帧求交 ms**（插件插桩，中位） | **无插桩**（ODE 逐射线，见下行） | **0.243**（min 0.231 / max 0.264，10 次采样，双实例合计 ≈0.49 ms/帧） | — |
+| **gzserver CPU ms / 帧**（统一口径，两个后端可比） | **176.2** | **57.0** | **−68%** |
+| gzserver RSS 中位（MB） | **3071** | **297** | **−90%** |
+| 整棵进程树 RSS 中位（MB） | 3406 | 664 | −80% |
+| gzserver CPU%（单核） | 76.5 | 55.7 | −27% |
+| 整棵树 CPU%（单核） | 87.1 | 159.7 | +83%（下游在同一台机器上跑得更快 ⇒ 吃更多 CPU） |
+| 启动 → 首帧（s） | 7.06 | **3.65** | −48% |
+| `/scan` 有限波束数（中位） | 465 | 402 | −14% |
+| `/scan` range min / max（m） | **0.19 / 9.92** | **2.64 / 9.87** | 见 §13.2 第 2 条 |
+| `/cloud_registered` 条数（20 s 窗口） | 67（3.3 Hz） | 1730（86.5 Hz） | 见 §13.2 第 3 条 |
+| `/cloud_registered` width 中位（点/条） | 11388 | 841 | 同上 |
+| 端到端 LIO | ✅ `odom→base_link` 10.00 Hz | ✅ `odom→base_link` 100.00 Hz | 两个后端都通 |
+
+`/tmp` 里的原始 JSON：`.tmp_gz_ab/ab_1840/{classic,gz}/metrics.json`（`contract.log` 同目录）。
+
+### 13.2 怎么读这张表（三条，缺一条就会误读）
+
+1. **"求交 ms"两个后端的口径不同，不能直接减**：gz 一列是插件自己插桩的
+   `Embree average raycast: X ms for 30000 rays`（每 100 帧一条运行均值，取中位）；
+   Classic 的雷达是 `gzserver` **进程内**的 ODE 插件，**没有任何插桩**，所以只能给
+   "gzserver CPU 秒 / 帧"这个**统一口径**（176 ms/帧 vs 57 ms/帧）。**结论只能写到
+   "gz 的求交本体是 0.24 ms/帧量级、Classic 的服务端每帧成本高 3 倍"**，不能写
+   "0.24 ms vs 176 ms 是同一种测量"。
+2. **`/scan` 近距差异的主因是"障碍物模型没进 gz 世界"**，不是传感器：Classic 的
+   `RMUC2026.world` 里还有 `meshes/obstacles/*` 的实体障碍（docs 里那张"正前方 0.42 m"的
+   就是它），gz 世界**只有**场地 STL + 机器人（§10-4 的既有缺口）⇒ Classic 的 `/scan`
+   能打到 0.19 m 的近物、gz 最近的只有 2.64 m。**这条差异会随"把障碍物搬进 gz 世界"消失**，
+   与 LIO/驱动无关。
+3. **`/cloud_registered` 的粒度差异有明确机理**：gz 的 `CustomMsg` 每个点带
+   `offset_time = i·1e9/point_rate`（跨 **100 ms**，像真机），Classic 的 `offset_time` **恒 0**。
+   `small_point_lio` 的 `handle_once()` 在 `imu.front().timestamp < point.back().timestamp`
+   时发布 ⇒ gz 侧几乎每条 IMU 都发（≈86–97 Hz、每次只发"上次发布以来新收的点"≈841 个），
+   Classic 侧每帧发一次（3.3 Hz、11388 个）。**总量级相同（~72k vs ~37k 点/s）、语义相同
+   （都是 odom 系里的配准点云）**；差别是"帧的切分"。如果哪天需要与 Classic 逐帧对齐，
+   给插件加一个 `<offset_time_span>0</offset_time_span>` 开关即可（本轮未做）。
+
+## 14. 单发布者契约（`map→odom` / `odom→base_link`）—— gz 侧**首次真正考到**
+
+### 14.1 工具与口径
+
+```bash
+python3 tools/scripts/gzsim/gz_contract_check.py --duration 12 \
+    --out contract.json --expect odom:base_link --expect map:odom
+```
+三路证据（ROS 2 的 `TFMessage` **不带 authority**，`view_frames` 里所有 broadcaster 都是
+`default_authority`，所以不能只看内容）：
+1. `/tf` 与 `/tf_static` 的**位点清单**（`ros2 topic info -v` 的每个 PUBLISHER：node 名 + GID）；
+2. **逐边消息率 + 同 stamp 冲突检测**：两个节点发同一条边时，率会≈相加，且同一 stamp 会出现
+   **两个不同变换值**（脚本逐条比较，记 `stamp_conflicts`）；
+3. `tf2_monitor` 的逐帧统计作为第二意见。
+另外查 gz 侧：`ign topic -i -t /mid360/imu_gz` 的 `Publishers:` 必须 = 1（= §11.1 的回归判据），
+`/clock` 必须 ≤1。
+
+### 14.2 计数（同一轮 A/B 的两个 `contract.log`）
+
+| 边 | Classic 11 | gz（`lio:=small_point_lio`） | gz（`lio:=fastlio`） |
+|---|---|---|---|
+| `odom → base_link` | **1 条边**，10.00 Hz，`stamp_conflicts=0` | **1 条边**，100.00 Hz，`stamp_conflicts=0` | **1 条边**，10.00 Hz，`stamp_conflicts=0` |
+| `map → odom` | **1 条边**，108.5 Hz，`stamp_conflicts=0` | **1 条边**，51.6 Hz，`stamp_conflicts=0` | **1 条边**，63.8 Hz，`stamp_conflicts=0` |
+| `/tf` 发布者数（全部边） | 6（`robot_state_publisher`/`slam_toolbox`×2/`fake_vel_transform`/`complementary_filter`/`small_point_lio`） | 6（同上，末项换成 `small_point_lio`） | 7（+ `laser_mapping`+`lio_tf_adapter`，- `small_point_lio`） |
+| `/tf_static` 发布者数 | 1（`robot_state_publisher`） | 1 | 1 |
+| `/odom` 发布者数 | 1 | 1 | 1 |
+| `/cloud_registered` 发布者数 | 1 | 1 | 1 |
+| `/livox/lidar`（CustomMsg）发布者数 | 1（`livox_frame_plugin`） | 1（`mid360_gz_custom`） | 1 |
+| `/livox/imu` 发布者数 | 1（`imu_plugin`） | 1（`mid360_gz_custom`） | 1 |
+| gz 侧 `/mid360/imu_gz` 发布者数 | — | **1** | **1** |
+| IMU 单调性（20 s） | `n_back=0`（459 条） | `n_back=0`（1162 条，`dt=10 ms` 恒定） | `n_back=0`（1168 条） |
+
+⇒ **`map→odom→base_link` 的每一段都恰好一个发布者**，且 gz 侧同 stamp 冲突 = 0。
+（`map→odom` 的"率"两后端都远高于 10 Hz：slam_toolbox 每帧重发一次，不是多发布者——
+`stamp_conflicts=0` 且发布者清单里只有 `slam_toolbox`、位点数 1。）
+
+### 14.3 为什么这次才算"真考到"
+
+旧轮 §8 的判决是"⚠️ 部分：没有 odom/map 边（因为 LIO 没起来）"。本轮 gz 侧 **LIO 在跑**，
+两条边都真实存在、都能被 `tf2_echo` 解出来：
+
+```
+$ ros2 run tf2_ros tf2_echo map base_link
+At time 13.170000000
+- Translation: [0.013, -0.029, -0.000]
+- Rotation: in RPY (degree) [-0.014, -0.003, 0.182]
+
+$ ros2 run tf2_tools view_frames        # 逐边 rate
+base_link:   parent 'odom'       rate 100.206
+odom:        parent 'map'        rate  10.208
+livox_frame: parent 'base_link'  rate 10000.000 (static)
+imu_link:    parent 'livox_frame' rate 10000.000 (static)
+```
+
+## 15. 更新后的「未实现 / 未验证」清单（**替代 §10**）
+
+**仍未实现**
+1. **障碍物模型没进 gz 世界**（§10-4 仍在）：Classic 的 `meshes/obstacles/*` 没有对应 SDF
+   ⇒ gz 档的 `/scan` 近距离回波比 Classic 少（§13.2-2）。这是**当前两后端最大的"世界不同"**。
+2. **底盘无碰撞响应**（§12.5）：运动学穿墙；要等价得把模型改动态 + 造轮子/接触。
+3. **加速度计无向心/切向项**（§12.5）。
+4. 多场地（只有 `RMUC2026`）、其它机器人槽位（只有 `robot11`）——§10-2/§10-3 不变。
+5. `/cloud_registered` 的帧切分与 Classic 不同（§13.2-3）；要逐帧对齐需给插件加
+   `<offset_time_span>` 开关（未做）。
+
+**仍未验证**
+6. **`mode:=slam_nav` / `mode:=nav`** 在 gz 档：本轮只跑了 `mode:=mapping`（nav2 仍未验）。
+7. **动态障碍 refit**（`rmagine_embree_map_system` 的 `delta_trans/delta_rot`）：世界与机器人都
+   还是静态模型（驱动是运动学改 pose，不是物理运动）⇒ 该分支**仍未走到**。
+8. **Classic 侧的"求交 ms"**：无插桩，只有 `gzserver CPU ms/帧` 的统一口径（§13.2-1）。
+9. **`lio:=pointlio` 的落盘路径**：`pcd_save_en: true` 会往编译期 `ROOT_DIR/PCD/` 写 PCD，
+   该目录不存在时**第一帧就 terminate**（§11.3）。本轮只**建目录**（未改它的配置），
+   跑通后删掉了产出的 PCD；**没有**在 Classic 侧复跑同一崩溃（同一份代码、同一条路径，按机理两边都会崩）。
+10. **CPU 峰值 / `perf` 火焰图**：仍只有 0.5 s 采样的瞬时值（§10-13）。
+11. **`ign sdf -k` 全仓预检**、**多实例 >2**、**GUI 成体系数字**：§10-9/§10-11/§10-12 不变。
+12. **同轮 A/B 只做了一轮（`ab_1840`）**：±3% 级别的抖动没有做重复实验；`RTF ×2.26` 与
+    `RSS −90%` 是量级结论，不是精密对照。
+
+## 16. 新增命令速查（复制即可）
+
+```bash
+# ① 一次性：取上游 + 打 4 个补丁 + 编译（含 0004 的 custom_msg_tag）
+tools/scripts/gzsim/fetch_and_patch_mid360.sh
+
+# ② 本仓编译（新增包 rm_gz_planar_move 会自动跳过"没有 Fortress"的机器）
+colcon build --symlink-install
+
+# ③ 整栈 + 可开（gz）：LIO 出 odom、底盘能动
+ros2 launch rm_nav_bringup bringup_sim.launch.py sim_backend:=gz world:=RMUC2026 \
+    mode:=mapping lio:=small_point_lio robot:=robot11 robot11_mount:=sensor \
+    gui:=False spin_speed:=0.0
+
+# ④ 开一下（命令从 ROS 走桥进 gz；真值看 /odom_ground_truth）
+ros2 topic pub -r 50 /cmd_vel_chassis geometry_msgs/msg/Twist \
+    "{linear: {x: 0.3}, angular: {z: 0.4}}"
+#   ↑ 想量"命令 vs 实测权威"就用脚本（含 IMU/LIO 同向核对）：
+python3 tools/scripts/gzsim/drive_probe.py --wz 0.4 --vx 0.3 --duration 4 \
+    --lio-odom-topic /odom --out /tmp/drive.json
+
+# ⑤ 契约：TF 单发布者 + gz 通道独占性（gz 侧必须 1 个 /mid360/imu_gz 发布者）
+python3 tools/scripts/gzsim/gz_contract_check.py --duration 12 \
+    --out /tmp/contract.json --expect odom:base_link --expect map:odom
+
+# ⑥ 同轮 Classic vs gz 并排（顺序跑，各自独占 domain/URI/partition）
+tools/scripts/gzsim/ab_backends.sh ab_$(date +%H%M) 20
+
+# ⑦ 时间戳探针（查 `imu loop back` 那一类问题；同时用 LIO 的 best_effort 与 FAST-LIO 的 reliable）
+python3 tools/scripts/gzsim/gz_stamp_probe.py --duration 10 --out /tmp/stamps.json
+
+# ⑧ 复现"partition 污染"（对照实验：两个世界共享 gz 话题 ⇒ IMU 戳交错）
+ros2 launch rm_livox_gz_sim gz_sim.launch.py robot:=robot11 gui:=False gz_partition:=shared_x
+ros2 launch rm_livox_gz_sim gz_sim.launch.py gz_world:=bench robot:=none gui:=False gz_partition:=shared_x
+```
+
+**回退**：`sim_backend` 不传即 Classic（行为与改动前逐字节相同）；只想退驱动：
+`gz_drive:=false`；想复现两个旧 bug：`gz_custom_msg_tag:=16`（点云全丢）+
+`gz_partition:=<同一个名字>`（IMU 交错）。

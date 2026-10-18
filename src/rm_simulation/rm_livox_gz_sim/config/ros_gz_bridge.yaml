@@ -21,3 +21,17 @@
   ros_type_name: "rosgraph_msgs/msg/Clock"
   gz_type_name: "ignition.msgs.Clock"
   direction: GZ_TO_ROS
+
+# ── /cmd_vel_chassis：ROS 2 → gz（**方向是 ROS_TO_GZ**）──────────────────────────
+# 消费方 = 我们自己的底盘驱动 `librm_gz_planar_move.so`（见
+# src/rm_simulation/rm_gz_planar_move/src/planar_move_system.cpp）。它与 Classic 的
+# libgazebo_ros_planar_move.so 同语义：订阅 /cmd_vel_chassis 的 Twist，按 (vx,vy,wz)
+# 积分模型位姿，并发 /odom_ground_truth 真值。
+# 为什么让命令**过桥**而不是在插件里直接订阅 ROS 话题：与"gz 侧的输入都走 gz transport"
+# 这条边界一致；桥是唯一一条 ROS↔gz 的命令通道，出错时 `ros2 topic info -v` 与
+# `ign topic -i` 都能各自看到端点。IMU/点云仍走**进程内** rclcpp（理由见文件头）。
+- ros_topic_name: "/cmd_vel_chassis"
+  gz_topic_name: "/cmd_vel_chassis"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "ignition.msgs.Twist"
+  direction: ROS_TO_GZ

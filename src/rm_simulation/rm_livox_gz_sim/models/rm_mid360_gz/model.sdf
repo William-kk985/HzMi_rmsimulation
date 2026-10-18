@@ -68,6 +68,9 @@
       <node_name>mid360_gz_custom</node_name>
       <qos_reliability>@QOS@</qos_reliability>
       <ignore_self>@IGNORE_SELF@</ignore_self>
+      <!-- CustomMsg 的每点 tag：0 = 与 Classic 的 libros2_livox.so 一致（上游写死 0x10，
+           small_point_lio 的适配器要求 (tag & 0x3f)==0 ⇒ 0x10 会把每帧每个点都丢掉） -->
+      <custom_msg_tag>0</custom_msg_tag>
     </plugin>
 
     <!-- ── 实例 #2：只发 PointCloud2（linefit 要的 /livox/lidar/pointcloud） ── -->
@@ -93,6 +96,9 @@
       <node_name>mid360_gz_pc2</node_name>
       <qos_reliability>@QOS@</qos_reliability>
       <ignore_self>@IGNORE_SELF@</ignore_self>
+      <!-- CustomMsg 的每点 tag：0 = 与 Classic 的 libros2_livox.so 一致（上游写死 0x10，
+           small_point_lio 的适配器要求 (tag & 0x3f)==0 ⇒ 0x10 会把每帧每个点都丢掉） -->
+      <custom_msg_tag>0</custom_msg_tag>
     </plugin>
   </model>
 </sdf>

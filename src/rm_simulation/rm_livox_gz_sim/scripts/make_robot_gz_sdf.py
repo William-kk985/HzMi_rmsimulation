@@ -22,7 +22,9 @@
 #     libgazebo_ros_imu_sensor.so、libgazebo_ros_planar_move.so。Fortress 加载不了它们
 #     （会报 "Failed to load system plugin" 并让模型插入失败）。
 #  4. 加回我们的东西：两个 mid360 插件实例（CustomMsg + PointCloud2）、一个 gz `<sensor
-#     type="imu">`（<topic> 显式给，插件订阅它转成 ROS 的 /livox/imu）。
+#     type="imu">`（<topic> 显式给，插件订阅它转成 ROS 的 /livox/imu）、以及**底盘驱动**
+#     `librm_gz_planar_move.so`（Classic 的 planar_move 在 Fortress 上的对应实现，
+#     见 src/rm_simulation/rm_gz_planar_move/src/planar_move_system.cpp）。
 #
 # 用法：
 #   make_robot_gz_sdf.py --urdf <in.urdf> --out-dir <dir> [--model-name robot11]
@@ -63,7 +65,8 @@ PLUGIN_TMPL = """
       <output_yaw>0.0</output_yaw>
       <node_name>{node}</node_name>
       <qos_reliability>{qos}</qos_reliability>
-      <ignore_self>{ignore_self}</ignore_self>{imu}
+      <ignore_self>{ignore_self}</ignore_self>
+      <custom_msg_tag>{custom_msg_tag}</custom_msg_tag>{imu}
     </plugin>"""
 
 
@@ -167,6 +170,17 @@ def main():
     ap.add_argument('--ignore-self', default='true', choices=['true', 'false'],
                     help='true（默认）= 把自己所属 model 注册进 MapRegistry，'
                          'BVH 里剔除它 ⇒ 看不到自己的车体；false 只用于对照实验')
+    ap.add_argument('--drive', default='true', choices=['true', 'false'],
+                    help='true（默认）= 给模型加底盘驱动插件（运动学 planar_move：'
+                         '/cmd_vel_chassis → 位姿 + /odom_ground_truth）；'
+                         'false = 保持"纯静态底座"（A/B 对照用）')
+    ap.add_argument('--drive-odom-rate', default='50',
+                    help='真值里程计 /odom_ground_truth 的发布率（Hz，仿真时间）')
+    ap.add_argument('--custom-msg-tag', default='0',
+                    help='/livox/lidar（CustomMsg）每个点的 tag 字节。**默认 0 = 与 Classic 的 '
+                         'libros2_livox.so 一致**；small_point_lio 的适配器要求 (tag & 0x3f)==0，'
+                         '上游写死的 0x10 会让它把每一帧的每个点都丢掉（实测症状：LIO 永不初始化、'
+                         '没有 odom→base_link 与 /cloud_registered）。传 16 可复现上游行为')
     args = ap.parse_args()
 
     if args.xacro:
@@ -301,14 +315,37 @@ def main():
         + PLUGIN_TMPL.format(link=link_name, csv=args.csv, topic='/livox/lidar',
                              kind='3', frame=link_name, node='mid360_gz_custom',
                              qos=args.qos, ignore_self=args.ignore_self,
-                             imu=imu_block)
+                             custom_msg_tag=args.custom_msg_tag, imu=imu_block)
         + '\n    <!-- HzMi: 双发布实例 #2 —— 只发 PointCloud2（linefit 用 /livox/lidar/pointcloud） -->'
         + PLUGIN_TMPL.format(link=link_name, csv=args.csv,
                              topic='/livox/lidar/pointcloud', kind='2',
                              frame=link_name, node='mid360_gz_pc2', qos=args.qos,
                              ignore_self=args.ignore_self,
+                             custom_msg_tag=args.custom_msg_tag,
                              imu='\n      <publish_imu>false</publish_imu>')
     )
+    if args.drive == 'true':
+        drive_link = 'base_link' if 'base_link' in links else sorted(links)[0]
+        plugins = plugins + (
+            '\n    <!-- HzMi: 底盘驱动（Classic 的 libgazebo_ros_planar_move.so 的对应实现）\n'
+            '         运动学、平面；/cmd_vel_chassis(gz Twist) → 模型位姿 + /odom_ground_truth。\n'
+            '         为什么不是 DiffDrive/VelocityControl：见该插件源码头部与\n'
+            '         docs/fortress_sim_backend.md「底盘运动」一节。 -->\n'
+            '    <plugin filename="librm_gz_planar_move.so" name="rm_gz::PlanarMove">\n'
+            '      <link_name>%s</link_name>\n'
+            '      <topic>/cmd_vel_chassis</topic>\n'
+            '      <odom_topic>/odom_ground_truth</odom_topic>\n'
+            '      <odom_frame>odom</odom_frame>\n'
+            '      <base_frame>%s</base_frame>\n'
+            '      <odom_rate>%s</odom_rate>\n'
+            '      <publish_odom>true</publish_odom>\n'
+            '      <command_timeout>0.0</command_timeout>\n'
+            '      <max_vx>3.0</max_vx>\n'
+            '      <max_wz>4.0</max_wz>\n'
+            '    </plugin>' % (drive_link, drive_link, args.drive_odom_rate))
+        log('底盘驱动：link=%s topic=/cmd_vel_chassis odom_rate=%s Hz'
+            % (drive_link, args.drive_odom_rate))
+
     close = xml.rindex('</model>')
     xml = xml[:close] + plugins + '\n  </model>' + xml[close + len('</model>'):]
 

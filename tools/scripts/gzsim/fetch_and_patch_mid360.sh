@@ -135,6 +135,7 @@ apply_patch() {  # apply_patch <repo-dir> <patch>
 apply_patch "$UPSTREAM/rgp"    "$PATCH_DIR/0001-rmagine-gazebo-plugins-self-exclusion.patch"
 apply_patch "$UPSTREAM/mid360" "$PATCH_DIR/0002-mid360-fortress-compat.patch"
 apply_patch "$UPSTREAM/mid360" "$PATCH_DIR/0003-mid360-ros-contract.patch"
+apply_patch "$UPSTREAM/mid360" "$PATCH_DIR/0004-mid360-custommsg-tag.patch"
 
 # 只把「上游③ 的 MID-360 包」和另外两个链接进工作区；上游③ 自带的 rmagine /
 # rmagine_gazebo_plugins 副本**不用**（我们用钉住的独立上游 ①②，避免版本漂移）。

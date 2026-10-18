@@ -41,9 +41,11 @@ GZSIM_WS=/opt/gzsim_ws tools/scripts/gzsim/fetch_and_patch_mid360.sh   # 换前�
 | `0001-rmagine-gazebo-plugins-self-exclusion.patch` | ② | `MapRegistry` 增加 `AddIgnoredModelEntity` / `RemoveIgnoredModelEntity` / `IsIgnoredModelEntity`；`RmagineEmbreeMapSystem::IsIgnoredVisual()` 在祖先链上多查一次。作用：**自机排除** —— 传感器插件把"自己所属的 model 实体"登记进去，建 BVH 时整棵子树被剔除 ⇒ 机器人看不见自己的车体。为什么不用上游已有的 `<ignore_model>名字</ignore_model>`：那是**按 model 名字**匹配，同一个模型被 include 两次时 Gazebo 会加 `_0` 后缀，名字匹配不可靠。 |
 | `0002-mid360-fortress-compat.patch` | ③ | Fortress（ignition-gazebo6）化：CMake 包名/目标名（`gz-sim8`→`ignition-gazebo6` 等 4 个）、注册宏（`GZ_ADD_PLUGIN`→`RMAGINE_GZ_ADD_PLUGIN`）、`components/RaycastData` 的 `#if`（gz-sim6 没有这个组件，physics 后端整个关掉，只留 Embree）、以及 **`gzerr/gzwarn/gzmsg/gzdbg` → `ignerr/…` 的 4 个 `#define`**（gz-common4 只定义 ign* 拼法，gz* 拼法是 gz-common5+ 才加的）。 |
 | `0003-mid360-ros-contract.patch` | ③ | 与本仓 ROS 契约对齐：① `<qos_reliability>`（默认 `best_effort` = `SensorDataQoS`；`reliable` 只作复现开关）；② `<node_name>`（双实例不能共用 node 名）；③ `<publish_imu>`（IMU 只能有一个实例发）；④ `<imu_frame_id>`（Classic 的 `/livox/imu` 是 `imu_link`，不是 `livox_frame`）；⑤ `<ignore_self>`（默认 true；false 只用于"自机排除到底有没有用"的对照实验）。 |
+| `0004-mid360-custommsg-tag.patch` | ③ | `/livox/lidar`（CustomMsg）每点 `tag` 从写死的 `0x10` 改成 `<custom_msg_tag>`、**默认 0**。理由：`small_point_lio` 的适配器要求 `(tag & 0x3f) == 0`，`0x10` 会让它把**每帧每个点都丢掉** ⇒ 永不初始化（无 `odom→base_link`、无 `/cloud_registered`）；Classic 的 `libros2_livox.so` 从不写 `tag`（默认 0）。`0x00` 仍在 FAST-LIO / Point-LIO 的白名单里（它们只要求 `(tag & 0x30) ∈ {0x00,0x10}`），所以三个槽位都收。传 `16` 可复现上游行为。 |
 
 **补丁行的计数**：`git diff --stat` 在打完后是
-`0001: 2 files, +35`、`0002: 2 files, +71/−20`、`0003: 1 file, +47/−6`。
+`0001: 2 files, +35`、`0002: 2 files, +71/−20`、`0003: 1 file, +47/−6`、
+`0004: 1 file, +13/−1`。
 
 ## 构建期依赖：Embree 4（Apache-2.0，构建期下载）
 

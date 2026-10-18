@@ -5,6 +5,11 @@
 #   1. `ign gazebo` 起 Fortress（世界 = 我们的 SDF 1.9；GUI 可选；HOME 自动重定向）；
 #   2. ros_gz_bridge 桥 **/clock**（这是唯一必须桥的）；
 #   3. robot_state_publisher + joint_state_publisher（TF 契约与 Classic 逐字相同）；
+#   3b. **每次运行独占一个 gz transport partition**（GZ_PARTITION/IGN_PARTITION）。
+#       不隔离的后果是实测过的（docs/fortress_sim_backend.md §8.2）：同机另一个
+#       Fortress 世界会把自己的 /clock 与 /mid360/imu_gz 送进我们的插件
+#       ⇒ /livox/imu 的戳变成**两个仿真钟交错** ⇒ small_point_lio 每秒每条都报
+#       `imu loop back`、永不初始化（既无 odom→base_link 也无 /cloud_registered）。
 #   4. 运行期把 robot 的 URDF 派生成 Fortress 的 SDF 模型（scripts/make_robot_gz_sdf.py），
 #      并把 sensor 模型里的 @MID360_CSV@ 换成仓库里那份 17 MB 的 mid360.csv 真路径。
 #
@@ -141,6 +146,9 @@ def _materialize(context, *args, **kwargs):
     csv_override = context.perform_substitution(LaunchConfiguration('gz_csv'))
     runtime_dir = context.perform_substitution(LaunchConfiguration('gz_runtime_dir'))
     extra_guis = context.perform_substitution(LaunchConfiguration('gz_extra_gui'))
+    partition = context.perform_substitution(LaunchConfiguration('gz_partition'))
+    custom_msg_tag = context.perform_substitution(LaunchConfiguration('gz_custom_msg_tag'))
+    drive = context.perform_substitution(LaunchConfiguration('gz_drive'))
 
     # ── 硬要求校验（缺了给可操作的报错，不静默跑错） ───────────────────────
     if robot not in ('', 'none', 'robot11'):
@@ -231,7 +239,8 @@ def _materialize(context, *args, **kwargs):
         model_name = 'rm_%s_gz' % (robot or 'robot')
         cmd = [sys.executable, gen, '--urdf', '-', '--out-dir', models_dir,
                '--model-name', model_name, '--csv', csv, '--qos', qos,
-               '--imu-frame', 'imu_link', '--ignore-self', ignore_self]
+               '--imu-frame', 'imu_link', '--ignore-self', ignore_self,
+               '--custom-msg-tag', custom_msg_tag, '--drive', drive]
         # 30° 斜装：robot11 的 URDF 只要 livox_mount/robot11_mount:=sensor|urdf 就已经把
         # roll 写进 body_to_livox 关节了。这里再显式钉一次，保证「不管 URDF 怎么写，
         # gz 侧的传感器 link pose 一定是 -0.5236」（B① 决策）。
@@ -246,6 +255,13 @@ def _materialize(context, *args, **kwargs):
     else:
         model_name = None
         log('robot:=none ⇒ 不起机器人（台架世界，只有传感器）')
+
+    # ── gz transport partition（**必须每次运行唯一**，理由见文件头 3b） ──────
+    # 空 = 本 run 随机一个（默认，最安全）；指定 = 固定名（只有"故意要让两个世界
+    # 共享 gz 话题"的对照实验才这么干）。
+    if not partition:
+        partition = 'rm_gz_%s' % uuid.uuid4().hex[:10]
+    log('gz transport partition = %s（GZ_PARTITION / IGN_PARTITION 同时设）' % partition)
 
     # ── 环境变量（Fortress 两个世代的名字都设：本机实测两个都设才稳，见
     #    livox_sensor_prior_art.md §10.7） ────────────────────────────────────
@@ -267,16 +283,29 @@ def _materialize(context, *args, **kwargs):
         # 上游装出来的 rpath 目录（rmagine 本体在这里）
         os.path.join(backend, 'rmagine', 'lib'),
     ]
+    # 我们自己的底盘驱动插件（本仓包 rm_gz_planar_move，`<prefix>/lib/librm_gz_planar_move.so`）
+    try:
+        _planar_share = get_package_share_directory('rm_gz_planar_move')
+        plugin_paths.append(os.path.dirname(os.path.dirname(_planar_share)))
+        # 上面那一层是 <prefix>（share/rm_gz_planar_move → <prefix>），.so 在 <prefix>/lib
+        plugin_paths[-1] = os.path.join(plugin_paths[-1], 'lib')
+    except PackageNotFoundError:
+        log('⚠ 没装 rm_gz_planar_move ⇒ gz 侧没有底盘驱动（/cmd_vel_chassis 无人消费）')
     for k in ('GZ_SIM_RESOURCE_PATH', 'IGN_GAZEBO_RESOURCE_PATH', 'IGN_FILE_PATH'):
         actions_extra_env.setdefault(k, os.pathsep.join(res_paths))
     for k in ('GZ_SIM_SYSTEM_PLUGIN_PATH', 'IGN_GAZEBO_SYSTEM_PLUGIN_PATH'):
         actions_extra_env[k] = os.pathsep.join(plugin_paths)
     log('GZ_SIM_SYSTEM_PLUGIN_PATH = %s' % actions_extra_env['GZ_SIM_SYSTEM_PLUGIN_PATH'])
+    # 两个拼法都设：ignition-transport11（Fortress）读 IGN_PARTITION，gz-transport12+
+    # 读 GZ_PARTITION；与 GZ_SIM_SYSTEM_PLUGIN_PATH 同一套"两代都设"的策略。
+    actions_extra_env['GZ_PARTITION'] = partition
+    actions_extra_env['IGN_PARTITION'] = partition
 
     ld = [LogInfo(msg='[gz_sim.launch] ' + m) for m in
           ('world = %s' % world_file, 'runtime dir = %s' % runtime_dir)]
     for k in ('GZ_SIM_RESOURCE_PATH', 'IGN_GAZEBO_RESOURCE_PATH', 'IGN_FILE_PATH',
-              'GZ_SIM_SYSTEM_PLUGIN_PATH', 'IGN_GAZEBO_SYSTEM_PLUGIN_PATH'):
+              'GZ_SIM_SYSTEM_PLUGIN_PATH', 'IGN_GAZEBO_SYSTEM_PLUGIN_PATH',
+              'GZ_PARTITION', 'IGN_PARTITION'):
         ld.append(SetEnvironmentVariable(k, actions_extra_env[k]))
 
     # ── ign gazebo ───────────────────────────────────────────────────────────
@@ -347,5 +376,21 @@ def generate_launch_description():
         DeclareLaunchArgument('gz_runtime_dir', default_value='',
                               description='空 = /tmp/rm_livox_gz_sim_<rand>；调试时指定可回看生成物'),
         DeclareLaunchArgument('gz_extra_gui', default_value=''),
+        DeclareLaunchArgument('gz_drive', default_value='true',
+                              description='true（默认）= 给 gz 机器人加**运动学底盘驱动**'
+                                          '（/cmd_vel_chassis → 位姿 + /odom_ground_truth，'
+                                          'Classic 的 planar_move 的对应实现）；false = 静态底座'
+                                          '（A/B 对照用）'),
+        DeclareLaunchArgument('gz_custom_msg_tag', default_value='0',
+                              description='/livox/lidar（CustomMsg）的每点 tag。0（默认）= 与 '
+                                          'Classic 逐字节一致；16 = 上游写死的 0x10（**只用于'
+                                          '复现 small_point_lio 全丢点**）'),
+        DeclareLaunchArgument('gz_partition', default_value='',
+                              description='gz transport partition（GZ_PARTITION/IGN_PARTITION）。'
+                                          '空 = 本次运行随机一个（**默认，必须**：同机另一个 '
+                                          'Fortress 世界会把 /clock 与 /mid360/imu_gz 送进来，'
+                                          '导致 /livox/imu 戳交错、small_point_lio 刷 '
+                                          '`imu loop back`）；只有"故意共享 gz 话题"的对照实验'
+                                          '才显式给一个名字'),
         OpaqueFunction(function=_materialize),
     ])

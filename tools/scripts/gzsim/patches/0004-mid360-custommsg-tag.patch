@@ -1,0 +1,53 @@
+This patch is ours (HzMi).  Upstream ③ ashduwihch/mid360_gazebo_harmonic @ 497149a
+(MIT).  Apply AFTER 0002 and 0003 with `git apply -p1` from the upstream root.
+
+Subject: /livox/lidar (CustomMsg) 的每点 tag 改成可配、默认 0（= Classic 的语义）
+
+Why（实测，docs/fortress_sim_backend.md "LIO 在 gz 侧为什么不动" 一节）：
+  · 上游写死 `tag = 0x10`，PC2 的 <tag> 字段与 CustomMsg 共用这个值；
+  · FAST_LIO / point_lio 的 preprocess 只要求 `(tag & 0x30) ∈ {0x00, 0x10}` ⇒ 0x10 收；
+  · small_point_lio 的 LivoxCustomMsgAdapter 要求 `(tag & 0x3f) == 0` ⇒ **0x10 全丢**；
+  · Classic 的 libros2_livox.so 从不写 tag（默认 0）⇒ 本仓既有契约就是 0。
+
+Effect（不传 <custom_msg_tag> 时）：每个 CustomMsg 点的 tag = 0，与 Classic 逐字节一致；
+  PC2 的 <tag> 字段同步变成 0（两个出口仍然一致，§3 的"逐点相同"结论不变）。
+  传 `<custom_msg_tag>16</custom_msg_tag>` 可复现上游行为。
+
+Files changed: 1 (+13/−1 lines)
+--- a/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
++++ b/packages/mid360_simulation_plugin_ros2/src/mid360_system.cpp
+@@ -176,6 +176,17 @@
+     //   sees its own chassis.  `false` is the CONTROL switch used to measure
+     //   that the exclusion actually does something (same world, same pose).
+     this->ignoreSelf = SdfValue<bool>(sdf, "ignore_self", true);
++    // custom_msg_tag: /livox/lidar (CustomMsg) 每个点的 tag 字节。
++    //   上游这里写死 0x10（PC2 的 <tag> 字段与 CustomMsg 共用）。0x10 对
++    //   FAST-LIO / Point-LIO 是"有效点"（它们只要求 (tag & 0x30) ∈ {0x00,0x10}），
++    //   但 small_point_lio 的 livox_custom_msg 适配器要求 **(tag & 0x3f) == 0**
++    //   （它把低 6 位当"线号/保留位"），于是 0x10 会让它把**每一帧的每个点都丢掉**
++    //   ⇒ point_deque 恒空 ⇒ 永不初始化 ⇒ 既无 odom→base_link 也无 /cloud_registered。
++    //   Classic 的 libros2_livox.so 从不写 tag（默认 0），所以本仓既有契约就是 0。
++    //   默认改 0：与 Classic 逐字节对齐，且对 FAST-LIO/Point-LIO 仍然有效（0x00 在
++    //   它们的白名单里）。需要复现上游行为可传 16。
++    this->customMsgTag = static_cast<std::uint8_t>(
++      std::clamp(SdfValue<int>(sdf, "custom_msg_tag", 0), 0, 255));
+     this->mapKey = SdfValue<std::string>(sdf, "map_key", "default");
+     this->outputYaw = SdfValue<double>(sdf, "output_yaw", 0.0);
+     this->outputCos = std::cos(this->outputYaw);
+@@ -544,7 +555,7 @@
+         this->outputSin * result.x + this->outputCos * result.y);
+       const float z = result.z;
+       const float intensity = 100.0F;
+-      const std::uint8_t tag = 0x10;
++      const std::uint8_t tag = this->customMsgTag;
+       const std::uint8_t line = this->activeSamples[i].line;
+       const auto offsetNs = static_cast<std::uint32_t>(
+         std::llround(static_cast<double>(i * this->downsample) * 1e9 / this->pointRate));
+@@ -682,6 +693,7 @@
+   bool ignoreSelf{true};
+   std::string nodeName{"mid360_gz_sim"};
+   bool publishImu{true};
++  std::uint8_t customMsgTag{0};
+   std::chrono::steady_clock::duration nextScanTime{0};
+   std::chrono::steady_clock::duration scanStamp{0};
+   std::vector<RayPoint> physicsPoints;
