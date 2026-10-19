@@ -3,10 +3,20 @@
 # map_archive.sh —— 「在上次基础上继续建图」的存档/查询工具（2D 位姿图 + 3D 先验）
 #
 # 它做三件事（子命令）：
-#   save [--name X]   把**正在跑的** slam_toolbox 的位姿图存到
+#   save [--name X] [--world W] [--resolution R]
+#                     把**正在跑的** slam_toolbox 的位姿图存到
 #                     src/rm_nav_bringup/map/<name>.{posegraph,data}（同名覆盖），
 #                     等两个文件都真的出现，然后刷新 sidecar <name>.meta.yaml；
 #                     若 3D 累加器（cloud_accumulator:=True）在跑，顺带存 PCD/<name>.pcd。
+#                     `--resolution`（米/格）★ 2026-10-20 新增：本次建图用的栅格分辨率 ——
+#                     **显式优先**，不给才 `ros2 param get /slam_toolbox resolution` 问活 mapper；
+#                     它会写进 sidecar 的 `resolution:` 并参与守卫的软警告（分辨率变了 ⇒ 栅格
+#                     尺寸变了）。取值必须能解析成有限正数且 ∈ [0.005, 1.0] m，否则 **exit 2**
+#                     （绝不"打 usage 然后静默什么都不写"）。
+#                     ⚠️ 调用方**必须**把本脚本的退出码传出去（`| tee` 时用 `${PIPESTATUS[0]}`
+#                     或 `set -o pipefail` 并别加 `|| true`）——否则失败被管道吞掉、看着像
+#                     成功而磁盘上什么都没写（2026-10-19 建图轮的实际事故，见 docs
+#                     frame_contract_v3_measurements.md §19）。
 #   info [--name X]   打印某份存档的 sidecar（world/出生点/版本）+ 各文件大小与时间戳。
 #   list              列出 map/（位姿图）与 PCD/（点云）下所有存档及其 world 摘要。
 #   adopt --name X --world W   给**旧版**（没有 sidecar 的）存档补一份 sidecar —— 等于人工担保它属于 W。
@@ -56,6 +66,7 @@
 #   tools/scripts/mapping/map_archive.sh save                 # 存档名 = 本次 launch 的 map_name
 #   tools/scripts/mapping/map_archive.sh save --check         # 只看"会用哪个名字+证据链"，不写盘
 #   tools/scripts/mapping/map_archive.sh save --name RMUC2026_home
+#   tools/scripts/mapping/map_archive.sh save --name RMUC2026_home --resolution 0.05   # 显式分辨率
 #   tools/scripts/mapping/map_archive.sh info --name RMUC2026_home
 #   tools/scripts/mapping/map_archive.sh list
 #   tools/scripts/mapping/map_archive.sh backups --name RMUC2026_home      # 看有几代备份
@@ -183,9 +194,46 @@ resolve_name_loose() {
   return 1
 }
 
+# ---- 分辨率（`--resolution` 显式优先；不给才问活 mapper）---------------------------
+# ★ 2026-10-20 新增（为什么）：`--resolution` 原来是**未知参数** ⇒ 打 usage + exit 2，
+#   而调用方用 `... | tee ... || true` 把退出码吃掉 ⇒ **静默失败**：看着成功、磁盘上什么都没写
+#   （2026-10-19 建图轮的真实事故，见 docs/frame_contract_v3_measurements.md §19）。
+#   现在 ① 显式值**校验后使用**（越界/非数 ⇒ exit 2，快速失败且不会"看着成功"）；
+#        ② 参与守卫 check 与 sidecar 的 `resolution:`（唯一写入口仍是 map_asset_guard）。
+RES_MIN=0.005   # m：slam_toolbox 的栅格分辨率可用下限（5 mm，比本仓 0.05 细 10 倍）
+RES_MAX=1.0     # m：上限（1 m/格，再粗 2D 栅格已无导航意义）
+parse_resolution() {   # parse_resolution <raw> → stdout 规整值；失败：stderr 说明 + 返回 2
+  python3 - "$1" "$RES_MIN" "$RES_MAX" <<'PY'
+import sys, math
+raw, lo, hi = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+try:
+    v = float(raw)
+except Exception:
+    print("[map_archive] ❌ --resolution %r 不是数：要一个**正数**（米/格，例：--resolution 0.05）" % raw,
+          file=sys.stderr)
+    sys.exit(2)
+if not math.isfinite(v) or v <= 0.0:
+    print("[map_archive] ❌ --resolution %r 必须是**有限正数**（米/格，例：--resolution 0.05）" % raw,
+          file=sys.stderr)
+    sys.exit(2)
+if not (lo <= v <= hi):
+    print("[map_archive] ❌ --resolution %g 超出可用范围 [%g, %g] m（slam_toolbox 的栅格分辨率；"
+          "本仓 config 里是 0.05）—— 确认要这么粗/这么细请改 tools/scripts/mapping/map_archive.sh "
+          "的 RES_MIN/RES_MAX 并写明理由" % (v, lo, hi), file=sys.stderr)
+    sys.exit(2)
+print('%g' % v)
+PY
+}
+
 mapper_resolution() {
   local v; v="$(timeout 8 ros2 param get /slam_toolbox resolution 2>/dev/null | sed -n 's/^Double value is: //p')"
-  [ -n "$v" ] && echo "$v" || echo "0.05"
+  if [ -n "$v" ]; then
+    echo "$v"
+  else
+    echo "[map_archive] ⚠️ 读不到 /slam_toolbox resolution（mapper 没起/参数名不对）⇒ 回退 0.05；" \
+         "要精确请显式 --resolution" >&2
+    echo "0.05"
+  fi
 }
 
 wait_for_files() {   # wait_for_files <base> <timeout>
@@ -227,8 +275,18 @@ cmd_save() {
     exit 2
   fi
 
+  # ---- 分辨率：**显式 --resolution 优先**（参数解析处已校验；这里只标来源），否则问活 mapper
+  #      ★ 以前这里无条件 `RESOLUTION="$(mapper_resolution)"` ⇒ 即使参数解析接受了
+  #        `--resolution` 也会被覆盖；现在显式值贯穿 guard check + sidecar 两处。
+  local res_src="活 mapper（ros2 param get /slam_toolbox resolution）"
+  if [ -n "$RESOLUTION" ]; then
+    res_src="--resolution（显式）"
+  else
+    RESOLUTION="$(mapper_resolution)"
+  fi
+  echo "[map_archive] resolution=$RESOLUTION m/格（来源=$res_src）⇒ 写进 $NAME.meta.yaml 的 resolution:"
+
   # ---- 守卫：**先查再写**（拒绝就把存档原样留着，绝不覆盖别场地的图）
-  RESOLUTION="$(mapper_resolution)"
   local check_args=(check --kind posegraph --name "$NAME" --world "$WORLD" --resolution "$RESOLUTION")
   [ "$ALLOW" = 1 ] && check_args+=(--allow-world-mismatch)
   set +e
@@ -248,7 +306,7 @@ cmd_save() {
     echo "[map_archive] 🧪 --check/--dry-run：**没有写任何文件**。若现在真的 save，会依次做："
     echo "    ① 覆盖前备份既有 map/$NAME.{posegraph,data,meta.yaml}（keep=$KEEP 代：*.prev-<时间戳>）"
     echo "    ② ros2 service call /slam_toolbox/serialize_map \"{filename: '$base'}\""
-    echo "    ③ 等 $base.{posegraph,data} 落盘（最多 ${TIMEOUT}s）后刷新 sidecar（world=$WORLD${SESSION_SPAWN:+ spawn=$SESSION_SPAWN}）"
+    echo "    ③ 等 $base.{posegraph,data} 落盘（最多 ${TIMEOUT}s）后刷新 sidecar（world=$WORLD resolution=$RESOLUTION${SESSION_SPAWN:+ spawn=$SESSION_SPAWN}）"
     echo "    ④ 若 /cloud_accumulator/save 在 ⇒ 顺带覆盖 PCD/$NAME.pcd（它自己备份）"
     echo "    名字来源=$SESSION_SOURCE；完整证据链见上面 ①~⑤ 五行。"
     exit 0
@@ -318,6 +376,7 @@ cmd_save() {
   echo "  位姿图 : $base.posegraph  $(human "$base.posegraph")"
   echo "  数据集 : $base.data       $(human "$base.data")"
   echo "  sidecar: $base.meta.yaml  $(human "$base.meta.yaml")"
+  echo "  分辨率 : $RESOLUTION m/格（来源=$res_src；sidecar 的 resolution: 就是它）"
   echo "  3D 先验: $cloud_note"
   echo "  写前指纹: posegraph=$pre_pg data=$pre_data"
   echo "  写后指纹: posegraph=$(stat -c '%s %Y' "$base.posegraph") data=$(stat -c '%s %Y' "$base.data")"
@@ -404,6 +463,11 @@ while [ $# -gt 0 ]; do
     --name) NAME="$2"; shift 2;;
     --world) WORLD="$2"; shift 2;;
     --timeout) TIMEOUT="$2"; shift 2;;
+    # ★ 2026-10-20：`save --resolution R` —— 显式分辨率（**校验后使用**；越界/非数 ⇒ exit 2）
+    --resolution)
+      [ $# -ge 2 ] || { echo "[map_archive] ❌ --resolution 缺取值（例：--resolution 0.05）" >&2; usage; exit 2; }
+      RESOLUTION="$(parse_resolution "$2")" || exit 2
+      shift 2;;
     --allow-world-mismatch) ALLOW=1; shift;;
     --no-cloud) WITH_CLOUD=0; shift;;
     --json) LIST_JSON=1; shift;;
@@ -416,6 +480,12 @@ while [ $# -gt 0 ]; do
     *) echo "[map_archive] 未知参数：$1" >&2; usage; exit 2;;
   esac
 done
+
+# `--resolution` 只对 save 有意义（其它子命令不写 sidecar）；给了就明确拒绝，别静默忽略
+if [ -n "$RESOLUTION" ] && [ "$CMD" != save ]; then
+  echo "[map_archive] ❌ --resolution 只对 save 生效（当前子命令：${CMD:-（无）}）" >&2
+  exit 2
+fi
 
 case "$CMD" in
   save) cmd_save;;

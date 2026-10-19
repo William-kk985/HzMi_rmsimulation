@@ -13,6 +13,11 @@
 #   bash tools/scripts/regress/run_remap_lowterrain.sh --tag ltmap --domain 165 --port 11865 \
 #        --map-name RMUC2026_lt --timeout 300
 #
+# 退出码：0 成功；**非 0 = 真的失败**（包括"存档那一步失败"—— 以前这一行是
+#   `... | tee ... || true`，save 的退出码被吞掉 ⇒ 建图跑完却什么都没有，看着像成功；
+#   现在显式传 `${PIPESTATUS[0]}`，见文件末尾与 docs/frame_contract_v3_measurements.md §19）。
+#   可选 `--map-resolution R`：透传给 `map_archive.sh save --resolution R`。
+#
 # 产物：
 #   map/<map-name>.{posegraph,data,meta.yaml}    ← slam_toolbox 存档（测试名）
 #   PCD/<map-name>.pcd + .meta.yaml              ← cloud_accumulator 的 3D 先验（测试名）
@@ -24,6 +29,9 @@ WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 . "$WS/tools/scripts/lib/scoped_cleanup.sh"
 TAG=""; DOMAIN=165; PORT=11865; WORLD=RMUC2026; MAP_NAME="RMUC2026_lt"; OUT_DIR=""
 TIMEOUT=300; SPEED=0.35; GROUND=linefit; PRIOR_MAP=""
+# ★ 2026-10-20：`--map-resolution R` 可选 —— 给了就透传给 `map_archive.sh save --resolution R`
+#   （写进 sidecar 的 resolution:）；不给 ⇒ 由 save 自己 `ros2 param get /slam_toolbox resolution`。
+MAP_RES=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,8 +44,9 @@ while [ $# -gt 0 ]; do
     --timeout) TIMEOUT="$2"; shift 2;;
     --speed) SPEED="$2"; shift 2;;
     --prior-map) PRIOR_MAP="$2"; shift 2;;
+    --map-resolution) MAP_RES="$2"; shift 2;;
     --out-dir) OUT_DIR="$2"; shift 2;;
-    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0;;
+    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0;;
     *) echo "未知参数: $1" >&2; exit 2;;
   esac
 done
@@ -119,8 +128,28 @@ python3 -u tools/scripts/mapping/coverage_drive.py --route "$ROUTE" \
   --dump-registered "$OUT_DIR/$TAG.registered.npz" 2>&1 | tee "$OUT_DIR/$TAG.drive.log"
 
 # ---- 存档：**用户 workflow 的最后一步** ----
-echo "[remap:$TAG] --- map_archive.sh save（--name $MAP_NAME）---"
-timeout 300 tools/scripts/mapping/map_archive.sh save --name "$MAP_NAME" 2>&1 | tee "$OUT_DIR/$TAG.save.log" || true
+# ★ 2026-10-20 修：这一行原来写的是
+#       timeout 300 …/map_archive.sh save --name "$MAP_NAME" 2>&1 | tee … || true
+#   两个问题叠加 ⇒ **静默失败**：
+#     ① `|| true` 把整条管道的退出码吃掉（`set -o pipefail` 也救不了它）；
+#     ② 而 `map_archive.sh save` 一旦收到不认识的参数（当时 `--resolution` 就是）会打 usage
+#        然后 exit 2 ⇒ 看着"跑完了"，磁盘上什么都没有（2026-10-19 建图轮的真实事故，见
+#        docs/frame_contract_v3_measurements.md §19）。
+#   现在：显式取 `${PIPESTATUS[0]}`（save 自己的退出码，不是 tee 的），非 0 就**把本脚本也
+#   弄成非 0**（`exit $rc`），并把失败写进日志目录。`--map-resolution` 是可选项：给了就透传
+#   给 `save --resolution`（不给 ⇒ 由 save 去问活 mapper，行为与以前一致）。
+echo "[remap:$TAG] --- map_archive.sh save（--name $MAP_NAME${MAP_RES:+ --resolution $MAP_RES}）---"
+SAVE_ARGS=(--name "$MAP_NAME")
+[ -n "$MAP_RES" ] && SAVE_ARGS+=(--resolution "$MAP_RES")
+set +e
+timeout 300 tools/scripts/mapping/map_archive.sh save "${SAVE_ARGS[@]}" 2>&1 | tee "$OUT_DIR/$TAG.save.log"
+SAVE_RC=${PIPESTATUS[0]}
+if [ "$SAVE_RC" != 0 ]; then
+  echo "[remap:$TAG] ❌ map_archive.sh save 失败（退出码 $SAVE_RC）—— 存档**没有写成/不完整**；" >&2
+  echo "[remap:$TAG]    上面是它的完整输出（也落盘在 $OUT_DIR/$TAG.save.log）。" >&2
+  echo "[remap:$TAG]    退出码含义：2 用法/环境 · 3 守卫拒绝（场地/会话名） · 4 落盘超时。" >&2
+  exit "$SAVE_RC"
+fi
 echo "[remap:$TAG] --- 存档产物 ---"
 ls -la --time-style=+%H:%M "src/rm_nav_bringup/map/$MAP_NAME".* "src/rm_nav_bringup/PCD/$MAP_NAME".* 2>&1 | head -12
 echo "[remap:$TAG] DONE"

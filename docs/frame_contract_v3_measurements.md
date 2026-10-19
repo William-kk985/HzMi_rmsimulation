@@ -3212,3 +3212,60 @@ E1 补丁只存在于 small_point_lio）`）。
    与本轮开始时的 `zfix`（`58bebfb8…`）不同 ⇒ 收尾后**已手工还原成 `zfix`** 并复核 md5
    （`build/small_point_lio/libsmall_point_lio.so` = `58bebfb81537978a0c93067be09de1be`）。
    本轮所有数字都在 `zfix` 上取得（`meta.txt` 记 `bin_lib_small_point_lio_md5`）。
+
+## §19 第十一轮（**本机 date=2026-10-20T02:00–02:5x**）：两条独立缺陷 —— ④ `map_archive.sh save --resolution` 的**静默失败**（含调用方吞退出码）、② `lio:=small_point_lio` + 默认模型槽位的 **SIGSEGV**
+
+> **本节只新增**（append-only）：§1–§18 一个字都没改。写作时 §18 是最新 ⇒ 本节取 §19
+> （§19 落笔时仍空闲）。两条缺陷**各自一个提交**（④ 先、② 后），本节按同一顺序记。
+> 隔离口径与 §17/§18 逐字相同：每跑私有 `GAZEBO_MASTER_URI` / `HOME` / `ROS_DOMAIN_ID`、
+> `gui:=False`、`nav_rviz:=False lio_rviz:=False`、`setsid` + `timeout` +
+> `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）。
+
+### 19.1 一句话结论
+
+> **④**：`save --resolution R` 现在**接受 + 校验 + 真的用**（写进 sidecar 的 `resolution:`，并且
+> 贯穿守卫 check），**调用方**也不再吞退出码（`| tee` 后取 `${PIPESTATUS[0]}`，非 0 ⇒ 调用方非 0）。
+> 实测：`--resolution 0.05` ⇒ sidecar `resolution: 0.05`、`--resolution 0.07` ⇒ `0.07`（证明是**用**
+> 了显式值而不是 mapper 的 0.05），坏参数（`banana`）⇒ `save` `rc=2` 且**一个文件都没写**，
+> 调用方 `run_remap_lowterrain.sh --map-resolution banana` ⇒ **`rc=2`**（修前是 `rc=0`，看着成功）。
+>
+> **②**：见 §19.3（SIGSEGV 的逐字 backtrace、根因、修法与 60 s 回归）。
+
+### 19.2 ④ `map_archive.sh save --resolution` + 调用方退出码（`tools/scripts/**`，不碰 ROS 代码）
+
+**缺陷形态**（2026-10-19 建图轮实际撞到，§16.4 坑 4 只记了现象、没修）：
+`map_archive.sh save --resolution 0.05` 打 usage + `exit 2`（`--resolution` 不在参数表里），
+而唯一的调用方 `tools/scripts/regress/run_remap_lowterrain.sh` 写的是
+`… save --name "$MAP_NAME" 2>&1 | tee … || true` ⇒ **`|| true` 把整条管道的退出码吃掉**
+（`set -o pipefail` 也救不了它）⇒ 建图跑完、看着成功、`map/<name>.{posegraph,data,meta.yaml}`
+一个都没写。
+
+| # | 文件:行（本提交） | 改动 |
+|---|---|---|
+| 1 | `tools/scripts/mapping/map_archive.sh:194-226` | 新增 `RES_MIN=0.005` / `RES_MAX=1.0` + `parse_resolution()`（python3 解析：非数 / 非有限 / ≤0 / 越界 ⇒ **stderr 说明 + exit 2**，成功回**规整值**）；`mapper_resolution()` 的回退 0.05 改为**带 WARN**（不再静默） |
+| 2 | `:467` | 参数表新增 `--resolution R`（缺取值 ⇒ usage + exit 2；值经 `parse_resolution` 校验） |
+| 3 | `:484-488` | `--resolution` 只对 `save` 生效；给其它子命令 ⇒ exit 2（不静默忽略） |
+| 4 | `:279-288` | `cmd_save` 里**显式值优先**（原来无条件 `RESOLUTION="$(mapper_resolution)"` 会把显式值覆盖掉），并打印 `resolution=… （来源=--resolution/活 mapper）` |
+| 5 | `:306` / `:379` | `--check` 的 ③ 行汇总与最终汇总都打印分辨率（**可核对**：sidecar 的 `resolution:` 就是它） |
+| 6 | `tools/scripts/regress/run_remap_lowterrain.sh:141-152` | 存档那一步改成 `set +e; … | tee …; SAVE_RC=${PIPESTATUS[0]}`，非 0 ⇒ 打印原因并 **`exit "$SAVE_RC"`**；新增 `--map-resolution R`（`:34/:47`）透传给 `save --resolution` |
+| 7 | 同上 `:16-19`、`map_archive.sh:9-19` | 文件头写明"调用方必须传退出码"（避免下一个人再写成 `| tee … || true`），并给 `--resolution` 的用法/边界 |
+
+**实测（本机，隔离栈；`lio:=small_point_lio gravity_align_mode:=off mapper:=slam_toolbox
+mode:=mapping world:=RMUC2026 map_name:d2_arch`，私有 DOMAIN=183 / port=11883）**：
+
+| # | 命令 | `rc` | `map/d2_arch.meta.yaml` 的 `resolution` | 产物 |
+|---|---|---|---|---|
+| A | `save --name d2_arch --world RMUC2026 --resolution 0.05` | **0** | **0.05** | posegraph 5,007,625 B + data 51,474 B + sidecar |
+| B | 同上但 `--resolution 0.07` | **0** | **0.07**（活 mapper 仍是 0.05 ⇒ 证明用的是显式值） | 同上（覆盖 + `*.prev-*` 备份各一代） |
+| C | `save --name d2_arch_bad --world RMUC2026 --resolution banana` | **2** | —（**没有** `d2_arch_bad.*` 任何文件） | 无 |
+| D | `save --name d2_arch --world RMUC2026`（不给 `--resolution`） | **0** | **0.05**（自动问活 mapper；与改动前一致） | 同上 |
+
+**调用方端到端（真跑 `run_remap_lowterrain.sh`，私有 DOMAIN=184 / port=11884，`--timeout 5`）**：
+
+| 跑 | 命令 | 修前 | 修后 |
+|---|---|---|---|
+| 坏参数 | `--map-name d4_caller --map-resolution banana` | `rc=0`（`|| true` 吞掉 save 的 2） | **`rc=2`**，且 `map/d4_caller.*` **一个都没有** |
+| 正常 | `--map-name d4_caller --map-resolution 0.05` | `rc=0` | **`rc=0`**，`map/d4_caller.{posegraph,data,meta.yaml}` 齐全，sidecar `resolution: 0.05` |
+
+> 口径说明：所有跑都用**测试专用** `map_name`（`d2_arch` / `d4_caller`），跑完已从
+> `src/rm_nav_bringup/map|PCD/` 删除；用户资产（`map/RMUC2026*`、`PCD/RMUC2026*`）一个字节没动。
