@@ -2619,6 +2619,10 @@ slam_toolbox 的 2D 栅格吃不下这个倾角（会变成 y 向 cos30° 压缩
    `range_max − 1e−4` 再投影（`laserScanValidInfCallback`）；NaN/−inf 丢弃。
 2. **搬到代价图帧 + 两道 z 闸**：用 TF2 在 **scan 的 stamp** 查 `scan.frame_id → global_frame`
    （查不到才退回最新一帧并在日志里标 `mode=latest`），对每个点算 `z`。nav2 实际有**两道**闸：
+   ⚠️ 代价图的 `transform_tolerance` 会被读进状态（`tf_tolerance_s`），但本节点**不把它当
+   阻塞超时** —— 单线程 executor 里阻塞等 TF 会饿死 TF 订阅本身（§10.4 的 `nav_band_probe`
+   第一版 124/124 全失败就是这个坑）；做法是 stamp 查一次、失败立即用最新帧，并在日志里
+   标 `mode=latest`。
    `ObservationBuffer` 的**每源** `<layer>.<source>.min/max_obstacle_height`，以及
    `ObstacleLayer::updateBounds` 的**图层级** `<layer>.min/max_obstacle_height`。
    本守卫取**交集** `[max(layer_min, source_min), min(layer_max, source_max)]`，数：
