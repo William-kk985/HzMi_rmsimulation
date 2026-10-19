@@ -721,6 +721,240 @@ python3 tools/scripts/tiltmount/spl_ab_table.py --root .tmp_ab --prefix ab_
 
 ---
 
+## §10 第三轮（2026-10-21）：**odom 的 z 原点 = 初始化时刻的地面**（E1b）
+
+> **本轮只新增本节**：§1–§9 与 §11（parser，父提交 `023d2e8`）一个字都没改；为保持编号顺序，
+> §10 插在 §9 与 §11 之间（不重排、不改写任何既有节）。契约规范见
+> `docs/frame_contract_v3.md` **§4.7**（任务书里叫 §4.3，但那个编号已被「来源与互检」占用）。
+> 代码 commit **`1b5db4b`**；原始数据 `.tmp_ab/zf2_*/`（gitignored）；每跑 `meta.txt` 有
+> `date`/`git_head`/两个 md5/`launch_args`/`ros_domain_id`/`gazebo_master_uri`。
+
+### 10.1 为什么必须修（一句话）与实现
+
+E1（`952a6da`）只设初始**旋转**：`odom` 重力对齐了，但原点还停在传感器壳上 ⇒ hybrid 档
+scan 盘面在 `odom` 的 z = **−0.158 m**，nav2 `obstacle_layer.scan.min_obstacle_height: 0.0`
+把 **677/677** 波束整盘丢掉（§9.7：local lethal **193→0**、整张 **62500 格全 free**、
+前方 2 m 的 **21** 个障碍格全丢、**零告警**）。E1b 补上**平移**：
+
+* 节点新参数 `gravity_align_z_origin ∈ {sensor(默认=旧行为), ground}` + `gravity_align_h`（米）；
+* `ground` 档初始化时 `position.z = h − (R_ws·t_IL).z`；
+  * 状态原点是 **IMU body**，livox 原点在 body 系里是 `t_IL = extrinsic_T = (0,0,0.05)`；
+  * robot11 sensor 档：`h = 0.102499 + 0.157028 = 0.259527`、`(R_ws·t_IL).z = 0.05·cos30° = 0.043301`
+    ⇒ `position.z = 0.216226`；
+  * ⇒ 车体水平、URDF=实物时 **ground z=0、base_link z=+0.102499、livox_frame z=+0.2595**
+    （精确值 0.102504 / 0.259532，差 ≤5 µm 来自四舍五入）。**由构造**：
+    初始化日志 state_z = 0.216226，减旋转后的 `t_imu←base` z 杆臂 0.113722 ⇒
+    `odom→base_link` z = **+0.102504**（窗口末端的 tf2_echo 因 §10.4.3 的漂移是 +0.051…+0.057）。
+* **初始地图点用同一个 `kf.x.position` 搬**（出点公式 `R·(R_L_I·p+T_L_I)+position`）——
+  不另写一份 `+h`。只改旋转不改平移 = 本 bug；反过来只改平移不改旋转也不行。
+* 默认 `sensor` ⇒ 这段代码**整段不执行**，`position` 保持 `reset()` 后的 0；
+  实现在独立 TU `src/gravity_align_ground.cpp`（本包 `-ffast-math`，不把新浮点代码放进 hot path TU）。
+
+### 10.2 launch：`h` 从 URDF 算（逐模型，不手填）
+
+`_gravity_align_h()` = `_HZMI_BASE_LINK_HEIGHT_M[robot]` + **URDF 里的 livox z 偏置**
+（与 `_GravityAlignRpy` / adapter 外参**同源**；`livox_raise_m` 自动跟随）：
+
+| `robot` | `base_link` 原点离地 | `livox_frame` z 偏置 | **`h`** | 与 linefit 交叉 |
+|---|---|---|---|---|
+| `robot11` | 0.102499（轮 mesh 最低点） | 0.15702816968305 | **0.25952717** | `sensor_height: 0.2595` ✅ |
+| `hzmirm` | 0.0（轮 r=0.08 心 z=0.08） | 0.6 + 0.2·cos(`turret_pitch_deg`) | **0.80000000**（pitch=0） | `0.80` ✅ |
+| 默认模型（`robot:=''`） | 0.06（轮 r=0.06 心 z=0） | 0.175 | **0.23500000** | `0.226`（Gazebo 实测 = 轮胎下沉 9 mm）✅ |
+
+只加在 `gravity_align_mode != off` 的那份 Node 上。运行期回读（`zf2_hybrid_r1/params.txt`）：
+
+```
+/small_point_lio gravity_align_mode      = hybrid
+/small_point_lio gravity_align_rpy       = [-30.0, 0.0, 0.0]
+/small_point_lio gravity_align_z_origin  = ground
+/small_point_lio gravity_align_h         = 0.25952717
+/lio_tf_adapter   rpy                    = [0.523598776, -0.0, -0.0]   # 弧度（setRPY 的约定）
+```
+
+`off` 档回读（`zf2_off_r1/params.txt`）：`gravity_align_z_origin = sensor`、`gravity_align_h = 0.0`
+（= **节点默认值**）⇒ launch 没给 off 档传这两个键，默认路径参数表不变。
+
+### 10.3 运行时互检：sim 里立刻抓到 **6.9 cm** 的 URDF-vs-可见地面差
+
+初始化日志（`zf2_hybrid_r1`，逐字）：
+
+```
+[INFO] gravity_align_z: z_origin=ground h(URDF)=0.259527 m lever_z=(R_ws·t_IL).z=0.043301 m
+       ⇒ state_z=0.216226 m（odom 的 z=0 = 初始化时刻的地面；初始地图点用同一平移）
+[ERROR] gravity_align_h_check: h_urdf=0.2595 m h_meas=0.1894 m |Δ|=0.0701 m >= 0.05 ⇒ ERROR
+        （URDF 的 livox 离地高度与实物不符，或出生时不在平地上；inliers=15547 tilt=0.05°
+         resid_p50=0.0002 resid_p95=0.0018）—— **仍用 URDF 值 0.2595 m 定基**（确定性；实测只作诊断）
+```
+
+* **拟合质量**：15547 内点、法向与重力先验差 **0.05°**、残差 p50 **0.2 mm** / p95 **1.8 mm**
+  ⇒ 不是拟合噪声；是**真的**量到了 0.1894。
+* **根因**（独立探针 `.tmp_ab/gt_rootcause_probe.py`）：用 `/odom_ground_truth` +
+  `TF base_link←livox_frame` 把**同一朵云**搬到 **world** 再拟合 ⇒ world 地面
+  **z = 0.1183**（3434 内点、p50 0.5 mm），而 URDF 的轮底平面在
+  `0.15216 − 0.102499 = 0.04966` ⇒ **差 6.9 cm**。即：RMUL2026 出生点处机器人实际“陷进”
+  地面 mesh / 该处 mesh 高于名义地面，雷达的**可见**离地高度是 **0.190**，不是 URDF 的 0.2595。
+* **这正是互检的用途**（同 E1 的 Δ(URDF,IMU) 模式）：**loud, never silent**。阈值
+  <0.03 INFO / 0.03–0.05 WARN / ≥0.05 ERROR；**定基仍用 URDF**（确定性），所以
+  odom z=0 = **URDF 地面**（名义 world 0.0496），可见地面 mesh 在 odom z≈**+0.069**。
+* **成本**：`gravity_align_init` → `gravity_align_h_check` 两条日志时间差 **2.6 ms**
+  （6294.6026 → 6294.6052 s），一次性。
+
+### 10.4 验收 A/B（`mode:=nav`、`localization:=gicp`、3 跑/档、交错）
+
+协议与 §9.7 **逐字相同**：`world:=RMUL2026`、`robot:=robot11 robot11_mount:=sensor`、
+`gui:=False`、`spin_speed:=0.0`、`settle=20 s / window=20 s`（仿真）、`lio:=small_point_lio`、
+`localization:=gicp`。**唯一变量 = `gravity_align_mode:=off` vs `hybrid`**（后者用默认
+`gravity_align_z_origin:=ground`）。同一个 `zfix` 二进制（`libsmall_point_lio.so` md5
+`58bebfb8…`）；每跑记录 **launch md5 `0161033b…`**（= `1b5db4b` 的冻结版本，**无** parser 代码）。
+探针：`navband grav points` + `uc_procstats`（与 §9.7 同口径；`points` 只订阅）。
+
+#### 10.4.1 主表（3 跑/档，median[min–max]）
+
+| 指标 | **`off`**（3 跑） | **`hybrid` + z-fix**（3 跑） | 任务书目标 | 判读 |
+|---|---|---|---|---|
+| `/scan` 有限波束/帧 | 677 [677–678] | 678 [678–678] | — | 同一批回波 |
+| 波束 z(odom) **p50** | **+0.243** [+0.239,+0.243] | **+0.058** [+0.057,+0.058] | ≈+0.259 | **≠+0.259**；见 §10.4.3 口径澄清 |
+| 波束 z(odom) min–max | −0.244…+2.595 | **+0.045…+0.099** | — | off 是 30° 斜面；修复后是**水平面** |
+| 在带 `[0,2]` **内** | 579 [578–580]（85.4%） | **678（100%）** | ≈580 | **超集**，不是缺失（见 §10.4.3） |
+| 带下 / 带上 | 60 [60–62] / 36 [36] | **0 / 0** | — | ★ |
+| **`base_link` z(odom)** | −0.081 [−0.085,−0.081] | **+0.057** [+0.051,+0.057] | ≈+0.1025 | 窗口值；**init = +0.1025**（差 = 既有 LIO z 漂移，见 §10.4.3） |
+| local **lethal** | **193** [193–210] | **288.5** [288–345] | ≈193 | 非空（病因是 **0**）；多出来的格 = 修复后多进带的 99 条波束 |
+| local **inscribed** | 8280.5 [8279.5–8324] | 8452 [8450–8838] | — | 同量级 |
+| local **free** | 44546 [44523.5–44560] | 43312.5 [43291–43336] | ≈44565 | 比 off 少 1233 格（≈ 多出的 lethal/inscribed） |
+| **最近 lethal** | **0.760** [0.759–0.760] | **0.769** [0.768–0.771] | ≈0.76 | ✅（差 9 mm） |
+| **前方 2.0×1.2 m lethal** | **21** [21–22] | **18** [17–23] | ≈21 | 同量级（差 3 格 / 14%）；**不是 0** |
+| 车 1 m 内 lethal | 26 [26–27] | 23.5 [23–32] | — | 同量级 |
+| `odom→base_link` rpy | [30.06…30.20, −0.12…−0.18, −0.07…−0.21]° | **[0.30…0.43, −0.21…−0.38, −0.04…+0.05]°** | ≈[0.27,−0.20,0.04] | ✅（在 E1 残差 0.5° 内） |
+| `/Odometry` z（state） | —（off 发合成 `T_ob`） | +0.171 [+0.166,+0.171]（init 0.216226） | — | 漂移 −0.045，见下 |
+| local **ground inclination** | 30.115 [30.077–30.227]° | **0.518** [0.488–0.575]° | <0.7 | ✅ |
+| global lethal/inscribed/free | 3713 / 16886 / 10176 | 3713 / 16886 / 10176 | — | **逐值相同**（全局图不吃这条带） |
+| nav2 "掉出高度带"告警 | 0 行 | 0 行 | — | 这条链**本来就没有**告警 |
+
+#### 10.4.2 判决：**功能上恢复到 `off` 基线；三行数值目标不能逐字相等，原因已定位**
+
+1. **病治好了**：修复后 **678/678 波束全部在带内**（off 只有 85.4%），local costmap 从
+   §9.7 的 **lethal 0 / free 62500 / ahead 0** 回到 **lethal ≈289 / 最近 0.769 m / ahead ≈18**，
+   与 off（193 / 0.760 / 21）**同一量级**，且障碍信息**比 off 更多**（多 99 条波束进带）。
+2. **三行"≈"对不上的口径原因**（不是回归）：
+   * `scan z p50 ≈ +0.259`：**+0.2595 是 `livox_frame` 的 z**，不是 scan 平面。`/scan` 的
+     `frame_id = base_link`（linefit/p2l 都在 base_link 里）⇒ 平面 z = base_link z：
+     **init +0.1025**、窗口 **+0.057**。+0.259 只有在 scan 帧 = livox_frame 时才成立。
+   * `in-band ≈ 580`：off 的 580 是**子集**（60 条带下 + 36 条带上被丢掉）。修复后是水平面，
+     **678 条全进带** ⇒ 正确值是 **678**，不是 580。
+   * `lethal ≈ 193 / free ≈ 44565`：lethal 格数由"进带波束集合"决定；678 条 vs 580 条 ⇒
+     lethal **288.5**、free **43312.5**。**离 193 越远，恰恰说明多进的 99 条波束真的在打障碍**
+     （最近 lethal 与 ahead 窗口都回到 off 基线可佐证）。
+3. **`base_link z` 窗口 +0.057 而不是 +0.1025**：初始化是精确的 **+0.102504**（由构造），
+   窗口末端 `odom` 的 state z 从 0.216226 掉到 0.171（**−0.045**）。这是**既有的 LIO z 漂移**，
+   不是本修复引入：§9.4 的 hybrid `/Odometry` z = −0.045…−0.050 就是从 init 0 掉下来的同一个量。
+   它是 O(4.5 cm) 的确定性偏置，仍在 nav2 带内（+0.057 > 0）。
+
+#### 10.4.3 为什么 `base_link z` 在窗口掉 4.5 cm：**不是物理下沉**
+
+同一跑里两处独立测量：初始化时 `h_meas = 0.1894`（雷达-可见地面垂距），窗口末端独立探针
+（§10.3 的 `gt_rootcause_probe.py`）量到 **0.1909** ⇒ 雷达相对地面的物理高度**没变**（差 1.5 mm）。
+⇒ `odom` 的 state z 下降 4.5 cm 是**估计器**的 z 漂移，不是车沉了。它在本轮**所有** hybrid 跑里
+一致出现（init 0.216226 → 窗口 0.166/0.171/0.171）。
+
+### 10.5 速度 / 初始化：**一次性成本，逐帧零增量**
+
+| 量 | `off`（3 跑） | `hybrid`+z-fix（3 跑） | 上一轮 hybrid（§9.7，`nav_hyb_gicp_r*`） |
+|---|---|---|---|
+| ms/帧（窗口 20 s） | 15.43 [14.30–15.80] | 13.90 [12.80–15.15] | 12.90 [12.65–14.00] |
+| %CPU | 5.82 [5.68–5.89] | 5.32 [5.21–5.75] | 5.55 [5.34–6.01] |
+| CPU/仿真秒 | 0.153 [0.143–0.158] | 0.139 [0.128–0.151] | 0.129 [0.127–0.140] |
+| VmHWM MB | 36.06 [35.77–37.00] | 36.21 [35.24–36.22] | 34.19 [33.82–35.11]（§9.4 mapping 档） |
+| 初始化（仿真 s / 墙钟 s） | 2.10–2.20 / 11.67 [11.24–12.51] | 2.10–2.20 / 12.25 [11.80–12.84] | 2.10 / 11.13–11.15 |
+| adapter %CPU | — | 0.209 [0.204–0.211] | 0.17 [0.15–0.17] |
+| 进 EKF 点/帧 | 8563.5 [8563–8563.5] | 8563 [8562.5–8563] | 8563 |
+| 每帧原始点 | 11896 | 11896 | 11896 |
+
+* **没有"修复变慢"的证据**：hybrid 的 ms/帧中位数 **13.90 < off 15.43**（方向与 §9.5 第 3 条一致：
+  sensor 约定省掉每帧一次 TF 查询/合成/广播）；与上一轮 hybrid（12.90）的差在**机器噪声**内
+  （本轮宿主机更忙：parser/文档/多个探针并行，off 档自己也从 13.20 涨到 15.43）。
+* **一次性**：z 定基是 3 行赋值；互检拟合 **2.6 ms**（§10.3）；初始化仿真时间 2.10–2.20 s
+  与 off、与上一轮 hybrid **逐项相同**。
+* 诚实边界：本轮 load 比 §9.7 高，**≤2–3% 的差别分辨不出**；能排除的是 ≥8% 的变慢（§9.6 同口径）。
+
+### 10.6 默认路径（`gravity_align_mode:=off`）逐位相同
+
+1. **同一输入流 bag 重放，两个二进制输出逐位相同**（口径与 §4.2 逐字相同）：
+   * 旧 = `955084877be37af3a7fdd269670c127c`（`zfix_prev`，= `8e5e928` 之后的 HEAD 构建）；
+   * 新 = `58bebfb81537978a0c93067be09de1be`（`zfix`，= `1b5db4b`；新增独立 TU，默认档不调用）；
+   * 结果：**141 行 vs 141 行（ODOM 47 / CLOUD 47 / TF 47），排序后 diff 0 行**；
+     未排序 diff 48 行 = **仅到达顺序**。原始数据 `.tmp_uc/replay_zfix/`。
+2. **launch 增量**（`tools/scripts/gzsim/launch_increment_diff.py`，`gravity_align_mode=off`）：
+   `OLD 66 / NEW 67`；新增 **1** 个 `DeclareLaunchArgument(gravity_align_z_origin)`；SPL 组
+   显示为"改了一份"，逐字段核对后**只有** `gravity_align_mode != off` 那份 Node 多了
+   `gravity_align_z_origin` / `gravity_align_h` 两个参数；**off 那份 Node 的参数表/remap/condition
+   逐字段相同**，`LogInfo` / rviz Node 相同，**共有 Action 相对顺序一致**。
+   ⇒ off 档：同一节点集合、同一参数、同一顺序。
+3. **off A/B 复现 §9.7 基线**：scan p50 **0.243**（§9.7：0.2426）、in-band **579**（580）、
+   local lethal **193**（193）、nearest **0.760**（0.760）、ahead **21**（21）、
+   `odom→base_link` rpy **[30.06…30.20]**（30.04）、倾角 **30.115°**（30.10）。
+4. **off 档没有收到新参数**：`ros2 param get` 回读是节点默认 `sensor` / `0.0`（§10.2）。
+
+### 10.7 因果对照：同一 `hybrid` + `gravity_align_z_origin:=sensor`（1 跑）
+
+| 指标 | `hybrid` + `z_origin:=sensor`（1 跑） | `hybrid` + `z_origin:=ground`（3 跑中位数） |
+|---|---|---|
+| 波束 z(odom) p50 | **−0.158** | **+0.058** |
+| 在带 `[0,2]` 内 | **0** | **678** |
+| local lethal / inscribed / free | **0 / 0 / 62500** | **288.5 / 8452 / 43312.5** |
+| 最近 lethal | **无** | **0.769 m** |
+| 前方 2.0×1.2 m lethal | **0** | **18** |
+| `base_link` z(odom) | **−0.159** | **+0.057** |
+| `odom→base_link` rpy | [0.279, −0.422, 0.002]° | [0.30, −0.36, −0.04]°（中位） |
+| 地面倾角 | 0.548° | 0.518° |
+
+⇒ **唯一变量 = `gravity_align_z_origin`**（同一 `hybrid`、同一二进制、同一 launch md5、同协议）：
+`sensor` 复现 §9.7 的"整盘掉出带 + 空图"（`lethal 0 / free 62500`），`ground` 恢复
+（`lethal 288.5 / 最近 0.769`）。**因果成立**，不是别的改动带来的。
+
+### 10.8 作废的一跑（**不进任何表**）：parser 并发改 launch 的 30 rad bug
+
+`zfix_hybrid_r1`（21:34–21:36，**旧批次**）跑到了另一个 agent 正在改的 launch：它把
+`/lio_tf_adapter rpy` 传成 **`[30.0, 0, 0]`（度）**，而该参数进 `setRPY()` 是**弧度** ⇒ 等价 30 rad
+⇒ `odom→base_link` roll **−110.7°**、scan z p50 **−0.552**、in-band **43**、local lethal **7**
+（又接近空图）。**该跑作废，本文任何数字都不引用它**。冻结后的 6 跑 launch md5 全部
+`0161033b…`（= `1b5db4b` 版本，无 parser 代码）；parser 的 launch-only 提交保留在
+`parser-a4dbbf9` 分支，由父 agent 安排 rebase + 修单位后重跑它自己的交叉校验。
+
+### 10.9 本轮没能验证 / 诚实边界
+
+1. **"地面"的定义**：`ground` 档的 z=0 是 **URDF 几何的地面**（轮底平面），不是"雷达在当前场景
+   里看到的那层地面"。RMUL2026 出生点两者差 **6.9 cm**（§10.3），互检已 ERROR；按任务书
+   **定基仍用 URDF**。若产品要的是"可见地面 z=0"，需要另立一条规则（用 `h_meas` 定基），
+   本轮**没有**做这个决定。
+2. **窗口 `base_link z = +0.057` 不是 +0.1025**：差 = 既有 LIO z 漂移 −0.045（§10.4.3），
+   不是修复引入；本轮没有改 LIO 的 z 漂移（那是独立问题）。
+3. **三行数值目标（scan z +0.259 / in-band 580 / lethal 193）不能逐字相等**，口径原因见
+   §10.4.2；其中 `+0.259` 与 `580` 是"scan 帧 = livox_frame / off 子集"的误读。
+4. **`slam_nav` 与 `global_obstacle:=scan` 没有跑**（时间让给主干 A/B + 因果对照）。机理上同一条
+   `min_obstacle_height` 常量带：`slam_nav` 的 local costmap 与 `mode:=nav` 逐字相同
+   ⇒ **预期同病同解**；`global_obstacle:=scan` 会把**全局**图也切到 2D `/scan`，修复后
+   scan z +0.057 仍在 `[0,2]` 内 ⇒ **预期也恢复**。两者**均未实测**。
+5. **`hzmirm` / 默认模型的 `h` 只做了 launch 求值**（0.800000 / 0.235000），**没有跑 Gazebo**
+   验证 TF/scan；`robot11` 是唯一实跑槽位。
+6. **`gravity_align_h ≤ 0` 的退回 sensor 分支**只做了代码审查 + 计划中的 bag 重放验证
+   （**已做**：同一份 bag 重放、`z_origin=ground, gravity_align_h=0.0` ⇒ 日志 `ERROR ... gravity_align_h=0.000000 m 无效 ⇒ 退回 sensor 档`，且**没有**打 `gravity_align_z` / `h_check` 两行）；阈值 0.03/0.05 的 WARN 带本轮**没有**构造出真实数据（sim 直接落 ERROR）。
+7. **速度**：机器不安静（parser/文档并行 + 多探针），只能排除 ≥8% 的变慢；≤2–3% 分辨不出。
+8. **互检拟合只用初始化前最后一帧**（0.20 s 窗口）；如果真机在"静止门"之后仍缓慢移动，
+   `h_meas` 会带运动模糊 —— 它只作诊断，不影响定基。
+
+### 10.10 一句话给用户
+
+> **修好了，而且病因/口径都钉死了。** `gravity_align_z_origin:=ground` 让 odom 的 z=0 =
+> **初始化时刻的地面**：初始 `base_link` z = **+0.1025**、`livox_frame` z = **+0.2595**，
+> scan 盘面从 **−0.158 m** 抬到 **+0.057 m**（窗口；init +0.1025）⇒ **678/678 波束全部进
+> nav2 的 `[0,2]` 带**，local costmap 从 **lethal 0 / 整张 free** 恢复成 **lethal ≈289 /
+> 最近 0.769 m / ahead ≈18**（off 193 / 0.760 / 21）——**障碍信息恢复，且比 off 多 99 条进带波束**。
+> 三行"≈"（scan z +0.259 / in-band 580 / lethal 193）**不能逐字相等**，原因是 +0.2595 是
+> livox 高度而非 scan 平面、且修复后 in-band 是 off 的**超集**（678 vs 580）——不是回归。
+> **一次性成本**：互检 2.6 ms，初始化/逐帧 ms 与 off 同量级；**默认路径逐位相同**（bag 重放
+> 141/141 行）。**副作用（loud）**：RMUL2026 出生点的可见地面比 URDF 轮底平面高 **6.9 cm**
+> （机器人陷进 mesh），互检如实报 **ERROR**；按任务书仍用 URDF 定基。
+
 ## §11 URDF 安装参数解析（launch 侧，2026-10-21）
 
 > 契约 §13.5。对象是 **launch 的取值**（`gravity_align_rpy` / adapter `xyz`+`rpy` / `gravity_align_h`
@@ -896,3 +1130,4 @@ vs 几何 0.259527 ⇒ 0.03 mm）。这部分**不在 launch 里**，由节点�
 > 安装参数现在**真的从这次 spawn 的 URDF/xacro 解析**：6 组 (robot, mount) 与旧表逐值一致；
 > 把 robot11 副本的倾角从 30° 改成 20° ⇒ 派生值变 **−20°** 且 WARN 响（仓库文件未动）；
 > 默认路径 Action 树 **0 增 0 删**、`robot_description` 字符串 6 组逐字节相同、off 档解析 **0 次**。
+

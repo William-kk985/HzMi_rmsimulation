@@ -179,6 +179,7 @@ ps -o pid,pgid,pcpu,rss,etimes,comm -g "$LPID" > "$OUT/ps_after.txt" 2>/dev/null
 {
   for kv in "/small_point_lio publish_tf" "/small_point_lio odom_convention" \
             "/small_point_lio gravity_align_mode" "/small_point_lio gravity_align_rpy" \
+            "/small_point_lio gravity_align_z_origin" "/small_point_lio gravity_align_h" \
             "/small_point_lio fix_gravity_direction" "/small_point_lio gravity" \
             "/small_point_lio point_filter_num" "/small_point_lio space_downsample" \
             "/small_point_lio min_distance" \

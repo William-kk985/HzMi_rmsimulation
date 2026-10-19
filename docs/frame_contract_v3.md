@@ -317,6 +317,60 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
   p95 4.8→8.3 mm ⇒ 一升一降、都在 ±0.1° 噪声内，**没有随 3 倍时间长大**（【实测】S1 §9.4(4)，`0ee92b6`）。
 * ⇒ 契约只承诺"**稳态偏置 < 0.7°**"，**不承诺**"初始化误差 < 0.7°"（后者实测 < 0.01°）。
 
+### 4.7 odom 的 z 原点约定（E1b，2026-10-21）
+
+> 任务书写的是"§4.3"；本体 §4.3 已被「来源与互检」占用（且被多份文档交叉引用），
+> 为不打乱既有编号，新增节落在 **§4.7**。内容 = 规范；实测见
+> `docs/frame_contract_v3_measurements.md` §10。
+
+**规范（`gravity_align_mode != off` 且 `gravity_align_z_origin:=ground` 时）**：
+
+1. **`odom` 的 z=0 = 初始化时刻的地面**。初始化状态位置
+   `position.z = h − (R_ws·t_IL).z`，其中
+   * `h` = **传感器（`livox_frame` 原点）离地高度**，由 launch 从 **URDF 几何**算（见第 2 条）；
+   * `R_ws` = E1 算出的 body→world 初始旋转；
+   * `t_IL` = 传感器在状态系（IMU body）里的位置 = `extrinsic_T`（默认 `(0,0,0.05)`）。
+   * 为什么不是直接 `position.z = h`：本 LIO 的**状态原点是 IMU body**，livox 原点比它高
+     `(R_ws·t_IL).z`。robot11 sensor 档 `R_ws=Rx(−30°)` ⇒ 该杆臂 = `0.05·cos30° = 0.043301`，
+     `position.z = 0.259527 − 0.043301 = 0.216226`。
+2. **初始地图必须用同一个平移**。初始地图点的出点公式是
+   `R_ws·(R_IL·p + t_IL) + position`；只要 `position` 在上面设好，地图与状态就同步搬，
+   **不要**另写一份 `+h`（那是第二个真源）。**只改旋转不改平移 = E1 遗留的 bug**
+   （地面被抬到 −h，nav2 局部代价图整盘掉出高度带）；反过来只改平移不改旋转也不行。
+3. **`h` 逐模型（默认姿态、`livox_raise_m:=0`，全部从 URDF/轮几何算，不手填）**：
+
+   | 模型 | `base_link` 原点离地 | `livox_frame` z 偏置 | **`h`** | 依据 |
+   |---|---|---|---|---|
+   | `robot:=robot11` | 0.102499 | 0.15702816968305（+`livox_raise_m`） | **0.259527** | 轮 mesh 最低点 −0.102499；`body_to_livox` 关节 z；与 linefit `sensor_height: 0.2595` 交叉一致 |
+   | `robot:=hzmirm` | 0.0 | 0.6 + 0.2·cos(`turret_pitch_deg`) | **0.800000**（pitch=0） | 轮 r=0.08 心 z=0.08 ⇒ 轮底在 base_link z=0；云台链 0.3+0.3+0.2 |
+   | 默认模型（`robot:=''`） | 0.06 | 0.175 | **0.235000** | 轮 r=0.06 心 z=0；`measurement_params_sim.yaml` 的 xyz z |
+
+   车体水平、URDF 与实物一致时 ⇒ **ground z=0、`base_link` z=+0.102499、`livox_frame` z=+0.2595**
+   （robot11；数值 0.102504/0.259532，差 ≤5 µm 来自四舍五入）。
+4. **运行时互检（loud, never silent）**。初始化时从**最后一帧**原始云（lidar 系）拟合地面，
+   量出 `h_meas`，与 `h_urdf` 比较：
+
+   | `\|Δ\|` | 级别 | 行为 |
+   |---|---|---|
+   | **< 0.03 m** | INFO | 用 URDF 值；日志同时打 h_urdf / h_meas / Δ / 内点 / 倾角 / 残差 |
+   | **0.03–0.05 m** | WARN | 同上；提示"URDF 与实测不符 / 场地不平" |
+   | **≥ 0.05 m** | ERROR | 同上；提示"URDF 写错或出生不在平地上" |
+
+   **定基永远用 URDF 值（确定性）**，`h_meas` 只作诊断：实测会被噪声/坡面/车体点带偏，
+   而 URDF 可复现。每次初始化只打一次（`reset()` 只在构造期调用）⇒ 天然 rate-limited。
+5. **默认值**：节点参数 `gravity_align_z_origin` 默认 **`sensor`**（= 旧行为，position 保持 0，
+   `/Odometry`/TF/点云逐位不变）；launch 里 `gravity_align_z_origin` 的默认值是 **`ground`**，
+   但**只在 `gravity_align_mode != off` 时**把它和 `gravity_align_h` 传给节点 ——
+   `off` 档那份 Node 的参数表一个键都不多，默认路径不受影响。
+6. **验收线（nav 侧）**：`mode:=nav` 下 scan 盘面在 odom 的 z 必须落在 nav2
+   `obstacle_layer.scan` 的 `[min_obstacle_height, max_obstacle_height] = [0, 2.0]` 内
+   （`local` 与 `global` 两处运行期回读），且 local costmap 的 lethal/inscribed 非空。
+   E1 档未修 z 时实测 **scan z = −0.158 m ⇒ 677/677 波束掉出带 ⇒ lethal 193→0**
+   （measurements §9.7）；E1b 修复后 3 跑验收见 measurements §10。
+7. **已知边界**：`ground` 档的"地面"是 **URDF 几何说的地面**（轮底平面），不是"雷达在当前
+   场景里看到的那层地面"。两者不一致时（换场地/模型下沉/斜坡）由第 4 条的 INFO/WARN/ERROR
+   报出来，**定基不跟着实测走**。
+
 ---
 
 ## §5 重定位契约
