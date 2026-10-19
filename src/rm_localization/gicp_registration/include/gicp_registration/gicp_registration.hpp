@@ -180,6 +180,24 @@ private:
   double plausible_margin_xy_, plausible_z_min_, plausible_z_max_;
   // 连续拒绝多少帧后判"定位失效"（停发 TF，等 /initialpose）。<=0 = 永不放弃（只沿用旧值，不入失效态）。
   int lost_after_rejections_;
+  // ---- 首帧门语义 / 自愈（2026-10-21；治 docs §12.4 的那个死锁）----
+  // 实测病（`zf2_*` 6 份日志 + `exp12_gscan_*` 2 份）：`采纳 0/25`、创新 0.176–0.227 m、**dt = 0.000 s**
+  // ⇒ 门限永远取下限 0.100 m ⇒ 任何真实帧间运动都被拒 ⇒ 永远没有"上次采纳" ⇒ dt 永远是 0
+  //   = **自锁**（与"是否真的发散"无关）。两条独立成因，各自的开关如下：
+  // ① dt 的来源：true（**默认**）= 与**上一帧收到的点云**的戳差 ⇒ 第 2 帧起就有效；
+  //    false = 旧语义（与**上次采纳帧**的戳差 ⇒ 首帧必为 0 ⇒ 门限取下限）。
+  bool gate_dt_from_last_received_;
+  // ② 无先验的第一帧**跳过创新门**（score/converged 与合理性判据照旧，垃圾帧照样被拒）。
+  //    false = 旧语义（首帧也过创新门 ⇒ 配上旧 dt 就是那个死锁）。
+  bool gate_skip_innovation_first_;
+  // ③ 自愈重锚：连续拒绝 N 帧 ⇒ 把锚点拉回**本帧的里程计预测位姿**、并**放行下一个通过
+  //    fitness+合理性的帧**（忽略它的创新）。<=0 = 关闭（旧语义：只等 lost_after_rejections
+  //    判失效，然后冻住等 /initialpose ⇒ 环境量（传感器外参偏置等）造成的恒定创新会永久自锁）。
+  int gate_reanchor_after_rejects_;
+  // ④ 判失效后的自愈探针：每 `lost_probe_period_sec_` 秒仍然跑一帧 align（**只算不发布**），
+  //    连续 gate_reanchor_after_rejects_ 次通过 fitness+合理性 ⇒ 重锚并恢复发布。
+  //    <=0 = 关闭（旧语义：判失效后完全停手，只等 /initialpose / 重启）。
+  double lost_probe_period_sec_;
   // 输出平滑：**只让修正量慢变**，高频运动继续由里程计提供（odom→base_link 不被本节点碰）。
   // 一阶低通：published ← slerp/lerp(published, 最近采纳的测量, 1-exp(-dt/tau))，按 50 Hz 定时器推进。
   bool smoothing_enable_;
@@ -247,8 +265,20 @@ private:
   bool cloud_seen_ = false;
   rclcpp::Time last_cloud_stamp_;
   // 门限/合理性/失效态的可观测量与状态（~1 Hz 状态行 + 罕见 WARN 用）
-  rclcpp::Time last_meas_stamp_;          // 最近一次**采纳**帧的点云戳（门限的 dt 来源）
+  rclcpp::Time last_meas_stamp_;          // 最近一次**采纳**帧的点云戳（旧 dt 语义的来源）
   bool last_meas_stamp_valid_ = false;
+  // dt 的**新**基准（gate_dt_from_last_received）：上一帧**收到**的点云戳。只在 align 组内读写
+  // （pointcloudCallback 是唯一写者）⇒ 不需要 mutex_。第 1 帧无基准 ⇒ 0（且首帧本来就免创新门）。
+  rclcpp::Time prev_recv_stamp_;
+  bool prev_recv_stamp_valid_ = false;
+  // "还没有任何先验"的一次性豁免（见 gate_skip_innovation_first_）：启动 ⇒ true；
+  // /initialpose **不会**把它重新置 true（人工给的就是先验，那条路要保留创新门的保护）。
+  bool gate_no_prior_ = true;
+  bool reanchor_pending_ = false;         // true = 刚重锚过 ⇒ 下一个过 fitness+合理性的帧直接采纳
+  int reanchor_count_ = 0;                // 累计重锚次数（诊断；~/gate 的 flags 位也标）
+  int lost_probe_passes_ = 0;             // 失效态探针：连续通过 fitness+合理性的次数
+  std::chrono::steady_clock::time_point last_lost_probe_tp_{};
+  bool last_lost_probe_tp_valid_ = false;
   int gate_reject_streak_ = 0;            // 当前连续拒绝帧数（任何一次采纳都清零）
   int gate_rejects_ = 0;                  // 累计：被创新门限拒绝
   int bound_rejects_ = 0;                 // 累计：被合理性检查拒绝

@@ -238,11 +238,38 @@
     plausible_z_max: 0.7                 # m；上限
     #
     # ③ 失效策略：连续 N 帧被拒 ⇒ 判"定位失效" ⇒ **停发 map→odom**（同时停止配准与 ~/pose），
-    #    大声 ERROR + 状态行改 ERROR，等 /initialpose。**绝不自动猜一个位姿继续发**
-    #    —— 那正是这次要修的失败模式。恢复：RViz 2D Pose Estimate 或重启导航栈。
+    #    大声 ERROR + 状态行改 ERROR，等 /initialpose。**绝不为了继续发 TF 而编造位姿**
+    #    —— 那正是这次要修的失败模式。恢复：自愈探针（见 ⑤）/ RViz 2D Pose Estimate / 重启导航栈。
     #    25 帧 @10 Hz = 2.5 s：足够长（不会被偶发坏帧触发），足够短（不会让 nav2 拿着错位姿跑很久）。
     #    <=0 = 永不放弃（只沿用上次采纳值，不入失效态）——实车保守用法可这么设。
     lost_after_rejections: 25
+    #
+    # ⑤ **首帧门语义 / 自愈**（2026-10-21 新增；修 docs/frame_contract_v3_measurements.md 里
+    #    「GICP 首帧门死锁」那一节实测的病：`采纳 0/25`、创新 0.176–0.227 m、**dt = 0.000 s**、
+    #    ~6 s 后判失效 ⇒ 停发 map→odom ⇒ global costmap 整跑 `Message Filter dropping`）。
+    #    病根是**两条独立的缺陷**，四个键各治一条：
+    #
+    #    (a) dt 的来源：旧语义 = 与**上次采纳帧**的点云戳差 ⇒ **首帧恒为 0** ⇒
+    #        门限 = clamp(rate·0, 0.10, 0.6) = **0.10 m** ⇒ 任何真实帧间运动（首帧创新 0.176–0.227 m）
+    #        都被拒 ⇒ 永远没有"上次采纳" ⇒ dt 永远是 0 = **自锁**（与"是否真的发散"无关）。
+    #        true（默认）= 与**上一帧收到的点云**的戳差 ⇒ 第 2 帧起 dt≈0.1–0.25 s ⇒ 门限 0.3–0.6 m。
+    #        ⚠️ 这只改变"门限的尺度"，不改变"创新"的定义（仍是 结果 − 里程计预测位姿）。
+    gate_dt_from_last_received: true
+    #    (b) 无先验的第一帧：创新只能在"有上次采纳"时才有意义。true（默认）= 首帧**免创新门**，
+    #        但 converged/score/合理性三道判据照旧 ⇒ 垃圾帧仍然被拒（实测 score≈0.005 m² 正常）。
+    #        /initialpose 之后**不豁免**（人工给的就是先验，那条路保留创新门的保护）。
+    gate_skip_innovation_first: true
+    #    (c) 自愈重锚：连续被拒 N 帧 ⇒ 锚点拉回**本帧的里程计预测位姿**，并放行下一个通过
+    #        fitness+合理性的帧（忽略它的创新）。为什么需要：传感器外参偏置这类**恒定**创新
+    #        （本轮实测约 0.19 m，来自当时未修的 Livox sensor 档平移 bug）会被创新门永久拒绝，
+    #        而"永久拒绝"= 停发 map→odom，比"接受一个 0.2 m 偏置、继续跟踪"更糟。
+    #        **不编造位姿**：重锚拉回的是"只信里程计"的预测值，落点仍必须过三道既有判据。
+    #        3 = 约 1 s（@4 Hz）就认账；<=0 = 关闭（旧语义：只等 lost_after_rejections 判失效后冻住）。
+    gate_reanchor_after_rejects: 3
+    #    (d) 判失效后的自愈探针：每 1.0 s 仍跑**一帧** align（只算不发布），连续
+    #        gate_reanchor_after_rejects 次通过 fitness+合理性 ⇒ 重锚并恢复发布。
+    #        <=0 = 关闭（旧语义：判失效后完全停手，只等 /initialpose / 重启）。
+    lost_probe_period_sec: 1.0
     #
     # ④ 输出平滑（**用户抱怨的"四处抖动"的直接对策**）：发布出去的 map→odom 朝"最近采纳的测量"
     #    做一阶低通（时间常数 tau），**高频运动继续由 odom→base_link 提供**（本节点绝不碰它）。
@@ -255,8 +282,15 @@
     smoothing_enable: true
     smoothing_tau: 1.0                   # s；一阶低通时间常数（<=0 或 enable=false ⇒ 不平滑）
     #
-    # 回退（三档，任选）：
+    # 回退（四档，任选）：
     #   · 只关新判据：gate_enable:=false + smoothing_enable:=false（= 逐字节回到 2026-10-06 之前）；
     #   · 只关平滑：smoothing_enable:=false（门限仍在，抖动回来但不会跑飞）；
     #   · 门限太紧（行驶中频繁"创新超门限"）：gate_trans_rate 0.8→1.5、gate_trans_step_max 0.12→0.25，
     #     或把 lost_after_rejections 设 0（永不判失效，只沿用旧值）。
+    #   · **逐字节回到 2026-10-21 之前（首帧门旧语义）**：下面四个键一起改 ——
+    #       gate_dt_from_last_received: false
+    #       gate_skip_innovation_first: false
+    #       gate_reanchor_after_rejects: 0
+    #       lost_probe_period_sec: 0.0
+    #     （= 首帧 dt=0 ⇒ 门限取下限 0.1 m、首帧也过创新门、拒绝只等判失效、判失效后完全停手。
+    #       **那个组合就是 0/25 采纳的死锁**，只用于对照实验，不要在生产里用。）

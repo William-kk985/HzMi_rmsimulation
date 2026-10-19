@@ -273,6 +273,27 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   plausible_z_min_ = declare_parameter<double>("plausible_z_min", -0.9);
   plausible_z_max_ = declare_parameter<double>("plausible_z_max", 0.7);
   lost_after_rejections_ = declare_parameter<int>("lost_after_rejections", 25);
+  // ---- 首帧门语义 / 自愈（2026-10-21；默认值 = 修好的一档，旧行为见各键的回退）----
+  // 背景与证据（首帧门死锁）：见 config/gicp_registration_sim.yaml 对应键的注释。
+  // **默认值就是修好的行为**（不然"改了等于没改"）；要逐字节回到 2026-10-21 之前：
+  //   gate_dt_from_last_received:=false + gate_skip_innovation_first:=false
+  //   + gate_reanchor_after_rejects:=0 + lost_probe_period_sec:=0.0
+  gate_dt_from_last_received_ = declare_parameter<bool>("gate_dt_from_last_received", true);
+  gate_skip_innovation_first_ = declare_parameter<bool>("gate_skip_innovation_first", true);
+  gate_reanchor_after_rejects_ = declare_parameter<int>("gate_reanchor_after_rejects", 3);
+  lost_probe_period_sec_ = declare_parameter<double>("lost_probe_period_sec", 1.0);
+  if (gate_reanchor_after_rejects_ < 0) {
+    RCLCPP_WARN(
+      get_logger(), "gate_reanchor_after_rejects=%d 非法（>=0；0 = 关闭重锚）⇒ 用 0",
+      gate_reanchor_after_rejects_);
+    gate_reanchor_after_rejects_ = 0;
+  }
+  if (lost_probe_period_sec_ < 0.0) {
+    RCLCPP_WARN(
+      get_logger(), "lost_probe_period_sec=%.3f 非法（>=0；0 = 关闭失效态探针）⇒ 用 0.0",
+      lost_probe_period_sec_);
+    lost_probe_period_sec_ = 0.0;
+  }
   smoothing_enable_ = declare_parameter<bool>("smoothing_enable", true);
   smoothing_tau_ = declare_parameter<double>("smoothing_tau", 1.0);
   // 非法值的处理原则与既有参数一致：**WARN + 退回默认**，绝不静默启用一个没标定过的数。
@@ -569,7 +590,11 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     " yaw rate=%.1f°/s（下限 %.2f / 上限 %.2f°）\n"
     "     · 判据 = 本帧结果相对**里程计预测位姿**（= 上次采纳 map→odom ∘ 本帧里程计增量）的偏离"
     "（「创新」）；超门限 ⇒ 拒绝，沿用上次采纳值\n"
-    "     · 门限 = clamp(rate·dt, 下限, 上限)，dt = 与上次采纳帧的点云戳差\n"
+    "     · 门限 = clamp(rate·dt, 下限, 上限)，dt 来源=%s"
+    "（last_received = 与**上一帧收到的点云**戳差；last_accepted = 旧语义，首帧恒为 0）\n"
+    "     · 首帧豁免=%s（无先验 ⇒ 只免创新门，score/converged 与合理性照旧）· 自愈重锚："
+    "连续 %d 帧被拒 ⇒ 拉回里程计预测位姿并放行下一个过 fitness 的帧（<=0 = 关）\n"
+    "     · 判失效后自愈探针：%.2f s/次（<=0 = 关 ⇒ 停手等 /initialpose）\n"
     "  ★ 合理性/定义域：map→base_link 必须落在 PCD 包围盒 x[%.2f, %.2f] y[%.2f, %.2f]+余量 %.2f m，"
     "且 z ∈ [%.2f, %.2f]\n"
     "  ★ 失效策略：连续 %d 帧被拒 ⇒ **停发 map→odom**（不再配准），等 /initialpose"
@@ -604,6 +629,9 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     no_improve_cycles_warn_, stale_warn_sec_,
     gate_enable_ ? "true" : "false", gate_trans_rate_, gate_trans_step_min_, gate_trans_step_max_,
     gate_yaw_rate_deg_, gate_yaw_step_min_deg_, gate_yaw_step_max_deg_,
+    gate_dt_from_last_received_ ? "last_received" : "last_accepted",
+    gate_skip_innovation_first_ ? "on（默认）" : "off（旧语义）",
+    gate_reanchor_after_rejects_, lost_probe_period_sec_,
     map_min.x - plausible_margin_xy_, map_max.x + plausible_margin_xy_,
     map_min.y - plausible_margin_xy_, map_max.y + plausible_margin_xy_, plausible_margin_xy_,
     plausible_z_min_, plausible_z_max_,
@@ -832,6 +860,21 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     last_cloud_stamp_ = stamp;
     cloud_seen_ = true;
   }
+  // --- ①b 门限 dt 的**新来源**（2026-10-21，gate_dt_from_last_received）---
+  // dt = 本帧与**上一帧收到的点云**的戳差 ⇒ 从第 2 帧起就 > 0（旧语义 = 与上次**采纳**帧的戳差
+  // ⇒ 首帧必为 0 ⇒ 门限永远取下限 0.1 m ⇒ 与"是否发散"无关的自锁；见 docs §12.4 实测）。
+  // 只在**收到点云**这一步更新基准（不是"处理成功"）：被 TF/点数不足丢掉的帧也算时间流逝。
+  double recv_dt = 0.0;
+  if (gate_dt_from_last_received_) {
+    if (prev_recv_stamp_valid_) {
+      recv_dt = (stamp - prev_recv_stamp_).seconds();
+      if (!(recv_dt > 0.0) || !std::isfinite(recv_dt)) {
+        recv_dt = 0.0;  // 同戳/倒序/仿真时间跳变 ⇒ 当"没有间隔"（门限取下限）
+      }
+    }
+    prev_recv_stamp_ = stamp;
+    prev_recv_stamp_valid_ = true;
+  }
 
   // --- ② 去 NaN + 体素下采样（**两级 leaf 的细档**：实时点云/source 用 voxel_leaf_size_scan_，
   //         与地图 target 的 voxel_leaf_size_ 解耦；原来是两级共用地图 leaf ⇒ 单帧被砍得过稀） ---
@@ -887,22 +930,46 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   }
   // 判过"定位失效"之后：本节点**不再配准、不再发 TF**，只在日志里说明，等 /initialpose
   // （语义与"没有初值就不发 TF"完全一致；这是 2026-10-06 新增的第三条：连续拒绝 N 帧 ⇒ 失效）。
+  bool lost_probe = false;  // 本帧是"判失效"状态下的自愈探针帧（只算不发布，除非恢复）
   if (lost_cur) {
     static thread_local int lost_log_n = 0;
     if (++lost_log_n % 25 == 1) {
       RCLCPP_ERROR(
         get_logger(),
-        "★★ 定位已判失效（连续 %d 帧被拒）：**本节点不再发布 map→odom / ~/pose**，"
-        "也不再跑 GICP —— 绝不用编造的位姿喂 nav2。恢复方式（人工，二选一）：\n"
-        "   ① RViz 的 2D Pose Estimate（= /initialpose）给一个**大致正确**的 map 系位姿"
+        "★★ 定位已判失效（连续 %d 帧被拒）：**本节点不再发布 map→odom / ~/pose**"
+        "（自愈探针 %s）。恢复方式（任一）：\n"
+        "   ① 等自愈探针通过 %d 次（每 %.2f s 一次）⇒ 自动重锚恢复；\n"
+        "   ② RViz 的 2D Pose Estimate（= /initialpose）给一个**大致正确**的 map 系位姿"
         "（车头方向要对，误差 <1 m 最好）；\n"
-        "   ② 重启导航栈。\n"
+        "   ③ 重启导航栈。\n"
         "   在此之前 map 系位姿是**没有发布者**的（global_costmap 会报 Invalid frame ID \"map\"，"
         "这是预期行为，不是新 bug）。",
-        lost_after_streak_);
+        lost_after_streak_,
+        (lost_probe_period_sec_ > 0.0 && gate_reanchor_after_rejects_ > 0) ? "开" : "关",
+        gate_reanchor_after_rejects_, lost_probe_period_sec_);
     }
-    publishHealth(false, 0.0, false);
-    return;
+    // ---- 自愈探针（2026-10-21）：判失效 ≠ 永久冻结 ----
+    // 每 lost_probe_period_sec_ 秒仍然跑**一帧** align：只认 fitness/converged + 合理性
+    // （创新在没有锚点时没有意义），连续 gate_reanchor_after_rejects_ 次通过 ⇒ 重锚并恢复发布。
+    // 关掉它（lost_probe_period_sec<=0 或 gate_reanchor_after_rejects<=0）⇒ 逐字节回到旧语义
+    // （完全停手，只等 /initialpose）。
+    if (lost_probe_period_sec_ <= 0.0 || gate_reanchor_after_rejects_ <= 0) {
+      publishHealth(false, 0.0, false);
+      return;
+    }
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (last_lost_probe_tp_valid_ &&
+      std::chrono::duration<double>(now_tp - last_lost_probe_tp_).count() <
+      lost_probe_period_sec_)
+    {
+      publishHealth(false, 0.0, false);
+      return;
+    }
+    last_lost_probe_tp_ = now_tp;
+    last_lost_probe_tp_valid_ = true;
+    lost_probe = true;
+    // 探针帧需要一个"预测位姿"当初值：用**冻结的** T_map_odom_（= 判失效前最后发布的值）。
+    valid_cur = true;
   }
 
   // ④b 首次：用 initial_pose 参数惰性初始化（需要 TF odom→base 已可用；失败则下一帧重试）
@@ -920,7 +987,7 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         estimate_valid_ = true;
         param_init_pending_ = false;
         no_improve_cycles_ = 0;
-        last_meas_stamp_valid_ = false;  // 下一帧采纳时重新对齐一次（门限的 dt 也从那时起算）
+        last_meas_stamp_valid_ = false;  // 下一帧采纳时重新对齐一次（新 dt 语义不依赖它）
         gate_reject_streak_ = 0;
         localization_lost_ = false;
       }
@@ -1017,11 +1084,17 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   double innov_xy = 0.0, innov_yaw_deg = 0.0, allow_xy = 0.0, allow_yaw_deg = 0.0;
   innovationOf(guess, T_map_sensor, innov_xy, innov_yaw_deg);
   int gate_flags = 0;  // ~/gate 的 flags 位（见下方 publishGateMetrics 调用处）
-  // dt：本帧与**上次采纳帧**的点云时间戳差（查不到/首帧 ⇒ 0 ⇒ 用单帧下限）。
-  // 为什么用点云戳而不是墙钟：点云戳是"这一帧数据属于哪个时刻"，与修正量的物理含义一致；
-  // 墙钟在 CPU 过载时会被拉长，反而会把非法的大跳变"合法化"。
+  // dt：门限 = clamp(rate·dt, 下限, 上限) 里的那个 dt。
+  //   · 默认（gate_dt_from_last_received=true）：本帧与**上一帧收到的点云**的戳差 ⇒ 第 2 帧起有效。
+  //     为什么改用这个：旧语义（与**上次采纳帧**的戳差）在"还没有任何采纳"时恒为 0 ⇒ 门限永远
+  //     取下限 0.1 m ⇒ 实测创新 0.176–0.227 m 全被拒 ⇒ 永远没有"上次采纳" ⇒ **自锁**
+  //     （docs §12.4 的 `采纳 0/25`、dt=0.000 s；与是否真发散无关）。
+  //   · 为什么用点云戳而不是墙钟：点云戳是"这一帧数据属于哪个时刻"，与修正量的物理含义一致；
+  //     墙钟在 CPU 过载时会被拉长，反而会把非法的大跳变"合法化"。
   double gate_dt = 0.0;
-  {
+  if (gate_dt_from_last_received_) {
+    gate_dt = recv_dt;
+  } else {
     std::lock_guard<std::mutex> lock(mutex_);
     if (last_meas_stamp_valid_) {
       gate_dt = (stamp - last_meas_stamp_).seconds();
@@ -1049,7 +1122,68 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         lastTfError().c_str());
     }
   }
-  const bool accepted = score_ok && innov_ok && plaus_ok;
+  // ---- ⑦a 首帧豁免：**还没有任何先验**时不判创新（score/合理性照旧）----
+  // 依据：创新 = 结果 − **预测位姿**，而预测位姿只能来自"上次采纳的 map→odom"。首帧没有它，
+  // 此刻的"创新"其实是"测量 vs 人工初值"的差 —— 那不是发散，是**初值准不准**（实测 0.176–0.227 m，
+  // 其中约 0.19 m 来自当时未修的 Livox sensor 档平移 bug）。用发散门限去卡它 ⇒ 首帧被拒 ⇒
+  // 与旧 dt（首帧=0 ⇒ 下限 0.1 m）配合就是那个永久自锁。
+  // 只对**启动/参数初值**这条一次性路径生效（gate_no_prior_）；/initialpose 之后**不豁免**
+  // （人工给的就是先验，那条路保留创新门的保护，见 consumePendingInitialPose 里清 gate_no_prior_）。
+  const bool skip_innov = gate_skip_innovation_first_ && gate_no_prior_;
+  if (skip_innov) {
+    gate_no_prior_ = false;  // 一次性
+    gate_flags |= 0x1;
+  }
+  // ---- ⑦b 自愈重锚：连续拒绝 N 帧 ⇒ 锚点拉回"本帧的里程计预测位姿"，并放行下一个过
+  //          fitness+合理性的帧（忽略它的创新）----
+  // 为什么这样是安全的：重锚**不编造任何位姿** —— 它只是承认"上次采纳的测量已经落后这么多"，
+  // 把发布值与平滑目标都拉回**只信里程计**的预测位姿（连续跟踪时二者只差本帧的里程计增量）。
+  // 之后那一个"忽略创新"的采纳，落点仍必须过 converged/score/合理性三道既有判据。
+  // 代价：环境量（传感器外参偏置、地图轻微错位）造成的**恒定**创新会被吸收成一次 0.2 m 级的
+  // 位姿修正，而不是像旧语义那样冻死（旧语义下它就是 0/25 采纳 + 判失效 + 停发 map→odom）。
+  bool reanchored = false;
+  if (!lost_probe && gate_reanchor_after_rejects_ > 0) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (gate_reject_streak_ >= gate_reanchor_after_rejects_) {
+      T_map_odom_ = guess;          // 发布值 = 只信里程计的预测位姿
+      T_map_odom_target_ = guess;   // 平滑目标同步（否则会被 alpha 慢慢拖回去）
+      gate_reject_streak_ = 0;
+      reanchor_pending_ = true;
+      reanchored = true;
+      ++reanchor_count_;
+    }
+  }
+  if (reanchored) {
+    gate_flags |= 0x2;
+    RCLCPP_WARN(
+      get_logger(),
+      "★ 连续 %d 帧被拒 ⇒ **重锚**：map→odom 与平滑目标都拉回本帧的里程计预测位姿 %s"
+      "（累计第 %d 次）。下一个通过 fitness+合理性的帧将被采纳（忽略它的创新）"
+      "—— 不做这件事就会像 docs §12.4 那样永久自锁（采纳 0/25）。",
+      gate_reanchor_after_rejects_, poseToStr(guess).c_str(), reanchor_count_);
+  }
+  // ---- ⑦c 失效态探针：没有锚点 ⇒ 创新没有意义，只认 fitness+合理性；连续通过 N 次即恢复 ----
+  bool lost_probe_accept = false;
+  if (lost_probe) {
+    gate_flags |= 0x4;
+    if (score_ok && plaus_ok) {
+      ++lost_probe_passes_;
+    } else {
+      lost_probe_passes_ = 0;
+    }
+    lost_probe_accept = lost_probe_passes_ >= gate_reanchor_after_rejects_;
+    if (!lost_probe_accept) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "[失效态自愈探针] 本帧 %s（连续通过 %d/%d）：converged=%s, score=%s m²（阈值 %.3f）, "
+        "合理性=%s ⇒ 仍不发布 map→odom", (score_ok && plaus_ok) ? "通过" : "未通过",
+        lost_probe_passes_, gate_reanchor_after_rejects_, converged ? "true" : "false",
+        scoreToStr(score).c_str(), max_fitness_score_,
+        plaus_ok ? "通过" : ("✗" + plaus_why).c_str());
+    }
+  }
+  const bool accepted =
+    score_ok && plaus_ok && (innov_ok || skip_innov || reanchor_pending_ || lost_probe_accept);
   {
     std::lock_guard<std::mutex> lock(mutex_);
     last_innov_xy_ = innov_xy;
@@ -1061,11 +1195,15 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     T_map_odom_cur = T_map_sensor * T_sensor_odom;
     int n_acc = 0;
     int n_tot = 0;
+    const bool recovered = lost_probe;          // 本帧是失效态探针 ⇒ 这一采纳就是"恢复"
+    const bool was_reanchor_accept = reanchor_pending_;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      acceptMeasurementLocked(T_map_odom_cur, stamp);
+      acceptMeasurementLocked(T_map_odom_cur, stamp);  // 内含 gate_reject_streak_=0、lost=false
       estimate_valid_ = true;
       no_improve_cycles_ = 0;
+      reanchor_pending_ = false;
+      lost_probe_passes_ = 0;
       n_acc = ++accepted_cycles_;
       n_tot = total_cycles_;
     }
@@ -1075,6 +1213,21 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       "（%d/%d 帧被接受；创新 %.4f m / %.3f°，门限 %.4f m / %.3f°）",
       scoreToStr(score).c_str(), align_ms, source->size(), poseToStr(T_map_odom_cur).c_str(),
       n_acc, n_tot, innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg);
+    if (recovered) {
+      RCLCPP_WARN(
+        get_logger(),
+        "★ 失效态自愈：探针连续 %d 次通过 ⇒ **重锚并恢复发布 map→odom**"
+        "（score=%s m²；恢复后照常过三道判据）", gate_reanchor_after_rejects_,
+        scoreToStr(score).c_str());
+    } else if (was_reanchor_accept) {
+      RCLCPP_WARN(
+        get_logger(),
+        "★ 重锚后的**豁免采纳**：本帧创新 %.4f m / %.3f°（门限 %.4f m / %.3f°）被忽略，"
+        "但 converged=%s、score=%s m²（阈值 %.3f）、合理性=通过 ⇒ map→odom = %s"
+        "（此后创新门限照常生效）",
+        innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, converged ? "true" : "false",
+        scoreToStr(score).c_str(), max_fitness_score_, poseToStr(T_map_odom_cur).c_str());
+    }
   } else {
     int n = 0;
     int n_gate = 0, n_bound = 0;
@@ -1083,18 +1236,24 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     {
       std::lock_guard<std::mutex> lock(mutex_);
       n = ++no_improve_cycles_;
-      if (!innov_ok) {++gate_rejects_;}
-      if (!plaus_ok) {++bound_rejects_;}
+      if (!lost_probe) {  // 失效态探针帧的"拒绝"是**预期**的（它只是采样），不计入门限/连击统计
+        if (!innov_ok) {++gate_rejects_;}
+        if (!plaus_ok) {++bound_rejects_;}
+        // 连续拒绝计数：**只统计"配准本身自洽（score_ok）但被新判据拦下"的帧**也算进去，
+        // 因为那正是"看不见的发散"的形状；score 就不合格的帧（既有路径）同样计入。
+        ++gate_reject_streak_;
+      }
       n_gate = gate_rejects_;
       n_bound = bound_rejects_;
-      // 连续拒绝计数：**只统计"配准本身自洽（score_ok）但被新判据拦下"的帧**也算进去，
-      // 因为那正是"看不见的发散"的形状；score 就不合格的帧（既有路径）同样计入。
-      ++gate_reject_streak_;
-      if (lost_after_rejections_ > 0 && gate_reject_streak_ >= lost_after_rejections_) {
+      if (!lost_probe && lost_after_rejections_ > 0 &&
+        gate_reject_streak_ >= lost_after_rejections_)
+      {
         // —— 第三条判据：连续 N 帧拒绝 ⇒ 判"定位失效" ⇒ **停发 map→odom**，等 /initialpose ——
         localization_lost_ = true;
         estimate_valid_ = false;  // 复用"没有初值就不发 TF"的语义（不是新造一条通路）
         lost_after_streak_ = gate_reject_streak_;
+        reanchor_pending_ = false;   // 失效态由**探针**负责恢复（见 ⑦c），不再走重锚那条路
+        lost_probe_passes_ = 0;
         went_lost = true;
         lost_streak = gate_reject_streak_;
       }
@@ -1107,11 +1266,15 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         "     判据：① score=%s（阈值 %.3f）；② 创新 %.4f m / %.3f°（门限 %.4f m / %.3f°，dt=%.3f s）；"
         "③ 合理性=%s\n"
         "     累计：门限拒绝 %d 帧、越界拒绝 %d 帧。\n"
-        "     ⚠️ 本节点**不会**自动猜一个位姿继续发（那正是这次要修的失败模式）。\n"
-        "     操作员请做（二选一）：① RViz 2D Pose Estimate 给一个大致正确的 map 系位姿；② 重启导航栈。",
+        "     ⚠️ 本节点**不会**为了继续发 TF 而编造位姿；它只会在**下一帧起**每 %.2f s 跑一次"
+        "**自愈探针**\n"
+        "        （只算不发布；连续 %d 次通过 fitness+合理性 ⇒ 重锚恢复）。关掉探针 = "
+        "lost_probe_period_sec:=0。\n"
+        "     也可以人工恢复：① RViz 2D Pose Estimate 给一个大致正确的 map 系位姿；② 重启导航栈。",
         lost_streak, scoreToStr(score).c_str(), max_fitness_score_, innov_xy, innov_yaw_deg,
-        allow_xy, allow_yaw_deg, gate_dt, plaus_txt.c_str(), n_gate, n_bound);
-    } else {
+        allow_xy, allow_yaw_deg, gate_dt, plaus_txt.c_str(), n_gate, n_bound,
+        lost_probe_period_sec_, gate_reanchor_after_rejects_);
+    } else if (!lost_probe) {
       const std::string innov_txt = innov_ok ? std::string("") : std::string(" ★创新超门限（发散？）");
       const std::string plaus_txt = plaus_ok ? std::string("通过") : ("✗" + plaus_why);
       RCLCPP_WARN_THROTTLE(
@@ -1123,7 +1286,7 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         max_fitness_score_, innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, gate_dt,
         innov_txt.c_str(), plaus_txt.c_str(), n);
     }
-    if (n == no_improve_cycles_warn_ && !went_lost) {
+    if (n == no_improve_cycles_warn_ && !went_lost && !lost_probe) {
       RCLCPP_WARN(
         get_logger(),
         "★★ GICP 已连续 %d 帧未被采纳：map→odom 一直沿用旧值 ⇒ **定位实际已失效**"
@@ -1255,10 +1418,16 @@ bool GicpNode::consumePendingInitialPose()
     estimate_valid_ = true;
     param_init_pending_ = false;  // 人工给的初值优先于 initial_pose 参数
     no_improve_cycles_ = 0;
-    last_meas_stamp_valid_ = false;  // 门限的 dt 从"下一次采纳"重新起算
+    last_meas_stamp_valid_ = false;  // 旧 dt 语义的基准清零（新语义见 gate_dt_from_last_received）
     gate_reject_streak_ = 0;
     localization_lost_ = false;
     last_smooth_tp_valid_ = false;
+    // **人工初值就是一帧先验** ⇒ 关掉"无先验首帧免创新门"那条豁免（2026-10-21）：
+    // 豁免只针对"启动时还不知道自己在哪"，而这里操作员刚刚告诉了节点位姿 —— 首次精修也要过
+    // 创新门（保护"点歪了 5 m"这种情况：GICP 会在错盆地收敛得很漂亮，score 看不出问题）。
+    gate_no_prior_ = false;
+    reanchor_pending_ = false;
+    lost_probe_passes_ = 0;
   }
   if (lost_before) {
     RCLCPP_WARN(
