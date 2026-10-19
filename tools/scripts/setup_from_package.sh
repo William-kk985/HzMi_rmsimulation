@@ -11,7 +11,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ★ 2026-10-21：本脚本在 tools/scripts/ 下 ⇒ 项目根 = SCRIPT_DIR/../..（原来只写了 /..，
 #   停在 tools/ 上，check_directory 的 "src" 永远找不到 ⇒ 脚本一启动就报"请在...目录下运行"）。
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# ★ 2026-10-22：分发包里 create_config_package.sh 把本脚本复制到包根（与 src/ 同级），
+#   此时 ../.. 会跑出包外；按 src/ 的实际位置判定，仓库布局与分发包布局都可用。
+if [ -d "${SCRIPT_DIR}/src" ]; then
+    PROJECT_ROOT="${SCRIPT_DIR}"                          # 分发包：脚本在包根
+else
+    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"     # 仓库：tools/scripts/
+fi
 cd "${PROJECT_ROOT}"
 
 # 颜色定义

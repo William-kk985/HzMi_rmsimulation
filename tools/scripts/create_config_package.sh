@@ -48,36 +48,41 @@ print_info "工作空间：$WORKSPACE_NAME"
 print_info "时间戳：$TIMESTAMP"
 
 # 创建临时目录
+# ★ 2026-10-22：包内顶层目录必须是 HzMi_rmsimulation（QUICK_START.md 让用户 `cd HzMi_rmsimulation`，
+#   归档指南的目录树也是这个口径）。原脚本把内容直接铺在 ${PACKAGE_NAME}_${TIMESTAMP}/ 下，
+#   打包时却 `tar ... "$WORKSPACE_NAME"` ⇒ tar 找不到目标、以 2 退出。
+#   因此 TEMP_DIR 只作 /tmp 下的暂存外壳，STAGE_DIR（包内根）才是压缩包的顶层目录。
 TEMP_DIR="/tmp/${PACKAGE_NAME}_${TIMESTAMP}"
+STAGE_DIR="${TEMP_DIR}/${WORKSPACE_NAME}"
 print_info "创建临时目录：$TEMP_DIR"
-mkdir -p "$TEMP_DIR"
+mkdir -p "$STAGE_DIR"
 
 # 复制必要文件
 print_info "复制源文件..."
 
 # 复制 src 目录（排除 build 和 install）
-cp -r src "$TEMP_DIR/"
+cp -r src "$STAGE_DIR/"
 
 # 复制启动脚本
-cp "${PROJECT_ROOT}/tools/scripts/control/start_sentinel.sh" "$TEMP_DIR/" 2>/dev/null || print_info "start_sentinel.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/tools/scripts/mapping/save_pcd.sh" "$TEMP_DIR/" 2>/dev/null || print_info "save_pcd.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/tools/scripts/mapping/save_grid_map.sh" "$TEMP_DIR/" 2>/dev/null || print_info "save_grid_map.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/tools/scripts/control/improved_teleop.sh" "$TEMP_DIR/" 2>/dev/null || print_info "improved_teleop.sh 不存在，跳过"
-cp "${PROJECT_ROOT}/tools/scripts/setup_from_package.sh" "$TEMP_DIR/" 2>/dev/null || print_info "setup_from_package.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/control/start_sentinel.sh" "$STAGE_DIR/" 2>/dev/null || print_info "start_sentinel.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/mapping/save_pcd.sh" "$STAGE_DIR/" 2>/dev/null || print_info "save_pcd.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/mapping/save_grid_map.sh" "$STAGE_DIR/" 2>/dev/null || print_info "save_grid_map.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/control/improved_teleop.sh" "$STAGE_DIR/" 2>/dev/null || print_info "improved_teleop.sh 不存在，跳过"
+cp "${PROJECT_ROOT}/tools/scripts/setup_from_package.sh" "$STAGE_DIR/" 2>/dev/null || print_info "setup_from_package.sh 不存在，跳过"
 
 # 复制文档
-cp "${PROJECT_ROOT}/README.md" "$TEMP_DIR/" 2>/dev/null || print_info "README.md 不存在，跳过"
+cp "${PROJECT_ROOT}/README.md" "$STAGE_DIR/" 2>/dev/null || print_info "README.md 不存在，跳过"
 # ★ 2026-10-21：`docs/package/` 已改名为 `docs/archive/package/`（该指南随那次整理搬走）；
 #   原路径不存在 + `set -e` ⇒ 整个打包脚本在最后一步前静默退出。
-cp "${PROJECT_ROOT}/docs/archive/package/HZMI_RMSIMULATION_CONFIG_GUIDE.md" "$TEMP_DIR/"
+cp "${PROJECT_ROOT}/docs/archive/package/HZMI_RMSIMULATION_CONFIG_GUIDE.md" "$STAGE_DIR/"
 
 # 复制 CMakeLists.txt 和 package.xml（如果存在）
 if [ -f "CMakeLists.txt" ]; then
-    cp CMakeLists.txt "$TEMP_DIR/"
+    cp CMakeLists.txt "$STAGE_DIR/"
 fi
 
 # 创建 .gitignore（防止误用 git）
-cat > "$TEMP_DIR/.gitignore" << 'EOF'
+cat > "$STAGE_DIR/.gitignore" << 'EOF'
 # 编译产物
 build/
 install/
@@ -100,7 +105,7 @@ __pycache__/
 EOF
 
 # 创建快速开始指南
-cat > "$TEMP_DIR/QUICK_START.md" << 'EOF'
+cat > "$STAGE_DIR/QUICK_START.md" << 'EOF'
 # 🚀 快速开始指南
 
 ## 第一步：运行配置脚本
@@ -184,11 +189,8 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 祝你使用愉快！🎉
 EOF
 
-# 复制到临时目录
-cp "$TEMP_DIR/QUICK_START.md" "$TEMP_DIR/"
-
 # 创建版本信息文件
-cat > "$TEMP_DIR/VERSION.txt" << EOF
+cat > "$STAGE_DIR/VERSION.txt" << EOF
 HzMi_rmsimulation 离线配置包
 版本：1.0.0
 创建时间：$TIMESTAMP
@@ -207,18 +209,22 @@ Ubuntu 版本：22.04
 EOF
 
 # 设置脚本执行权限
-chmod +x "$TEMP_DIR"/*.sh 2>/dev/null || true
+chmod +x "$STAGE_DIR"/*.sh 2>/dev/null || true
 
 # 创建压缩包
-cd /tmp
+# ★ 2026-10-22：原脚本先 `cd /tmp`，再 `tar ... "$WORKSPACE_NAME"`；但 /tmp 下的暂存目录叫
+#   ${PACKAGE_NAME}_${TIMESTAMP}，且内容没有装进 HzMi_rmsimulation/ ⇒ tar 报
+#   "HzMi_rmsimulation：无法 stat: 没有那个文件或目录" 并以 2 退出（set -e 终止打包）；
+#   zip 同理 "Nothing to do!"（exit 12）。现在用 -C "$TEMP_DIR" 打包 STAGE_DIR，
+#   压缩包内顶层目录才是 HzMi_rmsimulation。
 print_info "创建压缩包..."
-
-# 创建 tar.gz 格式
-tar -czf "${PACKAGE_NAME}_${TIMESTAMP}.tar.gz" "$WORKSPACE_NAME"
+TARBALL="/tmp/${PACKAGE_NAME}_${TIMESTAMP}.tar.gz"
+ZIPFILE="/tmp/${PACKAGE_NAME}_${TIMESTAMP}.zip"
+tar -czf "$TARBALL" -C "$TEMP_DIR" "$WORKSPACE_NAME"
 
 # 同时创建 zip 格式（如果安装了 zip）
 if command -v zip &> /dev/null; then
-    zip -rq "${PACKAGE_NAME}_${TIMESTAMP}.zip" "$WORKSPACE_NAME"
+    ( cd "$TEMP_DIR" && zip -rq "$ZIPFILE" "$WORKSPACE_NAME" )
     print_success "创建完成："
     echo "  - ${PACKAGE_NAME}_${TIMESTAMP}.tar.gz"
     echo "  - ${PACKAGE_NAME}_${TIMESTAMP}.zip"
@@ -232,14 +238,23 @@ fi
 print_info "清理临时文件..."
 rm -rf "$TEMP_DIR"
 
-# 移动压缩包到原目录
-mv "/tmp/${PACKAGE_NAME}_${TIMESTAMP}."* "./${PACKAGE_NAME}_${TIMESTAMP}/" 2>/dev/null || true
+# 移动压缩包到项目根下的输出目录
+# ★ 2026-10-22：原 `mv "/tmp/${PACKAGE_NAME}_${TIMESTAMP}."* "./${PACKAGE_NAME}_${TIMESTAMP}/"`：
+#   目的地目录从未 mkdir，且前面的 `cd /tmp` 让 ./ 指向 /tmp（不是项目根），
+#   再叠加 `2>/dev/null || true` 把 "目标 ... 不是目录" 吞掉 ⇒ 压缩包永远留在 /tmp，
+#   脚本却打印一个不存在的项目根目录。改为显式创建 OUTPUT_DIR 并逐个移动。
+OUTPUT_DIR="${PROJECT_ROOT}/${PACKAGE_NAME}_${TIMESTAMP}"
+mkdir -p "$OUTPUT_DIR"
+mv "$TARBALL" "$OUTPUT_DIR/"
+if [ -f "$ZIPFILE" ]; then
+    mv "$ZIPFILE" "$OUTPUT_DIR/"
+fi
 
 print_success "=========================================="
 print_success "    离线配置包创建成功！"
 print_success "=========================================="
 echo ""
-print_info "位置：$(pwd)/${PACKAGE_NAME}_${TIMESTAMP}/"
+print_info "位置：${OUTPUT_DIR}/"
 echo ""
 print_info "分发说明："
 echo "  将压缩包发送给其他同学"
