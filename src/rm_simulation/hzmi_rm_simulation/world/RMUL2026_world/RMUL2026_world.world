@@ -44,7 +44,22 @@
         <kinematic>0</kinematic>
         <enable_wind>0</enable_wind>
         <visual name='visual'>
-          <pose>0 0 -2.6 -1.5705 0 0</pose>
+          <!-- ★ 2026-10-21 地面校准（visual + collision 都改；旋转/缩放不动）：
+               实测：本场地的**可行驶地面**（机器人静止时 4 个轮 cylinder 碰撞的最低点接触面）
+               world z = +0.049662 m；等于标称值 2.65（model pose）− 2.6（本 pose）
+               − 0.000338（mesh 地面平面的局部 y 残差）。
+               ⇒ 本 pose 的 z 由 −2.6 再降 0.049662 ⇒ −2.649662，地面正好落在 **world z = 0**
+               （与 RMUC2026 同一约定：那份是 +1.6413436 抬升后地面在 0）。
+               量法/日期/多点 spread 见 docs/frame_contract_v3_measurements.md §12：
+                 · 真值法（不用雷达）：GT base_link z − 0.102499（URDF 轮底平面到 base_link）
+                   出生点 (4.3,3.35) + 4 个相距 ~2 m 的点 ⇒ 0.049662 / 0.049662 / 0.050151 / 0.050255
+                   （另有一点 (5.4,4.2) 落在高台上 = 0.103258，不在可行驶面里）；
+                 · 雷达可见地面（修好 sensor 档坐标系 bug 之后）= 0.0474~0.0503，与上面差 ≤3 mm。
+               残余：地面在 ±6 mm 内不是理想平面（mesh 的大三角形有 ~1 cm 级台阶），
+               所以"常数偏移"只准到 ~±6 mm；4.97 cm 的主体偏移是确定的。
+               ⚠️ 只有本 world 文件里**内联**的这份是实际生效的资产；`model.sdf` 那份
+               （scale 0.01 / 旋转 +1.5708 / z=0）不生效，本轮不动它（见 docs/worlds.md §2.1）。 -->
+          <pose>0 0 -2.649662 -1.5705 0 0</pose>
           <geometry>
             <mesh>
               <uri>model://RMUL2026_world/meshes/RMUL2026.stl</uri>
@@ -71,7 +86,22 @@
         <collision name='collision'>
           <laser_retro>0</laser_retro>
           <max_contacts>10</max_contacts>
-          <pose>0 0 -2.6 -1.5705 0 0</pose>
+          <!-- ★ 2026-10-21 地面校准（visual + collision 都改；旋转/缩放不动）：
+               实测：本场地的**可行驶地面**（机器人静止时 4 个轮 cylinder 碰撞的最低点接触面）
+               world z = +0.049662 m；等于标称值 2.65（model pose）− 2.6（本 pose）
+               − 0.000338（mesh 地面平面的局部 y 残差）。
+               ⇒ 本 pose 的 z 由 −2.6 再降 0.049662 ⇒ −2.649662，地面正好落在 **world z = 0**
+               （与 RMUC2026 同一约定：那份是 +1.6413436 抬升后地面在 0）。
+               量法/日期/多点 spread 见 docs/frame_contract_v3_measurements.md §12：
+                 · 真值法（不用雷达）：GT base_link z − 0.102499（URDF 轮底平面到 base_link）
+                   出生点 (4.3,3.35) + 4 个相距 ~2 m 的点 ⇒ 0.049662 / 0.049662 / 0.050151 / 0.050255
+                   （另有一点 (5.4,4.2) 落在高台上 = 0.103258，不在可行驶面里）；
+                 · 雷达可见地面（修好 sensor 档坐标系 bug 之后）= 0.0474~0.0503，与上面差 ≤3 mm。
+               残余：地面在 ±6 mm 内不是理想平面（mesh 的大三角形有 ~1 cm 级台阶），
+               所以"常数偏移"只准到 ~±6 mm；4.97 cm 的主体偏移是确定的。
+               ⚠️ 只有本 world 文件里**内联**的这份是实际生效的资产；`model.sdf` 那份
+               （scale 0.01 / 旋转 +1.5708 / z=0）不生效，本轮不动它（见 docs/worlds.md §2.1）。 -->
+          <pose>0 0 -2.649662 -1.5705 0 0</pose>
           <geometry>
             <mesh>
               <uri>model://RMUL2026_world/meshes/RMUL2026.stl</uri>
