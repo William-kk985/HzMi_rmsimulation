@@ -1131,3 +1131,226 @@ vs 几何 0.259527 ⇒ 0.03 mm）。这部分**不在 launch 里**，由节点�
 > 把 robot11 副本的倾角从 30° 改成 20° ⇒ 派生值变 **−20°** 且 WARN 响（仓库文件未动）；
 > 默认路径 Action 树 **0 增 0 删**、`robot_description` 字符串 6 组逐字节相同、off 档解析 **0 次**。
 
+
+---
+
+## §12 第四轮（本机 date=2026-10-19）：`slam_nav` 与 `nav + global_obstacle:=scan` 的「斜 odom / 高度带」验收
+
+> **本轮只新增本节**（append-only）：§1–§11 一个字都没改。对象是 §9.10 第 4 条 / §10.9 第 4 条登记的
+> 两个「未验证组合」：**①`mode:=slam_nav`**、**②`mode:=nav` + `global_obstacle:=scan`**（把**全局**
+> 代价图也切到 2D `/scan`）。每组跑 `gravity_align_mode:=off` 与 `hybrid`（后者用默认
+> `gravity_align_z_origin:=ground`），共 **4 跑**；另加 **1 跑** `slam_nav`+`hybrid` 复本（n=2，
+> 且用升级后的探针补测 `map→odom` 的「唯一戳率」）。**只做实验：src/** / tools/** / 任何 launch 与
+> 参数文件**一个字节都没改**；新增的只是 `.tmp_ab/exp12/`（gitignored）里的**只读**探针与包装脚本。
+>
+> **日期口径**：本轮每跑 `meta.txt` 的 `date` 都是 **2026-10-19T22:1x–22:3x**（本机时钟）；§10 标题里的
+> 「2026-10-21」是上一轮的任务标签，与文件里记录的 date 不一致 —— 本节一律以 `meta.txt` 的 date 为准。
+>
+> **冻结（launch_md5）**：5 跑的 `src/rm_nav_bringup/launch/bringup_sim.launch.py` md5 全部
+> **`6d38e74ea7a53924e601e89b23331a77`**，且 `跑前 == 跑后 == 该跑时刻 HEAD 的 launch`（每跑
+> `exp12_meta.txt` 的 `launch_md5_before/after/head` 三行逐字相同）。实验期间 HEAD 从 `f9bf4a9`
+> 前进到 `49a4328`（**只动 tools/ 两个打包脚本**），launch 未变 ⇒ 冻结成立。二进制 =
+> `libsmall_point_lio.so` md5 **`58bebfb8…`**（= §10.4 的 zfix 构建；`small_point_lio_node` 的
+> `d940e573…`），跑前/跑后逐值相同（`.tmp_uc/bins/zfix` ↔ `build/`；bench 收尾会把 `build/` 换回旧的
+> `after`，包装脚本在每跑后**还原成 zfix 并校验 md5**）。
+
+### 12.1 协议（与 §10.4 逐字相同 + 一个只读补充探针）
+
+四跑 × 两模式（`settle=20 s / window=20 s` 仿真；探针超时 560 s；`gui:=False`、`spin_speed:=0.0`、
+`nav_rviz:=False lio_rviz:=False`）——**逐字命令**：
+
+```bash
+# A. slam_nav（lio:=small_point_lio、mapper:=slam_toolbox；world / spawn / 机器人同 §10.4）
+.tmp_ab/exp12/run_one.sh exp12_snav_off_r1 world:=RMUL2026 mode:=slam_nav mapper:=slam_toolbox robot:=robot11 \
+    robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=off
+.tmp_ab/exp12/run_one.sh exp12_snav_hyb_r1 world:=RMUL2026 mode:=slam_nav mapper:=slam_toolbox robot:=robot11 \
+    robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=hybrid
+# B. nav + gicp + 全局也走 2D scan（磁盘图 = map/RMUL2026.yaml + PCD/RMUL2026.pcd）
+.tmp_ab/exp12/run_one.sh exp12_gscan_off_r1 world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp \
+    global_obstacle:=scan robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=off
+.tmp_ab/exp12/run_one.sh exp12_gscan_hyb_r1 world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp \
+    global_obstacle:=scan robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=hybrid
+# C. 补充（n=2；探针升级后补测 map→odom 唯一戳率）
+.tmp_ab/exp12/run_one.sh exp12_snav_hyb_r2 world:=RMUL2026 mode:=slam_nav mapper:=slam_toolbox robot:=robot11 \
+    robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=hybrid
+```
+
+* **隔离**：`run_one.sh` 与 `spl_ab_bench.sh` 同口径（`HOME=.tmp_ab/home-<tag>`、按 tag 散列
+  `ROS_DOMAIN_ID`、**先探空端口再占** `GAZEBO_MASTER_URI`、`setsid` 起栈、收尾只用
+  `tools/scripts/lib/scoped_cleanup.sh` 清**本进程组/本 master URI**，**无全机 pkill**；包装脚本在
+  bench 返回后只 `kill` 自己的探针 PID）。
+* **探针**（都是只订阅、不发布、不改参数）：
+  * `tools/scripts/tiltmount/nav_band_probe.py`（§9.7 起就有）：`/scan` 在 **odom** 的 z + 两张
+    costmap 的原始代价计数（254/253/0/255）、车那格、最近 lethal、前方 2.0×1.2 m lethal；
+  * `tools/scripts/tiltmount/spl_ab_bench.sh` 自带的 `grav_probe.py`（`.tmp_gravtest/`）：残余地面
+    倾角、`odom→base_link` rpy、RTF；
+  * **本轮新增（只在 `.tmp_ab/exp12/probe_exp12.py`，gitignored）**：同一帧 `/scan` 的波束端点
+    （scan 帧里 z=0）用 TF 搬到 **odom 与 map 两个代价图帧**，给 z 统计、`[0,2]` 带内/带下/带上、
+    **被保留波束的 y 区间**（= "banded slab / 半平面盲区"的直接证据）；`/map` 的条数/速率/发布者/info；
+    `/tf` 里 `(parent=map, child=odom)` 的条数、**唯一戳数**、同戳最大重复次数；运行期
+    `ros2 param get` 回读两张 costmap 的 `global_frame` / `obstacle_layer.enabled` /
+    `stvl_layer.enabled` / `min|max_obstacle_height`、以及 `/small_point_lio` 的
+    `gravity_align_mode|z_origin|h`、`/lio_tf_adapter rpy`。
+* **口径**：`/scan` 的 `frame_id=base_link`；"in-band"= 波束端点 z ∈ `[0.0, 2.0]`（= nav2
+  `obstacle_layer.scan` 的默认 `min_obstacle_height` + 文件里的 `max_obstacle_height: 2.0`，本轮
+  运行期回读：local/global 都是 **min 0.0 / max 2.0**）；"kept y"= 带内波束端点的 odom/map y 范围。
+* **⚠️ 环境噪声（记录在案，不影响判决）**：`spawn_entity.py` 在 **2/5 跑**（`exp12_snav_off_r1`、
+  `exp12_snav_hyb_r1`）报 `Spawn status: Entity pushed to spawn queue, but spawn service timed out…`
+  然后退出。**实体其实成功生成**：5 跑的 `/odom_ground_truth` 同值（`x≈4.2999926/4.2999931`、
+  `y≈3.3497892/3.3497908`、`z≈0.1521570/0.1521612`，互差 ≤5×10⁻⁶ m；与 §10.4 同值），
+  `/scan` 4.1 Hz、`/map` 有发布者。
+  ⇒ 判定为 **spurious**（§9.7/§10 那两轮没有出现，未归因）。另：`/scan` 的有限波束数逐跑
+  在 **677–678** 与 **775–776** 两档之间跳（同世界/同出生点/同静止；原因未查）⇒ 所有 in-band 都
+  用**逐跑自己的分母**。
+
+### 12.2 四跑 + 一跑复本：主表（`settle 20 / window 20`，中位数；每跑 n=1，除注明）
+
+| run（tag） | 组合 / 重力档 | launch_md5 | 有限波束 | z(odom) p50 · [min,max] | **带内 / 带下 / 带上** | **kept y（odom）** | local **lethal / inscribed / free / unknown** | 最近 lethal · 前方 2×1.2 m | global **lethal / inscribed / free / unknown**（格数） | global 最近 · 前方 | 残余倾角 · RTF |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `exp12_snav_off_r1` | **slam_nav** / off | `6d38e74e…` | 678 | **+0.243** [−0.244, +2.593] | **580 / 60 / 36**（85.5%） | **[0.112, 3.568]** | **193 / 8282 / 44544 / 0** | **0.761 m** · **21** | **209 / 2133 / 1530 / 12740**（17250） | 0.786 · 15 | 30.08° · 0.372 |
+| `exp12_snav_hyb_r1` | **slam_nav** / hybrid | `6d38e74e…` | 677 | **+0.058** [+0.046, +0.098] | **677 / 0 / 0**（100%） | **[−0.458, 5.258]** | **287 / 8426 / 43343.5 / 0** | **0.768 m** · **18** | **239 / 2109 / 1485 / 12639**（17100） | 0.746 · 18 | 0.49° · 0.364 |
+| `exp12_snav_hyb_r2`（补充，n=2） | **slam_nav** / hybrid | `6d38e74e…` | 776 | +0.071 [+0.062, +0.099] | **776 / 0 / 0** | [−0.677, 5.060] | **272.5 / 9349 / 42714.5 / 0** | **0.723 m** · **21** | 227 / 2012 / 687 / 10590（13950） | 0.724 · 30 | 0.31° · 0.287 |
+| `exp12_gscan_off_r1` | **nav + gicp + global:=scan** / off | `6d38e74e…` | 677 | **+0.239** [−0.242, +2.602] | **578 / 62 / 36**（85.4%） | **[0.165, 3.597]** | **209 / 8254.5 / 44611 / 0** | **0.760 m** · **20** | 3782 / 17133 / 9859 / 0（43077）**⚠️ 见 §12.4** | 0.470 · 91 | 30.27° · 0.383 |
+| `exp12_gscan_hyb_r1` | **nav + gicp + global:=scan** / hybrid | `6d38e74e…` | 775 | **+0.072** [+0.060, +0.101] | **775 / 0 / 0**（100%） | **[−0.644, 5.055]** | **256.5 / 9372.5 / 42701.5 / 0** | **0.723 m** · **20** | 4010 / 17214 / 9627 / 0（43077）**⚠️ 见 §12.4** | 0.454 · 95 | 0.26° · 0.294 |
+
+读法与 §10.4 的表一致：`unknown=0` 是因为 `track_unknown_space=false`（"没看见"与 free 同值）；
+"最近 lethal"= 车（`base_link_fake`）到最近 254 格的平面距离；"前方"= 车体系 x∈[0,2.0] m、|y|≤0.6 m
+窗口内的 lethal 格数。`global` 的格数栏是**该跑自己的** global costmap 大小（slam_nav 是实时新建的
+图，逐跑 17250/17100/13950 格；nav 是磁盘图 43077 格），跨跑不可直接比。
+
+**第二张表（诊断用：map 帧几何 + `map→odom` + `/map`）** —— `map` 帧 z 只有在"map→odom 活着"或
+"能回退到最新一帧"时才有值（见 §12.4 的坑）：
+
+| run | map 帧 z p50 · [min,max] | map 帧 带内/下/上 | map 帧 kept y | `map→odom` 发布者（节点级） | `/tf` 里 map→odom：条数 / 唯一戳 | `/map` |
+|---|---|---|---|---|---|---|
+| `snav_off_r1` | **+0.0062** [−0.0105, +0.0126] | 638 / 40 / 0 | [−0.259, 5.353] | **`/slam_toolbox`（唯一）** | 2225 条 / 探针记录跨度 17.8 仿真秒 ≈ **46 条/墙钟秒**（唯一戳未测） | 有：`/slam_toolbox`，0.50 Hz，150×115 @0.05，17250 格 |
+| `snav_hyb_r1` | **−0.0004** [−0.0026, +0.0030] | 243.5 / 437 / 0 | [−0.329, 5.258] | **`/slam_toolbox`（唯一）** | 2258 条 ≈ 46 条/墙钟秒（唯一戳未测） | 有：同上，0.51 Hz，150×114，17100 格 |
+| `snav_hyb_r2` | **−0.00055** [−0.010, +0.0047] | 262.5 / 512 / 0 | [−0.526, 5.057] | **`/slam_toolbox`（唯一）** | **2917 条 / 20 仿真秒**（= 145.9 条/仿真秒 ≈ **42 条/墙钟秒**）；**唯一戳 179 个**（8.95/仿真秒 ≈ **2.6/墙钟秒**），同一条戳最多重复 **21** 次 | 有：`/slam_toolbox`，0.65 Hz，150×93，13950 格 |
+| `gscan_off_r1` | **+0.432** [−0.401, **+4.501**] | 536 / 58 / 83 | **[0.127, 1.317]** | `/gicp_registration`（**只活了 ~6 s**，见 §12.4） | 300 条 / **25 唯一戳**（同戳最多重复 13 次；戳跨度仅 2.4 仿真秒） | 有：`/map_server`（latched 1 条），窗口内 0 条 |
+| `gscan_hyb_r1` | **+0.134** [+0.100, +0.238] | 776 / 0 / 0 | [−0.662, 5.022] | `/gicp_registration`（**只活了 ~6 s**） | 371 条 / **23 唯一戳**（同戳最多重复 20 次） | 有：`/map_server`（latched 1 条），窗口内 0 条 |
+
+### 12.3 判决 A：**`mode:=slam_nav` 与 `mode:=nav` 是同一个病、同一个解**
+
+1. **同病（off）**：off 的局部代价图与 §10.4 的 `mode:=nav` off **逐项对上** —— 有限波束 678、
+   带内 **580**（85.5%）、带下 60、带上 36、`z(odom) p50=+0.243`、**kept y=[0.112, 3.568]**
+   （= 只保留一个 y 方向的**条带**，机器人正前方/负 y 半平面的波束被整片丢掉）、local
+   **lethal 193 / inscribed 8282 / free 44544 / 最近 lethal 0.761 m / ahead 21**。
+   §10.4 nav off 的同名量：579 / 60 / 36 / +0.243 / 193 / 0.760 / 21。**同一个病，且数值几乎逐值相同。**
+2. **治愈（hybrid）**：**677/677 全部在带内**（0 带下 / 0 带上），`z(odom) p50=+0.058`，
+   kept y 变成**整盘**（[−0.458, 5.258]），local **lethal 287 / 最近 0.768 m / ahead 18**；
+   n=2 复本给出 **272.5 / 0.723 / 21**、**776/776**。§10.4 nav hybrid：288.5 / 0.769 / 18 /
+   678-in-band。**同一量级、同向、同解。**（残余倾角 0.49° / 0.31°，§10.4 的 0.518° 同带。）
+3. **local 是否"像 `mode:=nav`"**：是 —— 不是"像"，而是**逐项重合**（上两条）；`mode:=slam_nav`
+   的 local costmap 与 `mode:=nav` 是同一份参数（`global_frame: odom`、`obstacle_layer.scan`
+   min/max **0.0/2.0**，运行期回读），差别只在"谁发 map→odom / 谁发 /map"。
+4. **global（本组默认 `global_obstacle:=stvl`）**：off 209/2133/1530/12740（17250 格）、hybrid
+   239/2109/1485/12639（17100 格）、n=2 227/2012/687/10590（13950 格）——**都没空**，且都在
+   "实时新建的 slam 图"上（`/map` 由 `/slam_toolbox` 以 0.5–0.65 Hz 发、150×93…150×115 逐跑不同）。
+   这三跑的格数/占用率本来就逐跑不同（实时建图），**不要跨跑比绝对值**；能说的是"STVL 这一路
+   不吃 `obstacle_layer.scan` 的 `[min,max]` 常量带、也没有因为 off/hybrid 变空"。
+5. **`map→odom`（节点级发布者 = 1）**：`/tf` 的 publisher endpoint 里只有 **`/slam_toolbox`** 能
+   发 map→odom（slam_nav 不起任何重定位节点、不起 map_server；`ros2 node list` 里没有
+   amcl/gicp/icp）。`/tf` 图上 `/slam_toolbox` 占 **2 个 publisher endpoint**（ROS 2 按 endpoint
+   计数，不是两个发布者）；**`tf2_monitor map odom` 报 `<no authority available>`**（Humble 的
+   `/tf` 消息不带 authority，broadcaster 级计数**不可得**）。**速率**：`transform_publish_period:
+   0.02` ⇒ **≈42–46 条/墙钟秒**；但 `restamp_tf` 默认 false ⇒ 同一条 scan 戳会被重复广播
+   （n=2 实测同戳最多重复 **21** 次，20 仿真秒里只有 **179 个唯一戳** ⇒ **位姿更新率 ≈ 2.6/墙钟秒
+   = scan 处理率**）。**"条数"不是"位姿更新率"**，两个都给。
+6. **nav2 告警**：高度带这条链 **0 条**（见 §12.5）；slam_nav 两跑只有启动期
+   `Robot is out of bounds of the costmap` 12–13 条 + `no map received` 1 条（实时图还没覆盖到车）
+   + `Message Filter dropping` 1 条（slam_toolbox 自己的 TF 缓存冷启动），**都随图/缓存就绪消失**。
+
+### 12.4 判决 B：**局部同病同解；但 `global_obstacle:=scan` 这一臂被 gicp 打断 —— "全局有没有变空"能答，"global 的带子是否同病/是否被 hybrid 治好"不能答**
+
+1. **局部（有效）**：off → 578/677 在带内（85.4%）、kept y=[0.165, 3.597]、local lethal **209**、
+   最近 **0.760 m**、ahead **20**；hybrid → **775/775 全在带内**、kept y 整盘、lethal **256.5**、
+   最近 **0.723 m**、ahead **20**。⇒ **与 A、与 §10.4 同病同解**。数量级说明：本跑 hybrid 的
+   lethal（256.5）低于 §10.4 hybrid 的 288.5、但高于本组 off 的 209；这一跑 `/scan` 有限波束是
+   775（off 是 677），绝对格数会随"进带波束集合"逐跑浮动（§12.1 末尾），判决看的是
+   "in-band 85% → 100%、最近 lethal 与 ahead 不为 0"。
+2. **全局"没有变空"（能答）**：off **3782 lethal / 17133 inscribed / 9859 free / 0 unknown**
+   （43077 格），最近 lethal **0.470 m**、ahead 91；hybrid **4010 / 17214 / 9627 / 0**，最近 **0.454**、
+   ahead 95。两张图都**有静态墙 + inflation**，不是空图。
+3. **⚠️ 但这 3782/4010 不是 2D scan 层打出来的，是 `static_layer` + inflation 撑着的**：
+   `localization:=gicp` 在**两种重力档**下都**从未采纳第一帧**——日志逐字：
+   * `用参数 initial_pose 初始化：map 系机器人位姿 x=0.000 y=0.000 z=0.000 yaw=0.00° ⇒ map→odom = x=0.005 y=0.001 z=-0.079 yaw=0.02°`（off）/ `… z=0.063 …`（hybrid）；
+   * 每帧 `GICP 本帧未被采纳（converged=true, score≈0.0052 m² … | 创新 0.176–0.227 m / ≤0.9° vs 门限 0.1000 m / 3.000°（**dt=0.000 s**）★创新超门限 … 连续 N 帧）`；
+   * ~6 s 后：`★★ 定位已判失效（连续 25 帧被拒）：**本节点不再发布 map→odom / ~/pose**`；
+   * 此后 global costmap 的观测滤波器**整跑都在丢消息**（off **38** 条 / hybrid **39** 条，最后一条
+     一直持续到跑尾）：`global_costmap.global_costmap: Message Filter dropping message: frame
+     'base_link'（或 'livox_frame'）at time … for reason 'the timestamp on the message is earlier than
+     all the data in the transform cache'`。
+   ⇒ 窗口内 `global_obstacle:=scan` **没有可用的 `map←odom`**，一条 scan 也没标进 map 帧。
+   **这不是本轮引入的**：§10.4 的 **6 份日志**（`zf2_off_r1–r3`、`zf2_hybrid_r1–r3`）逐份都是
+   `采纳 0/N` + **147–161 条**"判失效"（§9.10 第 7 条把它们记成"off 118 / hybrid 2 条外推告警"，
+   与本轮看到的日志不符；本轮 off 128 / hybrid 129 条外推、且两档都死）。**疾病与本轮变量无关。**
+4. **能作为"推断"（不是实测）的一条**：gicp 唯一发出去过的 map→odom 是**初始值**（从未被采纳帧
+   修正）。off 档该值在数值上 = `T_odom_base`（`z=-0.079`、roll 30° 未打印）⇒ `map←base` 把 odom
+   的 30° 倾角**加倍**成 ~60°：map 帧 z 跨度 **4.90 m** vs odom **2.84 m**（比值 **1.72 ≈ tan60/tan30**），
+   in-band 只剩 **1.19 m** 宽的 y 条带（odom 里是 3.43 m）；hybrid 档初始 map→odom 是水平
+   （`z=0.063`）⇒ map 帧 z=**+0.100…+0.238**、tilt 0.12°、**776/776 全在带内**。
+   **若** map→odom 是活的且等于这个初始值，几何上 off 会把 global 的 2D scan 层切成**更窄**的条带、
+   hybrid 全部保留（同病同解）——**但"活定位器"这个前提不成立**，所以这条**只登记为推断**。
+   （可能来源：`gicp_registration.cpp` 的初始化式 `T_map_odom_cur = T_map_base_init * T_odom_base`；
+   本轮只读观察，**未改 src/**，也**没有**单独验证这个式子是不是 bug。）
+5. **结论**：对 combo B 的**局部**半 = "同病、hybrid 治愈"（实测）；对**全局**半 = **不能判**
+   （既不能说"同病"，也不能说"治好了"），因为该臂的定位器在窗口开始前就死了。要判全局，
+   必须先修 gicp 的首帧门（`dt=0.000 s` ⇒ 门限永远取下限 0.1 m，而首帧创新 0.16–0.23 m ⇒ 死锁），
+   或换 `localization:=amcl` / `slam_nav + global_obstacle:=scan` 重做（后者 `map→odom` 是活的，
+   但 slam_toolbox 把 map 的 z 锚在车起始高度 ⇒ scan 平面**压在带子下边界**，是另一种"刀口"，
+   见 §12.6 第 2 条）。
+
+### 12.5 nav2 的"静默"：高度带这条链确实一条告警都没有 —— 但静默 ≠ 健康
+
+* 5 跑对 `dropped|out of band|min_obstacle|max_obstacle|isCurrent` 的匹配数 **全部 = 0**
+  （`nav_band_probe`/`log_grep` 同口径）。nav2 的 `obstacle_layer` **不会**因为波束掉出
+  `[min_obstacle_height, max_obstacle_height]` 报任何东西 —— **这是 §9.7 那条"无任何提示"的复现**。
+* 但"静默"只覆盖高度带：**gicp 死掉时 nav2 说的是另一套**（planner_server 的
+  `Timed out waiting for transform…` / `Extrapolation Error`：off 128 / hybrid 129 条；
+  global_costmap 的 `Message Filter dropping`：38/39 条），**没有一条提到"高度带"或"看不见障碍"**。
+  slam_nav 的 off/hybrid 则是 0–1 条外推 + 启动期 12–13 条 out-of-bounds + 1 条 no-map。
+* 所以本轮的"nav2 静默"结论要拆开说：**对高度带，静默成立（5/5）**；**对"局部/全局图是否真的
+  收到实时障碍"，不成立**（gicp 那一臂有 128–129 条 TF 告警，只是都跟高度带无关）。
+
+### 12.6 本轮没能验证 / 诚实边界
+
+1. **combo B 的 global 半没测到**（§12.4）：gicp 首帧门死锁 ⇒ 窗口内没有 `map←odom` ⇒
+   `global_obstacle:=scan` 从未真正工作。要判它，得先修 gicp（禁改 src/**）或换定位器重做。
+2. **`slam_nav + global_obstacle:=scan` 没跑**：map 帧由 slam_toolbox 定基（map←base 水平、
+   z≈0、±1 cm），scan 平面**正好压在下边界**：`snav_off_r1` 的 map 帧带内 **638/677**、
+   `snav_hyb_r1` 只有 **243.5/677**（两跑只差 ~6 mm 的 z 偏移）⇒ 若把 global 切到 scan，会得到
+   "刀口"而不是"斜面"的另一种病。**未实测**。
+3. **`map→odom` 的 broadcaster 级计数不可得**：ROS 2 Humble 的 `/tf` 消息不带 authority，
+   `tf2_monitor map odom` 报 `<no authority available>`；本轮给的是**节点级**
+   （`/slam_toolbox` 唯一，2 个 endpoint）+ 唯一戳率（n=2 实测 179 戳/20 仿真秒）。
+4. **单跑/双跑**：A 组 off n=1、hybrid n=2；B 组 off n=1、hybrid n=1。没有 3 跑中位数；
+   噪声带按 §10.4 的 [min–max]（lethal ±10、ahead ±3、nearest ±2 mm）参考。`/scan` 有限波束数
+   在 677–678 / 775–776 两档跳（原因未查，§12.1）⇒ in-band 的**绝对条数**有 ~14% 的逐跑差，
+   **比例**（85% vs 100%）是稳的。
+5. **只测 `robot:=robot11 robot11_mount:=sensor`**；`plugin`/`urdf`/默认模型、`hzmirm` 未测。
+   combo B 只测 `localization:=gicp`（amcl/small_gicp 未测）。
+6. **spawn_entity 的 spurious "timed out"**（2/5 跑）只做了"实体确实在"的旁证
+   （`/odom_ground_truth` 5 跑同值 ≤5×10⁻⁶ m + `/scan` 4.1 Hz + `/map` 有发布者），**未归因**。
+7. **map 帧 z 统计的样本**：`gscan_*` 两跑有 `map→odom` 死后的"回退到最新一帧"，所以 map 帧数字
+   来自**初始（从未修正）的 map→odom**；`snav_*` 两跑 map→odom 活着，数字可信。
+   样本数：`snav` 3 跑都是 199/199 帧；`gscan` 每跑 199 帧里 **176 帧**拿到了 map TF
+   （`tf_fail` 96/98，含 odom 侧；失败的帧在 map 帧统计里被跳过）。
+8. **日期口径**：本机 `date` 与 §10 的标题日期不同（见本节抬头）；每跑以 `meta.txt` 的 `date` 为准。
+
+### 12.7 一句话给用户
+
+> **A（`slam_nav`）：同病同解。** off 与 `mode:=nav` off **逐项重合**（带内 580/678 = 85.5%、
+> kept y=[0.112, 3.568] 的条带、local lethal 193、最近 0.761 m、ahead 21），hybrid 后
+> **677/677 全进带**、lethal 287、最近 0.768 m、ahead 18（n=2：272.5/0.723/21）——
+> slam_nav 的 local costmap 就是 nav 的 local costmap，30° 病与 z 原点修复一字不差。
+> `map→odom` 唯一发布者 = `/slam_toolbox`（节点级 1 个；/tf 不带 authority），
+> 广播 ~42–46 条/墙钟秒、**唯一戳只有 ~2.6/墙钟秒**（同一条 scan 戳重复最多 21 次）。
+> **B（`nav + gicp + global_obstacle:=scan`）：局部同病同解；全局这一半没测到。**
+> 局部 off 578/678 → hybrid 775/775（lethal 209→256.5、最近 0.760→0.723）是干净的；
+> 但 **gicp 在两种重力档下都 0/25 采纳、~6 s 判失效、停发 map→odom**（创新 0.16–0.23 m >
+> 门限 0.100 m，dt=0.000 s 死锁；§10.4 的 6 份日志同样如此）⇒ 全局图**没有变空**
+> （off 3782/17133/9859、hybrid 4010/17214/9627），但那 3782/4010 是 **static_layer + inflation**，
+> 不是 2D scan 层；`global_obstacle:=scan` 是否同病/是否被 hybrid 治好 = **本轮无法判定**
+> （唯一能做的是从"初始 map→odom"几何推断：off 会加倍成 ~60° ⇒ 只剩 1.19 m 条带，hybrid 水平 ⇒
+> 776/776 —— **推断，未实测**）。**nav2 对高度带全程静默（5/5 跑 0 条）**；它对 gicp 的死亡
+> 倒是喊了（128–129 条 TF 外推 + 38–39 条 Message Filter 丢弃），但没有一句和高度带有关。
