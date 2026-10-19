@@ -217,7 +217,11 @@ class Probe(Node):
             p = msg.pose.pose.position
             self.odom_last = {'x': p.x, 'y': p.y, 'z': p.z,
                               'yaw': yaw_of(msg.pose.pose.orientation),
-                              'rpy_deg': rpy_of(msg.pose.pose.orientation)}
+                              'rpy_deg': rpy_of(msg.pose.pose.orientation),
+                              # ★ 仿真时间戳：drive/yaw 两段是**墙钟** sleep 出来的，
+                              #   RTF<1 时"墙钟 2 s"≠"仿真 2 s" ⇒ 执行率必须在仿真时间里算
+                              #   （§20：同一个 run 里 RTF≈0.7 会把 95% 误读成 72%）。
+                              't': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9}
             rp = rpy_of(msg.pose.pose.orientation)
             self.odom_tilt_max = max(getattr(self, 'odom_tilt_max', 0.0),
                                      abs(rp[0]), abs(rp[1]))
@@ -231,7 +235,8 @@ class Probe(Node):
             p = msg.pose.pose.position
             self.gt_last = {'x': p.x, 'y': p.y, 'z': p.z,
                             'yaw': yaw_of(msg.pose.pose.orientation),
-                            'rpy_deg': rpy_of(msg.pose.pose.orientation)}
+                            'rpy_deg': rpy_of(msg.pose.pose.orientation),
+                            't': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9}
             rp = rpy_of(msg.pose.pose.orientation)
             self.gt_tilt_max = max(getattr(self, 'gt_tilt_max', 0.0), abs(rp[0]), abs(rp[1]))
             if self._gt_prev is not None:
@@ -277,12 +282,19 @@ class Probe(Node):
         dgx, dgy = g1['x'] - g0['x'], g1['y'] - g0['y']
         dyaw_o = wrap(o1['yaw'] - o0['yaw'])
         dyaw_g = wrap(g1['yaw'] - g0['yaw'])
-        return {'d_odom_xy': [round(dox, 3), round(doy, 3)],
-                'd_gt_xy': [round(dgx, 3), round(dgy, 3)],
-                'drift_xy': round(math.hypot(dox - dgx, doy - dgy), 4),
-                'drift_yaw_deg': round(math.degrees(wrap(dyaw_o - dyaw_g)), 3),
-                'd_odom_yaw_deg': round(math.degrees(dyaw_o), 2),
-                'd_gt_yaw_deg': round(math.degrees(dyaw_g), 2)}
+        out = {'d_odom_xy': [round(dox, 3), round(doy, 3)],
+               'd_gt_xy': [round(dgx, 3), round(dgy, 3)],
+               'drift_xy': round(math.hypot(dox - dgx, doy - dgy), 4),
+               'drift_yaw_deg': round(math.degrees(wrap(dyaw_o - dyaw_g)), 3),
+               'd_odom_yaw_deg': round(math.degrees(dyaw_o), 2),
+               'd_gt_yaw_deg': round(math.degrees(dyaw_g), 2)}
+        # ★ 两段快照之间的**仿真**时长（RTF<1 时墙钟不可比）。
+        #   ⚠️ 这个窗口包含"相位结束后补零速 + settle"的那一段，**不是**指令持续时长
+        #   ⇒ 不要用它当执行率分母（会把 96% 算成 72%）。量执行率请用
+        #   `tools/scripts/gzsim/drive_probe.py`（它按相位自己的仿真时间算，见 docs §20）。
+        if all('t' in p for p in (o0, g0, o1, g1)):
+            out['dt_sim_s'] = round(g1['t'] - g0['t'], 4)
+        return out
 
     def rate(self, stamps):
         if len(stamps) < 3:

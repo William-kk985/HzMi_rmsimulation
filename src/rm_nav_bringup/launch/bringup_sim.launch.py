@@ -126,7 +126,16 @@ class _PackageShareFile(Substitution):
 
 #: 可用的 robot 槽位值 → (相对 urdf/ 的文件名, 人话说明)
 _ROBOT_SLOTS = {
-    '': ('sentry_robot_sim.xacro', '默认模型（本仓现行，雷达在 base_link+0.12,0,0.175）'),
+    # ★ 2026-10-20：默认槽位改为**单刚体底盘**变体（生成物；几何与源文件逐条相等）。
+    #   为什么（实测，见 docs/frame_contract_v3_measurements.md §20）：planar_move 把同一个
+    #   (v, ω) 写给模型里的**每一个 link**，对多刚体 + 关节树不自洽 ⇒ 原 5 刚体/4 关节版本
+    #   纯原地转只执行 **4.3%**（wz=0.8 → 实测 0.034 rad/s）。单刚体 + 轮子对地摩擦 0.02
+    #   ⇒ **95.4%**；前进 80.9% → 88.1%（同一台车/世界/命令的台架实测）。
+    #   源文件 `sentry_robot_sim.xacro` **一个字节都没改**：它仍是生成器的输入，
+    #   也是 `--chassis articulated` 回退档的基准。
+    '': ('sentry_robot_sim_rigid.xacro',
+         '默认模型（单刚体底盘；几何 = urdf/sentry_robot_sim.xacro 逐条相等，'
+         '雷达在 base_link+0.12,0,0.175）'),
     'hzmirm': ('sentry_robot_hzmirm_sim.xacro',
                '用户给的哨兵 URDF（雷达在云台头上 base_link+0,0,0.8；运动学逐字保留）'),
     'robot11': ('sentry_robot_robot11_sim.xacro',
@@ -1675,7 +1684,10 @@ def generate_launch_description():
     launch_params = yaml.safe_load(open(os.path.join(
     get_package_share_directory('hzmi_rm_simulation'), 'config', 'measurement_params_sim.yaml')))
     # ★ 2026-10-07：robot:=<模型> 槽位（**opt-in**）。
-    #   robot 留空（默认）= 现在的默认模型 sentry_robot_sim.xacro：命令字符串与逐字节行为都不变；
+    #   robot 留空（默认）= 默认模型 `sentry_robot_sim_rigid.xacro`（2026-10-20 起；它是
+    #                       `sentry_robot_sim.xacro` 的**单刚体底盘生成物** —— 差别只有
+    #                       轮关节 continuous→fixed 与轮子对地摩擦，几何逐条相等，
+    #                       由 tools/scripts/regress/default_make_sim_xacro.py 自证）；
     #   robot:=hzmirm     = 用户给的哨兵 URDF（urdf/sentry_robot_hzmirm_sim.xacro = 其运动学逐字
     #                       保留 + 我们补的 inertial/IMU/雷达/底盘，见该文件头与 docs/robot_models.md）。
     #   惰性：路径/命令都在 Substitution.perform() 里才求值 ⇒ 不选这个槽位零成本，
@@ -2034,8 +2046,13 @@ def generate_launch_description():
     declare_robot_cmd = DeclareLaunchArgument(
         'robot',
         default_value='',
-        description="机器人模型槽位（留空 = 本仓现行默认模型，行为与以前完全一致）："
-                    "'' → urdf/sentry_robot_sim.xacro（雷达 base_link+0.12,0,0.175，离地 0.226）；"
+        description="机器人模型槽位（留空 = 本仓默认模型）："
+                    "'' → urdf/sentry_robot_sim_rigid.xacro（**单刚体底盘**；几何与 "
+                    "urdf/sentry_robot_sim.xacro 逐条相等（轮 r=0.06、base_link 离地 0.06、"
+                    "雷达 base_link+0.12,0,0.175 离地 0.226），差别只有①轮关节 continuous→fixed "
+                    "②轮子对地摩擦 0.02 ⇒ planar_move 的角速度通道 4.3%→95.4%；"
+                    "生成器 tools/scripts/regress/default_make_sim_xacro.py，"
+                    "回退 --chassis articulated 或把 _ROBOT_SLOTS[''] 指回源文件）；"
                     "hzmirm → urdf/sentry_robot_hzmirm_sim.xacro（用户给的哨兵 URDF："
                     "雷达在云台头上 base_link+0,0,0.8、底盘 0.6x0.6x0.3、轮距 0.50/轴距 0.44；"
                     "运动学逐字保留，我们补 inertial/IMU/MID360/Livox 插件/底盘里程计）。"
@@ -2046,6 +2063,7 @@ def generate_launch_description():
                     "选 robot11 时 launch 会调整 lio_tf_adapter 杆臂（含 30° 旋转补偿），"
                     "并切到该槽位专用的 linefit 参数（sensor_height=0.2595 + gravity_aligned_frame"
                     "=base_link）与 p2l 参数（target_frame=base_link，高度带改在重力系量）。"
+                    "默认模型的改动（实测数字/影响面）见 docs/frame_contract_v3_measurements.md §20，"
                     "范围/数值对照见 docs/robot_models.md",
         choices=['', 'hzmirm', 'robot11'])
 
@@ -3470,8 +3488,10 @@ def generate_launch_description():
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）
     ld.add_action(LogInfo(
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == ''"])),
-        msg='[robot] 模型槽位 = 默认（urdf/sentry_robot_sim.xacro）'
-            '：雷达 base_link+0.12,0,0.175，linefit sensor_height=0.226（现行标定，未改）'))
+        msg='[robot] 模型槽位 = 默认（urdf/sentry_robot_sim_rigid.xacro = 单刚体底盘生成物；'
+            '几何与 urdf/sentry_robot_sim.xacro 逐条相等）：雷达 base_link+0.12,0,0.175，'
+            'linefit sensor_height=0.226（现行标定，未改）；'
+            '⚠️ 与旧默认的差别只有"轮关节 fixed + 轮子对地摩擦 0.02"，见 docs §20'))
     ld.add_action(LogInfo(
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == 'hzmirm'"])),
         msg=['[robot] 模型槽位 = hzmirm（urdf/sentry_robot_hzmirm_sim.xacro）：用户给的哨兵 URDF，'

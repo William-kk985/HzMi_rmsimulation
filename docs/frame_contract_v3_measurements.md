@@ -3269,3 +3269,176 @@ mode:=mapping world:=RMUC2026 map_name:d2_arch`，私有 DOMAIN=183 / port=11883
 
 > 口径说明：所有跑都用**测试专用** `map_name`（`d2_arch` / `d4_caller`），跑完已从
 > `src/rm_nav_bringup/map|PCD/` 删除；用户资产（`map/RMUC2026*`、`PCD/RMUC2026*`）一个字节没动。
+
+## §20 第十一轮（**本机 date=2026-10-20T02:00–03:0x**）：**默认模型（`robot:=''`）真的能原地转了** —— 单刚体底盘 + 轮子对地摩擦（角速度通道 4.3% → 95.4%）
+
+> **本节只新增**（append-only）：§1–§19 一个字都没改。§19 已被另一个 agent 占用 ⇒ 本节用 §20。
+>
+> 触发 = 父任务原文：**"make the default robot model (`robot:=''`, the "hzmirm" slot) actually
+> rotate —— 实测纯原地转 0.80 rad/s → 实际 0.025 rad/s（3%），前进正常（0.30 → 0.183 m/s）"**。
+>
+> 与 §16「坑 1」的关系：§16 把 3% / 0.183 m/s 这组数记在 `robot:=robot11` 名下，**实际那两跑
+> 是默认模型槽位**（§16.4 的 recipe A 没有 `robot:=`）。本节按**默认模型**重测、定量归因并修掉；
+> §16 那两行数字**作废**（见 §20.6）。
+>
+> 隔离（与 §16/§17 同口径）：私有 `HOME=/tmp/gzhome-<tag>`、非默认 `ROS_DOMAIN_ID`、
+> 按 tag 探测端口的 `GAZEBO_MASTER_URI`、`unset DISPLAY`、`gui:=False`、`world:=X` **不带**前导
+> `--`、收尾只用 `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）。
+> 原始数据：`.tmp_rigid/`（台架 SDF/生成物/`drive_*`）、`.tmp_robotslot/rb_{before,after}_*`
+> （整栈探针）、`.tmp_wz/bench/out/rb_*`（台架变体矩阵，gitignored）。
+
+### 20.1 一句话结论
+
+> 默认模型的角速度通道有两个**串联**的限制项，**只修一个都不够**：
+> ① **模型结构**：`libgazebo_ros_planar_move.so` 的 `Set{Linear,Angular}Vel` 把**同一个 (v, ω)
+> 写给模型里的每一个 link**（`gazebo/physics/Model.cc:746-771`），对多刚体+关节树不自洽
+> ⇒ 原 5 刚体/4 关节版本只执行 **4.3%**；
+> ② **轮子对地摩擦**：塌成单刚体后轮子**不能再滚动**，原地转 = 4 个轮子同时**横向刮地**
+> ⇒ μ=1 时只到 **14.1%**（与 `robot:=robot11` 的 16.5% 同量级，§M.3）。
+> 两项都修（单刚体 + 轮子摩擦 0.02）⇒ **95.4%**（台架）/ **95.1%**（整栈、20 Hz 指令），nav 冒烟 PASS（§20.7），
+> 前进同时从 75% 升到 **98.7%**（同一条摩擦损失的另一个面，**不是**独立回归 —— 见 §20.6）。
+> **几何一个字节没动**（轮 r=0.06 / 轮心 z=0 / base_link 离地 0.06 / 雷达 `base_link+0.12,0,0.175`
+> rpy=0 / `h=0.235` / 质量 10.21 kg / Izz 0.103945 逐项自证相等）。`robot:=robot11` 不受影响。
+
+### 20.2 为什么"只塌刚体"不够（判决性台架，同一世界/出生点/命令）
+
+台架 = 只起 gzserver + **一个模型** + 底盘插件（摘掉 LIO/nav2/雷达），探针以 100 Hz 发
+`/cmd_vel_chassis`，真值 = `/odom_ground_truth`（= Gazebo `WorldPose`），执行率按**仿真时间**归一。
+命令：纯自转 `wz=0.8 rad/s × 2 仿真秒`（请求 91.7°）、纯前进 `vx=0.30 m/s × 1.5 仿真秒`（请求 0.45 m）。
+
+| 变体 | 自转 Δyaw | **自转执行率** | 前进位移 | **前进执行率** |
+|---|---|---|---|---|
+| 源模型（5 刚体 / 4 个 continuous 轮关节） | 3.93° | **4.3%** | 0.3642 m | 80.9% |
+| 单刚体（4 轮关节 fixed，sdformat 合并）μ=1 | 12.93° | **14.1%** | 0.3618 m | 80.4% |
+| 单刚体 + 轮子 μ=0.02（**本节的修法**） | 87.45° | **95.4%** | 0.3965 m | 88.1% |
+| 单刚体 + 轮子 μ=0.001（上限对照） | 89.72° | **97.9%** | — | — |
+| 同上但世界换 RMUC2026（μ=0.02） | 87.46° | **95.4%** | — | — |
+
+**摩擦剂量-响应（单刚体、同一命令、RMUL2026）**—— 这条曲线说明"第二限制项"是连续的、不是阈值：
+
+| 轮子 μ | 1 | 0.5 | 0.2 | 0.1 | 0.05 | 0.03 | 0.02 | 0.001 |
+|---|---|---|---|---|---|---|---|---|
+| 自转执行率 | 14.1% | 34.4% | 72.2% | 84.6% | 90.5% | 93.6% | **94.9%** | 97.9% |
+
+> ⇒ 取 **μ=0.02**：过 90% 且留 ~5 点余量（μ=0.05 只有 90.5%，临界）。
+> ⚠️ **被否掉的另一条路**：把插件 `<update_rate>` 100→1000 Hz（每个物理步都重设速度）也能到
+> **98.9%**，但同一改动让车**爬上**实体障碍 —— 25 秒盲推（`vx=0.25`）`z_max` 从 **0.0601 m**
+> 升到 **0.0951 m**（μ=0.2+1000 Hz 同样 0.0951 m）⇒ 障碍不再是障碍。这与 §M.5 对 robot11
+> 的判决一致 ⇒ **不采用**。μ=0.02 档的同一盲推：`z_max=0.0601 m`、最远 0.506 m
+> （原模型 0.526 m）⇒ **"前面有实体障碍就过不去"这条物理性质保住了**。
+
+### 20.3 整栈实测（`world:=RMUC2026 mode:=mapping lio:=fastlio`，真值 + 仿真时间）
+
+`tools/scripts/gzsim/drive_probe.py --cmd-topic /cmd_vel_chassis --wz 0.8 --vx 0.30 --duration 3`
+（每段 3 **仿真**秒；`--publish-rate 20` = nav2 的控制器档位，200 = 物理上限档）：
+
+| 量 | 改前（源模型）20 Hz | 改前 200 Hz | **改后** 20 Hz | **改后** 200 Hz |
+|---|---|---|---|---|
+| 自转 | 5.99 °/s = **13.1%** | 2.47 °/s = **5.4%** | 43.57 °/s = **95.1%** | 44.04 °/s = **96.1%** |
+| 前进 | 0.2258 m/s = 75.3% | 0.2231 m/s = 74.4% | 0.2960 m/s = **98.7%** | 0.2965 m/s = **98.8%** |
+| `/livox/imu` 陀螺 z 均值（自转段） | 0.348 rad/s（**抖**） | 0.088 rad/s（**抖**） | **0.7885** | **0.7889** |
+
+> · 改前同一指令在**不同跑之间**落在 **3.2%…13.1%**（§16 记的 3% 是其中一跑）：不是"慢"，是
+>   **抖转** —— 净转 6°…18° 而 IMU 陀螺均值到 0.35 rad/s（关节约束在来回掰），这正是 §16
+>   "LIO 把原地抖转积分成 142.8 m"的物理来源。改后 IMU 0.789/0.8 = **98.6%**，与真值一致。
+> · 改前 200 Hz 比 20 Hz **更差**（5.4% < 13.1%）也符合"抖"的图景：指令越密，约束对抗越频繁。
+> · 口径警告：`robot_model_probe.py` 的 `phase_drift` 窗口包含"相位结束后补零速 + settle"那一段，
+>   **不能**拿它当执行率分母（会把 96% 读成 72%）。本轮已把快照的**仿真时刻**写进 JSON
+>   （`dt_sim_s`）并在 `drive_probe.py` 加 `--publish-rate`；执行率请用后者。
+
+### 20.4 改了什么（最小面：一个生成物 + 一个槽位）
+
+| 文件 | 改动 |
+|---|---|
+| `src/rm_nav_bringup/urdf/sentry_robot_sim_rigid.xacro` | **新增（自动生成）**：源文件 `sentry_robot_sim.xacro` 的**单刚体底盘**变体。差别只有两类：①`base_to_wheel1..4` `continuous→fixed`（去掉 axis/limit/anchor）⇒ sdformat 的 URDF→SDF 把轮子的几何/惯量**按平行轴定理合并**进 `base_link`（Gazebo 里 1 个 link）；②4 个 `<gazebo reference="wheel_N">` 补 `mu1=mu2=0.02`（源模型把 `mu1/mu2` 写在 `<link>` **里面**，Gazebo 的 URDF 解析器只认 `<gazebo reference>` ⇒ 一直是**失效**的）。源文件**一个字节没改**。 |
+| `tools/scripts/regress/default_make_sim_xacro.py` | **新增生成器**：`--chassis rigid`（默认，写生成物）/ `articulated`（回退档 = 源文件逐字节副本）/ `--wheel-mu` / `--report-only`；写完前先自证（见 §20.5），不通过**不写文件**。 |
+| `src/rm_nav_bringup/launch/bringup_sim.launch.py:136` | `_ROBOT_SLOTS['']` → `sentry_robot_sim_rigid.xacro`（默认槽位换生成物）；`robot` 的 description / 启动横幅 / 段注释同步（`:2049` / `:3490` / `:1687`）。**没有任何新 launch 参数**，`robot:=hzmirm|robot11` 的路径逐字节未动。 |
+| `tools/scripts/gzsim/drive_probe.py:42` | `--publish-rate`（0=尽快；20=nav2 档）—— 量"指令频率对执行率"的影响。 |
+| `tools/scripts/regress/robot_model_probe.py:224/239` | 快照多记一个**仿真时刻** `t`（+ `phase_drift` 里 `dt_sim_s`）。**只增字段**，不改变任何既有判据。 |
+
+为什么是"生成物 + 槽位"而不是改源文件：这与 `robot:=robot11` 的既有机制**同构**
+（`robot11_make_sim_xacro.py --chassis rigid|articulated` + `robot11_weld_chassis.py` 自证 +
+生成物入库），而且**回退是一条命令**。区别只在"合并"这一步由 **sdformat** 做（fixed 关节的
+URDF→SDF 合并），不搬几何 ⇒ 从根上不可能搬错（§M 的 robot11 是手写 FK 搬的）。
+
+### 20.5 几何不变性自证（生成器每次写文件前都跑；不过就不写）
+
+`python3 tools/scripts/regress/default_make_sim_xacro.py --report-only`（需
+`source install/setup.bash`；`gz sdf -p` 会写 `~/.gazebo` ⇒ 生成器把 `HOME` 指到临时目录）：
+
+| 检查 | 结果 |
+|---|---|
+| Gazebo 里的 link 数 | 源模型 **5** → 刚性档 **1**（`sdf_links_rigid=1`，joints=0） |
+| 碰撞几何 | 6 条（底盘 box + 4 轮 cylinder + IMU box）；逐条 `(类型, base_link 系 AABB)` 与源模型**相等**（容差 5e-5 m；唯一 1e-6 级差异来自 xacro `${PI}=3.1415926` 与 SDF 的 π） |
+| 总质量 / 惯量 | **10.21 kg**（8.2+4×0.5+0.01）/ **Izz=0.103945**、Ixx=0.083957、Iyy=0.070301；**与 sdformat 合并后的值逐位相等**（两套独立实现互证） |
+| 整车最低点 | **−0.06 m**，落在 **cylinder（轮子）** 上（`wheels_are_lowest=true`） |
+| 轮子几何 | `cylinder radius=0.06 length=0.05`，轮心 `(±0.1, ±0.13, 0)` —— 与源文件逐字相同 |
+| 安装关节 | `livox_frame_joint` xyz=`0.12 0 0.175` rpy=`0 0 0`；`imu_joint` xyz=`0.12 0 0.125` —— 与源文件逐字相同；**运行期 TF 实测**（`/tf_static`）也是 `[0.12, 0.0, 0.175] / rpy 0` |
+| base_link 离地 | `/odom_ground_truth` 的 GT z = **0.059987**（改前 0.059993）⇒ 0.06 不变 |
+| `h` | `0.06 + 0.175 = 0.235` 不变；linefit `sensor_height=0.226` 的横幅与参数**逐字节未动**（改后 launch 日志照旧） |
+| 轮子摩擦入 SDF | `sdf_wheel_mu=['0.02','0.02','0.02','0.02']`（4 个轮 collision 各一条 `<friction><ode><mu>`） |
+
+### 20.6 默认模型的用户需要知道什么（诚实清单）
+
+1. **物理被故意改了**（这就是修法）：轮关节变死 + 轮子对地摩擦 **0.02**。**前进也一起变快**
+   （整栈 0.226 → 0.296 m/s，执行率 75% → 99%）。这不是独立回归，是**同一条摩擦损失**被拿掉的
+   另一面：任何能让自转 ≥90% 的 μ，必然让前进也接近 100%（反过来 μ=1 时前进 80%、自转 14%）。
+   ⇒ **§16 的 `0.183 m/s` 对默认模型作废**；依赖"车速比"的历史数字（覆盖跑图 10.6 m、
+   26 min 等）都要按新速度重读。
+2. **坡上会滑**：μ=0.02 ⇒ 静摩擦角 **≈1.1°**。平面速度驱动**爬坡不受影响**（插件直接设速度，
+   不需要抓地），但**在 >1.1° 的坡上停住时**会缓慢下滑。§16 之前那些"坡度/台阶"实测
+   （`slope_speed`、`low_terrain`）**没有**在本轮重测 ⇒ 若要用它们，先复核
+   （`.tmp_lowterrain`、`tools/scripts/regress/slope_speed_probe.py`）。
+3. **障碍仍然挡得住**：25 s 盲推 0.25 m/s → `z_max=0.0601 m`（不爬）、最远 **0.506 m**
+   （原模型 0.526 m）。**对比**：`update_rate=1000` 那条路 `z_max=0.0951 m`（开始爬）⇒ 被否。
+4. **`robot:=robot11` 完全不受影响**：它的 xacro / welded 生成物 / `_ROBOT_SLOTS` 条目都没动。
+   （顺带记录：**Classic 里 robot11 的单刚体也只有 10.5%**（本轮台架 wz=0.8×2 s，`.tmp_wz/bench/out/rb_r11_spin`）
+   —— 任务原文"robot11 达到 100%（wz 0.5 → 28.65°/s）"那个数出自 **gz（Fortress）后端**
+   `docs/fortress_sim_backend.md §12.4`，那里的 100% 是**运动学直接积分、没有接触**，与
+   Classic 的刚体/摩擦无关。）
+5. **回退**：`python3 tools/scripts/regress/default_make_sim_xacro.py --chassis articulated
+   --out src/rm_nav_bringup/urdf/sentry_robot_sim.xacro` 不可逆（别这么干）；正确回退是
+   **把 `_ROBOT_SLOTS['']` 指回 `sentry_robot_sim.xacro`**（源文件一直在，本轮未改）。
+   另一种微调：`--wheel-mu` 重生成（0.05→90.5%、0.1→84.6%、1.0→14.1%，见 §20.2 表）。
+6. **`install/` 需要重建**：`install/<pkg>/share/.../urdf/` 是**逐文件符号链接**（不是整目录软链），
+   新文件不会自己出现 ⇒ `colcon build --symlink-install --packages-select rm_nav_bringup`
+   （本轮实测：不建就直接 `FileNotFoundError: .../sentry_robot_sim_rigid.xacro`）。
+7. **`rm_simulation.launch.py`（只起 Gazebo+模型的那个独立入口）没改**：它的 `robot:=''` 仍指向
+   `hzmi_rm_simulation/urdf/simulation_waking_robot.xacro`（同一台车的**多刚体**版）⇒ 单独用它
+   调试底盘时**仍是 4% 档**；要新物理请走 `bringup_sim.launch.py`。
+8. **地图资产没有重建/提升**（按任务要求）：本轮没有跑覆盖建图，`map/`、`PCD/` 一个字节没动。
+   速度变快 ⇒ 覆盖跑图的里程/时间关系会变，下一轮重建地图时需要重新标定。
+
+### 20.7 nav 冒烟（`mode:=nav localization:=amcl`，**PASS**）
+
+`tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization amcl --settle 5`
+（栈：`world:=RMUL2026 mode:=nav localization:=amcl lio:=fastlio nav:=rpp spin_speed:=0.0`，
+默认模型 = 本节修好后的 `sentry_robot_sim_rigid.xacro`；原始数据 `.tmp_rigid/rb_nav_after3/`）：
+
+| 判据 | 实测 |
+|---|---|
+| 链路就绪 | clock/pcloud/imu/scan/odom/TF 全齐；**RTF=0.44**（前两次因机器 `load≈75` 只有 0.29/0.33，被工具的前置 RTF≥0.35 挡下 —— 那是**环境**门，不是导航失败） |
+| 定位稳定性 | `map→odom` 5 s 窗口漂移 **xy=0.0000 m / yaw=0.0000 rad** |
+| 目标可用性 | 先验图 `249x173 @0.05`，目标 (-1.00, 2.00) 落格 (23,102) = **free** |
+| 结果 | **`status=SUCCEEDED`，7.8 s，`d_min=0.0 m`，`recoveries=0`** |
+| **四跳命令链**（当初抓 `fake_vel_transform` 丢角速度的判据） | `nav=(1.20, 1.35)` → `smooth=(1.20, 1.35)` → **`chassis=(1.20, 1.35)`** ⇒ **角速度指令 1.346 rad/s 一路走到车体**（改前这条链也通，但车体只执行 3–13%） |
+| 真值 | `twist_max=1.346`、`pose_delta=2.975 m` ⇒ 车**真的**动了（不是"假到达"） |
+
+> 这是**default 槽位 + 现网地图资产**上的完整导航（含转弯），通过。⚠️ 反过来说：改前的 3–13%
+> 角速度执行率下，nav2 发的 1.35 rad/s 转弯指令只会让车头挪 ~5°，所以 §16 的覆盖跑图卡在第一个转弯
+> 是**模型物理**问题，不是 planner/controller 参数问题 —— 本节把物理修好了。
+
+### 20.8 没能验证的（诚实边界）
+
+* **可选的覆盖跑图冒烟没做**（时间不够）：预期"同样墙钟时间内真值位移 >10.6 m"未实测。
+  速度变快 31%（§20.6#1）⇒ 覆盖跑图的里程/时间关系**会变**，下一轮重建地图需要重新标定。
+* **坡度/台阶/低地形**未重测（见 §20.6#2）：μ=0.02 在 >1.1° 的坡上停住会滑；`slope_speed` /
+  `low_terrain` 的历史数字**没有**在本轮复核。
+* **nav 的多次重复**没做：nav 冒烟只有 1 次 PASS（RTF 0.44、7.8 s、无 recovery）；高负载下
+  前置 RTF 门会挡，不能把它当"任意负载下都 PASS"。
+* `robot:=robot11` "不受影响"是**静态证据**（文件/槽位未动 + 本轮台架 10.5% 与历史 16.5% 同量级），
+  本轮没有重跑它的整栈 A/B。
+* μ=0.02 是**为速度驱动插件标定的值**，不是从任何轮胎/地面材料推出来的；换世界/换地面材质
+  需要重新看 §20.2 的剂量-响应。
+* 台架脚本 `.tmp_wz/bench/*` 是 **gitignored** 的临时工具（§M 沿用），本轮没有把它提升成
+  仓库内工具；可复现的权威口径是 §20.3 的 `drive_probe.py` 命令 + §20.5 的生成器自检。

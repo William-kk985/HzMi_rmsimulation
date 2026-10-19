@@ -1,0 +1,279 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="sentry_robot">
+
+  <!--
+  ==================================================================================
+  【自动生成，不要手改】sentry_robot_sim_rigid.xacro —— 默认模型（robot:=''）的
+  **单刚体底盘**变体。生成器：tools/scripts/regress/default_make_sim_xacro.py
+  ==================================================================================
+  与源文件 urdf/sentry_robot_sim.xacro 的差别**只有两类**（几何一个字节都没动）：
+    ① base_to_wheel1..4：continuous → fixed（去掉 axis/limit/anchor）。
+       sdformat 的 URDF→SDF 把 fixed 子 link 的几何/惯量**合并**进 base_link
+       ⇒ Gazebo 里是 1 个刚体；而 planar_move 的 Set{Linear,Angular}Vel 只对单刚体自洽。
+       台架实测纯 wz=0.8 rad/s × 2 仿真秒：5 刚体 4.3% → 1 刚体 14.1%。
+    ② 4 个轮子的 <gazebo reference="wheel_N"> 补 mu1=mu2=0.02（原模型把 mu1/mu2 写在
+       <link> 里，Gazebo 的 URDF 解析器只认 <gazebo reference> ⇒ 一直是无效的）。
+       平面速度驱动 + 焊死的轮子 ⇒ 原地转就是 4 个轮子横向刮地；mu=1 时摩擦吃掉 86%。
+       单刚体真值剂量-响应：mu 1 → 14.1% / 0.5 → 34.4% / 0.2 → 72.2% / 0.1 → 84.6%
+       / 0.05 → 90.5% / 0.02 → 94.9% / 0.001 → 97.9%。
+    自检（本文件由生成器逐条断言，不通过就不写文件）：模型里 1 个 link；碰撞几何 AABB
+    逐条与源模型相等；最低点 −0.06 m 在轮子上；质量 10.2100 kg / Izz 0.103945 kg·m²；
+    livox_frame_joint / imu_joint 的 origin 与源模型逐字相同。
+    回退：`default_make_sim_xacro.py —chassis articulated`（= 源文件逐字节副本），
+    或把 bringup_sim.launch.py 的 _ROBOT_SLOTS[''] 指回 sentry_robot_sim.xacro。
+    实测与影响面：docs/frame_contract_v3_measurements.md §20。robot:=robot11 不受影响。
+--><xacro:property name="length_wheel" value="0.05" />
+  <xacro:property name="radius_wheel" value="0.06" />
+  <xacro:property name="PI" value="3.1415926" />
+  <xacro:macro name="default_inertial" params="mass">
+    <inertial>
+      <mass value="${mass}" />
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01" />
+    </inertial>
+  </xacro:macro>
+
+  <!-- base_link to livox_frame -->
+  <xacro:arg name="xyz" default="0.12 0.0 0.175" />
+  <xacro:arg name="rpy" default="0 0 0" />
+
+  <!-- Delete dummy链接，直接使用base_link作为根链接 -->
+
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.2 .3 .1" />
+      </geometry>
+      <origin rpy="0 0 ${PI/2}" xyz="0 0 0.05" />
+      <material name="white">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.2 .3 0.1" />
+      </geometry>
+      <origin rpy="0 0 ${PI/2}" xyz="0 0 0.05" />
+    </collision>
+    <xacro:default_inertial mass="8.2" />
+  </link>
+
+  <!-- 注释掉dummy连接，让base_link成为根链接 -->
+  <!--
+  <joint name="dummy_joint" type="fixed">
+     <parent link="dummy"/>
+     <child link="base_link"/>
+  </joint>
+  -->
+
+  <link name="wheel_1">
+    <visual>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <material name="black">
+        <color rgba="0 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+    </collision>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <xacro:default_inertial mass="0.5" />
+  </link>
+
+  <link name="wheel_2">
+    <visual>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <material name="black" />
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+    </collision>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <xacro:default_inertial mass="0.5" />
+  </link>
+
+  <link name="wheel_3">
+    <visual>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <material name="black" />
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+    </collision>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <xacro:default_inertial mass="0.5" />
+  </link>
+
+  <link name="wheel_4">
+    <visual>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <material name="black" />
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="${length_wheel}" radius="${radius_wheel}" />
+      </geometry>
+    </collision>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <xacro:default_inertial mass="0.5" />
+  </link>
+
+  <joint name="base_to_wheel1" type="fixed">
+    <parent link="base_link" />
+    <child link="wheel_1" />
+    <origin rpy="${-PI/2} 0 0" xyz="0.1 0.13 0" />
+    </joint>
+
+  <joint name="base_to_wheel2" type="fixed">
+    <parent link="base_link" />
+    <child link="wheel_2" />
+    <origin rpy="${-PI/2} 0 0" xyz="-0.1 0.13 0" />
+  </joint>
+
+  <joint name="base_to_wheel3" type="fixed">
+    <parent link="base_link" />
+    <child link="wheel_3" />
+    <origin rpy="${-PI/2} 0 0" xyz="0.1 -0.13 0" />
+  </joint>
+
+  <joint name="base_to_wheel4" type="fixed">
+    <parent link="base_link" />
+    <child link="wheel_4" />
+    <origin rpy="${-PI/2} 0 0" xyz="-0.1 -0.13 0" />
+  </joint>
+
+  <!-- IMU joint -->
+  <joint name="imu_joint" type="fixed">
+    <axis xyz="0 1 0" />
+    <origin xyz="0.12 0 0.125" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="imu_link" />
+  </joint>
+
+  <!-- IMU -->
+  <link name="imu_link">
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.05 0.05 0.05" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.05 0.05 0.05" />
+      </geometry>
+      <material name="green">
+        <color rgba="0 1 0 1" />
+      </material>
+    </visual>
+    <inertial>
+      <mass value="1e-2" />
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6" />
+    </inertial>
+  </link>
+
+
+  <!-- Gazebo插件设置相关 -->
+  <gazebo reference="base_link">
+    <material>Gazebo/Orange</material>
+  </gazebo>
+  <gazebo reference="wheel_1">
+    <material>Gazebo/Red</material>
+  <mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="wheel_2">
+    <material>Gazebo/Black</material>
+  <mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="wheel_3">
+    <material>Gazebo/Red</material>
+  <mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="wheel_4">
+    <material>Gazebo/Black</material>
+  <mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="imu_link">
+    <material>Gazebo/BuildingFrame</material>
+  </gazebo>
+  <gazebo reference="livox_frame">
+    <material>Gazebo/LightBlueLaser</material>
+  </gazebo>
+
+  <!-- Drive controller plugin-->
+  <!-- https://github.com/ros-simulation/gazebo_ros_pkgs/wiki/ROS-2-Migration:-Planar-Move -->
+  <gazebo>
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <!-- Add a namespace -->
+        <namespace>/</namespace>
+        <!-- Remap the default topic -->
+        <remapping>cmd_vel:=cmd_vel_chassis</remapping>
+        <!-- 真值里程计改到独立话题：/odom 已由 LIO（经 T2 remap）独占，
+             否则真值与 LIO 估计会在同一话题交替，导致 odom→base_link 抖动、costmap 报 out of bounds -->
+        <remapping>odom:=odom_ground_truth</remapping>
+      </ros>
+
+      <!-- Set control loop update rate -->
+      <update_rate>100</update_rate>
+      <!-- Set odom publish rate -->
+      <publish_rate>10</publish_rate>
+
+      <!-- Set if odom required -->
+      <publish_odom>true</publish_odom>
+      <!-- T4: 关闭 Gazebo 的 odom→base_link TF（否则与 LIO 的 lio_tf_adapter 抢同一条边）；/odom 话题保留供对比 -->
+      <publish_odom_tf>false</publish_odom_tf>
+
+      <!-- Frame IDs -->
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+
+      <!-- Set odom covariance -->
+      <covariance_x>0.0001</covariance_x>
+      <covariance_y>0.0001</covariance_y>
+      <covariance_yaw>0.01</covariance_yaw>
+    </plugin>
+  </gazebo>
+
+  <!-- mid360_imu plugin -->
+  <!-- https://github.com/ros-simulation/gazebo_ros_pkgs/wiki/ROS-2-Migration:-IMU-Sensors -->
+  <gazebo reference="imu_link">
+    <sensor name="mid360_imu" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+        <ros>
+          <namespace>/</namespace>
+          <remapping>~/out:=/livox/imu</remapping>
+        </ros>
+        <frame_name>imu_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- Livox-Mid360  -->
+  <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro" />
+  <xacro:mid360 name="livox_frame" parent="base_link" topic="/livox/lidar">
+    <origin xyz="$(arg xyz)" rpy="$(arg rpy)" />
+  </xacro:mid360>
+
+</robot>

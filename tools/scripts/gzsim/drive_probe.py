@@ -39,6 +39,11 @@ def main():
     ap.add_argument('--vx', type=float, default=0.3, help='阶段 B 的命令线速度 m/s')
     ap.add_argument('--duration', type=float, default=4.0, help='每阶段仿真秒数')
     ap.add_argument('--settle', type=float, default=1.0, help='开始前先等多久（墙钟秒）')
+    ap.add_argument('--publish-rate', type=float, default=0.0,
+                    help='命令发布频率 Hz（0 = 尽可能快 ≈ 100~200 Hz）。'
+                         '★ 实测（默认模型 + 单刚体底盘，docs §20）：20 Hz 与 200 Hz 都是 95~96% '
+                         '（指令频率不是瓶颈）；**改前**的多刚体模型是 13%/5%。'
+                         '想看 nav2 实际档位就传 20')
     ap.add_argument('--out', default='')
     args = ap.parse_args()
 
@@ -90,9 +95,15 @@ def main():
             return
         t0 = state['odom']['t_ns']
         t_end = time.monotonic() + 180.0
+        period = (1.0 / args.publish_rate) if args.publish_rate and args.publish_rate > 0 else 0.0
         while time.monotonic() < t_end:
+            t_pub = time.monotonic()
             pub.publish(tw)
-            rclpy.spin_once(node, timeout_sec=0.005)
+            rclpy.spin_once(node, timeout_sec=0.002 if period else 0.005)
+            if period:
+                rest = period - (time.monotonic() - t_pub)
+                if rest > 0:
+                    time.sleep(rest)
             if state['odom'] and (state['odom']['t_ns'] - t0) >= seconds * 1e9:
                 return
 
