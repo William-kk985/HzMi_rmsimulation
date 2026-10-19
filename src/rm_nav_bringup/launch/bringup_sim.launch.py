@@ -2205,6 +2205,20 @@ def generate_launch_description():
                     '开关表 = rm_navigation/launch/navigation_launch.py 的 LOCAL_OBSTACLE_LAYER_TABLE；'
                     '实测见 docs/stvl_local_costmap.md')
 
+    # ★ 2026-10-21：`band_guard` —— nav2 高度带**静默丢波束**的只读诊断（opt-in）。
+    #   默认 False = **节点集/参数/时序与改造前完全一致**（这个 Node 的 condition 恒假，
+    #   launch 不会起它；只有多一条 launch 参数声明）。见
+    #   docs/frame_contract_v3_measurements.md §17。
+    declare_band_guard_cmd = DeclareLaunchArgument(
+        'band_guard',
+        default_value='False',
+        choices=['True', 'False'],
+        description='False（默认，行为不变）= 不起 band_guard；True = 起只读诊断节点 '
+                    '`rm_nav_bringup/band_guard.py`：订阅 /scan + TF，回读两张 costmap 的**生效**'
+                    '高度带参数，若 in-band==0（ERROR）/ <10%（WARN）/ kept-y 单侧（WARN）就'
+                    '打日志 + 发 /band_guard/status(JSON)。**不改任何数据/控制路径**。'
+                    '只在 mode:=nav|slam_nav 生效。')
+
     declare_mapper_cmd = DeclareLaunchArgument(
         'mapper',
         default_value='slam_toolbox',
@@ -3294,6 +3308,35 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}],
     )
 
+    # ★ 2026-10-21：`band_guard:=True` 才存在的只读诊断节点（默认档 condition 恒假 ⇒ 节点集不变）。
+    #   它在 t=0 起（不挡 nav2 的 10 s 时序），自己轮询 /scan、TF 与两张 costmap 的参数服务；
+    #   参数**单一真源** = 运行期参数服务（不是 launch 传参）⇒ 不会与深合并/rewrite 后的值漂移。
+    band_guard_node = Node(
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('band_guard'), "'.lower() == 'true' and (",
+            "'", LaunchConfiguration('mode'), "' == 'nav' or '",
+            LaunchConfiguration('mode'), "' == 'slam_nav')"])),
+        package='rm_nav_bringup',
+        executable='band_guard.py',
+        name='band_guard',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'scan_topic': '/scan',
+            'costmap_nodes': ['/local_costmap/local_costmap',
+                              '/global_costmap/global_costmap'],
+            'period_s': 5.0,
+            'params_refresh_s': 30.0,
+            'min_scan_rate_hz': 1.0,
+            'scan_stale_s': 1.0,
+            'inband_warn_fraction': 0.10,
+            'y_onesided_margin_m': 0.05,
+            'rate_limit_s': 5.0,
+            'status_topic': '/band_guard/status',
+            'publish_status': True,
+        }],
+    )
+
     start_navigation2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(navigation2_launch_dir, 'bringup_rm_navigation.py')),
         # 只在 nav / slam_nav 下启动；纯建图(mapping)不需要规划控制，省 CPU（重场景 RTF 本来就紧张）
@@ -3399,6 +3442,8 @@ def generate_launch_description():
         actions=[OpaqueFunction(function=_check_gravity_align_contract)]))
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
+    # ★ 2026-10-21：高度带静默过滤守卫（opt-in；默认 False ⇒ 不起节点，见 §17）
+    ld.add_action(declare_band_guard_cmd)
     # ★ 2026-10-06：「续建 + 场地隔离」相关（默认值下现有行为不变，详见各自的 description）
     ld.add_action(declare_map_yaml_cmd)
     ld.add_action(declare_map_name_cmd)
@@ -3457,6 +3502,8 @@ def generate_launch_description():
     ld.add_action(TimerAction(period=4.0, actions=[start_cartographer_mapping,
                                                    start_cartographer_as_lio_mapping]))
     ld.add_action(TimerAction(period=10.0, actions=[start_navigation2]))
+    # ★ 2026-10-21：band_guard（opt-in；默认 condition 假 ⇒ 该 Action 不执行、节点集不变）
+    ld.add_action(band_guard_node)
     # 纯建图模式的 RViz（nav2 未启动时 nav_rviz 仍要能出图）
     ld.add_action(mapping_rviz_node)
 

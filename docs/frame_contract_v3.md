@@ -379,6 +379,14 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
 > 7.05 cm)，让 `h_meas` 在**地面已经正确的 RMUC2026** 里也报 ERROR —— 那次不是地面，是 Livox
 > 插件（measurements §13.4）。
 
+### 4.9 高度带静默过滤的守卫（opt-in，2026-10-20）
+
+> nav2 的 `min/max_obstacle_height` 是**静默**的（E1b 的 scan 盘面、measurements §15 的
+> 全局 `map` 都吃过这个亏）：`band_guard:=True`（默认 `False`，`rm_nav_bringup`）只读地
+> 复算每束 z 并报 `in-band==0`（ERROR）/`<10%`（WARN）/`kept-y` 单侧（WARN），
+> 只写日志 + `/band_guard/status`；不改 scan/costmap/TF/控制。详见
+> `docs/frame_contract_v3_measurements.md` §17。
+
 ---
 
 ## §5 重定位契约

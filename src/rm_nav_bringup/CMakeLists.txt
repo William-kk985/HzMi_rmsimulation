@@ -42,6 +42,9 @@ ament_auto_package(
 install(PROGRAMS
   scripts/map_resume_check.py
   scripts/map_session_announcer.py
+  # ★ 2026-10-21：band_guard（nav2 高度带静默丢波束的只读诊断，opt-in；
+  #   launch arg band_guard:=True 才起，见 docs/frame_contract_v3_measurements.md §17）
+  scripts/band_guard.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

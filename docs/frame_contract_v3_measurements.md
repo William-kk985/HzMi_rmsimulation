@@ -2573,3 +2573,364 @@ slam_toolbox 的 2D 栅格吃不下这个倾角（会变成 y 向 cos30° 压缩
 > 另外撞到两条独立缺陷：`small_point_lio` + 默认模型槽位 **SIGSEGV**、`robot11_mount:=sensor` +
 > `small_point_lio` 的 **`map` 系斜 30°**（fastlio 无此问题）。下一步建议：先修底盘自转（或换
 > `planar_move`→真差速），再跑一次全场覆盖，然后按 `docs/map_assets.md` §4.2 提升。
+
+## §17 第九轮（**本机 date=2026-10-20T00:08–00:30**）：nav2 高度带**静默丢波束**的只读守卫 `band_guard`（opt-in）
+
+> **本节只新增**（append-only）：§1–§16 一个字都没改。写作时 §16 已被**并发 agent**的
+> 建图轮占用 ⇒ 本节取第一个未占用编号 **§17**（任务书写"§15 是最新"是它落笔时的状态）。
+> 本轮**没有**改 `src/rm_navigation/**`、`src/rm_localization/**`、`src/rm_simulation/**`、
+> nav2 参数文件、地图/PCD 资产。
+>
+> **代码（4 处，全部 opt-in）**：
+> ① `src/rm_nav_bringup/scripts/band_guard.py`（**新增**，只读节点；下文行号按本提交）；
+> ② `src/rm_nav_bringup/launch/bringup_sim.launch.py`（新增 launch arg `band_guard` +
+>    一个 condition 为假的 Node；L2212 / L3314 / L3446 / L3506）；
+> ③ `src/rm_nav_bringup/CMakeLists.txt`（把脚本装到 `lib/rm_nav_bringup/`，L42–48）；
+> ④ `src/rm_nav_bringup/package.xml`（`sensor_msgs` / `tf2_ros` / `rcl_interfaces`，L20–23）。
+
+### 17.1 一句话结论
+
+> **加了一个"只读哨兵"**：它订阅 `/scan`、按 nav2 的**同一口径**（`projectLaser` 的
+> `(r·cos a, r·sin a, 0)` + `inf_is_valid` + `ObservationBuffer` 的 z 闸）把每条波束搬到
+> 代价图帧，数 `in-band / below / above`、**kept-y 区间**和 z 的 min/p50/max；数据来自
+> **两张 costmap 运行期参数服务**（单一真源），**只写日志 + 发 `/band_guard/status`（JSON）**，
+> 不碰 scan / costmap / TF / 控制。**默认 `band_guard:=False` ⇒ 不起节点**（R3 实测
+> `ros2 node list` 里没有 `/band_guard`），且**合并出的 nav2 参数文件 md5 与不开守卫逐字节相同**
+> （`e5179ab…`）。**同一栈内**先测 15 s（无守卫）再起守卫测 15 s：local lethal **266 → 265**、
+> global lethal **3898 → 3897**（`free` 42415→42438 / 9693→9721，差 ≤0.07%）。
+>
+> **两个失败都抓到（逐字日志见 17.5/17.7）**：
+> · 局部 `off`：**333/772（43.1%）**、`kept-y=[0.275,3.460]` 单侧 `+y`、`z p50=-0.093`
+>   （= §15 记录的 333/774、kept-y [0.112,3.568]、§13.8 的 z p50 −0.0919 同一档）；
+> · 全局 `map` 无 `-1.0` 覆盖：**0/774（0.0%）ERROR**、`z p50=-0.178`、全局 lethal
+>   **3713 恒定 / inscribed 16886 / free 10176**（= §15 的"static+inflation 哑图"）；
+>   带 `-1.0` 覆盖：**776/776（100%）**、全局 lethal **3866.5**（有实时障碍）。
+> · `hybrid` 修好局部：**772/772（100%）**、kept-y 整盘 `[-0.637,5.089]`、`z p50=+0.036`
+>   （= §13.8 的 +0.0360）。
+
+### 17.2 它到底量什么 / 不做什么（规约）
+
+**严格复刻 nav2 的两步**（见 `nav2_costmap_2d/plugins/obstacle_layer.cpp` 与
+`src/observation_buffer.cpp:143-144`）：
+
+1. **扫描系投影**：对第 i 条波束，`a = angle_min + i·angle_increment`，扫描系点 =
+   `(r·cos a, r·sin a, 0)`；只保留 `range_min ≤ r < range_max`（`projectLaser` 的
+   `range_cutoff = range_max`）。若该源的 `inf_is_valid=true`，先把 **+inf** 换成
+   `range_max − 1e−4` 再投影（`laserScanValidInfCallback`）；NaN/−inf 丢弃。
+2. **搬到代价图帧 + 两道 z 闸**：用 TF2 在 **scan 的 stamp** 查 `scan.frame_id → global_frame`
+   （查不到才退回最新一帧并在日志里标 `mode=latest`），对每个点算 `z`。nav2 实际有**两道**闸：
+   `ObservationBuffer` 的**每源** `<layer>.<source>.min/max_obstacle_height`，以及
+   `ObstacleLayer::updateBounds` 的**图层级** `<layer>.min/max_obstacle_height`。
+   本守卫取**交集** `[max(layer_min, source_min), min(layer_max, source_max)]`，数：
+   `in_band`、`below`（z < min_eff）、`above`（z > max_eff）、**kept-y**（带内点的 y 的
+   min/max/span）、**all-y**、z 的 min/p50/max。
+   ⇒ **`kept-y` 单侧**就是"半平面盲区"的直接证据（§9.7/§12 的 333/774 + [0.112,3.568]）。
+
+**两套计数都打出来（口径必须写清）**：
+
+* `total / in_band` = **nav2 真实云大小**（含 `inf_is_valid` 换出来的最大量程点）；
+* `finite_total / finite_in_band` = **只算有限 range**（= 既往 `nav_band_probe.py` 的
+  `n_finite` 口径，便于跨文档比较）。本机 `/scan` 有 1462 条角度，逐帧有限回波
+  **768–789**（中位数 774–776）；所以"0/774 / 333/774"是**某一帧**，而守卫 5 s 采一帧会看到
+  0/774、333/772、333/775、333/776 这类相邻值 —— 比例与判决不受影响。
+
+**报警规则（只写日志）**：
+
+| 条件（`in-band` 按 nav2 真实口径） | 级别 | 必带字段 |
+|---|---|---|
+| `in_band == 0` 且 `/scan` 在正常发布（龄期 ≤1 s、速率 ≥1 Hz） | **ERROR** | frame、layer/source、两道闸的四个数、scan frame、TF（目标/源/戳/mode/age）、z p50 |
+| `in_band / total < 10%` | **WARN** | 同上 + 丢掉的条数 |
+| kept-y 单侧：`kept_y_min > origin_y + 0.05` 或 `kept_y_max < origin_y − 0.05`，且**全盘**跨过原点（避免"波束本来就只在一侧"的误报） | **WARN** | kept-y 两个数 + all-y 两个数 + origin_y |
+| TF 查不到 | **TF_FAIL**（WARN） | 源/目标/失败原因；**不**据此报高度带 ERROR |
+| `/scan` 没数据/太慢/太旧 | 不报警（状态 `no_scan_data`） | 龄期/速率写进状态话题 |
+| 没有启用的 2D scan 层（如默认 `global_obstacle:=stvl`） | 不报警（`idle`） | `plugins`/`enabled`/跳过原因 |
+
+**限流**：每个 `costmap/layer/source` 最多 `rate_limit_s`（默认 5 s）一条；级别升级立即打印；
+降级到 OK 时打一条 INFO。**正常帧也打 INFO**（否则验收 2/3 的 100% 没有日志证据），
+可用 `log_healthy:=false` 关掉。
+
+**状态话题**：`std_msgs/String` JSON 发到 `/band_guard/status`，**transient_local**（后加入的
+读者能拿到最后一条），每个评估周期一条；schema
+`rm_nav_bringup/band_guard@1`，含 `scan`（topic/stamp/frame/rate/age/ok）、`costmaps[]`
+（frame/layer/source/band 的 source+layer+effective、counts、kept-y、z、TF 的
+translation+rotation、severity、hint）、`alerts[]`、`single_source`。可直接进 A/B 记录。
+
+**节点参数**（launch 里写死默认，可命令行覆盖）：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `scan_topic` | `/scan` | 订阅（sensor QoS） |
+| `costmap_nodes` | `['/local_costmap/local_costmap','/global_costmap/global_costmap']` | 参数服务目标 |
+| `period_s` | `5.0` | 评估周期（节点时钟；仿真里=仿真秒） |
+| `params_refresh_s` | `30.0` | 参数缓存刷新（启动读一次 + 每 30 s） |
+| `min_scan_rate_hz` | `1.0` | 低于它不报带子 ERROR |
+| `scan_stale_s` | `1.0` | 最新 scan 最大龄期 |
+| `inband_warn_fraction` | `0.10` | `<10%` WARN 阈值 |
+| `y_onesided_margin_m` | `0.05` | kept-y 单侧余量 |
+| `rate_limit_s` | `5.0` | 每 costmap 日志最小间隔 |
+| `status_topic` / `publish_status` | `/band_guard/status` / `True` | 状态话题 |
+| `log_healthy` | `True` | 正常帧也打 INFO |
+
+**契约**：只订阅 `/scan`、`/tf`、`/tf_static`；只调用**只读**参数服务
+（`<node>/list_parameters` + `<node>/get_parameters`）；只发布 `/band_guard/status`。
+不发布 TF、不发布/订阅任何控制或 costmap 话题、不写文件。
+
+### 17.3 单一真源：选 (a) **运行期参数服务**，不选 launch 传参
+
+本节点直接读 `/local_costmap/local_costmap` 与 `/global_costmap/global_costmap` 的
+**运行期参数服务**：
+
+* `plugins`、`global_frame`、`transform_tolerance`；
+* 每个图层的 `<layer>.plugin/.enabled/.observation_sources`；
+* 图层级 `<layer>.min_obstacle_height/.max_obstacle_height`（`updateBounds` 第二道闸）；
+* 每源 `<layer>.<source>.data_type/.topic/.min_obstacle_height/.max_obstacle_height`
+  （`ObservationBuffer` 第一道闸），另读 `inf_is_valid`。
+
+**为什么不是 (b)（launch 从同一份 nav2 params 再算一遍）**：
+1. **不会漂移**：launch 的深合并（base → `robot11` 覆盖 → `global_obstacle:=scan` 覆盖）与
+   `RewrittenYaml` 的 rewrite 都可能改值；参数服务返回的是 nav2 **真正拿到**的值。
+   本轮实测：`global_obstacle:=scan` 的 global 是 **−1.0/−1.0**，局部是 **0.0/0.0**；
+   R4 的 scratch 覆盖把它们改成 **0.0/0.0**，守卫**同一份代码**立刻改报 0/774（17.7）。
+2. **可独立运行**：`ros2 run rm_nav_bringup band_guard.py` 能挂到**任意**已在跑的栈上，
+   不需要用户告诉它参数文件在哪，也不需要 launch 为它加参数。
+3. **覆盖动态改参**：`ros2 param set` 改过的值 30 s 内会被看到（本轮没有专门压测动态改参）。
+
+**代价**：要等 costmap 节点起来（0.5 s 轮询、不挡启动）；参数缓存 30 s 刷新。
+本轮用**进程内异步客户端**（不是 `ros2 param get` 子进程），每次只查 ~30 个键；
+§15.11 记录过"40 次 `ros2 param get` 子进程风暴"会扰动 MessageFilter，本实现刻意避开。
+**证明它是 live 值**（R2 的逐字日志）：
+
+```text
+[band_guard.py-11] [INFO] [1792426642.279887772] [band_guard]: [band_guard] 参数回读（live）/global_costmap/global_costmap: frame=map plugins=['static_layer', 'obstacle_layer', 'stvl_layer', 'inflation_layer'] obstacle_layer.band=[-1.000,2.000] obstacle_layer.scan[LaserScan topic=/scan src.band=[-1.000,2.000]] stvl_layer(enabled=false)
+```
+
+R4（scratch 覆盖 min=0.0）同一行的 live 值：
+
+```text
+[band_guard.py-11] [INFO] [1792427024.982840089] [band_guard]: [band_guard] 参数回读（live）/global_costmap/global_costmap: frame=map plugins=['static_layer', 'obstacle_layer', 'stvl_layer', 'inflation_layer'] obstacle_layer.band=[0.000,2.000] obstacle_layer.scan[LaserScan topic=/scan src.band=[0.000,2.000]] stvl_layer(enabled=false)
+```
+
+### 17.4 集成：launch arg + standalone；默认路径的证明
+
+**launch arg**：`band_guard:=True`（默认 `False`，choices True/False）。Node 的 condition =
+`band_guard.lower()=='true' and (mode=='nav' or mode=='slam_nav')`；`mode:=mapping` 不起。
+Node 参数 = 17.2 的表（`use_sim_time` 透传）。它**不**改变 nav2 的 params 文件，
+也不改任何既有 Node 的参数。
+
+**standalone**（不需要改 launch）：
+
+```bash
+source /opt/ros/humble/setup.bash && source install/setup.bash
+ros2 run rm_nav_bringup band_guard.py --ros-args -p use_sim_time:=true
+# 或纯源码树：
+python3 src/rm_nav_bringup/scripts/band_guard.py --ros-args -p use_sim_time:=true
+```
+
+**默认路径证明 A（Action 树）**：`tools/scripts/gzsim/launch_increment_diff.py`，old=HEAD
+（本提交前）的 launch，new=本提交，默认参数：
+
+```text
+actions: OLD 67 / NEW 69；共有 67
+
+新增（NEW − OLD，整棵子树逐字段）：2
+  + DeclareLaunchArgument name=band_guard
+  + Node cond=IfCondition
+消失/变成另一份（OLD − NEW）：0
+
+共有 Action 的相对顺序：一致 ✅
+==> 纯增量 ✅：没有任何 Action 被删/改，只有上面 2 个新增，原有顺序不变
+```
+
+⇒ **67 个既有 Action 逐字段相同、顺序不变、0 个消失/被改**。新增的 2 个 =
+① launch arg 声明；② condition 恒假的 Node（默认不执行）。
+**诚实写法**：这不是"Action 树 0 增 0 删"，而是"**纯增量**"；`--strip-conditions` 的对照
+里新增的 Node 内容也在（条件去掉后只剩 `+ Node`），说明新增的只有这扇门本身。
+
+**默认路径证明 B（真实节点集）**：R3（`band_guard:=False` 的 hybrid 跑）的
+`ros2 node list` **没有** `/band_guard`（`grep band_guard` = 0）；`nodes.txt` 里 36 个节点
+（含 9 个 `transform_listener_impl_*`）与改动前一致。R2（`band_guard:=True`）才有 `/band_guard`。
+
+**默认路径证明 C（参数文件）**：同一组 launch 参数下，`band_guard:=True` / `False` /
+`gravity_align_mode:=off` 三种跑合并出的 nav2 YAML **md5 完全相同**：
+
+```text
+e5179abdbd33ab4865046f7b08deb38b  bg_hyb_guard/roslog/nav2_params_sim_robot11_global_scan_merged.yaml
+e5179abdbd33ab4865046f7b08deb38b  bg_hyb_noguard/roslog/nav2_params_sim_robot11_global_scan_merged.yaml
+e5179abdbd33ab4865046f7b08deb38b  bg_off_guard2/roslog/nav2_params_sim_robot11_global_scan_merged.yaml
+```
+
+⇒ 守卫**没有**改 nav2 的生效参数（它也从不写 params 文件）。
+
+### 17.5 复现 A：局部 `off`（斜 odom）——守卫报单侧 kept-y
+
+**命令**（隔离口径：`HOME`/`ROS_DOMAIN_ID`/`GAZEBO_MASTER_URI` 私有、`gui:=False`、
+`nav_rviz:=False lio_rviz:=False`、`setsid` 起栈、`scoped_cleanup.sh` 只清本进程组/本 URI）：
+
+```bash
+world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp global_obstacle:=scan \
+robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=off band_guard:=True
+```
+
+**逐字日志**（`bg_off_guard2/launch.log`，9 个评估周期里的一条）：
+
+```text
+[band_guard.py-10] [WARN] [1792426539.839560853] [band_guard]: [band_guard] WARN /local_costmap/local_costmap frame=odom layer=obstacle_layer source=scan | in-band 333/772 (43.1%) below=437 above=2 finite=333/772 inf_converted=0 | kept-y=[0.275, 3.460] m span=3.185 origin_y=0.032 one-sided=+y all-y=[-0.444, 4.467] | finite kept-y=[0.275, 3.460] finite all-y=[-0.444, 4.467] | z min/p50/max=-0.390/-0.093/2.457 finite=-0.390/-0.093/2.457 | band=[0.000,2.000] source=[0.000,2.000] layer=[0.000,2.000] | scan frame=base_link rate=10.00Hz age=0.100s | tf base_link->odom @ 669.000s mode=stamp age=0.000s | hint=kept-y is ONE-SIDED (+y): kept=[0.275,3.460] m while all beams span [-0.444,4.467] m; nav2 keeps only a slab/half-plane. Check the TF base_link->odom vs band [0.000,2.000].
+```
+
+**9 个守卫样本的中位数 [min–max]**：
+
+| 量 | 守卫（live 参数） | 记录值（§15/§13） |
+|---|---|---|
+| local finite in-band / total | **333 / 776** [326–336 / 768–786] | **333/774**（§15.9 `exp15_gscan_off_r2`） |
+| local in-band 比例 | **42.9%** [42.2%, 43.2%] | 43.0% |
+| local kept-y（finite） | **[0.268, 3.404]** [min 0.227–0.283, max 3.132–3.629] | **[0.112, 3.568]**（§12.2） |
+| local z min / p50 / max | **−0.501 / −0.091 / 2.459** [−0.567…−0.390 / −0.093…−0.088 / 1.838…2.466] | z p50 **−0.0919**（§13.8）；§12 旧跑 +0.243（地面校准前） |
+| TF | `base_link->odom`，全部 `mode=stamp`（1 条早期 `mode=latest`） | — |
+| 探针 `/scan` 有限波束中位数 | **775.5** | 774–776 |
+| 探针 local lethal / inscribed / free | **288 / 8896.5 / 44260** | §15.9 off：293/8855/44318 |
+
+**判决**：`in-band 43%` + **kept-y 整段 > 0**（one-sided `+y`）正是 §9.7/§12 的"斜板/半平面"
+——**不是**"全空"那么显眼，但已经丢了 57% 的波束和负 y 半平面的障碍；守卫按规则报 WARN。
+同一跑的**全局**（带 `-1.0` 覆盖）是 776/776 OK（见 17.6 的 global 行），即"局部病、全局没病"。
+
+### 17.6 复现 B：`hybrid` 修好局部；全局 `-1.0` 覆盖下 100%
+
+**命令**：同 17.5，只把 `gravity_align_mode:=off` 换成 `hybrid`。
+
+**逐字日志（局部）**：
+
+```text
+[band_guard.py-11] [INFO] [1792426645.843446562] [band_guard]: [band_guard] OK /local_costmap/local_costmap frame=odom layer=obstacle_layer source=scan | in-band 772/772 (100.0%) below=0 above=0 finite=772/772 inf_converted=0 | kept-y=[-0.637, 5.089] m span=5.726 origin_y=-0.054 one-sided=no all-y=[-0.637, 5.089] | finite kept-y=[-0.637, 5.089] finite all-y=[-0.637, 5.089] | z min/p50/max=0.023/0.036/0.064 finite=0.023/0.036/0.064 | band=[0.000,2.000] source=[0.000,2.000] layer=[0.000,2.000] | scan frame=base_link rate=10.00Hz age=0.100s | tf base_link->odom @ 644.000s mode=stamp age=0.000s | hint=none
+```
+
+**逐字日志（全局；`global_obstacle:=scan` 的 −1.0 覆盖生效）**：
+
+```text
+[band_guard.py-11] [INFO] [1792426645.844273088] [band_guard]: [band_guard] OK /global_costmap/global_costmap frame=map layer=obstacle_layer source=scan | in-band 772/772 (100.0%) below=0 above=0 finite=772/772 inf_converted=0 | kept-y=[-0.633, 5.066] m span=5.698 origin_y=-0.083 one-sided=no all-y=[-0.633, 5.066] | finite kept-y=[-0.633, 5.066] finite all-y=[-0.633, 5.066] | z min/p50/max=-0.244/-0.179/-0.125 finite=-0.244/-0.179/-0.125 | band=[-1.000,2.000] source=[-1.000,2.000] layer=[-1.000,2.000] | scan frame=base_link rate=10.00Hz age=0.100s | tf base_link->map @ 644.000s mode=stamp age=0.000s | hint=none
+```
+
+9–10 个样本的中位数：local **779.5/779.5（100%）**、kept-y **[-0.636, 5.086]**、z
+**0.020 / 0.036 / 0.068**；global **779.5/779.5**、kept-y **[-0.630, 5.064]**、z
+**−0.245 / −0.179 / −0.128**。探针：local lethal/free **267 / 42442**、global
+**3866.5 / 9693.5**；`/scan` 有限 775。
+⇒ 与 §13.8 的 hybrid z p50 **+0.0360** 和 §15.9 的 global 774/774 / lethal 3851–3919 同档。
+
+### 17.7 复现 C：全局 `map` 去掉 `-1.0` 覆盖 ⇒ **0/774 ERROR**
+
+**怎么在不改源码/资产的前提下复现旧配置**：scratch launch wrapper
+（`.tmp_band_guard/launch/bringup_sim_noband.py`，**gitignored**）import 真正的
+`bringup_sim.launch.py`，monkeypatch `_Nav2ParamsForSlot.perform`，在它写出
+`…_merged.yaml` 后**只改两个键**：`global_costmap.global_costmap.ros__parameters.
+obstacle_layer.min_obstacle_height` 和 `…obstacle_layer.scan.min_obstacle_height`，都设回
+**0.0**。用 `diff` 证明**只动了这两行**（R2 vs R4 的合并文件）：
+
+```diff
+-          min_obstacle_height: -1.0
+-        min_obstacle_height: -1.0
++          min_obstacle_height: 0.0
++        min_obstacle_height: 0.0
+```
+
+**命令**（其余同 17.6；`LAUNCH_FILE` 指向 scratch wrapper）：
+
+```bash
+LAUNCH_FILE=.tmp_band_guard/launch/bringup_sim_noband.py \
+  world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp global_obstacle:=scan \
+  robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=hybrid band_guard:=True
+```
+
+**逐字日志（先参数回读，再 ERROR；0/774 是 9 个样本里的一帧）**：
+
+```text
+[band_guard.py-11] [INFO] [1792427024.982840089] [band_guard]: [band_guard] 参数回读（live）/global_costmap/global_costmap: frame=map plugins=['static_layer', 'obstacle_layer', 'stvl_layer', 'inflation_layer'] obstacle_layer.band=[0.000,2.000] obstacle_layer.scan[LaserScan topic=/scan src.band=[0.000,2.000]] stvl_layer(enabled=false)
+[band_guard.py-11] [ERROR] [1792427082.595548756] [band_guard]: [band_guard] ERROR /global_costmap/global_costmap frame=map layer=obstacle_layer source=scan | in-band 0/774 (0.0%) below=774 above=0 finite=0/774 inf_converted=0 | kept-y=[-, -] m span=- origin_y=-0.095 one-sided=no all-y=[-0.854, 5.061] | finite kept-y=[-, -] finite all-y=[-0.854, 5.061] | z min/p50/max=-0.257/-0.178/-0.131 finite=-0.257/-0.178/-0.131 | band=[0.000,2.000] source=[0.000,2.000] layer=[0.000,2.000] | scan frame=base_link rate=10.00Hz age=0.100s | tf base_link->map @ 664.000s mode=stamp age=0.000s | hint=ALL 774 beams are outside band [0.000,2.000] in frame=map; nav2 will silently keep 0/774. Check BOTH obstacle_layer.scan.min_obstacle_height=0.000 and obstacle_layer.min_obstacle_height=0.000 (and max).
+```
+
+**测量**：全局 **0/780 中位（0/774 那一帧）**，z **−0.245 / −0.179 / −0.129**；
+探针全局 **lethal 3713 恒定、inscribed 16886 恒定、free 10176 恒定**（43 帧 min=max）
+= §15 的"static+inflation 哑图"；**同一跑局部 hybrid 780/780 OK**，local lethal 266、
+free 42442。
+⇒ 守卫抓到了"全局层被整盘清空但 nav2 零告警"的原始失败；改回 −1.0（R2）则
+**776/776**、global lethal **3866.5**（min≠max 3858–3884）。
+
+### 17.8 验收跑汇总（4 个正式跑 + 1 个栈内 A/B）
+
+隔离：每个 run 私有 `GAZEBO_MASTER_URI` / `HOME` / `ROS_DOMAIN_ID`、`gui:=False`、
+`nav_rviz:=False lio_rviz:=False`、`setsid`、`timeout`、`scoped_cleanup.sh`（无全机 pkill）。
+探针 = `tools/scripts/tiltmount/nav_band_probe.py`（只订阅；`settle 20 / window 26`）。
+守卫数字 = 该跑 `status.jsonl` 的**中位数**；`finite_*` 是跨文档可比的有限波束口径。
+
+| run（tag） | 组合 / 重力 | 守卫 | local finite in-band / total | local kept-y（finite） | local z min/p50/max | global in-band / total | global z p50 | 探针 local lethal / free | 探针 global lethal / free |
+|---|---|---|---|---|---|---|---|---|---|
+| `bg_off_guard2` | off + global:=scan（−1.0） | on | **333 / 776**（42.9%） | **[0.268, 3.404]** | −0.501 / **−0.091** / 2.459 | **776 / 776** | −0.179 | 288 / 44260 | 3861 / 9712 |
+| `bg_hyb_guard` | hybrid + global:=scan（−1.0） | on | **779.5 / 779.5**（100%） | **[−0.636, 5.086]** | 0.020 / **+0.036** / 0.068 | **779.5 / 779.5** | −0.179 | 267 / 42442 | 3866.5 / 9693.5 |
+| `bg_hyb_noguard` | hybrid + global:=scan（−1.0） | **off** | —（无守卫） | — | —（探针 z p50 +0.037） | — | — | 307 / 42343 | 3859 / 9717 |
+| `bg_global_noband` | hybrid + global:=scan（**0.0 scratch**） | on | **780 / 780**（100%） | **[−0.635, 5.086]** | 0.023 / **+0.036** / 0.069 | **0 / 780**（一帧 **0/774**） | **−0.179** | 266 / 42442 | **3713 / 10176**（恒定） |
+
+> 读法：`bg_off_guard2` 的 `333/776` 与 §15 的 `333/774` 是同一帧族（有限波束逐帧
+> 768–786）；**比例 42.9% vs 43.0%**、kept-y 区间同向同量级、z p50 −0.091 vs §13.8 −0.0919。
+> `bg_hyb_guard` 的局部 100% / 全局 100% 与 §13.8/§15.9 的 776/776、774/774 同档。
+> `bg_global_noband` 的 global 3713/16886/10176 **逐帧恒定**，正是 §15.1 的"哑图"指纹。
+
+### 17.9 不改行为：栈内 A/B（同一栈、同一机器人位姿）与分离跑对照
+
+**栈内 A/B**（`bg_within_ab`）：launch 用 `band_guard:=False`（**launch 的节点集不含守卫**），
+先跑探针 A（`settle 20 / window 15`，无守卫），然后**手工** `ros2 run … band_guard.py`，
+紧接着跑探针 B（`settle 2 / window 15`，守卫在跑）。中间没有重启栈，机器人静止、位姿连续：
+
+| 量（15 s 窗口，中位数） | A（无守卫） | B（守卫在跑） | Δ |
+|---|---|---|---|
+| local lethal | **266** | **265** | **−1** |
+| local inscribed / free | 9546 / 42415 | 9521 / 42438 | −25 / +23 |
+| local nearest lethal / ahead | 0.70505 / 25 | 0.70499 / 24 | 0 / −1 |
+| global lethal | **3898** | **3897** | **−1** |
+| global inscribed / free | 17194 / 9693 | 17181 / 9721 | −13 / +28 |
+| global nearest / ahead | 0.457455 / 89 | 0.457467 / 89 | ~0 / 0 |
+| `/scan` 有限波束中位数 | 775 | 775.5 | +0.5 |
+
+⇒ 守卫在跑与不在跑的**相邻窗口**差 **1 个 lethal 格**、`free` 差 ≤0.07%；没有可测的
+数据/控制路径影响。B 窗口内守卫日志是 local/global **780/780 OK**（17.6 同款）。
+
+**分离跑对照的诚实说明**：`bg_hyb_guard`（守卫 on）与 `bg_hyb_noguard`（守卫 off）的
+local lethal 是 **267 vs 307**，差的 40 格**不是**守卫造成的 —— 两跑的机器人 odom 位姿差
+**7 mm**（x 0.0179 vs 0.0250 m；local lethal 对 0.02 m 栅格的亚格位移很敏感），而
+**守卫 on 的另两跑**（R2/R4）local lethal 是 267/266，与栈内 A/B 的 266/265 一致；
+全局 lethal 在 R2/R3 只差 7.5 格、栈内 A/B 差 1 格。⇒ 分离跑的局部差归因于**逐跑位姿/时序**，
+不是守卫；这也是为什么验收 5 用**栈内 A/B** 作为主证据、分离跑只作旁证。
+
+**其它默认路径证据**：17.4 的 67/69 Action 纯增量、R3 `ros2 node list` 无 `/band_guard`、
+三跑合并 nav2 YAML md5 全等 `e5179ab…`。**没有**修改 `src/rm_navigation/**` 或任何 nav2
+参数文件；**没有**发布/改写 scan、costmap、TF、cmd_vel。
+
+### 17.10 本轮没能验证 / 诚实边界
+
+1. **"333/774"不是逐字复现的单一帧**：守卫 5 s 采一帧，本机 `/scan` 有限回波逐帧
+   768–786；off 跑拿到 **333/772**（一帧）、9 帧中位 **333/776**；§15 记录的 333/774 是
+   探针的另一帧。**比例 42.9–43.2% vs 43.0%**、kept-y 同向、z p50 同值；没有把某一帧
+   的 774 硬凑出来。global 旧配置倒是拿到**逐字 0/774** 一帧。
+2. **只测了一个组合**：`world:=RMUL2026`、`robot:=robot11 robot11_mount:=sensor`、
+   `lio:=small_point_lio`、`localization:=gicp`、`nav:=rpp`、`planner:=navfn`、
+   `local_obstacle:=scan`、`global_obstacle:=scan`。**未测**：`amcl`/`beluga`/`small_gicp`、
+   `fastlio`/`pointlio`、`mode:=slam_nav`、`global_obstacle:=stvl` 的守卫 idle 日志（代码会
+   `idle`，但没有跑出日志证据）、`RMUC2026`、真机/真实时间。
+3. **TF 的 stamp vs latest**：绝大多数样本 `mode=stamp`；每跑开头有 1 条 `mode=latest`
+   （scan 戳早于 TF 缓存最早数据）。nav2 用 stamp；守卫退回 latest 只影响这一帧的
+   z/kept-y，日志里明确标了 `mode=latest`。**未**量化这一帧与 nav2 的差。
+4. **参数服务扰动的定量**：§15.11 记录过 `ros2 param get` 子进程风暴会扰动 MessageFilter；
+   本实现是进程内异步 + 每 30 s 一次，栈内 A/B 没看到差异；但**没有**做"服务风暴"压测。
+5. **动态改参**：`params_refresh_s=30` 才会看到 `ros2 param set`；本轮 R4 用**启动时**
+   的 scratch 覆盖，没有测"运行中把 ×0.0 改回来"的 30 s 延迟。
+6. **状态话题没有进 rosbag**：只用 `.tmp_band_guard/status_recorder.py`（transient_local
+   订阅）记 JSONL；没有 `ros2 bag record`，也没有长跑（每跑 ~1–2 min 仿真）。
+7. **限流/刷屏**：`period=5 s`、`rate_limit=5 s`、正常帧也打 INFO ⇒ 每 costmap 每 5 s 一行
+   （每行 ~700 字符）。没有测"参数频繁抖动/级别频繁升降"时的日志量。
+8. **`mode:=mapping`**：守卫 condition 明确不启动；没有跑 `mode:=mapping band_guard:=True`
+   去证明"确实不启动"（代码/condition 可读，但没实测）。
+9. **"默认 Action 树逐字节相同"的严格说法不成立**：实测是**纯增量**（67 个既有 Action
+   逐字段相同、0 删/改、顺序不变；新增 launch arg + 恒假 Node 两个 Action）。`band_guard`
+   默认不执行、节点集/参数文件/控制路径不变；但若要求"Action 树 0 新增"，做不到 ——
+   除非改既有 Node/参数（那才是行为变化）。这条按实测写，不按口号写。
+10. **日志行很长**：所有可执行字段在一行（frame、两道闸、scan frame、TF、z、kept-y、
+    hint），便于 grep 但不利于人眼；没有做多行/JSON 双格式。
+11. **`finite` 口径**：守卫按 nav2 严格 `< range_max`，既往探针用 `<= range_max` ⇒ 两边
+    可能差 0–1 条；本节的 `finite_*` 是守卫自己的口径，跨文档比较时看比例而非绝对条数。
