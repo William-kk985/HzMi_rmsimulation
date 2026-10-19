@@ -53,6 +53,9 @@ GATE_FIELDS = [
     'align_ms',       # 10 align 耗时 (ms)
     'streak',         # 11 本帧处理后的连续拒绝帧数
     'flags',          # 12 bit0 跳过创新门限 / bit1 重锚 / bit2 失效态探针
+    'innov_dx',       # 13 创新分量 dx（≈map 系，m）—— 常量错位指认用
+    'innov_dy',       # 14 创新分量 dy
+    'innov_dz',       # 15 创新分量 dz
 ]
 FLAG_SKIP_INNOV, FLAG_REANCHOR, FLAG_LOST_PROBE = 1, 2, 4
 
@@ -186,6 +189,11 @@ class GateProbe(Node):
             'n_flag_lost_probe': sum(1 for r in rows if int(r[12]) & FLAG_LOST_PROBE),
             'src_points_p50': pct([r[9] for r in rows], 50),
             'align_ms_p50': pct([r[10] for r in rows], 50),
+            # 创新分量（≈map 系）：**常量错位**的诊断指纹（模长看不出方向，分量能）
+            'innov_dx_p50': pct([r[13] for r in rows], 50),
+            'innov_dy_p50': pct([r[14] for r in rows], 50),
+            'innov_dz_p50': pct([r[15] for r in rows], 50),
+            'n_rejected': n - len(acc),
         }
 
     def _per_sec(self, times):
