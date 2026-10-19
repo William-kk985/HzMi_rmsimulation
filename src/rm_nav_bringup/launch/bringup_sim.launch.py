@@ -2393,6 +2393,22 @@ def generate_launch_description():
                     '默认 False：它是只读消费者（不发 /map、不发 TF，不碰 map→odom 与 /segmentation 契约），'
                     '但属新增路径、还没做长跑验收 ⇒ 先关着，要用显式打开')
 
+    # ★ 2026-10-21（§24）：累加器的**累积坐标系**（`map` | `odom`）。默认 `map` = 与改造前逐字节相同。
+    #   为什么需要它（实测，见 docs/frame_contract_v3_measurements.md §23.9#1 / §24.5）：
+    #   累加器按 `TF(target_frame ← livox_frame)` 的**当前值**把每帧点搬进 target_frame，
+    #   而 `slam_toolbox` 会在整跑过程中不断修正/跳变 `map→odom` ⇒ **已经积进去的点不会跟着动**
+    #   ⇒ 同一面墙被画成多条弧带（"鬼影"，实测墙面残差散布 0.2–0.4 m）。
+    #   `odom` 档：LIO 的 `odom→livox_frame` 是**平滑**的（没有跳变）⇒ 云内部刚性、无鬼影；
+    #   落盘后由调用方用**一次** `map←odom` 刚体变换把 PCD 搬进 `map`（sidecar 的 `frames`
+    #   仍然写 `map`，因为最终资产确实在 map 系）。2D 栅格那一侧完全不受影响（它自己闭环）。
+    declare_cloud_accumulator_target_frame_cmd = DeclareLaunchArgument(
+        'cloud_accumulator_target_frame',
+        default_value='map',
+        description='cloud_accumulator 的累积坐标系：map（默认 = 历史行为）| odom。'
+                    'map 档会被 slam_toolbox 的 map→odom 修正撕裂出鬼影（§23.9#1）；'
+                    'odom 档把累积放进平滑的 LIO 世界系、落盘后再用一次 map←odom 搬进 map。'
+                    '只影响 3D 先验，不影响 /map、map→odom、/segmentation 的单一发布者契约')
+
     # ★ 2026-10-06（事故当天追加）：续建后的**一次性**一致性检查（详见 docs/continue_mapping.md §8）
     #   动机：场地隔离守卫只管"world/spawn 对不对"，管不了"图本身歪了"——
     #   当天用户续建的 map/RMUC2026.posegraph 里已经含有一段 LIO 退化（ATE max 1.15 m），
@@ -3353,6 +3369,11 @@ def generate_launch_description():
         allow_mismatch = _as_bool(
             context.perform_substitution(LaunchConfiguration('map_allow_world_mismatch')),
             'map_allow_world_mismatch')
+        target_frame_v = (context.perform_substitution(
+            LaunchConfiguration('cloud_accumulator_target_frame')) or '').strip() or 'map'
+        if target_frame_v not in ('map', 'odom'):
+            raise RuntimeError("[launch] cloud_accumulator_target_frame:=%r 不是可用取值（map | odom）"
+                               % target_frame_v)
         # 3D 先验一旦越过场地边界同样是"把两张图叠在一起"⇒ 走同一份 sidecar / 同一套判定
         # （节点内部还会在 load/save 前各查一次；这里先查是为了在**起栈时**就把问题喊出来，
         #   但 3D 存档不匹配**不终止 launch** —— 2D 位姿图才是主线，用户可能只想建 2D）。
@@ -3388,6 +3409,8 @@ def generate_launch_description():
                 'pcd_dir': guard.pcd_dir(rm_nav_bringup_dir),
                 # 与 PCD/ 既有资产的体素口径一致（0.10 m，见 docs/mapping_small_point_lio.md §6.2）
                 'voxel_size': 0.10,
+                # 累积坐标系（§24.5 鬼影修法）：map（默认）| odom
+                'target_frame': target_frame_v,
             }],
         )
         return [LogInfo(msg=banner), TimerAction(period=6.0, actions=[node])]
@@ -3566,6 +3589,7 @@ def generate_launch_description():
     ld.add_action(declare_map_start_pose_cmd)
     ld.add_action(declare_map_allow_world_mismatch_cmd)
     ld.add_action(declare_cloud_accumulator_cmd)
+    ld.add_action(declare_cloud_accumulator_target_frame_cmd)
     ld.add_action(declare_map_resume_check_cmd)
     ld.add_action(declare_map_resume_check_delay_cmd)
     ld.add_action(declare_map_resume_check_strict_cmd)
