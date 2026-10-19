@@ -3113,7 +3113,7 @@ SETTLE=20 WINDOW=20 PROBES="navband grav points" \
 /lio_tf_adapter  odom_topic              = String value is: /odom
 ```
 
-**主表**（`navband` 200 帧 / `band_guard` 8 个 5 s 样本的中位；单跑 n=1）：
+**主表**（`navband` 200 帧 / `band_guard` 11 个 5 s 样本；单跑 n=1）：
 
 | 指标 | 本轮 `auto ⇒ hybrid` | 对照（§17.8 同配方、显式 hybrid / off） |
 |---|---|---|
