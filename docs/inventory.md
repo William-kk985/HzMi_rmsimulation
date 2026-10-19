@@ -68,7 +68,7 @@
 | `docs/slope_speed_limiting.md` | 348 | `95846c3 2026-10-07` | 前瞻坡度/台阶限速：物理推导 + 整栈 A/B |
 | `docs/traversability_plan.md` | 652 | `fc226bb 2026-10-07` | 3D 派生可通行性（坡度/落空/净空）设计计划，未实现 |
 | `docs/scan_context_plan.md` | 738 | `413415d 2026-10-05` | Scan Context 类全局地点识别接入方案，未落地 |
-| `docs/cartographer_2d_occupancy_semantics.md` | 967 | `本次整理` | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导）+ §5 合并附录（issue 调查 / TSDF / slam_toolbox / nav2 阈值 / 调参表） |
+| `docs/cartographer_2d_occupancy_semantics.md` | 968 | `本次整理` | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导）+ §5 合并附录（issue 调查 / TSDF / slam_toolbox / nav2 阈值 / 调参表） |
 | `docs/livox_sensor_prior_art.md` | 508 | `03c8498 2026-10-18` | 非重复扫描 Livox 在新 Gazebo 上的既有实现调研 + REUSE/ADAPT/WRITE 裁决 + §10 编译实测 |
 | `docs/kinodynamic_esdf_mpc_notes.md` | 270 | `7097602 2026-10-05` | `865749/Kinodynamic_esdf_mpc` 调研笔记（外部仓库） |
 | `docs/slam_nav_goal_strategies.md` | 418 | `09578ed 2026-10-05` | "目标怎么给"四种方式的外部调研 |
@@ -86,7 +86,7 @@
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
-| `docs/frame_contract_v3_measurements.md` | 345 | `8152e57 2026-10-19` | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 |
+| `docs/frame_contract_v3_measurements.md` | 344 | `8152e57 2026-10-19` | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 |
 | `docs/cod_real_frame_measurement.md` | 255 | `本次整理` | **COD 实车帧实测原文**（2026-10-18）：`T_bl` rpy `(−46.238°, −1.684°, 0)`/`\|t\| 0.3949 m`、静止 `odom→base_link` roll `0.030°` ⇒ A 型 + 共轭 bug 生效；5 条命令逐字 + 算术核对 + 7 条 caveat |
 | `docs/tilted_lidar_fidelity.md` | 2988 | `本次整理` | 雷达斜 30° 的逐帧点云账本 + 代价图归因 + bug①② 的判决性签名 |
 | `docs/lio_drift_diagnosis.md` | 598 | `6ca978e 2026-10-07` | LIO 漂移分段诊断："才跑一会儿就飘"是否合理（唯一复现 = 高角速度甩转） |
