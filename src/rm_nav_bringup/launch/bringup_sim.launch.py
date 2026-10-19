@@ -232,14 +232,27 @@ def _check_gravity_align_contract(context):
             "lio:=small_point_lio，或把 gravity_align_mode 设回 off" % (mode, lio or '(空)'))
     # 先验必须真的能从 URDF 推出来（robot 未知 / 轴写错 ⇒ 在这里报，而不是到节点里才发现）
     rpy = _urdf_livox_mount_rpy_deg(context)
+    # ★ 2026-10-21（E1b）：z 原点。`sensor` = 旧行为；`ground` = odom 的 z=0 放在初始化时刻的地面，
+    #   高度由 `_gravity_align_h()` 从 **URDF** 算（轮几何 + livox 关节）。这里只做取值检查 +
+    #   把 h 打进日志（节点初始化时还会用第一帧点云拟合地面互检）。
+    z_origin = (LaunchConfiguration('gravity_align_z_origin').perform(context) or '').strip() or 'sensor'
+    if z_origin not in ('sensor', 'ground'):
+        raise RuntimeError(
+            "[launch] gravity_align_z_origin:=%r 不是可用取值（sensor | ground）" % z_origin)
+    h = _gravity_align_h(context)
     return [LogInfo(msg=(
         '[gravity_align] mode=%s ⇒ 统一输出契约启用：LIO publish_tf:=false + odom_convention:=sensor、'
         'lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy 由 URDF 自动算出 = '
-        '[%.6f, %.6f, %.6f]°（robot=%r mount=%r axis=%r）'
+        '[%.6f, %.6f, %.6f]°（robot=%r mount=%r axis=%r）；'
+        'z_origin=%s gravity_align_h(URDF)=%.6f m（%s）'
         % (mode, rpy[0], rpy[1], rpy[2],
            LaunchConfiguration('robot').perform(context),
            (LaunchConfiguration('robot11_mount').perform(context) or ''),
-           (LaunchConfiguration('livox_tilt_axis').perform(context) or ''))))]
+           (LaunchConfiguration('livox_tilt_axis').perform(context) or ''),
+           z_origin, h,
+           ('odom 的 z=0 = 初始化时刻的地面；h = base_link 离地 + livox z 偏置'
+            if z_origin == 'ground' else
+            'odom 原点 = 初始化时刻的传感器原点（旧行为；地面不在 z=0）'))))]
 
 
 def _rpy_deg_to_R(rpy_rad):
@@ -344,6 +357,72 @@ class _GravityAlignRpy(Substitution):
     def perform(self, context):
         v = _urdf_livox_mount_rpy_deg(context)
         return '[%s]' % ', '.join(repr(float(x)) for x in v)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
+
+
+#: 各模型 **base_link 原点离地高度**（m）—— E1b `gravity_align_h` 的加数之一。
+#: 与 `_lio_adapter_robot11()` 里那串几何**同源**（都是"URDF 说雷达/车体在哪"，不是手抄的巧合）：
+#:   · robot11 ：0.102499 = 四个轮 mesh 的最低点（xacro 几何速查「地面平面（body 系）z = -0.102499」；
+#:               轮 r=0.0580、轮心 z=-0.0445 ⇒ 0.0445+0.0580 = 0.1025）；
+#:   · hzmirm  ：0.0      = 轮 r=0.08、轮心在 base_link z=0.08 ⇒ 轮底正好在 base_link z=0
+#:               （⇒ base_link 原点就在地面上）；
+#:   · 默认模型：0.06     = 轮 r=0.06、轮心在 base_link z=0（sentry_robot_sim.xacro 的
+#:               base_to_wheel* origin z=0）⇒ 轮底 z=-0.06。
+#: ⚠️ 这个表只能描述"URDF 里的几何"；URDF 与实物是否一致由节点初始化时的**地面拟合互检**负责
+#:    （|h_meas−h_urdf| ≥0.05 m ⇒ ERROR，见契约 v3 §4.3）。
+_HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06}
+
+
+def _gravity_align_h(context):
+    """传感器（`livox_frame` 原点）离地高度 h（米）—— E1b `gravity_align_h` 的**唯一真源**。
+
+    h = **base_link 原点离地高度**（URDF/轮几何）
+      + **livox_frame 原点在 base_link 里的 z 偏置**（URDF 关节 / xacro 几何）
+
+    逐模型（默认姿态、`livox_raise_m:=0`）：
+      · `robot:=robot11`（sensor/urdf 挂法，30° 斜装只改朝向、不改原点位置）：
+            0.102499 + 0.15702816968305 = **0.259527 m**
+            （与 linefit 的 `sensor_height: 0.2595` 交叉一致；`sensor` 档点云真的在传感器系）
+      · `robot:=hzmirm`（云台 pitch=0）：
+            0.0 + (0.3 + 0.3 + 0.2·cos(pitch)) = **0.800000 m**（pitch=0；= linefit 的 0.80）
+            推导：base→turret_base (0,0,0.3) · turret_base→turret_head (0,0,0.3) ·
+                  turret_head→lidar (0,0,0.2)；只有最后一段被 Ry(pitch) 转过 ⇒ z = 0.6+0.2cos(pitch)
+      · 默认模型（`robot:=''`）：0.06 + 0.175 = **0.235000 m**
+            （linefit 的 `sensor_height: 0.226` 是 Gazebo 实测值 = 轮胎下沉 ~9 mm；
+             URDF 几何值是 0.235 —— 两者差 9 mm，落在节点的 INFO 带内）
+
+    ⚠️ 与 `_urdf_livox_mount_rpy_deg()` 一样：这里只回答"URDF 说雷达在哪"，**不是**实测值；
+    `livox_raise_m`（robot11 的 B 方案）会让雷达真的抬高 ⇒ 这里跟着加（linefit 的 YAML 不跟，
+    那份文件由用户同步，见 config/segmentation_sim_robot11.yaml 的 ⚠️）。
+    """
+    import math as _m
+    robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+    if robot == 'robot11':
+        # 轴/挂法只为校验参数合法（sensor/urdf/plugin 三种挂法的**原点位置**相同，只是朝向不同）。
+        if LaunchConfiguration('livox_tilt_axis').perform(context).strip() not in _LIVOX_TILT_RPY:
+            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % (
+                LaunchConfiguration('livox_tilt_axis').perform(context).strip(),))
+        _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+        raise_m = float(LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0')
+        return round(_HZMI_BASE_LINK_HEIGHT_M['robot11'] + 0.15702816968305 + raise_m, 9)
+    if robot == 'hzmirm':
+        pitch = float(LaunchConfiguration('turret_pitch_deg').perform(context).strip() or '0.0')
+        return round(_HZMI_BASE_LINK_HEIGHT_M['hzmirm'] + 0.6 + 0.2 * _m.cos(_m.radians(pitch)), 9)
+    if robot == '':
+        return round(_HZMI_BASE_LINK_HEIGHT_M[''] + 0.175, 9)
+    raise RuntimeError(
+        "[launch] gravity_align_h 需要从 URDF 推出传感器离地高度，但 robot:=%r 这一档本 launch "
+        "没有它的几何（目前只有 ''|hzmirm|robot11）。请在 _gravity_align_h 里补上该模型的"
+        "轮几何与 livox 关节高度（**不要**手填参数）" % robot)
+
+
+class _GravityAlignH(Substitution):
+    """`gravity_align_h` 参数：标量（米）。取值来自 `_gravity_align_h()`（= URDF），不是常数。"""
+
+    def perform(self, context):
+        return repr(float(_gravity_align_h(context)))
 
     def describe(self):
         return '%s()' % type(self).__name__
@@ -1477,6 +1556,24 @@ def generate_launch_description():
                     '⚠️ 200 帧初始化门（fix_gravity_direction）**必须保留**：关掉它 8 个变体里 '
                     '5 个发散（docs/odom_base_link_practice_survey.md §9.4(6)）')
 
+    # ★ 2026-10-21：E1b —— **odom 的 z 原点**（契约 v3 §4.3）。
+    #   默认 `ground`（**只在 gravity_align_mode != off 时生效**；off 档根本不给节点传这两个键）：
+    #   odom 的 z=0 = 初始化时刻的地面 ⇒ base_link 起始 z = +0.102499、livox_frame = +0.2595（robot11）。
+    #   为什么必须修：E1 只设了初始**旋转**，odom 原点还在传感器壳上 ⇒ nav2 local costmap 的
+    #   `min_obstacle_height: 0.0` 把 scan 盘面（z=−0.159）整盘丢掉（193→0 lethal，实测见
+    #   docs/frame_contract_v3_measurements.md §9.7）。`sensor` 保留 = 旧行为（回退/复现 A/B 用）。
+    declare_gravity_align_z_origin_cmd = DeclareLaunchArgument(
+        'gravity_align_z_origin',
+        default_value='ground',
+        choices=['sensor', 'ground'],
+        description='E1b：odom 的 z 原点（只在 gravity_align_mode != off 时生效）。'
+                    'ground（默认）= odom 的 z=0 = **初始化时刻的地面**，高度 `gravity_align_h` '
+                    '由本 launch 从 URDF 算（base_link 离地 + livox z 偏置：robot11 0.259527 / '
+                    'hzmirm 0.800000 / 默认模型 0.235000 m）；节点初始化时还会用第一帧点云'
+                    '拟合地面互检（|Δ|≥0.05 m ⇒ ERROR，仍用 URDF 值定基）。'
+                    'sensor = 旧行为（odom 原点 = 初始化时刻的传感器/IMU 原点，地面不在 z=0；'
+                    'hybrid 档会把 nav2 局部代价图打空，仅用于复现 A/B / 回退）')
+
     # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
     #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
     #   其中 `base_link.STL` 一项就是 **99 MiB / 2,078,226 三角形**（+ 云台 l11 8.8 MB / 17.6 万面）
@@ -2011,7 +2108,12 @@ def generate_launch_description():
                      'odom_convention': 'sensor',
                      # ③ E1：初始化时把 URDF 的安装倾角吸收进 odom
                      'gravity_align_mode': LaunchConfiguration('gravity_align_mode'),
-                     'gravity_align_rpy': [_GravityAlignRpy()]},
+                     'gravity_align_rpy': [_GravityAlignRpy()],
+                     # ④ E1b：z 原点（契约 v3 §4.3）。`ground` ⇒ odom 的 z=0 = 初始化时刻的地面，
+                     #   h 由 _gravity_align_h() 从 URDF 算（不手填）；`sensor` = 旧行为（回退用）。
+                     #   ⚠️ off 档的 Node（上面那个）**没有**这两个键 ⇒ 默认路径的参数表逐字节不变。
+                     'gravity_align_z_origin': LaunchConfiguration('gravity_align_z_origin'),
+                     'gravity_align_h': [_GravityAlignH()]},
                 ],
                 remappings=[('/Odometry', '/odom')],
             ),
@@ -2727,6 +2829,8 @@ def generate_launch_description():
     ld.add_action(declare_robot11_mount_cmd)
     # ★ 2026-10-20：E1 重力对齐 + 统一输出契约（默认 off ⇒ 演示路径零改动；见 declare 的 description）
     ld.add_action(declare_gravity_align_mode_cmd)
+    # ★ 2026-10-21：E1b 的 z 原点（ground 默认；off 档不读这个值 ⇒ 默认路径零改动）
+    ld.add_action(declare_gravity_align_z_origin_cmd)
     # ★ Phase 4：robot:=robot11 的视觉 mesh 档位（decimated | full）
     ld.add_action(declare_robot11_visual_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）

@@ -25,6 +25,10 @@ namespace small_point_lio {
         fix_gravity_direction = node.declare_parameter<bool>("fix_gravity_direction");
         // ===== 实验补丁（三个键都用**带默认值**的声明 ⇒ 现有 YAML 一个字节都不用改）=====
         gravity_align_mode = node.declare_parameter<std::string>("gravity_align_mode", "off");
+        // E1b（契约 v3 §4.3）：z 原点约定。两个键都带默认值 ⇒ 现有 YAML 一个字节都不用改，
+        // 默认 sensor = 原行为（position 保持 0，逐位不变）。
+        gravity_align_z_origin = node.declare_parameter<std::string>("gravity_align_z_origin", "sensor");
+        gravity_align_h = node.declare_parameter<double>("gravity_align_h", 0.0);
         {
             auto rpy_temp = node.declare_parameter<std::vector<double>>("gravity_align_rpy", std::vector<double>{});
             if (rpy_temp.size() == 3) {

@@ -79,6 +79,10 @@ list(APPEND SOURCE src/extrinsic_guard.cpp)
 #   同样必须是**独立 TU**（理由见该文件头：本包 `-ffast-math`，把新浮点代码放进 odom 回调所在
 #   TU 会让默认路径出现 1 ulp 差，口径见 docs/tilted_lidar_fidelity.md §O.2）。
 list(APPEND SOURCE src/odometry_convention.cpp)
+# ★ 本仓新增（docs/frame_contract_v3.md §4.3，E1b：`gravity_align_z_origin:=ground` 的 z 定基 +
+#   初始帧地面拟合互检）。同样是**独立 TU**：默认档（gravity_align_mode:=off）不调用它，
+#   避免在 hot path 所在 TU 里新增浮点代码改变 IPA/内联 ⇒ 默认路径逐位不变。
+list(APPEND SOURCE src/gravity_align_ground.cpp)
 list(REMOVE_DUPLICATES SOURCE)
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})

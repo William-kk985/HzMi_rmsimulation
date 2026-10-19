@@ -5,6 +5,7 @@
  */
 
 #include "small_point_lio.h"
+#include "gravity_align_ground.h"
 
 namespace small_point_lio {
 
@@ -221,6 +222,89 @@ namespace small_point_lio {
                                     "Δ(URDF,IMU)=%.3f° world_gravity=[%.3f %.3f %.3f] body_source=%s",
                                     mode.c_str(), used_src, rpy.x(), rpy.y(), rpy.z(), delta_deg,
                                     g_world.x(), g_world.y(), g_world.z(), body_src);
+
+                        // ===================== E1b：z 原点（契约 v3 §4.3）=====================
+                        // 默认 gravity_align_z_origin=sensor ⇒ **本段完全不执行**（position 仍为 reset() 后的 0
+                        // ⇒ off 档以及旧的 hybrid 档逐位不变）。
+                        // ground 档：把 odom 的 z=0 放到"初始化时刻的地面"上 ——
+                        //   状态原点严格说是 **IMU body**（点先经 extrinsic_T/R 搬进 IMU 系），传感器
+                        //   livox 原点在 body 系里是 t_IL（= extrinsic_T，默认 (0,0,0.05)）⇒
+                        //       p_livox(world) = p_state(world) + R_ws·t_IL
+                        //   要求 livox 正好在 +h（h = 传感器离地高度）⇒
+                        //       position.z = h − (R_ws·t_IL).z
+                        //   **推导出的期望关系**（车体水平、URDF 与实物一致、robot11 sensor 档）：
+                        //       ground z=0 · base_link z=+0.102499 · livox_frame z=+0.2595
+                        //       （数值：h=0.102499+0.157028=0.259527；杆臂 (R_ws·t_IL).z=0.05·cos30°=0.043301
+                        //        ⇒ position.z=0.216226；base_link 再减旋转后的 t_imu←base 的 z 杆臂 0.113722
+                        //        = 0.102504；livox 再加 base←livox 的 z=0.157028 ⇒ 0.259532）
+                        //   ⚠️ **只改旋转不改平移 = 本 bug**（地面被抬到 −h）；反过来只改平移不改旋转也不行。
+                        //   初始地图点在上面那个循环里用**同一个 kf.x.position** ⇒ 与状态同步搬，
+                        //   不需要另写一份平移（写了反而会有第二个真源）。
+                        //   h 只取 **URDF 值**（确定性）；下面拟合出的 h_meas 只当诊断，不参与定基。
+                        if (parameters.gravity_align_z_origin == "ground") {
+                            if (!(parameters.gravity_align_h > 0.0)) {
+                                RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"),
+                                             "gravity_align_z_origin=ground 但 gravity_align_h=%.6f m 无效（应 >0，"
+                                             "由 launch 从 URDF 算）⇒ 退回 **sensor** 档（odom 原点 = 初始化时刻的传感器原点，"
+                                             "地面不在 z=0）", parameters.gravity_align_h);
+                            } else {
+                                const Eigen::Matrix<state::value_type, 3, 3> R_IL =
+                                        parameters.extrinsic_est_en ? estimator.kf.x.offset_R_L_I : estimator.Lidar_R_wrt_IMU;
+                                const Eigen::Matrix<state::value_type, 3, 1> t_IL =
+                                        parameters.extrinsic_est_en ? estimator.kf.x.offset_T_L_I : estimator.Lidar_T_wrt_IMU;
+                                const double lever_z = (R_use * t_IL).z();
+                                const double state_z = z_origin_state_z(parameters.gravity_align_h, R_use, t_IL);
+                                estimator.kf.x.position.z() = state_z;
+                                RCLCPP_INFO(rclcpp::get_logger("small_point_lio"),
+                                            "gravity_align_z: z_origin=ground h(URDF)=%.6f m lever_z=(R_ws·t_IL).z=%.6f m "
+                                            "⇒ state_z=%.6f m（odom 的 z=0 = 初始化时刻的地面；初始地图点用同一平移）",
+                                            parameters.gravity_align_h, lever_z, state_z);
+                                // 运行时互检（**loud, never silent**）：从初始帧原始云（lidar 系）拟合地面，
+                                // 量出传感器离地高度 h_meas，与 URDF 值对比。这是 E1 的 Δ(URDF,IMU) 同一套模式：
+                                // 抓"URDF 写错 / 出生时不在平地上 / 模型与场地不符"。
+                                // 拟合用**最后一帧**（初始化前有 ~2 s 的 200 帧 IMU 门，点云跨多帧 ⇒ 取最后一帧
+                                // 避开出生落定窗口里的运动模糊）。
+                                // 阈值：<0.03 INFO / 0.03–0.05 WARN / ≥0.05 ERROR。ERROR 只影响**日志电平**，
+                                // **定基仍然用 URDF 值**（确定性优先：实测会被噪声/坡面/车体点带偏，而 URDF 是可复现的）。
+                                // 每次初始化只打一次 ⇒ 天然 rate-limited（reset() 只在构造期调用一次）。
+                                const GroundFitResult fit =
+                                        fit_ground_plane_sensor_frame(preprocess.point_deque, 0.20, R_use, R_IL);
+                                if (!fit.ok) {
+                                    RCLCPP_WARN(rclcpp::get_logger("small_point_lio"),
+                                                "gravity_align_h_check: 初始帧地面拟合不可信（inliers=%d tilt=%.2f°）⇒ **跳过互检**；"
+                                                "仍用 URDF 值 h=%.6f m（确定性）", fit.inliers, fit.tilt_deg,
+                                                parameters.gravity_align_h);
+                                } else {
+                                    const double delta = std::fabs(fit.height_m - parameters.gravity_align_h);
+                                    if (delta < 0.03) {
+                                        RCLCPP_INFO(rclcpp::get_logger("small_point_lio"),
+                                                    "gravity_align_h_check: h_urdf=%.4f m h_meas=%.4f m |Δ|=%.4f m < 0.03 ⇒ INFO"
+                                                    "（inliers=%d tilt=%.2f° resid_p50=%.4f p95=%.4f）",
+                                                    parameters.gravity_align_h, fit.height_m, delta, fit.inliers,
+                                                    fit.tilt_deg, fit.resid_p50_m, fit.resid_p95_m);
+                                    } else if (delta < 0.05) {
+                                        RCLCPP_WARN(rclcpp::get_logger("small_point_lio"),
+                                                    "gravity_align_h_check: h_urdf=%.4f m h_meas=%.4f m |Δ|=%.4f m ∈ [0.03,0.05) ⇒ WARN"
+                                                    "（URDF 与实测不符/场地不平；inliers=%d tilt=%.2f° resid_p50=%.4f）—— 仍用 URDF 值定基",
+                                                    parameters.gravity_align_h, fit.height_m, delta, fit.inliers,
+                                                    fit.tilt_deg, fit.resid_p50_m);
+                                    } else {
+                                        RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"),
+                                                     "gravity_align_h_check: h_urdf=%.4f m h_meas=%.4f m |Δ|=%.4f m >= 0.05 ⇒ ERROR"
+                                                     "（URDF 的 livox 离地高度与实物不符，或出生时不在平地上；"
+                                                     "inliers=%d tilt=%.2f° resid_p50=%.4f resid_p95=%.4f）"
+                                                     "—— **仍用 URDF 值 %.4f m 定基**（确定性；实测只作诊断）",
+                                                     parameters.gravity_align_h, fit.height_m, delta, fit.inliers,
+                                                     fit.tilt_deg, fit.resid_p50_m, fit.resid_p95_m,
+                                                     parameters.gravity_align_h);
+                                    }
+                                }
+                            }
+                        } else if (parameters.gravity_align_z_origin != "sensor") {
+                            RCLCPP_WARN(rclcpp::get_logger("small_point_lio"),
+                                        "gravity_align_z_origin=%s 不是 sensor|ground 之一 ⇒ 按 sensor 处理（odom 原点 = 传感器原点）",
+                                        parameters.gravity_align_z_origin.c_str());
+                        }
                     }
                 }
                 // init map
