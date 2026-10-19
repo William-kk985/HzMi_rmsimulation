@@ -9,7 +9,9 @@ set -e
 
 # ===== 自动定位项目根目录（脚本可在任意位置被调用）=====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# ★ 2026-10-21：本脚本在 tools/scripts/ 下 ⇒ 项目根 = SCRIPT_DIR/../..（原来只写了 /..，
+#   停在 tools/ 上，check_directory 的 "src" 永远找不到 ⇒ 脚本一启动就报"请在...目录下运行"）。
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # 颜色定义

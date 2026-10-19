@@ -9,7 +9,9 @@ set -e
 
 # ===== 自动定位项目根目录（脚本可在任意位置被调用）=====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# ★ 2026-10-21：本脚本在 tools/scripts/ 下 ⇒ 项目根 = SCRIPT_DIR/../..（原来只写了 /..，
+#   停在 tools/ 上 ⇒ `cp src` / `cp tools/...` 全部找不到）。
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # 颜色定义
@@ -65,7 +67,9 @@ cp "${PROJECT_ROOT}/tools/scripts/setup_from_package.sh" "$TEMP_DIR/" 2>/dev/nul
 
 # 复制文档
 cp "${PROJECT_ROOT}/README.md" "$TEMP_DIR/" 2>/dev/null || print_info "README.md 不存在，跳过"
-cp "${PROJECT_ROOT}/docs/package/HZMI_RMSIMULATION_CONFIG_GUIDE.md" "$TEMP_DIR/"
+# ★ 2026-10-21：`docs/package/` 已改名为 `docs/archive/package/`（该指南随那次整理搬走）；
+#   原路径不存在 + `set -e` ⇒ 整个打包脚本在最后一步前静默退出。
+cp "${PROJECT_ROOT}/docs/archive/package/HZMI_RMSIMULATION_CONFIG_GUIDE.md" "$TEMP_DIR/"
 
 # 复制 CMakeLists.txt 和 package.xml（如果存在）
 if [ -f "CMakeLists.txt" ]; then
