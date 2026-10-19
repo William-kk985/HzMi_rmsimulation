@@ -1948,7 +1948,9 @@ spread（288–345）之外一点点，**不做定量结论**（n=1）。
 > **本节只新增**（append-only）：§1–§14 一个字都没改。§14 是上一节（另一个 agent），本节取
 > **第一个未占用**的编号 ⇒ §15。
 >
-> **对象**：`docs/rm_navigation` 的 `global_obstacle` 槽位里 `scan` 这一档（§14.7 用盒子试验
+> **对象**：`src/rm_nav_bringup/launch/bringup_sim.launch.py` 的 `global_obstacle` 槽位
+> （nav2 params 在 `src/rm_navigation/rm_navigation/params/nav2_params_sim_base.yaml`，本节**未改**）
+> 里 `scan` 这一档（§14.7 用盒子试验
 > **证明**它"全局层一个格子都没落地"，并把它登记为"**另一个** defect，待修"）。本轮把它**定位到根因、
 > 修掉、并逐格验收**；同时把 §14 遗留的"**全局半**（off / hybrid）"补测完。
 >
