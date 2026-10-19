@@ -4088,3 +4088,332 @@ lio:=small_point_lio`（**不传** `gravity_align_mode`：launch 收据 `gravity
     没有做点云级/接触级 A/B（也不需要 —— 摩擦不参与几何）。
 11. **`--chassis articulated` 的回退验证**是"去注释后模型体逐字节相同"（34573 B），不是整文件逐字节
     （文件头会多出 22.4 那段说明，HEAD 本来就有这个口径）。
+
+## §23 第十四轮（**本机 date=2026-10-20T03:43–05:20**）：按参考流水线重建两个世界的资产 —— **覆盖率与绝对几何都没有赢过旧图，两个候选都不提升**；附带四条硬发现（LIO 发散 → `slam_toolbox` OOM、路线×跟随器耦合、`align.json` 口径错、3D 资产的 z 原点不是地面）
+
+> **本节只新增**（append-only）：§1–§22 一个字都没改。写作时 §22 是最新 ⇒ 本节用 §23。
+>
+> 任务口径（父任务原文）：按**参考流水线** `mode:=mapping lio:=small_point_lio robot:=robot11
+> robot11_mount:=sensor`（`gravity_align_mode` 不传 ⇒ `auto` ⇒ **hybrid**、`gravity_align_z_origin:=ground`）、
+> `cloud_accumulator:=True`、`ground:=linefit`、`spin_speed:=0.0`，跑**有界**的覆盖路线，
+> 重建 RMUC2026（先）与 RMUL2026（后）的 2D+3D 先验；**四道门（覆盖率 / 绝对几何 / 定位质量 / 自洽）
+> 全过才提升**，任何一门不过就保留旧默认并逐条报"哪一门、为什么"。
+>
+> 隔离（与 §17/§22 同口径）：每跑私有 `HOME` / `ROS_DOMAIN_ID=137` /
+> `GAZEBO_MASTER_URI=http://127.0.0.1:11737`、`gui:=False`、`world:=X` **不带前导 `--`**、
+> `setsid` + `timeout` + `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**，收尾按进程组/URI 判归属）。
+> 原始数据与**可复跑**脚本在 `.tmp_map2/`（gitignored）：`env.sh`（隔离）、`run_mapping_v2.sh`（建图整跑）、
+> `run_nav_gate.sh`（GICP 定位门）、`build_truth_map.py`（**从 STL 真值**生成路线底图）、`map_cov_stats.py`
+> （2D 覆盖率对照）、`wall_resid.py`（墙面证人，带偏航/平移自标定）、`floor_pcd.py`（资产地面高度）、
+> `map_align_tf.py`（**用 TF** 量 map 系是否水平）、`map_odom_probe.py`（`map→odom` 常量偏置）、
+> `odom_watch.py`（LIO 看门狗：|pose|>100 m 或 45 s 无新样本 ⇒ 退出码 2 ⇒ 调用方立刻停跑图）。
+> 每跑目录里有 `meta.txt`（date/git_head/world_md5/launch_md5/livox_so_md5/domain/master）、`launch.log`、
+> `drive.log`、`drive.json`、`health.json`、`gate.json`、`map_odom.json`。
+
+### 23.1 一句话结论
+
+> **四条门没有一条是"新资产赢"**：覆盖率 RMUC `known 168.7 m² vs 旧 389.9 m²（43%）`、
+> RMUL `51.1 vs 94.8 m²（54%）`；绝对几何新 3D 的墙面残差 **8–23 cm、散布 0.2–0.4 m**（旧图 RMUL 是 3.8–4.9 cm、RMUC 是 10–12 cm）；
+> 地面高度 **RMUC −0.104 m / RMUL +0.051 m**（`z_origin=ground` 的期望是 **0**）；
+> GICP 在**新** PCD 上的 `score` 虽然更低（RMUC `0.00446 vs 0.0139 m²`），但 `map→odom` 要一次性修
+> **`(0.282, −1.899, 0.181) m / 4.19°`**（旧图只要 `(−0.139, +0.086, −0.003) m / 1.18°`）⇒ 图本身与 odom 不自洽。
+> ⇒ **两个世界都保留旧默认，一个字节没覆盖**（`.bak-20261020` 只是"换装门禁跑"的备份，见 §23.8）。
+> 根因不是"配方写错"，而是四条**上游/环境**问题（§23.9）：① `lio:=small_point_lio` 在这台机器上
+> **驱动就发散**（RMUL 两跑：一次 79 s 硬发散到 1e2 m 量级、一次 ATE 5.34 m；RMUC 第一跑 2 min 内发散
+> ⇒ `slam_toolbox` 吃 16.6 GB ⇒ **被内核 OOM-kill**）；② 简化过的路线会让纯追踪**原地抖转**（v=0、wz=±1，
+> 几分钟零位移且不触发卡死判据）；③ §16 用的 `map_world_align.py` 在 **hybrid/`odom_convention=sensor`** 档
+> 量出来的"map 系斜 30°"是**口径错**（它把 `/odom` 的**雷达**位姿和真值的**base**位姿相减），
+> 用 TF 重测 map 系是**水平的（roll +0.38° / pitch −0.07°）**。
+
+### 23.2 配方（**实际命令**）+ 路线 + 时长
+
+```bash
+# ① 路线底图：**从 STL 真值**生成（不用旧默认图当底图 —— 旧图 free 里含 unknown(205)，
+#    coverage_route 的 trinary 语义会把 205 当 free，路线会穿"未知区"）
+python3 .tmp_map2/build_truth_map.py RMUC2026 --out .tmp_map2/truth_RMUC2026 \
+    --window -26.0 -10.0 5.0 8.5          # free = 相对地面高度 <0.15 m 且局部坡度 ≤20°
+python3 .tmp_map2/build_truth_map.py RMUL2026 --out .tmp_map2/truth_RMUL2026 \
+    --window -3.4 -4.4 11.7 6.7
+
+# ② 覆盖路线（clearance 0.50 = robot11 的**外接半径 0.4243** + 7.6 cm 余量；
+#    min-waypoint-sep 0.3 + simplify 0.02 ⇒ 输出的是 A* 折线本身，不是被抽稀成锐角的弦）
+python3 tools/scripts/mapping/coverage_route.py --map-yaml .tmp_map2/truth_<W>.yaml \
+    --clearance 0.50 --lane-spacing <2.0|2.0> --goal-step <2.5|2.5> \
+    --min-waypoint-sep 0.3 --simplify 0.02 --order lawnmower --speed 0.6 \
+    --out .tmp_map2/route_<W>.json
+
+# ③ 建图整跑（一条 bash 调用里：launch + 静止对齐 + 跑图 + map_saver + map_archive save + 体检 + 收尾）
+bash .tmp_map2/run_mapping_v2.sh <tag> <W> <W>_v5 <route.json> <2D 前缀>
+#   内部就是：
+ros2 launch rm_nav_bringup bringup_sim.launch.py world:=<W> mode:=mapping lio:=small_point_lio \
+  mapper:=slam_toolbox ground:=linefit spin_speed:=0.0 robot:=robot11 robot11_mount:=sensor \
+  gravity_align_z_origin:=ground map_name:=<W>_v5 map_autocontinue:=False cloud_accumulator:=True \
+  nav_rviz:=False lio_rviz:=False gui:=False
+#   跑图：coverage_drive.py --pose-source gt --speed 0.7 --lookahead 0.55 --yaw-gain 1.5
+#         --yaw-rate-max 1.5 --rot-in-place-rad 2.8 --spin-all-turns 1.0 --spin-every 10
+#         --final-spin 1.0 --stuck-sec 20 --save-2d <前缀>
+#   落盘：map_saver_cli（2D）+ map_archive.sh save --name <W>_v5 --resolution 0.05（PCD + posegraph + 两个 sidecar）
+```
+
+**launch 收据（逐字，两跑相同）**：`gravity_align_mode=auto ⇒ 有效值=hybrid（lio=small_point_lio）`；
+`gravity_align_rpy=[-30.000000, 0.000000, 0.000000]°`；`z_origin=ground gravity_align_h→0.259527 m`；
+`gravity_align_h_check: h_urdf=0.2595 m h_meas=0.2597 m |Δ|=0.0002 m ⇒ INFO`（= `sensor` 档的
+偏移修复 `72c7c07` 在**建图链路**上也是好的）。
+
+| 项 | RMUC2026 | RMUL2026 |
+|---|---|---|
+| 路线（真值底图上的可行驶连通域） | **56.7 m²**（clearance ≥0.50 m） | **38.2 m²** |
+| 路线：航点 / 总长 / bbox（map 系） | 49 / **79.34 m** / `x[-8.93,3.08] y[-6.67,6.23]` | 25 / **40.12 m** / `x[-1.27,8.72] y[-1.88,4.62]` |
+| 实跑：到位 / GT 轨迹长 | **48/49** / 64.24 m | **16/25（超时）** / 35.23 m |
+| 原地转圈数（1 圈 @0.7 rad/s） | 4（+收尾 1） | 2 |
+| 墙钟 / 仿真时长 / RTF | **387.7 s / 162.1 s / 0.42** | **525.2 s / 203.6 s / 0.39** |
+| LIO vs 真值（`/odom` vs `/odom_ground_truth`） | ATE xy RMSE **0.124 m**、head 0.119 / tail 0.116（**不长漂**）、轨迹长比 1.068 | ATE xy RMSE **5.344 m**、head 3.084 / tail 6.080（**在长漂**）、轨迹长比 **2.965** ⇒ LIO 发散 |
+
+> 两跑的 `RTF≈0.4` 不是这台机器的常态：`/clock` 实测 0.39–0.42，而同机**空载**时同一世界能到 ~1.0
+> （§16 的 `RTF 0.995–0.999`）。第一跑（03:44）期间内核 OOM + swap 打满（`Swap 3/3 GB`）把 RTF 压到 0.40，
+> 之后即使内存恢复也一直是 0.4x —— 本机 `gzserver` + 113 条 collision 的 robot11 在 Classic 里就是这个量级，
+> **跑图时长要按 ×2.5 估**（§23.9#1 的 OOM 也发生在这一段）。
+
+### 23.3 资产清单（旧 vs 新，全部留档，旧的一个字节没删）
+
+| world | 槽位 | 旧默认（**提升后仍是它**） | 旧 md5 | 新候选（**未提升**） | 新 md5 |
+|---|---|---|---|---|---|
+| RMUC2026 | 2D | `map/RMUC2026.pgm`+`.yaml`，`577x326 @0.05`，`origin [-25.2,-9.09]` | `82e1742b…` / `683b07a8…` | `map/RMUC2026_v5_spl.pgm`+`.yaml`，**`392x412`**，`origin [-11.30,-10.44]` | `56dbd764…` / `4e9b3c85…` |
+| RMUC2026 | 3D | `PCD/RMUC2026.pcd`，203,352 点 / 6.51 MB | `5b494a60…` | `PCD/RMUC2026_v5.pcd`，**201,432 点 / 6.45 MB**（累积 14.61 M 点，voxel 0.1） | `9c5ab7fa…` |
+| RMUL2026 | 2D | `map/RMUL2026.pgm`+`.yaml`，`249x173 @0.05`，`origin [-2.2,-3.15]` | `6e45a932…` / `fd23dd82…` | `map/RMUL2026_v5_spl.pgm`+`.yaml`，**`279x320`**，`origin [-5.46,-7.70]` | `9b365993…` / `e2fd3254…` |
+| RMUL2026 | 3D | `PCD/RMUL2026.pcd`，53,164 点 / 1.70 MB | `5d0d33eb…` | `PCD/RMUL2026_v5.pcd`，**97,148 点 / 3.11 MB** | `bbd45b48…` |
+
+* 新候选的 sidecar（由 `map_archive.sh save` 写）：`map/<W>_v5.{posegraph,data,meta.yaml}` +
+  `PCD/<W>_v5.{pcd,meta.yaml}`；`world/spawn_pose/map_start_pose/resolution/frames/files/file_sizes/versions` 全齐，
+  PCD 侧另带 `accumulated_points / voxel_size / bbox / z_span / health_warning / dropped_* /
+  skipped_frames_* / tf_frames_ok/failed / source`。
+  ⚠️ **RMUC 的 sidecar 自己写着 `health_warning: true`**（z 跨度 2.746 m、xy bbox 40.0×49.8 m）—— 资产自检就不过。
+
+### 23.4 门① 覆盖率（2D）：**两个世界都是回归**
+
+口径：`map_cov_stats.py`（同一把尺子、同一 spawn；`missing = 旧图已知(free|occ) 而新图未知/出窗`）。
+
+| 量 | RMUC 旧 | RMUC 新 | RMUL 旧 | RMUL 新 |
+|---|---|---|---|---|
+| 栅格 / bbox（m） | `577x326` / **28.85 × 16.30** | `392x412` / **19.60 × 20.60** | `249x173` / 12.45 × 8.65 | `279x320` / 13.95 × 16.00 |
+| 窗口面积 | 470.25 m² | 403.76 m²（86%） | 107.69 m² | 223.20 m²（**207%**，被漂移撑大） |
+| **已知**（free+occ） | **389.9 m²** | **168.7 m²（43%）** | **94.8 m²** | **51.1 m²（54%）** |
+| **占用格数**（occ） | **9769**（24.4 m²） | **7142（73%）** | **3713**（9.28 m²） | **4885（132%）** |
+| 自由格数 / 未知 | 146198 / 80.3 m² | 60343 / **235.0 m²** | 34195 / 12.9 m² | 15551 / **172.1 m²** |
+| 旧图已知被新图覆盖 | — | **33.6%** | — | **41.1%** |
+| 缺区 `missing`（其中落在新窗口内） | — | **258.8 m²**（76.2 m²） | — | **55.9 m²**（43.9 m²） |
+| 新图独有 `new_only` | — | 37.6 m² | — | 12.2 m² |
+| 占用格"厚度"（到最近自由格）p50/mean | 0.05 / 0.075 | 0.05 / 0.062 | 0.05 / 0.082 | 0.05 / 0.063 |
+
+**判读**
+
+1. **RMUC 的覆盖率回归是"物理"的，不是配方**：`robot11` 的碰撞足印是 **0.600×0.600 m**
+   （URDF 109 box + 4 cylinder，内切 0.300 / **外接 0.4243**），而真值 2D 上两个半场之间的通道
+   **最窄 0.48–0.52 m**（clearance ≥0.24 m 时两半场还连通、≥0.26 m 就裂成 72 / 87 m² 两块）
+   ⇒ **这台车过不去**。可达域只有出生点所在半场 **56.7–72.2 m²**；`/scan` 的 `range_max=10.0 m`
+   又限制了 2D 栅格能长到多远 ⇒ 新图的已知区最多到"路线最西点 −8.93 再往西 ~2.4 m"（实测窗口西边界
+   **−11.30**，因为再往西就被中墙挡住、没有回波），而旧图西边界是 **−25.2**。
+   **旧图能覆盖全场，最可能是它出自一次"人工遥操把车硬挤过那条 0.48 m 缝"的会话**（旧图中心那两条
+   "S" 形黑带就是当年插件偏置把中墙抹开的样子；`docs/worlds.md` §6 也记过"0.45 m 缝、余量 5 mm/边 ⇒
+   实际过不去"）。这条**是推断、没有当年的会话日志可查**，列进诚实清单 §23.10#10。
+2. **RMUL 的窗口反而更大（13.95×16.00 vs 12.45×8.65）但那是假象**：新 PCD 的 xy bbox 是
+   `19.3 × 20.2 m`（房间只有 12.6 × 8.6 m）—— LIO 漂移把点云甩到房间外，栅格跟着长；**已知面积只有旧图的 54%**。
+3. **占用格数不是"越多越好"**：RMUL 新图的 occ 反而高 32%（4885 vs 3713），但同一次跑的 ATE 是 5.34 m ⇒
+   多出来的占用格是**漂移/鬼影**。这也是本节对"用 occ 计数当覆盖判据"的订正：**必须与 known 面积、缺区、
+   绝对几何一起看**。
+
+### 23.5 门② 绝对几何：墙面证人 + 地面高度 **都不过**
+
+**方法**（`wall_resid.py`，与 §13.4/§16.6 同一把尺子）：取世界网格（STL）里**从机器人可见**的竖直面，
+在资产里取落进该面 ±0.45 m、且在面切向跨度内的点/占用格，1D 直方图定峰 + ±2 cm 中位精修，
+`残差 = 资产面 − 网格面`（沿面法向）。因为旧资产没有"同一跑实测的 R_world←map"，本工具对**每个资产**
+做一次**偏航单参数最小二乘**（对每个 dyaw 用各面残差解析求最优平移 `min_t Σ(r_i+n_i·t)²`，
+取"扣掉平移后残差 RMS 最小"的 dyaw），三组数都报：`raw`（spawn 平移 + 偏航 0）/ `yawfit`（最优偏航、
+**不加平移**）/ `fullfit`（偏航+平移都拟合 = **形状误差**）。新旧同法 ⇒ 可比。
+
+**RMUC2026（3D PCD，23 个可见面）**
+
+| 量 | 旧 `PCD/RMUC2026.pcd` | 新 `PCD/RMUC2026_v5.pcd` |
+|---|---|---|
+| `raw` \|残差\| p50 / max | 0.1232 / 0.2250 m | **0.0820 / 0.2413 m** |
+| `fullfit` \|残差\| p50 / max / RMS | 0.1003 / 0.2680 / 0.1177 m | **0.0841 / 0.2540 / 0.1098 m** |
+| 各面残差散布（`spread_p90`） | 0.17–0.44 m | **0.19–0.42 m** |
+| 典型面（旧 → 新） | `x=10.5 +0.031`、`y=−7.23 +0.119`、`y=−4.71 +0.083` | `x=10.5 +0.056`、`y=−7.23 +0.097`、`y=−4.71 +0.189`、`y=−6.90 −0.215` |
+
+**RMUL2026（3D PCD，9 个可见面）**
+
+| 量 | 旧 `PCD/RMUL2026.pcd`（点太稀，只有 2 面够样本） | 新 `PCD/RMUL2026_v5.pcd` |
+|---|---|---|
+| `raw` \|残差\| p50 / max | **0.0437 / 0.0492 m**（`x=+2.5 −0.0381`、`y=−8.5 +0.0492`） | **0.1507 / 0.2288 m**（`x=+2.5 +0.151`、`y=+0.5 +0.204`、`x=+2.22 +0.229`） |
+| `fullfit` p50 / max / RMS | —（面数 <3，拟合不成立） | 0.0886 / 0.1986 / 0.1134 m |
+| 各面散布 `spread_p90` | 0.049 / 0.106 m | **0.17–0.40 m** |
+
+⇒ **新 3D 资产的墙面位置没有旧图准**（RMUC 的 p50 从 0.100 变 0.084 只是"略好"，但 max 与散布同量级；
+RMUL 从 3.8–4.9 cm 掉到 15–23 cm）。原因见 §23.9#1：`cloud_accumulator` 用的是
+**`livox_frame→map` 的全链 TF**，`map→odom` 一旦被 `slam_toolbox` 修正/跳变，早先累积的点不会跟着动
+⇒ 同一面墙被画成**多条弧带**（§23.9#1 的"鬼影"），残差散布 0.2–0.4 m 就是它。
+
+**地面高度（`floor_pcd.py`：全局 z 直方图峰 + 各距离带复算；`z_origin=ground` ⇒ 期望 0）**
+
+| 带（距出生点） | RMUC 新 | RMUL 新 |
+|---|---|---|
+| 全局峰 | **−0.1043 m**（22747 内点，resid p50 2.7 mm） | **+0.0509 m**（4431 内点，resid p50 6.0 mm） |
+| 0.8–1.5 / 1.5–3 / 3–6 / 6–10 / 10–20 m | −0.1046 / −0.1044 / −0.1046 / −0.1040 / −0.1038 | +0.0506 / +0.0506 / +0.0494 / +0.1519(低矮结构顶面) / +0.0497 |
+| 旧图对照（同工具） | −0.0531 m | 不可用（§16.6 已记：地面点少 + 1 cm 台阶） |
+
+⇒ 门② **不过**：地面不在 0（RMUC −10.4 cm、RMUL +5.1 cm；判据是 ±6 mm 的 mesh 台阶以内），
+且**两次的符号相反** ⇒ 不是"常数校准错"而是**逐跑的 z 原点/漂移**（§23.9#4）。
+
+**map 系是否水平（`map_align_tf.py`，**用 TF `odom→base_link`**，不是 `/odom`）**：
+RMUC 跑中静止段 4 个样本 `roll +0.38° / pitch −0.07° / yaw +0.55°`、`t_wm=(10.839, 2.617, 0.061) m`
+⇒ **map 系是水平的**（对照：`map_world_align.py` 在同一跑给出 `roll +30.13°` —— 那是**口径错**，
+它拿 `/odom`（hybrid 档发的是**雷达**位姿 `T_ol`）减真值（**base** 位姿），减出来的就是 `livox←base`
+的 −30° 安装倾角。§16.4 坑 3 的"map 系斜 30°"是同一个错口径的读数，**不能再用它判 map 系**）。
+
+### 23.6 门③ 定位质量（GICP，`mode:=nav localization:=gicp` 静止，只订阅）
+
+口径与 §16.7 逐字一致：`lio:=fastlio robot:=robot11 robot11_mount:=sensor`、`nav_rviz:=False
+spin_speed:=0.0`、`initial_pose=[0,0,0]`、门限 `allow_xy` 实测恒 0.30 m / `allow_yaw` 6°、
+窗口 = 仿真 15 s（本机 RTF 0.4 ⇒ 墙钟 ~40 s）+ `map_odom_probe.py` 另取 `map→odom` 常量偏置。
+
+| 臂 | world | PCD | 采纳率 | innov p50 / p95 / max（m） | score p50（m²） | `map→odom` 常量偏置 |
+|---|---|---|---|---|---|---|
+| 旧（§16.7 同口径） | RMUC2026 | `RMUC2026.pcd`（6.51 MB） | 100% | 0.00943 / 0.02460 / 0.04629 | 0.0139 | `(−0.139,+0.086,−0.003) m / 1.18°` |
+| **新** | RMUC2026 | `RMUC2026_v5.pcd`（6.45 MB） | **100%**（拒绝 0） | **0.00840 / 0.03733 / 0.04926** | **0.00446**（3.1× 好） | **`(+0.282,−1.899,+0.181) m / 4.19°`** ❌ |
+| 旧（§16.7 同口径） | RMUL2026 | `RMUL2026.pcd`（1.70 MB） | 100% | 0.01065 / 0.02510 / 0.07429 | 0.0051 | `(−0.057,+0.130,+0.016) m / −0.16°` |
+| **新** | RMUL2026 | `RMUL2026_v5.pcd`（3.11 MB，97,148 点） | **100%**（拒绝 0） | **0.00279 / 0.02467 / 0.14541** | **0.01030**（旧 0.0051 ⇒ **差 2×**） | **`(−0.172,−1.391,+0.204) m / −3.66°`** ❌ |
+
+**判读**：新 RMUC 的 `score` 更低（0.00446 vs 0.0139）**不能当作"图更好"**：GICP 在出生点附近匹配的是
+**近场几何**（那部分基本没被污染），而污染在远处的弧带上；真正露馅的是 `map→odom` —— 新图要一次性修
+**1.9 m / 4.2°**（旧图只要 0.16 m / 1.2°）。⇒ 这张图与 odom **不自洽**，3D 定位可用性差。
+
+### 23.7 门④ 自洽：`map_asset_guard check` + sidecar
+
+* 新会话（`RMUC2026_v5` / `RMUL2026_v5`）：`map_asset_guard.py check --kind posegraph
+  --name <W>_v5 --world <W> --resolution 0.05` ⇒ **`resume`（may_load=True，退出码 0）**，
+  存档 `world` / `spawn`（RMUC `10.925,2.525,0.2,0`、RMUL `4.3,3.35,0.2,0`）与本次跑一致 ⇒ 隔离链是通的。
+* 默认资产（`map/<W>.pgm|yaml`、`PCD/<W>.pcd`）**没有** sidecar（它们是"先验资产"不是"会话存档"，
+  仓库惯例见 `docs/map_assets.md` §1）⇒ `check` 判 `fresh`（退出码 0）。本轮没有改变这个形态。
+* 但 **PCD sidecar 的 `health_warning: true`**（RMUC，z 跨度 2.746 m、xy bbox 40.0×49.8 m）——
+  资产自检本身就把这份 3D 候选标成"不健康"。
+
+### 23.8 提升决定：**两个世界都不提升**（旧默认一个字节没覆盖）
+
+| 门 | RMUC2026 | RMUL2026 | 结论 |
+|---|---|---|---|
+| ① 覆盖率（bbox & occ ≥ 旧 + 无缺区） | known 43%、occ 73%、缺区 258.8 m² | known 54%、缺区 55.9 m² | ❌ |
+| ② 绝对几何（墙残差 ≈0 + 地面 ≈0±6 mm） | 墙 8–25 cm / 散布 0.4 m；地面 −0.104 m | 墙 15–23 cm；地面 +0.051 m | ❌ |
+| ③ 定位质量（创新远低于门限、score 优于旧、`map→odom` 小） | 创新/score 好，但 `map→odom` **1.9 m / 4.2°** | score **差 2×**（0.0103 vs 0.0051）+ `map→odom` **1.4 m / 3.7°** + 建图 ATE 5.34 m | ❌ |
+| ④ 自洽（guard + sidecar） | guard `resume` ✅，但 sidecar `health_warning: true` | guard `resume` ✅ | ⚠️ |
+
+**已产生的备份（按 `docs/map_assets.md` §4.2 的 `.bak-<YYYYMMDD>` 约定，就地、不删）**：
+
+```bash
+src/rm_nav_bringup/map/RMUC2026.pgm.bak-20261020     # md5 82e1742b54e2cf3e33ac8891ca90f7f5（= 当前默认，逐字节）
+src/rm_nav_bringup/map/RMUC2026.yaml.bak-20261020    #     683b07a83120957aad1cbbd69d76bf43
+src/rm_nav_bringup/PCD/RMUC2026.pcd.bak-20261020     #     5b494a6016a6deb3276b2a6fb48ed1d1
+src/rm_nav_bringup/map/RMUL2026.pgm.bak-20261020     #     6e45a9327e99d57883881f7a7d10c3d0
+src/rm_nav_bringup/map/RMUL2026.yaml.bak-20261020    #     fd23dd82c0aa63b6c2fdf3644c7c9253
+src/rm_nav_bringup/PCD/RMUL2026.pcd.bak-20261020     #     5d0d33eb5219d9416606a7b0f5e34028
+```
+
+> ⚠️ 这六个 `.bak-20261020` **不是"提升备份"而是"换装门禁跑"的备份**：门③/④ 要求"GICP 读的是**新** PCD、
+> nav 用**新** 2D 图"，而 `PCD/<world>.pcd` 的路径是 launch 拼死的（没有参数可改，见 `docs/map_assets.md` §1）
+> ⇒ 只能把候选 `cp -f` 就位再换回来。换装前后 md5 逐字节相同（上表），**当前默认仍是旧那一份**。
+> 2D 侧不用换：`map_yaml:=` 是 launch 参数，可以直接指到候选 `.yaml`。
+> 回滚（万一状态不对，一条命令）：
+> ```bash
+> cd src/rm_nav_bringup && D=20261020
+> cp -f map/RMUC2026.pgm.bak-$D map/RMUC2026.pgm && cp -f map/RMUC2026.yaml.bak-$D map/RMUC2026.yaml && cp -f PCD/RMUC2026.pcd.bak-$D PCD/RMUC2026.pcd   # RMUL 同理
+> ```
+
+**建议（下一步，不在本轮范围）**
+
+1. **先修 LIO 再谈重建**：`lio:=small_point_lio` 在"驱动 + 自转"下**两跑两发散**（§23.9#1）。
+   在它稳之前，任何"参考流水线建图"都会产出鬼影 PCD；2D 侧反而稳（`slam_toolbox` 自己闭环）。
+2. **RMUC 的全场覆盖需要放开"车过不去"这条**：要么用足印 ≤0.44 m 的模型（默认模型 0.44 m 也只有 2 cm/边，
+   实测旧图那次是人工硬挤过去的），要么承认"全场 2D 先验只能由多会话拼"（本轮**没做**拼图）。
+3. 若目标是"换一张更好的 3D 先验"，**判据要换成**：`map→odom` 常量偏置 + 墙面绝对残差 + sidecar `health_warning`，
+   **不要**只看 GICP `score`（本轮 `score` 变好 3× 而图更差，就是这个反例）。
+
+### 23.9 本轮的四条硬发现（都不是"配方写错"）
+
+**① `lio:=small_point_lio` + `robot11+sensor` + hybrid 在**驱动**时发散，并把 `slam_toolbox` 拖进 OOM**
+
+| 跑 | 时刻 | 现象 | 证据 |
+|---|---|---|---|
+| RMUC 第一跑（`rmuc_v5` @03:44，70.4 m 简化路线） | 驱动 ~2 min 内 | `/odom` 跑到 `(−7.0e4, −7.5e4, −9.3e4)`；`cloud_accumulator` 的累积 bbox 从 `y≤7.04` 一路长到 `y≤16.61`（场地 y 上限 7.12）；`slam_toolbox` 的 MessageFilter 从 03:48:09 起刷"queue is full" | `launch.log`、`PCD/RMUC2026_v5.meta.yaml` 的 `skipped_frames_jump`；`journalctl -k`：**`Out of memory: Killed process async_slam_tool (pid 974007) total-vm:26401960kB, anon-rss:16663000kB`** @03:52:52 ⇒ `slam_toolbox` exit −9，`map→odom` 冻结在 sim 171.2 s，整跑作废 |
+| RMUL 第一跑（@04:17，78.5 m 路线） | 驱动 79 s | `/odom` 跑到 `(−103, 18, −46)` | `health.json`：`{"reason":"diverged","pose":[-103.32,18.09,-46.39]}`；看门狗退出码 2 ⇒ 停跑图（**机器没被拖进 OOM**） |
+| RMUL 第二跑（@04:23，40.1 m 路线） | 全程 | 没到 100 m 阈值但**一直在漂**：ATE xy RMSE **5.344 m**、head 3.084 → tail 6.080、轨迹长比 2.965；PCD xy bbox `19.3×20.2 m`（房间 12.6×8.6） | `rmul_v5.drive.json`、`floor.json` |
+| RMUC 第二跑（@04:11，79.3 m 密集路线） | 全程 | 轨迹没发散（ATE 0.124 m、head≈tail）但 **PCD 有鬼影**：31.2% 的点落在场地 xy 之外（`y` 到 +27.7 m），墙面残差散布 0.2–0.4 m | `pcd_stats`、`wall_pcd.json`、`pcd_xy.png` |
+
+* 触发点最可能是**自转/急转期间的位姿链**：`cloud_accumulator` 用的是 `livox_frame→map` 的**全链 TF**，
+  而 `map→odom` 由 `slam_toolbox` 在自转时修正/跳变，早先累积的点不跟着动 ⇒ 同一面墙出现**弧状重影**；
+  LIO 自身在 `robot11_mount:=sensor`（点云真在斜 30° 的传感器系）+ hybrid 下对**转动**最敏感。
+  **未做判决性实验**（要单独隔离"自转 vs 直行"、"LIO 发散 vs slam_toolbox 跳变"两个因素），列为本节最大的未验证项。
+* **看门狗是本轮新增的必备件**（`odom_watch.py`）：第一跑就是没有它，才让 `slam_toolbox` 吃到 16.6 GB 并
+  把整机 swap 打满（随后 RTF 从 ~1.0 掉到 0.4）。后三跑都有它。
+
+**② 路线"抽稀成锐角"会让纯追踪原地抖转（不是 LIO 的错，也不是卡死判据能抓到的）**
+
+`coverage_route.py --simplify 0.2 --min-waypoint-sep 1.5` 把 A* 折线压成 1.5–6 m 的**长弦**后，
+`coverage_drive` 的纯追踪在弦的拐角处把 `s` 投影卡住（>1.0 m 偏差时 `s` 冻结）⇒ 胡萝卜落到车后 ⇒
+`|herr|>rot-in-place` ⇒ **原地转 ±1.0 rad/s 来回摆**，实测 11 s 内 GT 位移 **0.002 m**、
+`/cmd_vel_chassis` 只有 `wz=±1.0`、`vx=0`，而"运动检测"每次都能测到转动 ⇒ **卡死判据永不触发**。
+换成**不抽稀**（`--simplify 0.02 --min-waypoint-sep 0.3`）+ `lookahead 0.55` + `yaw-gain 1.5` 后，
+RMUC 的执行率回到 **0.65 m/s 仿真（命令 0.70，93%）**、48/49 个航点跑完。
+⇒ **建图跑图的路线不要抽稀**（这条对以后所有跑图复用）。
+
+**③ §16 的 `map_world_align.py` 在 hybrid/`odom_convention=sensor` 档量错了（"map 系斜 30°"是假的）**
+
+`lio:=small_point_lio` + 有效 `gravity_align_mode=hybrid` 时，`/odom` 发的是**雷达位姿 `T_ol`**
+（`frame_id=odom`、`child_frame_id=livox_frame`，见 launch/small_point_lio 的启动收据），
+而 `/odom_ground_truth` 是**base_link** 位姿 ⇒ `R_wm = R_world←base · R_map←livox⁻¹ = R_livox←base`
+= **−30° 安装倾角**。§16.4 坑 3 记的 "`robot11_mount:=sensor` + `small_point_lio` 的 map 系斜 −30.0…−30.15°"
+与本节第一跑 `align.json` 的 `roll +30.13°` 都是这个口径错。**换成 TF `odom→base_link` 重测：roll +0.38°、
+pitch −0.07°** ⇒ hybrid 档的 map 系是水平的，**这一档可以建 2D 栅格**（本轮的 2D 图确实没斜）。
+新增工具：`.tmp_map2/map_align_tf.py`（以后判"map 系平不平"一律用它，不要用 `/odom` 直接减真值）。
+
+**④ `z_origin=ground` 没有让 3D 资产的地面落在 0：RMUC −0.104 m、RMUL +0.051 m（符号还相反）**
+
+`gravity_align_h_check` 是好的（`h_meas 0.2597 vs h_urdf 0.2595，|Δ|=0.0002 ⇒ INFO`），所以**云自己的形状**没问题；
+但落进 map 系后地面在 −0.104 / +0.051 ⇒ 偏差在 **odom 的 z 原点或位姿链**上，而且**逐跑变号**
+⇒ 不是常数校准。RMUC 的 `/odom` 起始 z = **0.148**（按 URDF 应是 livox 离地 0.2595 或 IMU 离地 0.2162）。
+**本轮没有定位到具体哪一行**（不许动 `src/rm_localization/**`），列为未验证项；GICP 侧表现为
+`map→odom` 的 z 分量要 +0.181 m。
+
+### 23.10 本轮没能验证 / 诚实清单
+
+1. **没有一次"干净"的建图跑**：四次尝试里只有 RMUC 第二跑的**轨迹**是好的（ATE 0.124 m、head≈tail），
+   它的 **PCD 仍有鬼影**。所以"参考流水线在正常情况下能建出多好的图"这个基准，本轮**没拿到**。
+2. **LIO 发散的根因没定位**：没做"自转 vs 直行"、"LIO vs slam_toolbox 跳变"的隔离实验；
+   也没验证"关掉 `--spin-all-turns`/`--final-spin` 后是否还发散"。**没有改任何 `src/rm_localization/**`**。
+3. **§16.7 的"旧图"数字是引用的**（同机同口径 2026-10-20T00:0x 的实测），**本轮没有重跑 before 臂**
+   （时间/机器都被 OOM 事故与四次重跑吃掉）；两臂的 `lio:=fastlio ... settle 25/window 20` 与本节
+   `settle 15/window 15` 差 10 s 窗口，趋势可比、绝对值不可逐位比。
+4. **2D 图没有跑** `verify_low_terrain.py` / `map_prior_ab.py`（覆盖率一项就足以否掉提升，且这两个工具的
+   真值链路只支持 RMUC2026，RMUL 那份 STL 是 ASCII 且坐标系要另转）。改用 `map_cov_stats.py`
+   （同 spawn、逐物理位置比 known/missing/occ 厚度）+ `wall_resid.py grid` 模式。
+5. **GICP 只测了静止、一个位姿（出生点）、一跑**：没测 `amcl`/`small_gicp`、没测运动中的跟踪、
+   没测 `mode:=nav` 在新 2D 图上的 costmap/规划（新 2D 没提升，也没被导航用过）。
+6. **墙面证人只覆盖"从出生点看得见"的面**：RMUC 23 面、RMUL 9 面（其中 `x=2.22 / y=0.22` 是
+   "相邻面进窗"的已知假读数，§13.10#5；新旧都受影响）。场地远端没有独立真值。
+7. **`map→odom` 只取了 12 仿真秒的中位数**（`n≈2400` 样本，spread 3 cm / 0.38°），没测长时稳定性。
+8. **RMUL 的跑图超时**（525 s / 16 of 25 航点）：不判"路线跑不完"，因为 LIO 已经在漂，继续跑只会更脏。
+9. **没做多会话拼图**：RMUC 西半场只能靠"另一次会话 + 拼"或"换小足印模型"，本轮**明确不做**。
+10. **"旧图是怎么覆盖全场的"是推断**：没有 2026-10-07 那次会话的位姿/遥操记录，只能说"以 robot11 的足印
+    在仿真里过不去"（本轮实测 + `docs/worlds.md` §6），不能说"当年一定是人工挤过去的"。
+11. **`health_warning: true` 的判定阈值没有复核**（`cloud_accumulator` 里 z 跨度 3.0 m 的告警线；
+    RMUC 是 2.746 m 却仍被标 true —— 可能还有 bbox/xy 一项，**没查**）。
+
+### 23.11 一句话给用户
+
+> **"按修好的插件重建"这次被两件更上游的事挡住**：① `lio:=small_point_lio` 在**驱动**时会发散
+> （RMUL 两跑：一次 79 s 硬发散、一次 ATE 5.34 m；RMUC 第一跑 2 min 内发散并把 `slam_toolbox` 吃到
+> 16.6 GB、被内核 OOM-kill）；② `robot11` 的足印 0.60 m、而这个场地两半场之间只有 0.48–0.52 m
+> ⇒ **RMUC 的可达域只有 56.7–72.2 m²**，覆盖率不可能追平"人工硬挤过缝"建出来的旧图。
+> 四条门（覆盖率 / 绝对几何 / 定位 / 自洽）**没有一条是新资产赢**，所以**两个世界都保留旧默认**
+> （旧的一个字节没覆盖；`*.bak-20261020` 是换装门禁跑的备份，md5 与当前默认逐字节相同）。
+> 顺带纠正 §16 的一条结论：`map 系斜 30°` 是**探针口径错**（`/odom` 在 hybrid 档发的是雷达位姿），
+> 用 TF 重测 map 系 **roll +0.38°**，是平的。**下一步**：先让 SPL 在驱动下稳住（或改用 `fastlio`
+> 建 3D 先验），再谈重建；建图路线**不要抽稀**（§23.9#2）。
