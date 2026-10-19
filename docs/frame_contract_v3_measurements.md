@@ -2938,3 +2938,277 @@ local lethal 是 **267 vs 307**，差的 40 格**不是**守卫造成的 —— 
     hint），便于 grep 但不利于人眼；没有做多行/JSON 双格式。
 11. **`finite` 口径**：守卫按 nav2 严格 `< range_max`，既往探针用 `<= range_max` ⇒ 两边
     可能差 0–1 条；本节的 `finite_*` 是守卫自己的口径，跨文档比较时看比例而非绝对条数。
+
+## §18 第十轮（**本机 date=2026-10-20T01:10–01:20**）：`gravity_align_mode` 默认 = `auto`（决策 A）—— 默认路径逐字节不变，`lio:=small_point_lio` 默认就重力对齐
+
+> **本节只新增**（append-only）：§1–§17 一个字都没改。写作时 §17 是最新 ⇒ 本节取 §18
+> （§18 落笔时仍空闲）。规范侧在 **`docs/frame_contract_v3.md` §4.10**（决策/语义/生效条件/回滚/边界）。
+>
+> **本轮没有改任何二进制**（`build/small_point_lio/libsmall_point_lio.so` md5 `58bebfb8…` =
+> §10 的 `zfix`，跑前跑后一致），没有改 `src/rm_localization/**`、`src/rm_simulation/**`、
+> 地图/PCD 资产、任何 YAML。改的只有
+> ① `src/rm_nav_bringup/launch/bringup_sim.launch.py`；② 契约 §4.10；③ 本节。
+> 隔离口径与 §17 逐字相同：每跑私有 `GAZEBO_MASTER_URI` / `HOME` / `ROS_DOMAIN_ID`、
+> `gui:=False`、`nav_rviz:=False lio_rviz:=False`、`setsid` + `timeout` +
+> `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）。
+
+### 18.1 一句话结论
+
+> 把 `gravity_align_mode` 的默认值从 `off` 改成 **`auto`**（`auto = hybrid 当 lio==small_point_lio，
+> 否则 off`）之后：**默认（`lio:=fastlio`）路径的节点集合 / 每个节点的参数 / Action 顺序 /
+> `robot_description` 与改动前逐字段相同**（唯一新增 = 一行 t=0 收据），
+> 而 **`lio:=small_point_lio` 默认就重力对齐**（本机 1 跑：in-band **776/776**、倾角 **0.442°**、
+> local lethal **277**、`odom→base_link` rpy **[−0.04, −0.25, −0.22]°**、`h_meas` **0.2616 m INFO**、
+> 节点参数回读 **`gravity_align_mode=hybrid`** ⇒ `auto` 没有泄漏到下游）。
+> 显式 `off` 逐字节回退（11 节点 / 11 份 param dump 全等）；显式 `hybrid` + `lio:=fastlio`
+> 仍在 t=0 **逐字硬报错**。
+
+### 18.2 改了什么（launch 一处改动、六个消费方 + 一行收据）
+
+**为什么不能把默认值直接写成 `hybrid`**（本节的主约束）：launch 的 `lio` 默认是 `fastlio`，而
+`_check_gravity_align_contract` 对「**显式**非 off + 非 `small_point_lio`」是**硬报错**（E1 补丁
+只在 vendored `small_point_lio` 里）⇒ 默认写 `hybrid` 会让**每一个默认 launch 在 t=0 停**
+（§18.6 (d) 就是这条报错的逐字证据）。`auto` 把"默认（fastlio）不变"与"SPL 默认对齐"同时保住。
+
+| # | 文件:行（本提交） | 改动 |
+|---|---|---|
+| 1 | `bringup_sim.launch.py:823` | `_GRAVITY_ALIGN_MODES = ('off','urdf','imu','hybrid','auto')`（注释写明 auto 是解析档） |
+| 2 | `:826` / `:847` | **唯一解析点**：`_effective_gravity_align_mode(context)` + substitution `_GravityAlignEffectiveMode`（`auto` ⇒ `hybrid`/`off`；显式值原样；`auto` 绝不返回） |
+| 3 | `:862` / `:876` | 收据：`_gravity_align_resolution_msg` + `_GravityAlignResolution`（`LogInfo` 的消息体） |
+| 4 | `:2120`–`:2139` | `DeclareLaunchArgument('gravity_align_mode')`：默认 `off` → **`auto`**；choices 加 `auto`；description 写明 `auto = hybrid 当 lio==small_point_lio，否则 off` |
+| 5 | `:2154` | `gravity_align_z_origin` 的 description：`gravity_align_mode != off` → **有效值 != off**（文案澄清，无行为变化） |
+| 6 | `:223` | `_check_gravity_align_contract()` 内读的 `mode` = **有效值**（`auto`+非 SPL 直接返回；显式非 off + 非 SPL 仍逐字硬报错） |
+| 7 | `:2680` | 默认档 SPL Node 的 condition：`gravity_align_mode == 'off'` → **有效值 == off** |
+| 8 | `:2699` / `:2713` | 统一输出契约档 SPL Node 的 condition（`!= off`）**与其 `gravity_align_mode` 参数** = 有效值 |
+| 9 | `:3037` | `lio_tf_adapter_spl_node` 的 condition = 有效值 |
+| 10 | `:3520` | 新增 `LogInfo`：`gravity_align_mode == 'auto'` 时 t=0 打一行收据（显式值不打 ⇒ 显式路径的 Action 集不变） |
+| 11 | `:3536` | 组合检查 `GroupAction` 的 condition = 有效值 |
+
+**收据长这样**（本轮两跑逐字）：
+
+```text
+# 默认（lio:=fastlio）
+[INFO] [launch.user]: [gravity_align] gravity_align_mode=auto ⇒ 有效值=off（lio=fastlio；E1 补丁只存在于 small_point_lio）
+# lio:=small_point_lio
+[INFO] [launch.user]: [gravity_align] gravity_align_mode=auto ⇒ 有效值=hybrid（lio=small_point_lio）
+```
+
+### 18.3 静态证明：默认路径（`lio:=fastlio`）逐字节不变
+
+#### 18.3.1 静态 Action 树 diff（`tools/scripts/gzsim/launch_increment_diff.py`）
+
+```bash
+git show HEAD:src/rm_nav_bringup/launch/bringup_sim.launch.py > .tmp_ga/old/bringup_sim.launch.py
+ROS_LOG_DIR=/tmp/ga_roslog python3 tools/scripts/gzsim/launch_increment_diff.py \
+  --old .tmp_ga/old/bringup_sim.launch.py --new src/rm_nav_bringup/launch/bringup_sim.launch.py
+```
+
+```text
+actions: OLD 69 / NEW 70；共有 64
+新增（NEW − OLD，整棵子树逐字段）：6
+  + DeclareLaunchArgument name=gravity_align_mode
+  + DeclareLaunchArgument name=gravity_align_z_origin
+  + LogInfo cond=IfCondition
+  + GroupAction cond=IfCondition
+  + GroupAction
+  + Node cond=IfCondition
+消失/变成另一份（OLD − NEW）：5
+  - DeclareLaunchArgument name=gravity_align_mode
+  - DeclareLaunchArgument name=gravity_align_z_origin
+  - GroupAction cond=IfCondition
+  - GroupAction
+  - Node cond=IfCondition
+共有 Action 的相对顺序：一致 ✅
+```
+
+**逐项归类**（这 5 个"变成另一份"都不在默认路径的执行集里，或只是 launch 声明元数据）：
+
+| 变动项 | 是什么 | 默认路径会不会执行 |
+|---|---|---|
+| `DeclareLaunchArgument(gravity_align_mode)` | **本任务的目标**：默认 `off`→`auto`、choices +`auto`、description | 只影响 `--show-args` 元数据 |
+| `DeclareLaunchArgument(gravity_align_z_origin)` | **纯文案**（`gravity_align_mode != off` → 有效值 != off） | 只影响 `--show-args` 元数据 |
+| `Node cond=IfCondition` | `lio_tf_adapter_spl_node` 的 condition 换成有效档 | **不执行**（`lio:=fastlio`） |
+| `GroupAction`（`bringup_LIO_group`） | 内含 SPL 组：两个 SPL Node 的 condition / `gravity_align_mode` 参数换成有效档 | **不执行**（`lio:=fastlio`） |
+| `GroupAction cond=IfCondition` | 组合检查组：condition 换成有效档 | **不执行**（有效值 off） |
+| `LogInfo`（新增） | `auto` 的 t=0 收据 | **执行**（= 唯一新增的执行项） |
+
+`--show-args` 的可见差异只有 `gravity_align_mode` 自己：
+
+```text
+'gravity_align_mode': ... auto（默认）= hybrid 当 lio==small_point_lio，否则 off ...
+   Valid choices are: ['off', 'urdf', 'imu', 'hybrid', 'auto']   (default: 'auto')
+```
+
+#### 18.3.2 执行集（visited）diff：**0 changed / 0 removed**
+
+静态 diff 把"condition 的 substitution 换了"也显示成"改了一份"，**即使那扇门在默认参数下根本
+不会打开**（`lio != small_point_lio`）。所以补一个**按 launch 的 visit 规则**求值的对照
+（`.tmp_ga/visited_diff.py`：按执行顺序递归，condition 假 ⇒ 整棵子树跳过；Node 的参数按**求值后的
+值**比较；另抽 `robot_description` 的 xacro 命令子树算 md5）：
+
+| 参数组（OLD=HEAD 快照 / NEW=本提交） | process 执行集 | log | opaque | robot_description md5 |
+|---|---|---|---|---|
+| **默认**（不传任何参数） | **7 / 7，0 新增 / 0 删除**，md5 `27516842…` 相同 | +1（收据） | 2 / 2 | `bb73e46a…` 相同 |
+| 默认 lio + **整套 nav**（`mode:=nav localization:=gicp robot:=robot11 robot11_mount:=sensor band_guard:=True global_obstacle:=scan`） | **8 / 8，0 / 0**，md5 `28f51ed6…` 相同 | +1 | 2 / 2 | 相同 |
+| 显式 `off` + `lio:=small_point_lio` | **6 / 6，0 / 0**，md5 `b9bd7eb5…` 相同 | 2 / 2（**无新增**） | 2 / 2 | 相同 |
+| 显式 `hybrid` + `lio:=small_point_lio` | **7 / 7，0 / 0**，md5 `a4e6ffcc…` 相同 | 2 / 2 | 3 / 3 | 相同 |
+| **OLD 显式 `hybrid` vs NEW `auto`**（都 `lio:=small_point_lio`） | **7 / 7，0 / 0**，md5 `a4e6ffcc…` 相同 | +1（收据） | 3 / 3 | 相同 |
+
+> 最后一行是决策 A 的**等价性证明**：`auto`（新）与用户显式写 `hybrid`（旧）在 `lio:=small_point_lio`
+> 上的**执行集逐字段相同**（`auto` 只多一行收据）。
+> 前两行 = 默认路径：**执行项只多一行日志**；`--arg` 的声明元数据差异见 18.3.1。
+
+#### 18.3.3 运行期：`ros2 node list` / `param dump` / topic / service（old vs new）
+
+两跑逐字相同配方：`ros2 launch <launch> gui:=False`（**不传 mode / robot / lio / gravity_align_mode**），
+节点集稳定后（连续两次采样相同）dump。旧 = HEAD 快照（md5 `bcaf3839…`），新 = 本提交。
+
+| 量 | OLD（HEAD） | NEW（本提交） | 判决 |
+|---|---|---|---|
+| `ros2 node list`（剔除 `transform_listener_impl_*` 这类名字带进程哈希的内部 listener） | 12 | 12 | **逐行相同 ✅** |
+| launch 起的节点 | `/complementary_filter_gain_node /fake_vel_transform /gazebo /ground_segmentation /imu_plugin /joint_state_publisher /laser_mapping /lio_tf_adapter /livox_frame_plugin /mecanum_controller /pointcloud_to_laserscan /robot_state_publisher` | 同左 | 相同 |
+| `ros2 param dump`（逐节点） | 12 份 | 12 份 | **逐文件 byte-diff 0；拼接 md5 `1a44e04636b16ae6b079975d27135971` 相同 ✅** |
+| `ros2 topic list` | 31 | 31 | 相同 ✅ |
+| `ros2 service list` | 84 | 84 | 相同 ✅ |
+
+原始输出：`.tmp_ga/ga_def_{old,new}/{nodes,topics,services}.txt` + `params/`；
+汇总 `.tmp_ga/default_identity.txt`。
+
+### 18.4 (b) `lio:=small_point_lio` + 默认 `auto` ⇒ hybrid：nav 1 跑
+
+**命令**（唯一要点：**不传 `gravity_align_mode`**，让它走默认 `auto`）：
+
+```bash
+SETTLE=20 WINDOW=20 PROBES="navband grav points" \
+  bash tools/scripts/tiltmount/spl_ab_bench.sh ga_auto_spl zfix \
+  world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp robot:=robot11 \
+  robot11_mount:=sensor spin_speed:=0.0 band_guard:=True
+# 探针口径：navband settle 20 / window 20（仿真 s）；grav 5 帧（settle 20）；uc_procstats 20/20
+```
+
+**先证明"默认真的落到了 hybrid"**（launch 日志 + 参数回读）：
+
+```text
+[INFO] [launch.user]: [gravity_align] gravity_align_mode=auto ⇒ 有效值=hybrid（lio=small_point_lio）
+[INFO] [launch.user]: [gravity_align] mode=hybrid ⇒ 统一输出契约启用：LIO publish_tf:=false +
+  odom_convention:=sensor、lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy
+  （来源=URDF-xacro.process_file）= [-30.000000, 0.000000, 0.000000]°（robot='robot11'
+  mount='sensor' axis='roll'）；z_origin=ground gravity_align_h=URDF-xacro.process_file → 0.259527 m
+[small_point_lio]: gravity_align_init_hybrid: Δ(URDF,IMU)=0.002° < 2° ⇒ 用 URDF 先验
+[small_point_lio]: gravity_align_init: mode=hybrid src=urdf R_world_body rpy(deg)=[-30.000 0.000 0.000]
+  Δ(URDF,IMU)=0.002° world_gravity=[0.000 -0.000 -9.810] body_source=imu_mean200
+[small_point_lio]: gravity_align_z: z_origin=ground h(URDF)=0.259527 m lever_z=(R_ws·t_IL).z=0.043301 m
+  ⇒ state_z=0.216226 m（odom 的 z=0 = 初始化时刻的地面；初始地图点用同一平移）
+[small_point_lio]: gravity_align_h_check: h_urdf=0.2595 m h_meas=0.2616 m |Δ|=0.0020 m < 0.03 ⇒ INFO
+  （inliers=14434 tilt=0.07° resid_p50=0.0016 p95=0.0045）
+```
+
+```text
+/small_point_lio publish_tf              = Boolean value is: False
+/small_point_lio odom_convention         = String value is: sensor
+/small_point_lio gravity_align_mode      = String value is: hybrid        ← ★ auto 没有泄漏
+/small_point_lio gravity_align_rpy       = Double values are: array('d', [-30.0, 0.0, 0.0])
+/small_point_lio gravity_align_z_origin  = String value is: ground
+/small_point_lio gravity_align_h         = Double value is: 0.25952717
+/lio_tf_adapter  odom_topic              = String value is: /odom
+```
+
+**主表**（`navband` 200 帧 / `band_guard` 8 个 5 s 样本的中位；单跑 n=1）：
+
+| 指标 | 本轮 `auto ⇒ hybrid` | 对照（§17.8 同配方、显式 hybrid / off） |
+|---|---|---|
+| `/scan` 有限波束/帧 | **776**（min 755 / max 789） | 775–776 |
+| local 在带 `[0,2]` | **776 / 776（100%）**；`band_guard` **11 样本全部 100%**（772/772×2、775、777、778、779、780、783/783×4） | hybrid 779.5/779.5；off **333/776** |
+| local kept-y | **[−0.635, 5.090] m，`one-sided=no`** | hybrid [−0.636, 5.086]；off [0.268, 3.404] 单侧 +y |
+| local z min/p50/max | **0.020 / 0.037 / 0.076 m** | hybrid 0.020/+0.036/0.068 |
+| local **lethal** | **277** | hybrid 267；off 288 |
+| local inscribed / free | 9496.5 / 42386.5 | hybrid 9448/42442；off 8896.5/44260 |
+| local **最近 lethal** | **0.7215 m** | hybrid 0.703；off 0.755 |
+| local **前方 2.0×1.2 m lethal** | **21** | hybrid 28；off 17 |
+| 车 1 m 内 lethal | 26 | hybrid 34；off 25 |
+| global lethal/inscribed/free | 3725 / 16875 / 10175 | off（§13.8 B）3713/16886/10176；**两档是同一张全局图**（全局层不吃局部高度带，见 §4.10.4 第 3 条） |
+| **地面残余倾角**（原始云→TF→世界系拟合，主指标） | **0.442°**（5 帧 [0.419–0.532]；`ang_global` 0.376°） | hybrid 0.518°（§10.4）/0.346–0.488°（§3.1）；off **30.115°** |
+| 点云自身帧里的地面倾角 | **29.993°**（= 安装角） | — |
+| 地面在 `base_link` 里 | **0.0156°**（⇒ 真的平了） | — |
+| `odom→base_link` rpy（probe） | **[−0.044, −0.250, −0.216]°** | hybrid [0.30…0.43, −0.21…−0.38, −0.04…+0.05]；off [30.06…30.20, …] |
+| 同上（窗口末端 `tf2_echo`） | [−0.02…−0.12, −0.385…−0.393, −0.26…−0.28]° | — |
+| `h_meas` | **0.2616 m / Δ=0.0020 m ⇒ INFO** | 0.2603/0.2615（§13.9） |
+| ms/帧（20 s 窗口） | **16.15**（单跑；同轮 A/B 见 §10.5 的 13.90 vs 15.43，**不可跨轮比**） | hybrid 13.90 / off 15.43（§10.5） |
+| 初始化 | 2.10 仿真 s / 12.14 墙钟 s | 2.10–2.20 / 11.67–12.84 |
+| adapter CPU / RTF | 0.183% / 0.366 | 0.209% / — |
+
+**read-out（契约侧）**：`/odom` publisher **1**、`/cloud_registered` 1、`/scan` 1、`/tf` 5、
+`/tf_static` 1、`/local_costmap/costmap_raw` 1；`/Odometry` **0**（已被 remap 成 `/odom`）。
+⇒ 统一输出契约（选项 U）在默认档下**真的生效**，`odom→base_link` 只有 adapter 一个发布者。
+
+原始数据：`.tmp_ab/ga_auto_spl/{launch.log,probe.json,navband.json,points.json,proc.json,params.txt,publishers.txt}`。
+
+### 18.5 (c) 显式 `off` 回退：逐字节
+
+**静态**：18.3.2 表的第 3 行 —— `lio:=small_point_lio gravity_align_mode:=off` 的执行集
+**6 / 6，0 新增 / 0 删除 / 0 改动**，process md5 `b9bd7eb5…` 与 HEAD 快照完全相同。
+
+**运行期**（同一配方，两跑只换 launch 文件：HEAD 快照 vs 本提交）：
+
+```bash
+ros2 launch <launch> gui:=False lio:=small_point_lio gravity_align_mode:=off \
+  robot:=robot11 robot11_mount:=sensor
+```
+
+| 量 | OLD（HEAD `bcaf3839…`） | NEW（本提交） | 判决 |
+|---|---|---|---|
+| `ros2 node list`（剔除内部 listener） | 11 | 11 | **逐行相同 ✅**（`/small_point_lio` 在，`/lio_tf_adapter` **不在**） |
+| `ros2 param dump` | 11 份 | 11 份 | **逐文件 byte-diff 0；拼接 md5 `64e97e9dbd20957b88e6a03e7df142be` 相同 ✅** |
+| `ros2 topic list` / `service list` | 27 / 78 | 27 / 78 | 相同 ✅ |
+| `gravity_align_mode=auto ⇒` 收据 | 0 行 | **0 行** | 显式 off **不新增任何日志 Action** ✅ |
+| E1/E1b 日志（`gravity_align_init` / `z` / `h_check`） | 0 行 | 0 行 | off 档行为不变 ✅ |
+
+原始数据：`.tmp_ga/ga_off_spl_{old,new}/` + 汇总 `.tmp_ga/off_spl_identity.txt`。
+
+### 18.6 (d) 显式 `hybrid` + `lio:=fastlio`：仍硬报错（逐字）
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py gui:=False lio:=fastlio gravity_align_mode:=hybrid
+# exit code 1；gzserver/robot_state_publisher/... 一个都没起（日志里 0 条进程启动行）
+```
+
+```text
+[ERROR] [launch]: Caught exception in launch (see debug for traceback): [launch] gravity_align_mode:=hybrid 只对 lio:=small_point_lio 生效（E1 初始化对齐的补丁在 small_point_lio 包里；fastlio/pointlio/cartographer 没有 gravity_align_mode / gravity_align_rpy 这些参数，传了也不会生效）⇒ 当前 lio:=fastlio：请改成 lio:=small_point_lio，或把 gravity_align_mode 设回 off
+```
+
+⇒ **文案与改动前逐字相同**（`auto` 只是不触发它，没有改写它）。
+
+### 18.7 组合矩阵：`auto` 永不放错，显式值语义不变
+
+`.tmp_ga/contract_matrix.py` 直接调用 launch 里的**同一个** `_check_gravity_align_contract()`，
+对 5 个 lio × 5 个 mode 共 **25 格**求值：
+
+| lio \ mode | `auto`（默认） | `off` | `urdf` | `imu` | `hybrid` |
+|---|---|---|---|---|---|
+| `fastlio` | **放行（有效值 off）** | 放行 | 硬报错 | 硬报错 | 硬报错 |
+| `pointlio` | **放行（off）** | 放行 | 硬报错 | 硬报错 | 硬报错 |
+| `small_point_lio` | **放行（hybrid）** | 放行 | 放行 | 放行 | 放行 |
+| `none` | **放行（off）** | 放行 | 硬报错 | 硬报错 | 硬报错 |
+| `cartographer` | **放行（off）** | 放行 | 硬报错 | 硬报错 | 硬报错 |
+
+⇒ `auto` 在**所有** lio 上都放行（这正是默认值不能是 `hybrid` 的原因）；显式 `urdf|imu|hybrid`
++ 非 SPL 的**硬报错语义一格没变**。收据字符串也逐格核对（`… ⇒ 有效值=off（lio=<非 SPL>；
+E1 补丁只存在于 small_point_lio）`）。
+
+### 18.8 本轮没能验证 / 诚实边界
+
+1. **`auto` 的实跑只有 1 跑**（`world:=RMUL2026 mode:=nav localization:=gicp robot:=robot11
+   robot11_mount:=sensor spin_speed:=0.0 band_guard:=True`）。它是**存在性/口径**证据，**不是**
+   精度/性能 A/B；A/B 仍引用 §10/§13/§17 的多跑表。
+2. **默认路径的运行期对照是 `mode:=''`（launch 默认）**，节点 12 个（无 nav2）。**带全套 nav2 的
+   默认 lio** 没跑运行期对照，只有 18.3.2 的执行集静态对照（8 个 process Action、md5 相同）。
+3. **只测 `robot:=robot11` + `robot11_mount:=sensor`**；默认模型 / `hzmirm` / `plugin|urdf` 没跑。
+4. **`hzmirm` 的 `turret≠0`** 只做 launch 求值；**3–5 cm WARN 带**没构造出真实数据（§10.9 第 6 条）。
+5. **`small_point_lio` + 默认模型（`R_bl=I`）的 SIGSEGV** 是独立缺陷（§16.9），本轮**没有**碰；
+   它意味着 `auto` 的收益目前只在 `R_bl≠I` 的模型上可见。
+6. **`ros2 node list` 里的 `transform_listener_impl_*`** 是 tf2 内部 listener（名字带进程哈希），
+   两跑必然不同 ⇒ 已从对照里剔除并在表里注明；它们是 **launch 之外的节点**，不属于本次验收口径。
+7. **`spl_ab_bench.sh` 收尾会把 `build/` 的二进制还原成 `.tmp_uc/bins/after`（`zfix_prev`）**，
+   与本轮开始时的 `zfix`（`58bebfb8…`）不同 ⇒ 收尾后**已手工还原成 `zfix`** 并复核 md5
+   （`build/small_point_lio/libsmall_point_lio.so` = `58bebfb81537978a0c93067be09de1be`）。
+   本轮所有数字都在 `zfix` 上取得（`meta.txt` 记 `bin_lib_small_point_lio_md5`）。

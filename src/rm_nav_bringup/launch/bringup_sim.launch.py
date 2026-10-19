@@ -215,12 +215,12 @@ def _check_gravity_align_contract(context):
     ⚠️ 必须作为 **Action**（OpaqueFunction）放在 `declare_LIO_cmd` / `declare_gravity_align_mode_cmd` /
     `declare_robot11_mount_cmd` **之后**：`LaunchConfiguration(...).perform()` 读的是"已经声明过"的值，
     声明顺序反了会直接抛 "does not exist"（与 `_check_robot11_mount_combination` 同一个坑）。
+    ★ 2026-10-20（决策 A / 契约 §4.10）：这里读的是**有效档**（`_effective_gravity_align_mode`）——
+      `gravity_align_mode:=auto` 在 lio 不是 small_point_lio 时**解析成 off** ⇒ 本检查直接返回，
+      **不会**因为默认值变成 auto 而误报；而**显式** `urdf|imu|hybrid` + 非 SPL 仍然逐字硬报错
+      （用户的明确请求错了就必须停，`auto` 不替它兜底）。
     """
-    mode = (LaunchConfiguration('gravity_align_mode').perform(context) or '').strip() or 'off'
-    if mode not in _GRAVITY_ALIGN_MODES:
-        raise RuntimeError(
-            "[launch] gravity_align_mode:=%r 不是可用取值（%s）—— 选错不会静默回退，这里直接停"
-            % (mode, ' | '.join(_GRAVITY_ALIGN_MODES)))
+    mode = _effective_gravity_align_mode(context)      # auto ⇒ hybrid|off；显式值原样
     if mode == 'off':
         return []
     lio = (LaunchConfiguration('lio').perform(context) or '').strip()
@@ -813,8 +813,74 @@ def _parsed_livox_mount(context, urdf_path=None, mappings=None, robot=None, moun
 
 
 #: ★ 2026-10-20：E1 重力对齐（docs/frame_contract_v3.md §4）的四档来源。
-#:   **默认 off = 现状**（不改任何一条路径、不给任何节点多加一个参数）；推荐 hybrid。
-_GRAVITY_ALIGN_MODES = ('off', 'urdf', 'imu', 'hybrid')
+#: ★ 2026-10-20（决策 A / 契约 §4.10）：**默认值 `off` → `auto`**。`auto` **本身不是一档算法**，
+#:   只是一条解析规则：**`auto = hybrid 当 lio==small_point_lio，否则 off`**。
+#:   为什么不能把默认直接写成 `hybrid`：launch 的默认 `lio` 是 `fastlio`，而显式非 off + 非
+#:   small_point_lio 是**硬报错**（E1 补丁只打在 vendored 的 small_point_lio 里）⇒ 默认值写
+#:   hybrid 会让**每一个默认 launch 在 t=0 就停**。`auto` 让"默认（lio:=fastlio）逐字节不变"
+#:   与"选了 small_point_lio 就自动重力对齐"同时成立。
+#:   显式 `off|urdf|imu|hybrid` 的语义**一个字节都没改**（含"显式 hybrid + fastlio 仍硬报错"）。
+_GRAVITY_ALIGN_MODES = ('off', 'urdf', 'imu', 'hybrid', 'auto')
+
+
+def _effective_gravity_align_mode(context):
+    """`gravity_align_mode` 的**有效档**（`off | urdf | imu | hybrid`）—— **唯一的解析点**。
+
+    · 显式 `off|urdf|imu|hybrid` ⇒ **原样返回**（不替用户擦屁股：显式 `hybrid` + `lio:=fastlio`
+      仍然由 `_check_gravity_align_contract` 硬报错，见那里的注释）；
+    · `auto` ⇒ `hybrid` 当 `lio == small_point_lio`，否则 `off`（E1 补丁只在那个包里）。
+
+    ⚠️ `auto` **绝不下传**：节点 condition、节点参数、组合检查看到的都只有有效档 ——
+    这就是"解析一次、到处使用"的那一次。
+    """
+    raw = (LaunchConfiguration('gravity_align_mode').perform(context) or '').strip() or 'off'
+    if raw not in _GRAVITY_ALIGN_MODES:
+        raise RuntimeError(
+            "[launch] gravity_align_mode:=%r 不是可用取值（%s）—— 选错不会静默回退，这里直接停"
+            % (raw, ' | '.join(_GRAVITY_ALIGN_MODES)))
+    if raw != 'auto':
+        return raw
+    lio = (LaunchConfiguration('lio').perform(context) or '').strip()
+    return 'hybrid' if lio == 'small_point_lio' else 'off'
+
+
+class _GravityAlignEffectiveMode(Substitution):
+    """把 `gravity_align_mode` 的**有效档**喂给下游（condition / 节点参数）。
+
+    惰性求值（照抄 `_GravityAlignRpy` / `_PackageShareFile` 的原则：不读这个槽位的 launch 组合
+    零成本）。返回值永远是 `off|urdf|imu|hybrid` —— `auto` 在这一层就被消费掉，不会出现在
+    任何节点的参数表里。
+    """
+
+    def perform(self, context):
+        return _effective_gravity_align_mode(context)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
+
+
+def _gravity_align_resolution_msg(context):
+    """`gravity_align_mode:=auto` 的**解析收据**（t=0 打一次；默认 launch 也会打）。
+
+    形如 `[gravity_align] gravity_align_mode=auto ⇒ 有效值=hybrid（lio=small_point_lio）` /
+    `… ⇒ off（lio=fastlio；E1 补丁只存在于 small_point_lio）`。
+    """
+    raw = (LaunchConfiguration('gravity_align_mode').perform(context) or '').strip() or 'off'
+    eff = _effective_gravity_align_mode(context)
+    lio = (LaunchConfiguration('lio').perform(context) or '').strip() or '(空)'
+    why = 'lio=small_point_lio' if eff == 'hybrid' else (
+        'lio=%s；E1 补丁只存在于 small_point_lio' % lio)
+    return '[gravity_align] gravity_align_mode=%s ⇒ 有效值=%s（%s）' % (raw, eff, why)
+
+
+class _GravityAlignResolution(Substitution):
+    """`LogInfo` 的消息体：auto 的解析收据（惰性求值 ⇒ `--show-args` 不执行、不读参数）。"""
+
+    def perform(self, context):
+        return _gravity_align_resolution_msg(context)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
 
 
 def _urdf_livox_mount_rpy_deg(context):
@@ -2038,8 +2104,14 @@ def generate_launch_description():
         choices=list(_LIVOX_MOUNTS))
 
     # ★ 2026-10-20：**E1 重力对齐**（docs/frame_contract_v3.md §4 / §13）+ 统一输出契约（选项 U）。
-    #   默认 off ⇒ **现状**：不给任何节点多加一个参数、不加任何节点、Action 顺序不变。
-    #   非 off ⇒ 三件事**成组**发生（这是"选项 U"的定义，别只开一半）：
+    # ★ 2026-10-20（决策 A / 契约 §4.10）：默认值 `off` → **`auto`**。
+    #   `auto` 不是算法档，是**解析规则**：`auto = hybrid 当 lio==small_point_lio，否则 off`。
+    #   为什么不能把默认直接写成 hybrid：launch 的默认 `lio` 是 `fastlio`，而显式非 off + 非 SPL
+    #   是**硬报错**（E1 补丁只在 small_point_lio 里）⇒ 默认 hybrid 会让每个默认 launch 在 t=0 停。
+    #   `auto` 让两个默认同时成立：`lio:=fastlio`（默认）⇒ 有效值 off = **逐字节现状**；
+    #   `lio:=small_point_lio` ⇒ 有效值 hybrid = **该槽位默认就重力对齐**（用户签字的决策 A）。
+    #   显式 `off` ⇒ 现状：不给任何节点多加一个参数、不加任何节点、Action 顺序不变。
+    #   显式有效值非 off ⇒ 三件事**成组**发生（这是"选项 U"的定义，别只开一半）：
     #     ① 本 launch 把 `gravity_align_rpy` **从 URDF 自动算**出来（`_GravityAlignRpy`）传给 LIO，
     #        并把 mode 一起传下去 ⇒ 估计器初始化时把那 30° 吸收进 `odom`（`odom` 真的重力对齐）；
     #     ② 给 LIO 传 `publish_tf:=false` + `odom_convention:=sensor` ⇒ 它只发 `T_ol`、不发 TF；
@@ -2047,14 +2119,20 @@ def generate_launch_description():
     #        `odom→base_link` 全栈**唯一发布者** = adapter（契约 I2），外参与 ① 同一个 URDF 来源。
     declare_gravity_align_mode_cmd = DeclareLaunchArgument(
         'gravity_align_mode',
-        default_value='off',
+        default_value='auto',
         choices=list(_GRAVITY_ALIGN_MODES),
-        description='E1 重力对齐（只对 lio:=small_point_lio 生效；默认 off = 现状，什么都不改）。'
+        description='E1 重力对齐（只对 lio:=small_point_lio 生效；默认 auto = 该槽位自动对齐、'
+                    '其它 lio 保持逐字节现状）。'
+                    'auto（默认）= hybrid 当 lio==small_point_lio，否则 off —— E1 的补丁只存在于 '
+                    'small_point_lio 包里，而 launch 的默认 lio 是 fastlio ⇒ 默认组合的有效值是 off'
+                    '（不改任何一条路径）；选 small_point_lio 时才自动变成 hybrid（= 决策 A）。'
                     'off = 不初始化对齐（odom = 初始化时刻的传感器壳体系 ⇒ 斜装就斜 30°）；'
                     'urdf = 用 **URDF 推出**的先验 rpy（不需要 IMU、不需要静止，瞬时；先验错时**无告警**）；'
                     'imu = 用 200 帧 IMU 均值实测的重力方向（需要静止；不需要任何安装参数）；'
                     'hybrid = 两者都算 + Δ 互检（<2° 用 URDF / 2~5° WARN 改用 IMU / ≥5° ERROR 改用 IMU）'
-                    '—— **推荐档**。★ 非 off 时同时启用**统一输出契约**：LIO 的 publish_tf:=false、'
+                    '—— **推荐档**（= auto 在 small_point_lio 上的有效值）。'
+                    '⚠️ 显式 urdf|imu|hybrid + 非 small_point_lio 是**硬报错**（t=0 停），只有 auto 会自动降级。'
+                    '★ 有效值非 off 时同时启用**统一输出契约**：LIO 的 publish_tf:=false、'
                     'odom_convention:=sensor，并由 lio_tf_adapter 成为 odom→base_link 的唯一发布者；'
                     'gravity_align_rpy 由本 launch 从 URDF 自动算（**不手填**）。'
                     '验收线：残余地面倾角 <0.7°（实测 urdf 0.474° / hybrid 0.581° / off 30.110°，'
@@ -2063,7 +2141,8 @@ def generate_launch_description():
                     '5 个发散（docs/odom_base_link_practice_survey.md §9.4(6)）')
 
     # ★ 2026-10-21：E1b —— **odom 的 z 原点**（契约 v3 §4.3）。
-    #   默认 `ground`（**只在 gravity_align_mode != off 时生效**；off 档根本不给节点传这两个键）：
+    #   默认 `ground`（**只在有效值 != off 时生效** —— `gravity_align_mode:=auto` 也会先解析；
+    #   off 档根本不给节点传这两个键）：
     #   odom 的 z=0 = 初始化时刻的地面 ⇒ base_link 起始 z = +0.102499、livox_frame = +0.2595（robot11）。
     #   为什么必须修：E1 只设了初始**旋转**，odom 原点还在传感器壳上 ⇒ nav2 local costmap 的
     #   `min_obstacle_height: 0.0` 把 scan 盘面（z=−0.159）整盘丢掉（193→0 lethal，实测见
@@ -2072,7 +2151,8 @@ def generate_launch_description():
         'gravity_align_z_origin',
         default_value='ground',
         choices=['sensor', 'ground'],
-        description='E1b：odom 的 z 原点（只在 gravity_align_mode != off 时生效）。'
+        description='E1b：odom 的 z 原点（只在 gravity_align_mode 的**有效值** != off 时生效；'
+                    'auto 会先解析成 hybrid/off）。'
                     'ground（默认）= odom 的 z=0 = **初始化时刻的地面**，高度 `gravity_align_h` '
                     '由本 launch 从 URDF 算（base_link 离地 + livox z 偏置：robot11 0.259527 / '
                     'hzmirm 0.800000 / 默认模型 0.235000 m）；节点初始化时还会用第一帧点云'
@@ -2569,7 +2649,7 @@ def generate_launch_description():
 
         # ===== lio:=small_point_lio（vendored Yancey2023/small_point_lio，MIT，pin 688d75c）=====
         # 与上面两个槽位的**本质区别**：它自己就发 `odom→base_link`（源码硬编码），所以**默认档**
-        # （gravity_align_mode:=off）下：
+        # （有效值 off —— 含默认 `auto` + 默认 `lio:=fastlio`；见契约 §4.10）下：
         #   ① /Odometry → /odom 仍要 remap（统一话题口径）；
         #   ② **绝不能**再起 lio_tf_adapter（否则 odom→base_link 两个发布者 → 双父边/抖动）；
         #   ③ 它不认 camera_init/body ⇒ T1 回退静态桥也要排除它（见下面 icp_frame_bridge_condition）。
@@ -2577,7 +2657,7 @@ def generate_launch_description():
         # 失败就丢帧、连 /Odometry 都不发）—— 仿真里由 robot_state_publisher 从 URDF 提供
         # （实测 /tf_static 里有 base_link→livox_frame (0.12,0,0.175)，见 docs/lio_slots.md §2）。
         #
-        # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：**gravity_align_mode != off 时换成下面第二个 Node** ——
+        # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：**有效值 != off 时换成下面第二个 Node** ——
         #   同一个可执行文件/节点名，只是参数不同，两个 definition 互斥（照抄本文件
         #   linefit / p2l 在 robot11_mount:=sensor 上的"两份互斥 Node"写法）：
         #     publish_tf:=false      ⇒ 它不再发 odom→base_link（那是 adapter 的活，契约 I2）
@@ -2594,9 +2674,10 @@ def generate_launch_description():
             # 用户不必去猜"launch 到底给我读了 mid360_sim.yaml 还是 tuned 版"，日志里直接有。
             LogInfo(msg=['lio:=small_point_lio 使用的参数文件 = ', small_point_lio_params]),
             Node(
-                # 默认档（gravity_align_mode:=off）：**与 2026-10-19 之前逐字节相同**的参数表。
+                # 默认档（**有效值** off —— 含默认 `auto` + 默认 `lio:=fastlio`）：
+                # **与 2026-10-19 之前逐字节相同**的参数表。
                 condition = IfCondition(PythonExpression([
-                    "'", LaunchConfiguration('gravity_align_mode'), "' == 'off'"])),
+                    "'", _GravityAlignEffectiveMode(), "' == 'off'"])),
                 package='small_point_lio',
                 executable='small_point_lio_node',
                 name='small_point_lio',
@@ -2610,11 +2691,12 @@ def generate_launch_description():
                 remappings=[('/Odometry', '/odom')],
             ),
             Node(
-                # 统一输出契约档（gravity_align_mode ∈ urdf|imu|hybrid）。
+                # 统一输出契约档（**有效值** ∈ urdf|imu|hybrid；默认 auto + small_point_lio
+                # ⇒ hybrid，也走这一份）。
                 # 参数含义见 src/rm_localization/small_point_lio/src/small_point_lio_node.cpp 的
                 # "统一输出契约"注释块；两个发布参数默认值 = 现状，所以只有这一档显式传。
                 condition = IfCondition(PythonExpression([
-                    "'", LaunchConfiguration('gravity_align_mode'), "' != 'off'"])),
+                    "'", _GravityAlignEffectiveMode(), "' != 'off'"])),
                 package='small_point_lio',
                 executable='small_point_lio_node',
                 name='small_point_lio',
@@ -2627,7 +2709,8 @@ def generate_launch_description():
                      # ② /Odometry 改发 LIO 原始状态 T_ol（frame_id=odom、child_frame_id=livox_frame）
                      'odom_convention': 'sensor',
                      # ③ E1：初始化时把 URDF 的安装倾角吸收进 odom
-                     'gravity_align_mode': LaunchConfiguration('gravity_align_mode'),
+                     # ★ 2026-10-20：传**有效档**（auto 已解析；节点永远看不到 auto）
+                     'gravity_align_mode': _GravityAlignEffectiveMode(),
                      'gravity_align_rpy': [_GravityAlignRpy()],
                      # ④ E1b：z 原点（契约 v3 §4.3）。`ground` ⇒ odom 的 z=0 = 初始化时刻的地面，
                      #   h 由 _gravity_align_h() 从 URDF 算（不手填）；`sensor` = 旧行为（回退用）。
@@ -2923,7 +3006,8 @@ def generate_launch_description():
     )
 
     # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：`lio:=small_point_lio` **也**起 lio_tf_adapter ——
-    #    但**只在 `gravity_align_mode != off` 时**（= 统一输出契约档）。默认档（off）保持原样：
+    #    但**只在有效值 != off 时**（= 统一输出契约档；默认 `auto` + `lio:=small_point_lio`
+    #    也解析成 hybrid，于是这个槽位默认就对齐）。默认档（有效值 off）保持原样：
     #    那个槽位的 `odom→base_link` 仍由 LIO 自己发、**不启动**本节点（否则两个发布者）。
     #
     # ==================== 三方 `T_bl` 记账（写死在这里，改之前先读）====================
@@ -2950,7 +3034,7 @@ def generate_launch_description():
     lio_tf_adapter_spl_node = Node(
         condition = IfCondition(PythonExpression([
             "'", LaunchConfiguration('lio'), "' == 'small_point_lio' and '",
-            LaunchConfiguration('gravity_align_mode'), "' != 'off'"])),
+            _GravityAlignEffectiveMode(), "' != 'off'"])),
         package='lio_tf_adapter',
         executable='lio_tf_adapter_node',
         name='lio_tf_adapter',
@@ -3376,9 +3460,10 @@ def generate_launch_description():
     ld.add_action(declare_livox_raise_m_cmd)
     # ★ 2026-10-08：robot:=robot11 的雷达**安装方式**（倾角记在插件 vs 记在 URDF 关节）
     ld.add_action(declare_robot11_mount_cmd)
-    # ★ 2026-10-20：E1 重力对齐 + 统一输出契约（默认 off ⇒ 演示路径零改动；见 declare 的 description）
+    # ★ 2026-10-20：E1 重力对齐 + 统一输出契约（默认 auto ⇒ lio:=fastlio 下有效值 off =
+    #   演示路径零改动；见 declare 的 description 与契约 §4.10）
     ld.add_action(declare_gravity_align_mode_cmd)
-    # ★ 2026-10-21：E1b 的 z 原点（ground 默认；off 档不读这个值 ⇒ 默认路径零改动）
+    # ★ 2026-10-21：E1b 的 z 原点（ground 默认；有效值 off 的档不读这个值 ⇒ 默认路径零改动）
     ld.add_action(declare_gravity_align_z_origin_cmd)
     # ★ Phase 4：robot:=robot11 的视觉 mesh 档位（decimated | full）
     ld.add_action(declare_robot11_visual_cmd)
@@ -3427,18 +3512,28 @@ def generate_launch_description():
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)
+    # ★ 2026-10-20（决策 A / 契约 §4.10）：**auto 的解析收据**，t=0 打一次。
+    #   条件只看**用户写的值是否 auto**（显式 off|urdf|imu|hybrid 不打这一行 ⇒ 显式路径的
+    #   Action 集不变）；位置必须在 declare_LIO_cmd **之后**（要读 lio），且在节点之前（t=0）。
+    #   例：`[gravity_align] gravity_align_mode=auto ⇒ 有效值=off（lio=fastlio；E1 补丁只存在于
+    #   small_point_lio）` / `… ⇒ 有效值=hybrid（lio=small_point_lio）`。
+    ld.add_action(LogInfo(
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('gravity_align_mode'), "' == 'auto'"])),
+        msg=[_GravityAlignResolution()]))
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
     ld.add_action(declare_ground_cmd)
     # ★ 2026-10-09：robot11_mount:=sensor 的组合检查（必须在 ground 声明**之后**，见该函数注释）
     ld.add_action(OpaqueFunction(function=_check_robot11_mount_combination))
-    # ★ 2026-10-20：gravity_align_mode 的组合检查（只在 mode!=off 时才执行 ⇒ 默认路径**零动作**；
+    # ★ 2026-10-20：gravity_align_mode 的组合检查（只在**有效值**!=off 时才执行 ⇒ 默认路径**零动作**；
+    #   2026-10-20：条件改用 _GravityAlignEffectiveMode ⇒ `auto` + 非 SPL 不再误触发；
     #   位置必须在 declare_LIO_cmd 之后：它要读 lio / robot / robot11_mount / livox_tilt_axis，
     #   而 launch 的 DeclareLaunchArgument 是**按顺序**生效的）。
     ld.add_action(GroupAction(
         condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('gravity_align_mode'), "' != 'off'"])),
+            "'", _GravityAlignEffectiveMode(), "' != 'off'"])),
         actions=[OpaqueFunction(function=_check_gravity_align_contract)]))
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
