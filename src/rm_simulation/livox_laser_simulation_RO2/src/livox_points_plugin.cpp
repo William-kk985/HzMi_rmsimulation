@@ -190,7 +190,9 @@ namespace gazebo
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
                     "range_from_origin = %s ⇒ 点 = %s（缺省 = 修好的语义；写 false = 旧行为）",
                     range_from_origin_ ? "true" : "false",
-                    range_from_origin_ ? "range·axis + minDist·axis + offset.Pos()" : "range·axis（旧行为）");
+                    !range_from_origin_ ? "range·axis（旧行为）"
+                                        : (cloud_frame_sensor_ ? "range·axis + minDist·axis（传感器系，**不含** offset.Pos()）"
+                                                               : "range·axis + minDist·axis + offset.Pos()"));
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "sample: %ld", samplesStep);
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "downsample: %ld", downSample);
         // 这行日志用于确认加载的是修好时间基的插件（旧库打的是墙钟偏移）
@@ -346,7 +348,21 @@ namespace gazebo
             //   （docs/robot_models.md §12.3.1 / 本插件 §K 的 A/B）。
             //   ⚠️ 这是**共享代码**：所有模型都走这一行 ⇒ 逐模型 A/B 见 §K；
             //      回退 = SDF `<range_from_origin>false</range_from_origin>`（老行为，逐字节）。
-            auto point = range_from_origin_ ? (range * axis + minDist * axis + sensor_offset.Pos())
+            // ★★ 2026-10-21（**修 sensor 档的坐标系 bug**；parent 档逐字节不变，见 §12）：
+            //   `sensor_offset.Pos()` 是**父 link 系**的矢量，只有 `parent` 档的 `axis`
+            //   （= sensor_rot·mount_rot·ray）与它同系 ⇒ 可以相加。
+            //   `sensor` 档的 `axis` 已经是**传感器系**矢量（= mount_rot·ray），命中点在该系里
+            //   就是 `(range+minDist)·axis`（射线起点在传感器系原点）；再叠加父 link 系的
+            //   `sensor_offset.Pos()` ⇒ **整朵云被刚性平移** `R_joint·offset.Pos()`
+            //   （robot11 = (0.0006, 0.1919, **0.07053**) m，见 docs 的 §12）。
+            //   实测：h_meas 恒 0.1894 / 0.1906（RMUL / RMUC，两界都 ERROR）、雷达可见地面比
+            //   **真值接触地面**（GT base_link z − 0.102499）高 70.5 mm、整朵云沿 base_link
+            //   +y 偏 191.9 mm。改后 h_meas = 0.2595（INFO）。
+            //   ⚠️ 不加新开关：sensor 档的默认行为就是"修好的"；回退 = 把 `cloud_origin`
+            //      改回 `sensor_offset.Pos()`（一行）。`range_from_origin:=false` 仍只管 range 语义。
+            const ignition::math::Vector3d cloud_origin =
+                cloud_frame_sensor_ ? ignition::math::Vector3d::Zero : sensor_offset.Pos();
+            auto point = range_from_origin_ ? (range * axis + minDist * axis + cloud_origin)
                                             : (range * axis);
 
             // 填充 CustomMsg 点云消息
