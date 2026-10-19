@@ -3334,10 +3334,12 @@ mode:=mapping world:=RMUC2026 map_name:d2_arch`，私有 DOMAIN=183 / port=11883
 
 | 量 | 改前（源模型）20 Hz | 改前 200 Hz | **改后** 20 Hz | **改后** 200 Hz |
 |---|---|---|---|---|
-| 自转 | 5.99 °/s = **13.1%** | 2.47 °/s = **5.4%** | 43.57 °/s = **95.1%** | 44.04 °/s = **96.1%** |
+| 自转 | 5.99 °/s = **13.1%** | 2.47 °/s = **5.4%** | 43.57 °/s = **95.1%** | 44.04 °/s = **96.1%** ※ |
 | 前进 | 0.2258 m/s = 75.3% | 0.2231 m/s = 74.4% | 0.2960 m/s = **98.7%** | 0.2965 m/s = **98.8%** |
 | `/livox/imu` 陀螺 z 均值（自转段） | 0.348 rad/s（**抖**） | 0.088 rad/s（**抖**） | **0.7885** | **0.7889** |
 
+> ※ 200 Hz 那格：`drive_probe.py` 不做角度解缠，本次 3 s 转了 227.89° ⇒ 屏上打印 **−227.89°**
+>   （越过 ±180°）；按解缠值 132.11°/3 s = 44.04 °/s 记。
 > · 改前同一指令在**不同跑之间**落在 **3.2%…13.1%**（§16 记的 3% 是其中一跑）：不是"慢"，是
 >   **抖转** —— 净转 6°…18° 而 IMU 陀螺均值到 0.35 rad/s（关节约束在来回掰），这正是 §16
 >   "LIO 把原地抖转积分成 142.8 m"的物理来源。改后 IMU 0.789/0.8 = **98.6%**，与真值一致。
@@ -3396,10 +3398,13 @@ URDF→SDF 合并），不搬几何 ⇒ 从根上不可能搬错（§M 的 robot
    —— 任务原文"robot11 达到 100%（wz 0.5 → 28.65°/s）"那个数出自 **gz（Fortress）后端**
    `docs/fortress_sim_backend.md §12.4`，那里的 100% 是**运动学直接积分、没有接触**，与
    Classic 的刚体/摩擦无关。）
-5. **回退**：`python3 tools/scripts/regress/default_make_sim_xacro.py --chassis articulated
-   --out src/rm_nav_bringup/urdf/sentry_robot_sim.xacro` 不可逆（别这么干）；正确回退是
-   **把 `_ROBOT_SLOTS['']` 指回 `sentry_robot_sim.xacro`**（源文件一直在，本轮未改）。
-   另一种微调：`--wheel-mu` 重生成（0.05→90.5%、0.1→84.6%、1.0→14.1%，见 §20.2 表）。
+5. **回退**（两条，都不需要改生成物）：
+   · **整档回退**：把 `_ROBOT_SLOTS['']` 指回 `sentry_robot_sim.xacro`（源文件一直在，本轮
+     一个字节没改）—— 就回到 4.3% 的多刚体行为；
+   · **只回退摩擦**（保留单刚体）：`python3 tools/scripts/regress/default_make_sim_xacro.py
+     --wheel-mu 1.0`（0.05→90.5%、0.1→84.6%、1.0→14.1%，见 §20.2 表）。
+   ⚠️ `--chassis articulated --out <某个文件>` 只是把源文件**逐字节复制**到那个路径
+   （它不会"反向焊回去"，也不改源文件）⇒ 别把它当成"就地撤销"。
 6. **`install/` 需要重建**：`install/<pkg>/share/.../urdf/` 是**逐文件符号链接**（不是整目录软链），
    新文件不会自己出现 ⇒ `colcon build --symlink-install --packages-select rm_nav_bringup`
    （本轮实测：不建就直接 `FileNotFoundError: .../sentry_robot_sim_rigid.xacro`）。
