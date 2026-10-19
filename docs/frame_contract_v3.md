@@ -704,3 +704,31 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 `gravity_align_mode:=off` 仍**不**满足 §2 的"`odom` 必须重力对齐"（实测倾角 **30.08–30.38°**）——
 本轮把**合规档做成可一键启用**（`gravity_align_mode:=hybrid` 即满足 §4.5 与 I2），
 但**没有把默认值改成合规**。默认改 `hybrid` 是 v3b 的动作，且要先解决"没有 IMU / 起步就在动"的降级语义（R §9(a)）。
+
+### 13.5 安装参数改为从 URDF 解析（2026-10-21；旧表只作交叉校验/回退）
+
+> 任务书点名的 "§4.3" 已被「来源与互检」占用；E1b 的 z 原点规范在 §4.7。
+> 逐组合对照与决定性测试（含 30°→20°）见 **`docs/frame_contract_v3_measurements.md` §11**。
+
+**已实现**（`bringup_sim.launch.py`，无新节点/新包）：
+
+- **解析**：用与 `robot_description` **同一份** xacro 参数（`_robot_xacro_args`）展开这次真要
+  spawn 的 xacro，沿 fixed 关节链合成 `T(base_link←livox_frame)`（rpy **度** + xyz + `livox_z`）
+  与 `T(imu_link←base_link)`（adapter 的 xyz + rpy，**弧度**，进 `setRPY`）。链上出现非 fixed
+  关节 ⇒ 报关节名/类型/路径并拒绝（不猜运动学）。
+- **展开顺序（两级）**：① `xacro.process_file`（与 launch 的 xacro CLI 同一库、同一 mappings）；
+  ② 文件本来就是 plain URDF 时直读 XML。都失败 ⇒ **已知模型 WARN + 旧表回退**（banner 标
+  `table-fallback`）；**未知模型硬报错**。
+- **消费方**：`gravity_align_rpy`（E1）、`_LioAdapterExtrinsic`/`_LioAdapterRobot11`（adapter 的
+  xyz/rpy）、`gravity_align_h`（= 地面偏移表 + 解析出的 `livox_z`；`livox_raise_m` 自动跟随）。
+- **交叉校验**：解析 vs 旧表差 **>0.05°/轴 或 >1 mm** ⇒ 响亮 WARN（两个值 + 哪个 URDF/slot 产出），
+  **保留解析值**；linefit 的 `sensor_height` 与该槽位 YAML 差 **>1 cm** 也 WARN（**不改** YAML）。
+- **仍用字面值（有意）**：robot11 的 30° 是 launch **传给 xacro 的输入**（`_LIVOX_TILT_RPY`）；
+  地面偏移 `_HZMI_BASE_LINK_HEIGHT_M` 是 URDF 给不了的那一个先验（轮半径+轮心，逐台有证据）；
+  `lio_tf_adapter_hzmirm_node`（mode=off 的 legacy 非-spl 路径）与默认模型的
+  `lio_tf_adapter.yaml` 不改（换参数会动默认 Action 树/默认路径，解析值已与它们交叉校验）。
+
+**默认路径证明**：`tools/scripts/gzsim/launch_increment_diff.py` 5 组参数（`robot:=''` 默认、
+robot11 `plugin`/`sensor`、hzmirm、`gravity_align_mode:=hybrid`）全部 **新增 0 / 消失 0 /
+共有 Action 相对顺序一致**；`robot_description` 的 xacro 命令字符串 6 组组合逐字节相同；
+`gravity_align_mode:=off` ⇒ 组合检查入口即返回、解析器 **0 次求值**。（M §11.5。）

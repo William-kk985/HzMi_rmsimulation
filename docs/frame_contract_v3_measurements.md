@@ -718,3 +718,181 @@ python3 tools/scripts/tiltmount/spl_ab_table.py --root .tmp_ab --prefix ab_
 > 最小修法：**(a)** 给 `lio_tf_adapter` 的 `T_ob` 加一个常量 z 偏置让 `base_link` 起始 z≈0（首选，只影响 hybrid 档），
 > 或 **(b)** 把 `obstacle_layer.scan.min_obstacle_height` 改成 **−0.25**（一行，但在禁改的 nav2 参数目录、且默认模型共用）——
 > **两者都要单独 A/B，本轮一个字都没改。**
+
+---
+
+## §11 URDF 安装参数解析（launch 侧，2026-10-21）
+
+> 契约 §13.5。对象是 **launch 的取值**（`gravity_align_rpy` / adapter `xyz`+`rpy` / `gravity_align_h`
+> 的 livox 分量），**不是** LIO 算法，也不是运行期 `h_meas`（那在 §10 / LIO 侧）。
+> 本轮**没有起 Gazebo**：测的是"解析出来的数与旧表/命令字符串"，用 Python 直接加载 launch 文件即可。
+
+### 11.1 方法（离线、可复现）
+
+```bash
+source /opt/ros/humble/setup.bash && source install/setup.bash
+python3 .tmp_mountparse/test_integrated.py      # 脚本未提交（temp 工具，不是产品代码）
+```
+
+* 用 `SourceFileLoader` 加载**仓库里的** `src/rm_nav_bringup/launch/bringup_sim.launch.py`
+  （不是手抄的副本），构造 `launch.LaunchContext` 并只填 `launch_configurations`；
+  调用真实的 `_parsed_livox_mount` / `_GravityAlignRpy` / `_GravityAlignH` /
+  `_LioAdapterExtrinsic` / `_LioAdapterRobot11` / `_RobotXacroCommand`。
+* `robot11` 的 xacro 展开走 `xacro.process_file`（与 launch 的 `xacro` CLI **同一个 Python 库**、
+  同一份 `_robot_xacro_mappings`）。本机是 symlink-install ⇒ `install/…/urdf/*.xacro` 就是
+  `src/…/urdf/*.xacro`（robot11 的 md5 `ed0af27b2c4c365779b4260017b04ae2`），不是构建期旧副本。
+* 决定性测试把 xacro **复制到 `tempfile.TemporaryDirectory()`** 再改（仓库文件只读）；
+  仓库 xacro 的 md5 在测试前后不变。
+
+### 11.2 parse-vs-table（所有 `(robot, mount)` 组合）
+
+`parsed` = 展开这次真 spawn 的 xacro → fixed 关节链合成的 `T(base_link←livox_frame)`；
+`table` = 1b5db4b 的规则表（现在只作交叉校验）。角度单位 **°**，xyz/h 单位 **m**。
+
+| `robot` | `robot11_mount` | `livox_tilt_axis` | parsed rpy | table rpy | parsed xyz | table xyz | `h`(parsed) | `h`(table) |
+|---|---|---|---|---|---|---|---|---|
+| `''`（默认） | — | — | `[0, 0, 0]` | `[0, 0, 0]` | `[0.120000, 0, 0.175000]` | 同左 | 0.235000000 | 0.235000000 |
+| `hzmirm` | — | — | `[0, 0, 0]` | `[0, 0, 0]` | `[0, 0, 0.800000]` | 同左 | 0.800000000 | 0.800000000 |
+| `robot11` | `plugin`（默认） | `roll` | `[0, 0, 0]` | `[0, 0, 0]` | `[+0.000561701, +0.130915824, +0.157028170]` | 同左 | 0.259527170 | 0.259527170 |
+| `robot11` | `urdf` | `roll` | `[-30, 0, 0]` | `[-30, 0, 0]` | 同上 | 同上 | 0.259527170 | 0.259527170 |
+| `robot11` | `sensor` | `roll` | `[-30, 0, 0]` | `[-30, 0, 0]` | 同上 | 同上 | 0.259527170 | 0.259527170 |
+| `robot11` | `urdf` | `pitch` | `[0, -30, 0]` | `[0, -30, 0]` | 同上 | 同上 | 0.259527170 | 0.259527170 |
+
+* **6/6 组 Δrpy = 0.000000°、Δxyz = 0.000000 m**（9 位舍入内；30° = `0.523598775598293 rad`）。
+  `source` 全部 = `xacro.process_file`。**没有触发 WARN**（这正是"解析器没改行为"的基线）。
+* 关节链（`_compose_fixed_chain` 打印）：
+  * 默认模型：`livox_frame_joint(fixed)`；
+  * hzmirm：`livox_frame_joint ← head_to_lidar ← turret_to_head ← base_to_turret`（全是 fixed）；
+  * robot11：`body_to_livox(fixed)`。
+* **adapter 的 `T(imu_link←base_link)`**（`xyz` + `rpy`；`rpy` 是**弧度**，因为
+  `lio_tf_adapter` 里直接 `q_offset.setRPY(...)`）：
+
+| `robot` / `mount` | parsed adapter xyz | table adapter xyz | parsed adapter rpy (rad) | table adapter rpy (rad) |
+|---|---|---|---|---|
+| `''` | `[-0.120000, 0, -0.125000]` | 同左 | `[0, 0, 0]` | `[0, 0, 0]` |
+| `hzmirm` | `[0, 0, -0.750000]` | 同左 | `[0, 0, 0]` | `[0, 0, 0]` |
+| `robot11` / `plugin` | `[-0.000562, -0.130916, -0.107028]` | 同左 | `[0, 0, 0]` | `[0, 0, 0]`（表里是 `-0.0`） |
+| `robot11` / `urdf`+`sensor`（roll） | `[-0.000562, -0.034862, -0.151448]` | 同左 | `[+0.523598776, 0, 0]` | `[+0.523598776, -0.0, -0.0]` |
+| `robot11` / `urdf`（pitch） | `[-0.079001, -0.130916, -0.085710]` | 同左 | `[0, +0.523598776, 0]` | `[0, +0.523598776, 0]` |
+
+**单位坑（已修，实测抓到的）**：`gravity_align_rpy` 是**度**，adapter 的 `rpy` 是**弧度**。
+第一版解析器把 adapter 也填成度 ⇒ 交叉校验立刻报 `Δ=29.476401°`（`table` 0.523599 rad vs
+`parsed` 30 rad 级别的差）；改成 `_R_to_rpy_rad()` 后 6 组全部一致。这个 WARN 是故意留的：
+**单位写错会当场响**，不会静默把车转 30 rad。
+
+### 11.3 决定性测试：robot11 xacro 副本把倾角 **30°→20°**
+
+为什么用副本 + 为什么去掉 `livox_tilt_rpy` 映射：robot11 的 30° 是 **launch 传给 xacro 的参数**
+（`_LIVOX_TILT_RPY` → `livox_tilt_rpy:=…`），不是 xacro 的默认值。为了模拟"**URDF 自己拥有这个数**"
+（= 任意新机器人/关节字面值被改的场景），把副本的 `body_to_livox` 关节写成
+`rpy="-0.3490658503988659 0 0"`（−20°），并按"没有这个 launch 参数"的 mappings 解析；
+仓库文件一个字节没改。
+
+```text
+scratch = /tmp/mountparse_20_…/robot11_20deg.xacro
+parsed rpy = [-20.000000, +0.000000, +0.000000]°      （旧表 = [-30.000000, 0, 0]°）
+WARN = YES
+  [bringup_sim][WARN] URDF 安装参数与旧表不一致（**保留解析值** = 这次真的 spawn 的模型）：
+    robot='robot11' mount='urdf' urdf=/tmp/…/robot11_20deg.xacro（source=xacro.process_file）
+    rpy(parsed)=[-20.000000, 0.000000, 0.000000]° vs rpy(table)=[-30.000000, 0, 0]°  Δ=[10.000000, 0, 0]°
+    xyz(parsed)=[0.000562, 0.130916, 0.157028] m vs xyz(table)=同值  Δ=0
+    ⇒ 表只作交叉校验；若解析值才是实物，请同步 §13 与 linefit 的 sensor_height。
+  [bringup_sim][WARN] adapter 的 T(imu<-base_link) 与旧表不一致（**保留解析值**）：
+    rpy(parsed)=[0.349066, 0, 0] rad vs rpy(table)=[0.523599, -0.0, -0.0] rad  Δ=[-10.000000, 0, 0]°
+```
+
+⇒ **派生值真的跟着 URDF 改了**（−30°→−20°），adapter 也跟着变，**两条 WARN 都响**；
+被保留的是**解析值**（`-20°`），不是表值。测试后仓库 xacro md5 仍是 `ed0af27b…`。
+
+**对照测试（同一副本，但走完整 launch 参数）**：只把 `body_to_livox` 的 z 从
+`${0.15702816968305 + livox_raise_m_p}` 改成 `${0.25702816968305 + livox_raise_m_p}`：
+parsed `livox_z = 0.257028170`、`h = 0.359527170`（旧 `0.157028170 / 0.259527170`），
+WARN 报 `Δxyz=[0, 0, +0.100000] m`；同时 linefit 交叉检查报
+`yaml=0.259500 vs parsed h=0.359527（Δ=-0.1000 m）`。⇒ 即使 launch 参数原样，URDF 里关节几何
+一改，rpy/xyz/h 也全部跟着变。
+
+### 11.4 阈值 / 回退 / 未知模型 / linefit 交叉检查
+
+* **阈值**：正常 6 组 Δ=0 ⇒ 无 WARN；30→20° 的 Δ=10° > 0.05° ⇒ WARN。xyz 用 1 mm。
+* **已知模型解析失败**：把副本的 `body_to_livox` 改成 `type="revolute"` ⇒
+  `_parsed_livox_mount()` 返回 `None`（**不抛给用户**），WARN 第一行点名关节：
+  `body_to_livox` / `type=revolute` / 路径；wrapper 回退 `table`：
+  `rpy=[-30.000000, 0, 0]`、`h=0.259527170`，banner 来源 = **`table-fallback`**。
+* **未知模型**：`robot:=nope` ⇒ `RuntimeError`（"目前只有 ''|hzmirm|robot11… 不要手填"），
+  不回退。
+* **linefit `sensor_height`**（launch 从不设置它，按槽位选整份 YAML；解析器只读来交叉检查）：
+  * `robot11` h=0.259527 vs YAML 0.2595（Δ 0.027 mm）⇒ 无 WARN；
+  * `hzmirm` h=0.800000 vs YAML 0.80 ⇒ 无 WARN；
+  * `hzmirm` h=0.700000（人为） ⇒ WARN（Δ+0.1 m，给出 YAML 路径）；
+  * 30→20° + z→0.257 副本 ⇒ WARN（Δ−0.1 m），**但没有改 YAML 一个字节**。
+
+### 11.5 默认路径 identity（`gravity_align_mode:=off`）
+
+**(a) Action 树**：`launch_increment_diff.py`，old=`1b5db4b` 的 launch，new=本 commit：
+
+| 参数组 | OLD/NEW Action | 新增 | 消失/被改 | 顺序 |
+|---|---|---|---|---|
+| （默认，不传参数） | 67 / 67 | **0** | **0** | 一致 ✅ |
+| `mode=mapping lio=small_point_lio robot=robot11 robot11_mount=plugin gravity_align_mode=off world=RMUL2026 localization=` | 67 / 67 | **0** | **0** | 一致 ✅ |
+| `mode=mapping lio=small_point_lio robot=robot11 robot11_mount=sensor gravity_align_mode=off` | 67 / 67 | **0** | **0** | 一致 ✅ |
+| `mode=mapping lio=fastlio robot=hzmirm gravity_align_mode=off` | 67 / 67 | **0** | **0** | 一致 ✅ |
+| `mode=mapping lio=small_point_lio robot=robot11 robot11_mount=sensor gravity_align_mode=hybrid` | 67 / 67 | **0** | **0** | 一致 ✅ |
+
+⇒ 连 hybrid 档都只是 substitution 的**求值结果**变化，Action 树逐字段没动（无新节点/新参数/新顺序）。
+
+**(b) `robot_description` 命令字符串**：用 1b5db4b 的 `_RobotXacroCommand` vs 新实现，6 组组合
+（默认、hzmirm、robot11 plugin/urdf/sensor/urdf-pitch）**逐字节相同**（含 robot11 的引号规则）。
+
+**(c) 解析器求值次数**（instrumented）：
+
+* `gravity_align_mode:=off` + 默认模型：**0 次**（`_check_gravity_align_contract` 入口即返回；
+  off 档的 Node 也不含 `_GravityAlignRpy`/`_GravityAlignH`）。
+* `gravity_align_mode:=hybrid` + robot11：该 substitution 一次 launch 被求值 **7 次**
+  （banner 3：rpy / h / source + 节点参数 4：`gravity_align_rpy`、`gravity_align_h`、
+  adapter xyz/rpy），xacro 只展开 **1 次**（单次 9.5 ms，n=3 中位数）。
+* `gravity_align_mode:=off` + robot11 + 非 spl LIO：legacy adapter 2 个参数 ⇒ 求值 2 次、展开 1 次。
+
+⇒ 缓存保留（7 > 2 次；不缓存会重复展开 ~66 ms 并重复打 WARN）。
+
+**(d) 值对比**（old vs new 的 YAML 字符串）：`gravity_align_rpy` / `gravity_align_h` 6 组全部
+相同；adapter 5 组相同，**唯一差异**是 robot11 的 adapter rpy 里 `-0.0` → `+0.0`
+（`float('-0.0') == float('0.0')`，TF/四元数数值完全相同；YAML 字符串的符号零差异）。
+`hzmirm` 且 `turret_yaw_deg/turret_pitch_deg ≠ 0` 时，spl adapter 现在**跟着云台转**
+（旧 `_LioAdapterExtrinsic` 固定 `[0,0,-0.75]/[0,0,0]`）—— 这是 opt-in 档的已知缺口被解析器顺手修掉；
+legacy `lio_tf_adapter_hzmirm_node` 仍用字面值，但解析器对它做交叉校验（漂移 ⇒ WARN）。
+
+### 11.6 地面偏移表（h 的**先验**；URDF 给不了的那一个量）
+
+`h = _HZMI_BASE_LINK_HEIGHT_M[robot] + parsed livox_z`（`livox_raise_m` 已含在解析出的 z 里）。
+
+| `robot` | base_link 原点离地 | 证据 |
+|---|---|---|
+| `robot11` | **0.102499** | `urdf/sentry_robot_robot11_sim.xacro` 注释「地面平面（body 系）z=-0.102499」；轮 r=0.058、轮心 z=-0.044502 ⇒ 0.044502+0.058=0.102502，差 3 µm = mesh 离散；`robot11_weld_chassis.py` 自检也报最低点 -0.10250 |
+| `hzmirm` | **0.0** | `base_to_wheel_*` origin z=0.08、轮 cylinder r=0.08 ⇒ 轮底 = base_link z=0 |
+| `''`（默认） | **0.06** | `radius_wheel=0.06`、`base_to_wheel*` origin z=0 ⇒ 轮底 z=-0.06 |
+
+与 Gazebo 实测的差 = 轮胎下沉（默认模型 linefit 0.226 vs 几何 0.235 ⇒ ~9 mm；robot11 0.2595
+vs 几何 0.259527 ⇒ 0.03 mm）。这部分**不在 launch 里**，由节点初始化时的 `h_meas` 互检负责
+（LIO 侧，§4.7 / §10）；本 launch 只提供先验。
+
+### 11.7 本轮没能验证 / 诚实边界
+
+1. **没有跑 Gazebo / 完整 launch**：只做了 launch 求值与 `ros2 launch … --show-args`（100 个参数、
+   退出码 0）。没有用 `ros2 param get` 回读节点实际生效的 `gravity_align_rpy`/`gravity_align_h`。
+2. **plain-URDF 回退分支没有实跑**（本仓三个槽位都是 xacro）；`xacro.process_file` 是实际走到的
+   唯一展开层。CLI 子进程层在复杂度审查后**已删除**（CLI 依赖的就是同一个 Python 模块），
+   所以"CLI 不可用"的环境没有覆盖。
+3. **运行期 `h_meas` 互检不在本节**：那是 LIO 侧（`gravity_align_ground.cpp`）的 3/5 cm 带，
+   由并行任务实测；本节只证明 launch 送进去的先验值正确。
+4. **hzmirm 云台角 ≠ 0** 时 spl adapter 的值变了（旧缺口修复），但**没有跑节点验证 TF**；
+   legacy hzmirm adapter 仍用字面值（只 WARN）。
+5. linefit 交叉检查的 **1 cm** 是启发式阈值（默认模型 9 mm 下沉不报、robot11 0.03 mm 不报）；
+   它只 WARN，不会改 YAML，也不代表 linefit 的实际地面分割效果。
+6. `-0.0` vs `+0.0` 的 adapter rpy 字符串差异（数值相同）没有做二进制逐位重放 —— 因为
+   TF 输出只取决于 double 数值，`-0.0` 与 `+0.0` 在 `setRPY`/四元数里等价。
+
+### 11.8 一句话
+
+> 安装参数现在**真的从这次 spawn 的 URDF/xacro 解析**：6 组 (robot, mount) 与旧表逐值一致；
+> 把 robot11 副本的倾角从 30° 改成 20° ⇒ 派生值变 **−20°** 且 WARN 响（仓库文件未动）；
+> 默认路径 Action 树 **0 增 0 删**、`robot_description` 字符串 6 组逐字节相同、off 档解析 **0 次**。
