@@ -1,6 +1,7 @@
 # `docs/` 文档索引（唯一入口）
 
-> **2026-10 仓库整理**：覆盖**全仓 103 份自有 Markdown**（旧索引漏收 39 份）。每条 = 「链接 + 解决什么问题 + 状态」；**不移动、不改写**任何既有文档（只在 4 份顶部加了一行 `STATUS`）。
+> **2026-10 仓库整理**：覆盖**全仓 105 份自有 Markdown**（旧索引漏收 39 份）。每条 = 「链接 + 解决什么问题 + 状态」；上一轮只在 4 份顶部加了一行 `STATUS`。
+> **2026-10 合并轮**：3 组重复/未跟踪文档已合并（`docs/package/` 4 份 → 1 份、`docs/mapping/` 2 份 → 1 份、未入库的 cartographer 报告 → 并入 `cartographer_2d_occupancy_semantics.md` §5），原文归档到 `docs/archive/`；`livox_viewer2_launch_notes.md` 已入库。
 > 状态四值：`现行` / `历史（结论仍有效）` / `已被取代（见 X）` / `参考（非本仓结论）`。逐份明细见 [`inventory.md`](inventory.md)；不再成立的说法见 [取代表](#取代表不再成立的说法)。
 
 ## 先看这三份
@@ -28,8 +29,8 @@
 | [`rm_algorithm_overview.md`](rm_algorithm_overview.md) | 早期"角色 × 一体性 × 两场景"总结（推理过程仍有价值） | `已被取代（见 architecture.md §3.2.1 / algorithm_matrix.md §一）` |
 | [`slam_lio_primer.md`](slam_lio_primer.md) | 教材式讲义：KF→EKF→ESKF→预积分→LIO→SLAM→定位，每条公式落到本仓数字 | `现行` |
 | [`kalman_slam_tutorial.md`](kalman_slam_tutorial.md) | 循序渐进读本：24 章 + 练习，从"为什么需要滤波"到 SLAM/AMCL/GICP | `现行` |
-| [`mapping/README.md`](mapping/README.md) | `docs/mapping/` 子索引：现行落盘步骤 + 旧快照清单 | `现行` |
-| [`package/README.md`](package/README.md) | `docs/package/` 子索引：离线配置包多版本的主次 | `现行` |
+| [`mapping/README.md`](mapping/README.md) | `docs/mapping/` 子索引：建图快照合并版 + 现行落盘步骤 | `现行` |
+| [`package/README.md`](package/README.md) | `docs/package/` 子索引：离线配置包合并版（4 份原文已归档） | `现行` |
 
 ## ② 契约 / 规范
 
@@ -44,7 +45,7 @@
 | [`lio_extrinsic_application_survey.md`](lio_extrinsic_application_survey.md) | 外参该在哪一步乘一次：四家源码对照 + 本仓两处变换判决 | `现行` |
 | [`gravity_alignment_ownership_survey.md`](gravity_alignment_ownership_survey.md) | 重力对齐归谁（IMU/LIO/重定位/感知四层调研） | `已被取代（见 frame_contract_v3.md §2/§4）` |
 | [`relocalization_practice_survey.md`](relocalization_practice_survey.md) | 全局重定位 vs 局部跟踪的工业实践 + `map→odom` 到底归谁 | `现行` |
-| [`cod_vs_ours_frame_architecture.md`](cod_vs_ours_frame_architecture.md) | COD 实车 vs 本仓帧架构对账：base_link 约定分叉、共轭 bug 为何被掩盖 | `已被取代（§2「C 型」，见取代表 #11）` |
+| [`cod_vs_ours_frame_architecture.md`](cod_vs_ours_frame_architecture.md) | COD 实车 vs 本仓帧架构对账：base_link 约定分叉、共轭 bug 为何被掩盖 | `已被取代（§2「C 型」；实车实测见 cod_real_frame_measurement.md、取代表 #11）` |
 
 ## ③ 算法 / 原理
 
@@ -64,7 +65,7 @@
 | [`slope_speed_limiting.md`](slope_speed_limiting.md) | 前瞻坡度/台阶限速：物理推导 + 整栈 A/B | `现行` |
 | [`traversability_plan.md`](traversability_plan.md) | 3D 派生可通行性（坡度/落空/净空）设计计划，未实现 | `现行（plan only）` |
 | [`scan_context_plan.md`](scan_context_plan.md) | Scan Context 类全局地点识别接入方案，未落地 | `现行（plan only）` |
-| [`cartographer_2d_occupancy_semantics.md`](cartographer_2d_occupancy_semantics.md) | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导） | `现行` |
+| [`cartographer_2d_occupancy_semantics.md`](cartographer_2d_occupancy_semantics.md) | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导）+ **§5 合并附录**（issue 调查 / TSDF / slam_toolbox / nav2 阈值 / 调参表） | `现行` |
 | [`livox_sensor_prior_art.md`](livox_sensor_prior_art.md) | 非重复扫描 Livox 在新 Gazebo 上的既有实现调研 + REUSE/ADAPT/WRITE 裁决 + §10 编译实测 | `现行` |
 | [`kinodynamic_esdf_mpc_notes.md`](kinodynamic_esdf_mpc_notes.md) | `865749/Kinodynamic_esdf_mpc` 调研笔记（外部仓库） | `参考（非本仓结论）` |
 | [`slam_nav_goal_strategies.md`](slam_nav_goal_strategies.md) | "目标怎么给"四种方式的外部调研 | `参考（非本仓结论）` |
@@ -83,6 +84,7 @@
 | 文档 | 看它解决什么问题 | 状态 |
 |---|---|---|
 | [`frame_contract_v3_measurements.md`](frame_contract_v3_measurements.md) | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 | `现行` |
+| [`cod_real_frame_measurement.md`](cod_real_frame_measurement.md) | **COD 实车帧实测原文**（2026-10-18，ROS 2 Humble）：`T_bl` rpy `(−46.238°, −1.684°, 0)`/`\|t\| 0.3949 m`、静止 `odom→base_link` roll `0.030°` ⇒ A 型 + 共轭 bug 生效；5 条命令 + 原始输出 + 算术核对 + 7 条 caveat | `现行` |
 | [`tilted_lidar_fidelity.md`](tilted_lidar_fidelity.md) | 雷达斜 30° 的逐帧点云账本 + 代价图归因 + bug①② 的判决性签名 | `现行` |
 | [`lio_drift_diagnosis.md`](lio_drift_diagnosis.md) | LIO 漂移分段诊断："才跑一会儿就飘"是否合理（唯一复现 = 高角速度甩转） | `现行` |
 | [`lio_divergence_no_impact.md`](lio_divergence_no_impact.md) | "没撞击里程计自己飘"的整栈归因 + 限速 A/B | `现行` |
@@ -96,7 +98,7 @@
 | [`scan_context_probe_report.md`](scan_context_probe_report.md) | A1 资产可行性探针：Scan Context 路线的准入判定 | `现行` |
 | [`scan_context_samesource_gate_report.md`](scan_context_samesource_gate_report.md) | Scan Context 同源性硬门（真 `/scan` → PCD 库）实测 | `现行` |
 | [`gazebo_sim_migration_plan.md`](gazebo_sim_migration_plan.md) | Classic→新 Gazebo 迁移 spike + §9 纯 CPU 射线 BVH 实测（含单位 bug 修正） | `历史（结论仍有效）` |
-| [`livox_viewer2_launch_notes.md`](livox_viewer2_launch_notes.md) | LivoxViewer2 在 22.04 启动即崩的取证 + ROS2 驱动替代路线 | `现行（未入库）` |
+| [`livox_viewer2_launch_notes.md`](livox_viewer2_launch_notes.md) | LivoxViewer2 在 22.04 启动即崩的取证 + ROS2 驱动替代路线 | `现行` |
 
 ## ⑤ 历史 / 审计
 
@@ -108,14 +110,11 @@
 | [`research_p2l_scan_stall.md`](research_p2l_scan_stall.md) | 旧链（livox→linefit→p2l）`/scan` 永久停发的调研（两条本仓缺陷） | `历史（结论仍有效）` |
 | [`rm_algolab_plan.md`](rm_algolab_plan.md) | 宏架构早期规划（2026-08/09 草案） | `已被取代（见 architecture.md）` |
 | [`rm_bench_refactor_plan.md`](rm_bench_refactor_plan.md) | 实验台改造路线 M0–M4 设计草案 | `历史（结论仍有效）` |
-| [`cartographer_map_stability_report.md`](../cartographer_map_stability_report.md) | 英文报告：cartographer 2D 地图"墙被擦掉/不稳"的源码级根因 | `待定（未入库）` |
-| [`建图操作指南.md`](mapping/建图操作指南.md) | 当时会话的建图操作步骤（状态快照，现行看 runbook §1） | `历史（结论仍有效）` |
-| [`立即开始建图.md`](mapping/立即开始建图.md) | 当时会话的"立即开始"简明指南（状态快照） | `历史（结论仍有效）` |
+| [`mapping_session_snapshots_merged.md`](mapping/mapping_session_snapshots_merged.md) | **合并版**：同一会话两份建图快照（完整步骤 + 立即开始）→ 键位/路线/观察/排错/pbstream 保存 + §9 与现行流程差异 | `历史（结论仍有效；操作细节为 2026-09 快照）` |
+| [`docs/archive/mapping/`](archive/mapping/) | 已合并归档：`建图操作指南.md`（325 行）+ `立即开始建图.md`（115 行），`git mv` 保留历史 + 顶部 `STATUS` | `历史（已归档）` |
 | [`CARTOGRA_PBSTREAM_GUIDE.md`](mapping/CARTOGRA_PBSTREAM_GUIDE.md) | `.pbstream` 生成指南（含"需谨慎对待"的旧做法） | `历史（结论仍有效）` |
-| [`配置包使用说明.md`](package/配置包使用说明.md) | 离线配置包使用说明（2026-09-08 状态） | `历史（结论仍有效）` |
-| [`如何分发配置包.md`](package/如何分发配置包.md) | 如何把项目打包分发（2026-09-08） | `历史（结论仍有效）` |
-| [`HZMI_RMSIMULATION_CONFIG_GUIDE.md`](package/HZMI_RMSIMULATION_CONFIG_GUIDE.md) | 配置包使用指南（另一版本） | `历史（结论仍有效）` |
-| [`README_PACKAGE.md`](package/README_PACKAGE.md) | 配置包 README（另一版本） | `历史（结论仍有效）` |
+| [`config_package_guide_merged.md`](package/config_package_guide_merged.md) | **合并版**：离线配置包使用（依赖/编译/运行/参数/地图）+ 分发（打包/排除/MD5/模板）+ FAQ + 检查清单 + §11 2026-10 路径核对 | `历史（结论仍有效；v1.0.0 体系）` |
+| [`docs/archive/package/`](archive/package/) | 已合并归档：`HZMI_RMSIMULATION_CONFIG_GUIDE.md` / `配置包使用说明.md` / `如何分发配置包.md` / `README_PACKAGE.md`，`git mv` 保留历史 + 顶部 `STATUS` | `历史（已归档）` |
 | [`pbstream_生成完成报告.md`](../archive/pbstream_生成完成报告.md) | pbstream 生成成功报告（2026-09 归档） | `历史（结论仍有效）` |
 | [`README.md`](../archive/reality_frozen/README.md) | 真车配置冻结快照说明（R5） | `历史（结论仍有效）` |
 | [`FROZEN.md`](../archive/reality_frozen/FROZEN.md) | 该目录"已冻结"的六行声明 | `历史（结论仍有效）` |
@@ -166,34 +165,34 @@
 | 12 | **`small_point_lio` 更快（所以用它的理由）** | `docs/cod_nav_macro_integration.md:124`（F3）、`docs/cod_nav_2026_deep_dive.md:71` | 本仓调参下实测 **慢 2.4×**：**13.75 vs 5.75 ms/帧**（`frame_contract_v3_measurements.md` §1、§3.1、§6.2）。**核心是否更快未证**（同工作量 A/B 未做） |
 | 13 | **「`fix=false` 组 6 例中 4 例发散」** | `952a6da` 的 commit message | **8 个 `fix=false` 变体：5 发散 + 2 云被拖花**，唯一稳的是把 init 推迟的 `v2b`（`0ee92b6`；`frame_contract_v3_rationale.md` §7⑦；`odom_base_link_practice_survey.md` §9.3 末） |
 
-## 待决（本次不删任何东西）
+## 待决（2026-10 合并轮：标 ✅ 的条目已处理，其余未动）
 
-**① 未跟踪的 md（内容有价值，建议 `git add` / 确认归属）**
-- `cartographer_map_stability_report.md`（仓库根，455 行英文）—— 与已入库的 [`cartographer_2d_occupancy_semantics.md`](cartographer_2d_occupancy_semantics.md)（624 行）**主题重叠**（同一批源码取证），二者择一或合并。
-- [`livox_viewer2_launch_notes.md`](livox_viewer2_launch_notes.md)（255 行）—— LivoxViewer2 崩溃取证 + ROS2 替代路线，独立信息，建议入库。
+**① 未跟踪的 md —— ✅ 已清零（2026-10 合并轮）**
+- `cartographer_map_stability_report.md`（仓库根，455 行英文）→ 已并入 [`cartographer_2d_occupancy_semantics.md`](cartographer_2d_occupancy_semantics.md) **§5 合并附录**（重复部分在 §5.1 列指针），随后删除该未跟踪文件。
+- [`livox_viewer2_launch_notes.md`](livox_viewer2_launch_notes.md)（255 行）→ 已 `git add` 入库（内容未改）。
 
 **② 近重复（同一件事的多份文档）**
-- `docs/package/` 四份说明（`配置包使用说明` / `HZMI_RMSIMULATION_CONFIG_GUIDE` / `README_PACKAGE` / `README`）—— 2026-09-08 的四个版本。
-- `docs/mapping/建图操作指南.md` 与 `立即开始建图.md` —— 同一会话的两份状态快照。
-- `cod_nav_nav_stack_inventory.md` 与 `cod_nav_open_source_materials.md` —— 同一批 COD 仓库清单。
+- ✅ 已合并：`docs/package/` 四份说明 → [`package/config_package_guide_merged.md`](package/config_package_guide_merged.md)（原文归档 `docs/archive/package/`）。
+- ✅ 已合并：`docs/mapping/建图操作指南.md` + `立即开始建图.md` → [`mapping/mapping_session_snapshots_merged.md`](mapping/mapping_session_snapshots_merged.md)（原文归档 `docs/archive/mapping/`）。
+- `cod_nav_nav_stack_inventory.md` 与 `cod_nav_open_source_materials.md` —— 同一批 COD 仓库清单（**未合并**，本轮不做）。
 - `cod_nav_comparison.md` 是 `cod_nav_design_thinking.md` 的素材，内容大幅重叠。
 
 **③ 主题已被更新文档覆盖（保留供回溯，不当现行依据）**
 - `rm_algorithm_overview.md` → [`architecture.md`](architecture.md) §3.2.1 + [`algorithm_matrix.md`](algorithm_matrix.md) §一；`rm_algolab_plan.md` → [`architecture.md`](architecture.md)
-- `docs/mapping/` 三份快照 → [`smoke_test_runbook.md`](smoke_test_runbook.md) §1/§5；`gravity_alignment_ownership_survey.md` 的 `world_grav` 推荐 → [`frame_contract_v3.md`](frame_contract_v3.md) §4
+- `docs/mapping/` 两份快照（已合并归档）→ [`smoke_test_runbook.md`](smoke_test_runbook.md) §1/§5；`gravity_alignment_ownership_survey.md` 的 `world_grav` 推荐 → [`frame_contract_v3.md`](frame_contract_v3.md) §4
 
 **④ 入链情况**
 - 旧索引漏收 **39 份**（`cod_nav_*` 9、`gicp_*` 3、`scan_context_*` 3、`package/` 4、`continue_mapping` / `localization_slots` 等）；本次**全部收录**，本索引无孤儿。
 - 绝对零入链 4 份：`archive/pbstream_生成完成报告.md`、`archive/reality_frozen/FROZEN.md`、`robot11_description/inventory/mesh_inventory.md`、`tools/scripts/gzsim/ATTRIBUTION.md` —— 现已在 §⑤/§⑥ 收链。
 
 **⑤ 需要补的证据（是仓库缺数据，不是文档格式问题）**
-- 取代表 **#11** 的**实车实测原始数据**（`T_bl` rpy、`odom→base_link` 残差）在本仓**没有任何落盘文档**；建议补 `docs/cod_real_frame_measurement.md` 或并入 `odom_base_link_practice_survey.md` §10。
-- 取代表 **#7** 的引用位置：`livox_sensor_prior_art.md` §10 **没有**该数字，真实位置是 `gazebo_sim_migration_plan.md` §9.1.2 / §9.1.4。
-- `frame_contract_v3.md` 里的 `L:xxxx` 行号已随 launch 变长而偏移（例：`livox_tilt_axis` 标 `L:1257`，实际在 `:1407-1416`）。
+- ✅ 已补：取代表 **#11** 的实车实测原始数据已落盘为 [`cod_real_frame_measurement.md`](cod_real_frame_measurement.md)（5 条命令 + 原始输出 + 算术核对 + 7 条 caveat）。
+- ✅ 已修：`frame_contract_v3.md` / `frame_contract_v3_rationale.md` 的 `L:xxxx` 行号已按 `8e5e928`（2853 行）**逐条复核**（`livox_tilt_axis` 由 `L:1257-1268` 更正为 `L:1407-1416`），两份文档顶部都加了"行号基线"说明。
+- 取代表 **#7** 的引用位置：`livox_sensor_prior_art.md` §10 **没有**该数字，真实位置是 `gazebo_sim_migration_plan.md` §9.1.2 / §9.1.4（**未处理**，本轮不做）。
 
 ## 附录：清单与口径
 
-**103** 份自有（docs 87 / 根 3 / tools 2 / archive 3 / src 自有 7 / third_party 索引 1）· **119** 份第三方与子模块（src vendored 27 + `third_party/**` 92，**不进索引**，清单见 [`inventory.md`](inventory.md) 附录 B）· **124** 份临时/构建产物（`.tmp_*`、`.venv`、`install/`，**不计入**）。
+**105** 份自有（docs 90（含 `docs/archive/` 6 份已归档）/ 根 2 / tools 2 / archive 3 / src 自有 7 / third_party 索引 1）· **119** 份第三方与子模块（src vendored 27 + `third_party/**` 92，**不进索引**，清单见 [`inventory.md`](inventory.md) 附录 B）· **124** 份临时/构建产物（`.tmp_*`、`.venv`、`install/`，**不计入**）。
 
 ## 维护约定
 

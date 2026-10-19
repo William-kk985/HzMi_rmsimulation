@@ -14,6 +14,12 @@
 > **发布方式**：分两步。**v3a = 别名期**（§7 兼容层，现有命令零改动）；**v3b = 删除期**
 > （§10 删除清单生效）。本文不写日期，只写"进入 v3b 的前置条件"。
 
+> **行号基线（2026-10 复核）**：文中 `L:NNNN` / `launch:NNNN` 一律指
+> `src/rm_nav_bringup/launch/bringup_sim.launch.py` 的行号，已按 **`8e5e928`（2853 行）** 逐条用
+> `grep -n` / `sed -n` 复核过；旧稿是按 `c996365`（2584 行）编的，launch 重构（选项 U）后整体偏移，
+> 本次已全部更正。`file:NNNN` 一类同批复核（`small_point_lio*`、`eskf.h`、`gicp_registration_sim.yaml`）。
+> launch 再变长时**请重新 `grep -n`**，别照抄本文数字。
+
 ---
 
 ## 证据约定（全文强制）
@@ -72,8 +78,8 @@
 "两个节点同发 `map→odom`"在 tf2 看来**语法合法**，后果是查询抖动/跳变。
 ⇒ 契约不能靠"大家自觉"，只能靠 **launch 的静态互斥 + `check_contract` 的静态检查**（§6/§8）。
 
-**本仓的既有事实**：`localization` 的 8 个值靠 launch 条件互斥（L:1353-1366），`mapper` 与它按 `mode` 互斥
-（L:1430-1434、L:1815-1819）——**已经做到了"选的时候唯一"**，缺的是"运行期唯一 + 坏了谁接"（S3 §6.1 R1/R6/R8）。
+**本仓的既有事实**：`localization` 的 8 个值靠 launch 条件互斥（L:1528-1531），`mapper` 与它按 `mode` 互斥
+（L:1605-1608、L:2027-2035）——**已经做到了"选的时候唯一"**，缺的是"运行期唯一 + 坏了谁接"（S3 §6.1 R1/R6/R8）。
 
 ### P4 能力声明 —— 每个槽位声明"我能做什么"，组合由能力相容性决定，而不是由枚举值决定
 
@@ -98,12 +104,12 @@ v3 要求每个槽位**声明**三项能力：`cap_global`（能否无先验整�
 
 | 参数 | 取值 | 拥有的事实 | 能力声明 | 备注 |
 |---|---|---|---|---|
-| `robot` | `''`（默认模型）\| `hzmirm` \| `robot11` | link/关节/惯量/碰撞、**倾角与杆臂**、`base_link` 原点语义 | 提供 `base_link→livox_frame` / `base_link→imu_link` 静态边 | 默认 `''`（L:1233）；`robot11` 在 v3 语义（`sensor`）下倾角记在关节 `rpy=[-30,0,0]`、杆臂 `[0.000562,0.130916,0.157028]`（S4 §2.2 + S6 §J.1.2） |
+| `robot` | `''`（默认模型）\| `hzmirm` \| `robot11` | link/关节/惯量/碰撞、**倾角与杆臂**、`base_link` 原点语义 | 提供 `base_link→livox_frame` / `base_link→imu_link` 静态边 | 默认 `''`（L:1383）；`robot11` 在 v3 语义（`sensor`）下倾角记在关节 `rpy=[-30,0,0]`、杆臂 `[0.000562,0.130916,0.157028]`（S4 §2.2 + S6 §J.1.2） |
 
 **删除**：
-* `robot11_mount`（`plugin|urdf|sensor`，L:1287-1301）——三档并存 = 倾角有三个所有者（S4 §7.2 O3）。
+* `robot11_mount`（`plugin|urdf|sensor`，L:1437-1452）——三档并存 = 倾角有三个所有者（S4 §7.2 O3）。
 * `robot11_mount_axis` —— **本仓不存在此参数**（全仓 `grep` 无命中，已核）。真正存在的是
-  `livox_tilt_axis`（`roll|pitch`，L:1257-1268），随 P2 一并删除；其取值之争见 S4 §7.2 O6
+  `livox_tilt_axis`（`roll|pitch`，L:1407-1416），随 P2 一并删除；其取值之争见 S4 §7.2 O6
   （URDF 写 pitch、CSV 写 roll；`livox_tilt_axis` 默认 `roll`）。
 * v3 中 `sensor` 的语义**升格为唯一语义**：倾角在 URDF 里，点云表达在**传感器系**，
   `frame_id=livox_frame` 与数据自洽（S6 §J.3、S8 §2.2）。`plugin`（平帧 + 斜数据）与
@@ -113,14 +119,14 @@ v3 要求每个槽位**声明**三项能力：`cap_global`（能否无先验整�
 
 | 参数 | 默认（HEAD） | 取值 | 拥有的事实 | 谁读它 | 依据 |
 |---|---|---|---|---|---|
-| `sim_backend` | `classic` | `classic` \| `gz` | 用哪个仿真器 | 仅仿真装配 | L:1223；S8 §0/§9 |
-| `world` | `RMUL2026` | 世界名（同时决定 map/PCD 前缀） | 这次跑哪个场地 | 仿真 + 资产解析 | L:1206 |
-| `gui` | `True` | `True`\|`False` | 起不起 gzclient | 仅仿真 | L:1172 |
-| `nav_rviz` | `True` | `True`\|`False` | 起不起 nav2 RViz | 仅显示 | L:1146 |
-| `robot_visual` | `decimated` | `decimated`\|`full` | `<visual>` mesh 档 | 仅显示 | L:1315-1327 |
-| `spin_speed` | 槽位相关：`robot11` ⇒ `0.0`，其余 `5.0` | rad/s | `fake_vel_transform` 的小陀螺角速度 | `fake_vel_transform` | L:1193-1203 |
-| `cloud_accumulator` | `False` | `True`\|`False` | 起不起 3D 累加器（仅 `mode:=mapping`） | 建图链路 | L:1497-1517 |
-| `map_name` | `''`（= `<world>`） | 存档基名 | 这次读/写哪份存档 | 建图/定位 | L:1467-1474 |
+| `sim_backend` | `classic` | `classic` \| `gz` | 用哪个仿真器 | 仅仿真装配 | L:1373；S8 §0/§9 |
+| `world` | `RMUL2026` | 世界名（同时决定 map/PCD 前缀） | 这次跑哪个场地 | 仿真 + 资产解析 | L:1356 |
+| `gui` | `True` | `True`\|`False` | 起不起 gzclient | 仅仿真 | L:1322 |
+| `nav_rviz` | `True` | `True`\|`False` | 起不起 nav2 RViz | 仅显示 | L:1296 |
+| `robot_visual` | `decimated` | `decimated`\|`full` | `<visual>` mesh 档 | 仅显示 | L:1490-1498 |
+| `spin_speed` | 槽位相关：`robot11` ⇒ `0.0`，其余 `5.0` | rad/s | `fake_vel_transform` 的小陀螺角速度 | `fake_vel_transform` | L:1343-1354 |
+| `cloud_accumulator` | `False` | `True`\|`False` | 起不起 3D 累加器（仅 `mode:=mapping`） | 建图链路 | L:1672-1679 |
+| `map_name` | `''`（= `<world>`） | 存档基名 | 这次读/写哪份存档 | 建图/定位 | L:1642-1648 |
 
 > **约束（P1）**：算法层**不得**读这一层的任何参数。反例（v3 禁止）：`lio` 分支里读 `gui` 决定行为、
 > 感知参数里写死 `world` 名字。
@@ -167,13 +173,13 @@ map ──(local_tracker / M1–M4 中被选中的那一个)──► odom ─�
 | `odom→base_link` | **`lio_tf_adapter`** | dynamic | 9.999–10.000 Hz【实测 S1 §9.3】 | **合成** `T_ol·T_bl`（`q=q_lio·q_off`、`p=p_lio+R_lio·t_off`），S4 §3.5 | 缺失 ⇒ 无里程计；**共轭** ⇒ 假俯仰 **4.890°**（真值 0.003°，S5 §3.2）；**双重变换** ⇒ 场景刚性转 **30.970°**（S5 §3.1）；守卫 `fe0dc31` 会在旋转残差 >`1e-6 rad` 时限速 ERROR |
 | `base_link→livox_frame` | **URDF**（`robot_state_publisher`） | static | 一次（latched） | `R_x(−30°)` + `t=(0.000562,0.130916,0.157028)`（`\|t\|=0.204443 m`）【实测 S4 §2.2 / S5 §3.1】 | 与插件 `<tilt_rpy>` 同时存在 ⇒ **双倍倾角**；写错轴 ⇒ `livox_tilt_axis` 之争（S4 §7.2 O6） |
 | `base_link→imu_link` | **URDF** | static | 一次（latched） | IMU 安装位姿；MID-360 内置 IMU 的 `T_IL` 是**估计器参数**、不是这条 TF（S5 §1.2） | 与 LIO `extrinsic_T/R` 混用 ⇒ "转两次"（S5 §3.1 引 #433） |
-| `base_link→base_link_fake` | **`fake_vel_transform`** | dynamic | 20 Hz【实测 L:2146】 | **只含 yaw**（小陀螺角），pitch/roll 透传（S4 §7.1 I6） | 缺失 ⇒ nav2 的 `robot_base_frame` 解析不到；`spin_speed≠0` 时它凭空转而雷达不跟着转（L:1198） |
+| `base_link→base_link_fake` | **`fake_vel_transform`** | dynamic | 20 Hz【实测 L:2400】 | **只含 yaw**（小陀螺角），pitch/roll 透传（S4 §7.1 I6） | 缺失 ⇒ nav2 的 `robot_base_frame` 解析不到；`spin_speed≠0` 时它凭空转而雷达不跟着转（L:1348） |
 
 ### 2.2 `T_ol·T_bl` 的方向（最容易写反，写死在这里）
 
 * `T_ol` = LIO 输出的 body(=livox) 位姿；`T_bl = lookupTransform(livox_frame, "base_link")` = **base_link 在 livox 系里的位姿**。
 * 链式法则：`p_odom = T_ol·p_livox = T_ol·(T_bl·p_base)` ⇒ **`T_ob = T_ol·T_bl`（右乘合成）**。
-* `T_bl⁻¹·T_ol·T_bl` 是**换基（共轭）**，只在 `T_bl` 的旋转为 `I` 时姿态碰巧相同（S5 §3.2；上游 `qza36/COD_NAV` 的 `small_point_lio_node.cpp:75` 就是共轭，被 COD 的 `T_bl≡I` 约定掩盖，S4 §3.3）。
+* `T_bl⁻¹·T_ol·T_bl` 是**换基（共轭）**，只在 `T_bl` 的旋转为 `I` 时姿态碰巧相同（S5 §3.2；上游 `qza36/COD_NAV` 的 `small_point_lio_node.cpp:179-187、:218-219` ——本仓 vendored 同源副本的行号—— 就是共轭；旧稿说"被 COD 的 `T_bl≡I` 约定掩盖"，**该前提已被 2026-10-18 实车实测证伪**：`T_bl` 非单位阵、共轭未退化，见 [`cod_real_frame_measurement.md`](cod_real_frame_measurement.md)，S4 §3.3 的 C 型结论已降级）。
 
 ---
 
@@ -186,8 +192,8 @@ map ──(local_tracker / M1–M4 中被选中的那一个)──► odom ─�
 **判据**：对 TF 树里每条边，在 `(mode, robot, sim_backend, 8 个槽)` 的**笛卡尔积**上静态求值 launch 条件，
 **恰好一个**节点声明该边的 `parent→child`。
 **违反后果**：查询抖动/跳变；tf2 不报错（S3 §4.1）。
-**现状**：`map→odom` 已由"选的时候唯一"保证（L:1353-1366、L:1430-1434）；`odom→base_link` 在
-`lio:=small_point_lio` 时**唯一**（LIO 自己发，L:2028-2033 排除 adapter），其余 LIO 由 adapter 发 —— 也唯一，
+**现状**：`map→odom` 已由"选的时候唯一"保证（L:1528-1531、L:1605-1608）；`odom→base_link` 在
+`lio:=small_point_lio` 时**唯一**（LIO 自己发，L:2240-2248 排除 adapter），其余 LIO 由 adapter 发 —— 也唯一，
 但**权威不统一**（S4 §7.2 O2）。
 
 ### I2 `odom→base_link` 只由 `lio_tf_adapter` 发
@@ -200,7 +206,7 @@ bringup 传 `false`；**在 B1 落地前，I2 对 `small_point_lio` 记为"已�
 ### I3 `map→odom` 只由 `local_tracker` / M1 发
 
 **判据**：`global_relocalizer` 与 `map_source` 的节点**不得**出现在该边的发布者集合里；`mapper` 与
-`localization` 不得同时生效（`mode:=slam_nav` 时不加载任何重定位槽，L:1815-1819）。
+`localization` 不得同时生效（`mode:=slam_nav` 时不加载任何重定位槽，L:2037-2038）。
 **违反后果**：与 I1 同；且"全局/局部"失去分工（S3 §5.4 反模式）。
 
 ### I4 `global_relocalizer` 不发 TF
@@ -248,7 +254,7 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
 * **默认 `off`，推荐 `hybrid`**：`off` = 与未打补丁的二进制**同值**（实测 `v0_base` 30.110° vs `smoke0` 30.129°，
   S1 §9.3 #1/#2）⇒ 默认路径零风险。
 * **`gravity_align_rpy` 必须由 launch 从 URDF 自动算**（读 `base_link→livox_frame` 的静态 TF 再取 rpy，
-  与 `_LioAdapterRobot11` 现在从几何算 rpy 的做法同源，L:2073/219-252）。**禁止手填**：
+  与 `_LioAdapterRobot11` 现在从几何算 rpy 的做法同源，L:2285/396-418）。**禁止手填**：
   手填的值与实物不符时，`urdf` 档**没有任何告警**（S1 §9.4(5) 风险列）。
 
 ### 4.2 机制（两步，缺一不可）
@@ -329,7 +335,7 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
 |---|---|---|---|---|
 | **`known`** | 操作员/API 已给初值（`/initialpose`、`initial_pose_*`、`map_start_pose`） | 可只起 `local_tracker` | **立即**（首帧配准成功后） | AMCL 的 `set_initial_pose` 语义（S3 §3.2 E4） |
 | **`unknown`** | 无先验 | **必须**起 `global_relocalizer` | **只有**全局重定位给出位姿且质量过阈后 | AMCL `reinitialize_global_localization`（S3 §3.2 E7） |
-| **`continue`** | 沿用上次会话的位姿（存档/`.posegraph`/`.pbstream`） | `map_source` + 一致性检查 | 一致性检查通过后 | 本仓已有 `map_autocontinue`/`map_start_pose`/`map_resume_check`（L:1475/1482/1518） |
+| **`continue`** | 沿用上次会话的位姿（存档/`.posegraph`/`.pbstream`） | `map_source` + 一致性检查 | 一致性检查通过后 | 本仓已有 `map_autocontinue`/`map_start_pose`/`map_resume_check`（L:1650/1657/1693） |
 
 **铁律**：`initial_pose:=unknown` 且 `global_relocalizer:=none` ⇒ **非法组合**（§6 `E-INIT-01`）。
 任何 `local_tracker` 在"没有可信初值"时**不得**发 `map→odom` —— 这是本仓 `gicp` 已有的语义（"没有初值就不发 TF"，S3 §6.1 R4），与 AMCL 同源，不是本仓发明（S3 §3.2 第 5 条）。
@@ -383,7 +389,7 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
 | `stop` | WARN | 发零速 + 取消当前 goal + `state=LOST` | 工业默认（Autoware MRM，S3 §3.1/§4.2） |
 
 **阈值的来源**：【设计】。`T_warn=0.5 s` ≈ 5 帧 @10 Hz（LIO 实测 10.000 Hz，S1 §9.3）；
-`T_trip=2 s` 与既有 `gicp.lost_after_rejections=25`（2.5 s @10 Hz）同量级且更保守（`gicp_registration_sim.yaml:262`）。
+`T_trip=2 s` 与既有 `gicp.lost_after_rejections=25`（2.5 s @10 Hz）同量级且更保守（`gicp_registration_sim.yaml:245`）。
 **3 m** 直接取 SICK 的有界外推值（S3 §3.4 E21）。
 **这些是默认值，需在真机按"定位更新率/最高车速"重定**（S1 §9.6 第 3 条同款告诫）。
 
@@ -396,14 +402,14 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
 | # | `mode` | `map_source` | `global_relocalizer` | `local_tracker` | 形态 | 说明 |
 |---|---|---|---|---|---|---|
 | L1 | `mapping` | `none` | `none` | `none` | 建图 | `mapper` 槽生效（slam_toolbox/cartographer），`map→odom` 由它发 |
-| L2 | `slam_nav` | `none` | `none` | `none` | 边建边导航 | 在线 SLAM 直接持有 `map→odom`（L:1815-1819） |
+| L2 | `slam_nav` | `none` | `none` | `none` | 边建边导航 | 在线 SLAM 直接持有 `map→odom`（L:2027-2035） |
 | L3 | `nav` | `2d_grid` | `amcl_global` | `amcl` | **M1** | 一体机；`global_relocalizer` 与 tracker 是**同一节点**，允许 |
 | L4 | `nav` | `2d_grid` | `none` | `amcl` | M1（只给初值） | `initial_pose:=known` 时必须 |
 | L5 | `nav` | `pcd` | `descriptor` | `gicp` | **M2 串联** | 全局给先验 → 局部精配准；`initial_pose` 可为 `unknown` |
 | L6 | `nav` | `pcd` | `none` | `gicp` | M2（外部初值） | 必须 `initial_pose:=known` 或 `/initialpose` |
 | L7 | `nav` | `posegraph` | `none` | `slam_toolbox_localization` | M1 变体 | 起点靠 `/initialpose`（S3 §2） |
 | L8 | `nav` | `pbstream` | `none` | `cartographer_localization` | M1 变体 | 图冻结；只支持局部窗口（S3 §3.3） |
-| L9 | `nav` | `none` | `none` | `none` | **LIO 当绝对定位**（回退） | 需要 `map≡odom` 单条静态桥（L:2135-2142）；v3 记为 `degraded` |
+| L9 | `nav` | `none` | `none` | `none` | **LIO 当绝对定位**（回退） | 需要 `map≡odom` 单条静态桥（L:2388-2397）；v3 记为 `degraded` |
 
 ### 6.2 非法组合（每条对应一个 `check_contract` id）
 
@@ -426,7 +432,7 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
 [check_contract] E-TF-01  没有 map→odom 的发布者
   判据 I3：map→odom 必须由 local_tracker（或 M1 一体机）发布
   证据：mode:=nav, map_source:=2d_grid, global_relocalizer:=none, local_tracker:=none,
-        且未启用 map≡odom 回退桥（bringup_sim.launch.py:2135-2142 的条件为假）
+        且未启用 map≡odom 回退桥（bringup_sim.launch.py:2388-2397 的条件为假）
   修复：① local_tracker:=amcl（M1，配 map_source:=2d_grid）
         ② global_relocalizer:=amcl_global + local_tracker:=amcl（注意：同一体机不要起两份）
         ③ 明确接受降级：local_tracker:=none + 启用 map≡odom 桥（L9）
@@ -534,7 +540,7 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 |---|---|---|---|
 | **I1** 唯一发布者 | 对 `(mode, robot, sim_backend, 8 槽)` 笛卡尔积**静态**求值；再对每个组合跑 `view_frames` 检查重复边 | `ros2 run tf2_tools view_frames`；`ros2 topic info /tf -v`（查 publisher 数）；静态：`python3 tools/scripts/regress/<新增>_tf_publisher_uniqueness.py`（S4 §8 验收①） | 每条边恰好 1 个 owner；`/tf` 的 publisher 数 = 声明数 |
 | **I2** adapter 唯一 | `grep` 全栈 `sendTransform` + 运行期 `ros2 node info` | `grep -rn "sendTransform" src/` | 只有 adapter（B1 落地后） |
-| **I3** map→odom 唯一 | 同上 + 检查 `mapper`/`localization` 互斥条件 | L:1815-1819 的条件求值 | 无两个 `map→odom` 发布者 |
+| **I3** map→odom 唯一 | 同上 + 检查 `mapper`/`localization` 互斥条件 | L:2027-2038 的条件求值 | 无两个 `map→odom` 发布者 |
 | **I4** 全局器不发 TF | `ros2 node info <global_relocalizer>` 无 broadcaster；`view_frames` 里 `map→odom` 的 owner 不是它 | 同 I1 | 通过 |
 | **I5** 重力对齐 | ① `check_contract` 的 `W-GRAV-01`；② 跑一次静止 15 s，用**原始云经 TF 搬进 odom** 拟合地面（S1 §9.2 的方法） | 复用 `tools/scripts/.../grav_probe.py`（S1 §9 汇总脚本） | 残差 **<0.7°**（§4.5） |
 | **I6** 健康信号 | `ros2 topic hz /<source>/health` + `ros2 topic echo` 看字段齐全 | — | ≥1 Hz，§5.4 字段全有 |
@@ -559,7 +565,7 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 |---|---|---|---|---|
 | **C1** | `initial_pose:=unknown`，有地图、有全局器 | `global_relocalizer` + `local_tracker` | `IDLE→RELOCALIZING→TRACKING`；**RELOCALIZING 期间 `map→odom` 不发** | 状态序列与 `health.state` 一致；RELOCALIZING 期 `/tf` 无该边 |
 | **C2** | `initial_pose:=known`，给对初值 | 只 `local_tracker` | 首帧后 `TRACKING`；`map→odom` 立刻发 | `map→odom` 首条 ≤1 s |
-| **C3** | `initial_pose:=continue`，存档一致 | `map_source` + `map_resume_check` | 检查通过后 `TRACKING`；yaw/位置与存档差 < 容差 | `map_resume_check` 的 pos/yaw 判据（L:1534-1539） |
+| **C3** | `initial_pose:=continue`，存档一致 | `map_source` + `map_resume_check` | 检查通过后 `TRACKING`；yaw/位置与存档差 < 容差 | `map_resume_check` 的 pos/yaw 判据（L:1709-1717） |
 | **C4** | `initial_pose:=known` 但**给错**（偏移 2 m / yaw 错 90°） | 只 `local_tracker` | **必须**出现 `valid=false`/`quality` 跌穿阈值 ⇒ `LOST`，**不得**静默继续 | `gicp` 的 `gate_*`+`lost_after_rejections`（S3 §6.1 R3）或 AMCL 粒子协方差；`/cmd_vel_nav` 在 `T_trip` 内归零（`stop`/`degrade`） |
 
 > **C4 是最重要的一条**：它把"位姿源坏了"变成**可观测**的；缺了它，`warn`（默认档）就退化成"知道坏了但不处置"。
@@ -572,8 +578,8 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 
 ### 10.1 `robot11_mount` / `robot11_mount_axis`
 
-* **删什么**：`robot11_mount`（`plugin|urdf|sensor`，L:1287-1301）与其 `choices=list(_LIVOX_MOUNTS)`
-  （L:172、L:1303）、`_validate_livox_mount`（L:175-181）、`livox_tilt_axis`（L:1257-1268）。
+* **删什么**：`robot11_mount`（`plugin|urdf|sensor`，L:1437-1452）与其 `choices=list(_LIVOX_MOUNTS)`
+  （L:172、L:1453）、`_validate_livox_mount`（L:175-181）、`livox_tilt_axis`（L:1407-1416）。
   `robot11_mount_axis` **本仓不存在**（全仓 grep 无命中）——任务书里这个名字对应的是 `livox_tilt_axis`。
 * **为什么**：三档并存 = 倾角有三个所有者（P2、S4 §7.2 O3）；`<tilt_rpy>` 让 TF 说"平"、数据说"斜"（S8 §2.2）。
 * **删之前必须做**：`sensor` 语义成为唯一语义（倾角在 URDF、点云在传感器系）；Classic 默认档从 `plugin` 迁到
@@ -581,15 +587,15 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 * **影响面**：`robot:=robot11` 的默认点云表达（水平 → 斜传感器系）、`linefit.gravity_aligned_frame`/p2l `target_frame`
   的增量覆盖（L 里只对 `sensor` 档加的那两份增量文件，S6 §J.3）、所有已实测基线（S6 §A/§J/§K 的数字）都要重标口径。
 
-### 10.2 `camera_init→map` 全 0 静态桥（`launch:2117-2118`）
+### 10.2 `camera_init→map` 全 0 静态桥（`L:2371-2372`）
 
-* **删什么**：`tf_bridge_camera_init_to_map`（L:2116-2119，`arguments=['0','0','0','0','0','0','camera_init','map']`）
-  与兄弟桥 `tf_bridge_body_to_odom`（L:2125-2128）。
+* **删什么**：`tf_bridge_camera_init_to_map`（L:2367-2374，`arguments=['0','0','0','0','0','0','camera_init','map']`）
+  与兄弟桥 `tf_bridge_body_to_odom`（L:2376-2383）。
 * **为什么**：它们把 `map ≡ camera_init` **写死成恒等**——"倾斜不是缺模块，是被这条边写死成了恒等"（S2 §6.1 第 2 条）。
   在 E1 之后 `camera_init` 这个帧要么不存在（`small_point_lio` 没有它），要么已被对正，桥只会制造第二份真相。
-* **附带清掉**：`src/rm_localization/small_point_lio/launch/small_point_lio.launch.py:47` 的**单位**
+* **附带清掉**：`src/rm_localization/small_point_lio/launch/small_point_lio.launch.py:24-45` 的**单位**
   `base_link→livox_frame` 静态 TF（上游是死代码，我们把它加进了 `LaunchDescription`，S4 §7.2 O4）——
-  它与 URDF 的 −30° 关节**互斥**，同时存在即双倍倾角。**注意**：当前 bringup 不走这个 launch（L:1794-1806 自建 Node）
+  它与 URDF 的 −30° 关节**互斥**，同时存在即双倍倾角。**注意**：当前 bringup 不走这个 launch（L:1979-1994 自建 Node）
   ⇒ 是**潜伏**坑。
 * **删之前必须做**：`mode:=nav` 的 L9 回退（LIO 当绝对定位）需要一条**显式**的 `map→odom` 发布者，
   不能再用"全 0 静态桥"冒充；改由 `local_tracker:=none` + `map_source:=none` + 明确的 `degraded` 声明（§6 L9）。
@@ -605,7 +611,7 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 
 ### 10.4 `localization` 的双重身份
 
-* **删什么**：`localization`（8 值枚举，L:1353-1366）与 `mapper`（L:1430-1434）的**同名两项**
+* **删什么**：`localization`（8 值枚举，L:1528-1531）与 `mapper`（L:1605-1608）的**同名两项**
   （`slam_toolbox`/`cartographer` 同时出现在两个枚举里）。
 * **为什么**：同一个包的两个入口、不同模式、靠 launch 条件互斥——是**命名/分层重复**，不是双发布者（S3 §6.1 R2），
   但它让"能力"不可见（P4），也让 `check_contract` 必须硬编码"哪些名字是 SLAM"。

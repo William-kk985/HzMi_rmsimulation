@@ -1,4 +1,4 @@
-> **STATUS（2026-10，仓库整理）**：本文 §2/§3.3「COD 的 `base_link ≡ livox_frame`（C 型，`T_bl≡I`）」的结论已被实车实测（A 型，`T_bl` 非单位阵）取代（见 `docs/README.md` 取代表 #11）；其余内容仍有效。
+> **STATUS（2026-10，仓库整理；2026-10-18 实车实测后更新）**：本文 §2/§3.3「COD 的 `base_link ≡ livox_frame`（C 型，`T_bl≡I`）」的结论已被**实车实测**取代 —— 实测为 **A 型**（`T_bl` 非单位阵：roll `−46.238°`、`|t| 0.3949 m`；`odom→base_link` 静止时 roll ≈ `0.030°` ⇒ 共轭 bug 已生效）。**原始数据与判读见 [`cod_real_frame_measurement.md`](cod_real_frame_measurement.md)**（亦见 `docs/README.md` 取代表 #11）；本文其余内容（H2/H3 源码对账、耦合清单）仍有效，但"COD 不受影响"的归宿要按 A 型重读。
 # COD 实车（30° 斜装雷达）vs 本仓仿真：帧架构对账与"到底是谁的缺陷"
 
 > **任务性质**：只读代码取证（`grep` / `read` / `git log`），**未运行任何仿真**，未修改

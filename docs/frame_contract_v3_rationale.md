@@ -15,6 +15,10 @@
 > **S5** `lio_extrinsic_application_survey.md` · **S6** `tilted_lidar_fidelity.md` · **S7** `round_summary_gz_frames.md` ·
 > **S8** `fortress_sim_backend.md` · **L** `bringup_sim.launch.py`（HEAD `c996365`）。
 
+> **行号基线（2026-10 复核）**：文中 `L:NNNN` 指 `src/rm_nav_bringup/launch/bringup_sim.launch.py` 的行号，
+> 已按 **`8e5e928`（2853 行）** 逐条复核（旧稿按 `c996365`/2584 行编号，launch 重构后整体偏移）；
+> `file:NNNN` 同批复核。**L 的来源编号本身仍写 `c996365`**（该提交是本文写作基线），但**行号已更新到 HEAD**。
+
 ---
 
 ## 1. 问题重述：那 30° 必须被吸收在某处
@@ -86,10 +90,10 @@ E1 的答案是"定义 / 变 / 不是 / 能（地面倾角）"；`odom_grav` 是
 
 | 事实 | 落点 | 推论 |
 |---|---|---|
-| 传播用 `v += (R·acc + g)·dt` | `eskf.h:103`（S1 §9.1） | `x.gravity` 是**世界系**重力；`x.acceleration` 是 body 系比力 |
+| 传播用 `v += (R·acc + g)·dt` | `eskf.h:44`（S1 §9.1） | `x.gravity` 是**世界系**重力；`x.acceleration` 是 body 系比力 |
 | 初始化**从不写** `rotation`；`x.rotation` 只在 `eskf.h:30` 初始化成 `Identity()` | `eskf.h:30`、`small_point_lio.cpp:45-79` | **世界系 = 初始化时刻的传感器系**（斜 30°） |
 | `fix_gravity_direction=false` ⇒ `g = parameters.gravity` 逐字 | `small_point_lio.cpp:57-59` | 参数被当**世界系**用；写什么都**不能**把世界 z 摆正 |
-| `fix_gravity_direction=true` ⇒ 200 帧均值只进 `gravity` 状态 | `small_point_lio.cpp:50-57` | 同上：**只借模长，方向进状态**，不进姿态 |
+| `fix_gravity_direction=true` ⇒ 200 帧均值只进 `gravity` 状态 | `small_point_lio.cpp:50-56` | 同上：**只借模长，方向进状态**，不进姿态 |
 | 初始化把 `point_deque`（雷达系点）直接塞进 ivox | `small_point_lio.cpp:49-52` | 等价于假设 `R=I,t=0`；**一旦设 R≠I，初始地图会被整体转过 R** |
 
 ⇒ E1 在 `small_point_lio` 里**不是"5 行"**：`rotation`、`gravity`、`acceleration` 三处要一起写，
@@ -236,7 +240,7 @@ S5 §3.1 引 `observation_buffer.cpp`）：`sensor` 档实测 **39.6–40.4%** �
 | 档 | 外参来源 | 时变可用？ | 本仓谁在这一档 |
 |---|---|---|---|
 | **S**（static param / 缓存） | 参数文件常数；或构造时查一次 | ❌ | `lio_tf_adapter`（`rpy/xyz` 参数，`node.cpp:37-38`）；LIO-SAM（缓存 `lidar2Baselink`） |
-| **L**（per-message lookup） | 每条消息按 `stamp` 查 | ✅ | `small_point_lio`（`node.cpp:110`，S4 §3.5）、pb2025 |
+| **L**（per-message lookup） | 每条消息按 `stamp` 查 | ✅ | `small_point_lio`（`small_point_lio_node.cpp:167-168`，S4 §3.5）、pb2025 |
 | **J**（关节链） | URDF movable joint + `joint_state_publisher`/编码器 | ✅（L 的前提） | pb2025（`gimbal_yaw`）、XDU（串口） |
 
 ⇒ 本仓现在是 **S+L 混合**。**如果哪天真上云台，`lio_tf_adapter` 会立刻错，而 `small_point_lio` 的 lookup 会活着**（S1 §4.1 末）。
@@ -267,7 +271,7 @@ S5 §3.1 引 `observation_buffer.cpp`）：`sensor` 档实测 **39.6–40.4%** �
 而不是"重力对齐是错的"。真正支撑 E1 的是 §2 的机制分析 + §5 的实测，而不是"没人这么做"。
 
 **附带的操作教训**：我们自己**曾经**也把这条单位静态 TF 启用了（上游是死代码，我们把它加进了 `LaunchDescription`，
-S4 §7.2 O4）。它现在**潜伏**在 `src/rm_localization/small_point_lio/launch/` 里（bringup 不走它，L:1794-1806 自建 Node），
+S4 §7.2 O4）。它现在**潜伏**在 `src/rm_localization/small_point_lio/launch/` 里（bringup 不走它，L:1979-1994 自建 Node），
 一旦有人按上游 launch 起，就会与 URDF 的 −30° **互斥冲突** ⇒ 双倍倾角。C §10.2 把它列进删除清单。
 
 ---
@@ -549,7 +553,7 @@ pb2025 之所以能成，是因为 point_lio 里 `gravity` 只是 `Set_init` 的
 ### (b) `gravity_align_rpy` 由 **launch 从 URDF 自动算**（不手填）
 
 * **决策**：先验 rpy 由 launch 读 `base_link→livox_frame` 的静态 TF 再取 rpy（与 `_LioAdapterRobot11` 从几何算 rpy
-  的做法同源，L:2073/219-252），**禁止**手填。
+  的做法同源，L:2285/396-418），**禁止**手填。
 * **理由**：① P2 的唯一事实——倾角只在 URDF；手填就是第二个所有者；
   ② `urdf` 档**没有任何告警**（S1 §9.4(5) 风险列）：先验错 ⇒ 世界按错角度摆正，且你无从发现；
   ③ 自动算的值与实物同源，换支架只需改 URDF。

@@ -3,16 +3,17 @@
 > **口径**：`git ls-files '*.md'` + `find`（含未跟踪/子模块内部），排除 `.git/`。
 > **行数** = `wc -l`；**最后提交** = `git log -1 --format='%h %ad' --date=short -- <file>`（`未入库` = 尚无提交）。
 > 生成于 2026-10 仓库整理；本清单是 [`README.md`](README.md) 的明细附表，**不移动/不改写任何文档**。
+> **2026-10 合并轮**：3 组重复/未跟踪文档已合并（`docs/package/` 4 份、`docs/mapping/` 2 份归档到 `docs/archive/`；未入库的 cartographer 报告并入 `docs/cartographer_2d_occupancy_semantics.md` §5），`docs/livox_viewer2_launch_notes.md` 已入库。下表已按**合并后**的路径/行数更新。
 > 「最后提交」= `本次整理` 的行属于本次文档整理提交，记录的是**整理后**的行数；其余行为该文件最近一次实质提交。
 
 ## 计数
 
 | 类别 | 份数 | 处置 |
 |---|---:|---|
-| 本仓自有（docs / 根 / tools / archive / src 自有 / third_party 索引） | **103** | 收入本清单 A 表 + `README.md` 索引 |
+| 本仓自有（docs 90（含 `docs/archive/` 6）/ 根 2 / tools 2 / archive 3 / src 自有 7 / third_party 索引 1） | **105** | 收入本清单 A 表 + `README.md` 索引 |
 | 第三方 vendored + 子模块内部 | **119** | 附录 B（**不进索引**，只列出） |
 | 临时 / 构建产物（`.tmp_*`、`.venv`、`install/`） | **124** | 附录 C（不计入仓库文档） |
-| 合计 | **346** | — |
+| 合计 | **348** | — |
 
 ## A. 本仓自有文档（103 份，按索引分组）
 
@@ -21,8 +22,8 @@
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
 | `README.md` | 362 | `51ba382 2026-09-20` | 仓库总入口：来源与致谢、话题接口、Docker/原生两种环境、启动示例 |
-| `docs/README.md` | 200 | `本次整理` | 本文件 —— 全仓 md 的唯一索引（含取代表与待决清单） |
-| `docs/inventory.md` | 288 | `本次整理` | 本清单：逐份文档的行数 / 最后提交 / 一行定位（本索引的明细附表） |
+| `docs/README.md` | 199 | `本次整理` | 本文件 —— 全仓 md 的唯一索引（含取代表与待决清单） |
+| `docs/inventory.md` | 291 | `本次整理` | 本清单：逐份文档的行数 / 最后提交 / 一行定位（本索引的明细附表） |
 | `docs/round_summary_gz_frames.md` | 512 | `68d936f 2026-10-18` | 上一轮（10-18）四条线合并总结：外参守卫 / 机器卫生 / Fortress 后端 / COD 帧对账，含 24 条缺口 |
 | `docs/architecture.md` | 658 | `b2c8e1a 2026-10-05` | 目录结构 + 分层概念：为什么这么切 2D/2.5D/3D、参数在哪 |
 | `docs/glossary.md` | 76 | `aa64817 2026-09-21` | 名词一句话定义 + 指向详述章节 |
@@ -31,15 +32,15 @@
 | `docs/rm_algorithm_overview.md` | 151 | `84f3de6 2026-09-20` | 早期"角色 × 一体性 × 两场景"总结（推理过程仍有价值） |
 | `docs/slam_lio_primer.md` | 3064 | `00172e6 2026-10-09` | 教材式讲义：KF→EKF→ESKF→预积分→LIO→SLAM→定位，每条公式落到本仓数字 |
 | `docs/kalman_slam_tutorial.md` | 3606 | `7c6cd9f 2026-10-10` | 循序渐进读本：24 章 + 练习，从"为什么需要滤波"到 SLAM/AMCL/GICP |
-| `docs/mapping/README.md` | 96 | `b158525 2026-09-23` | `docs/mapping/` 子索引：现行落盘步骤 + 旧快照清单 |
-| `docs/package/README.md` | 13 | `84f3de6 2026-09-20` | `docs/package/` 子索引：离线配置包多版本的主次 |
+| `docs/mapping/README.md` | 96 | `本次整理` | `docs/mapping/` 子索引：现行落盘步骤 + 旧快照清单 |
+| `docs/package/README.md` | 14 | `本次整理` | `docs/package/` 子索引：离线配置包多版本的主次 |
 
 ### ② 契约 / 规范（10 份）
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
-| `docs/frame_contract_v3.md` | 700 | `8e5e928 2026-10-19` | **规范性**：三层参数、最终 TF 树（无 `odom_grav`）、I1–I7、重力契约 E1、重定位契约 |
-| `docs/frame_contract_v3_rationale.md` | 603 | `23bebb8 2026-10-19` | 上述契约的理由记录：为什么只有 E1 让世界系 z 朝上、18 仓库 0 例、8 条自我更正 |
+| `docs/frame_contract_v3.md` | 706 | `本次整理` | **规范性**：三层参数、最终 TF 树（无 `odom_grav`）、I1–I7、重力契约 E1、重定位契约 |
+| `docs/frame_contract_v3_rationale.md` | 607 | `本次整理` | 上述契约的理由记录：为什么只有 E1 让世界系 z 朝上、18 仓库 0 例、8 条自我更正 |
 | `docs/tf_interface_contract.md` | 153 | `489947f 2026-09-21` | TF/话题契约（T1–T5 已实施、T6 撤销）：谁发哪条边、谁供哪个话题 |
 | `docs/sim_real_contract.md` | 144 | `34c64a6 2026-09-22` | 仿真↔实车契约：分界点/替身、三分类判据、禁止清单 |
 | `docs/params_ownership_checklist.md` | 95 | `712741f 2026-10-07` | 参数归属清单（R1–R5）：算法参数该放哪个包 |
@@ -67,7 +68,7 @@
 | `docs/slope_speed_limiting.md` | 348 | `95846c3 2026-10-07` | 前瞻坡度/台阶限速：物理推导 + 整栈 A/B |
 | `docs/traversability_plan.md` | 652 | `fc226bb 2026-10-07` | 3D 派生可通行性（坡度/落空/净空）设计计划，未实现 |
 | `docs/scan_context_plan.md` | 738 | `413415d 2026-10-05` | Scan Context 类全局地点识别接入方案，未落地 |
-| `docs/cartographer_2d_occupancy_semantics.md` | 624 | `d398cf3 2026-09-23` | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导） |
+| `docs/cartographer_2d_occupancy_semantics.md` | 963 | `本次整理` | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导）+ §5 合并附录（issue 调查 / TSDF / slam_toolbox / nav2 阈值 / 调参表） |
 | `docs/livox_sensor_prior_art.md` | 508 | `03c8498 2026-10-18` | 非重复扫描 Livox 在新 Gazebo 上的既有实现调研 + REUSE/ADAPT/WRITE 裁决 + §10 编译实测 |
 | `docs/kinodynamic_esdf_mpc_notes.md` | 270 | `7097602 2026-10-05` | `865749/Kinodynamic_esdf_mpc` 调研笔记（外部仓库） |
 | `docs/slam_nav_goal_strategies.md` | 418 | `09578ed 2026-10-05` | "目标怎么给"四种方式的外部调研 |
@@ -81,11 +82,12 @@
 | `docs/cod_nav_nav_stack_inventory.md` | 225 | `09578ed 2026-10-05` | COD 战队导航开源资料完整清单 |
 | `docs/cod_nav_open_source_materials.md` | 208 | `09578ed 2026-10-05` | COD 及兄弟仓库的公开资料清单（哪个真开源、在哪） |
 
-### ④ 测量 / 实验记录（15 份）
+### ④ 测量 / 实验记录（16 份）
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
 | `docs/frame_contract_v3_measurements.md` | 345 | `8152e57 2026-10-19` | 统一输出契约（选项 U）的效率+精度实测：13.75 vs 5.75 ms/帧、逐位回归 |
+| `docs/cod_real_frame_measurement.md` | 255 | `本次整理` | **COD 实车帧实测原文**（2026-10-18）：`T_bl` rpy `(−46.238°, −1.684°, 0)`/`\|t\| 0.3949 m`、静止 `odom→base_link` roll `0.030°` ⇒ A 型 + 共轭 bug 生效；5 条命令逐字 + 算术核对 + 7 条 caveat |
 | `docs/tilted_lidar_fidelity.md` | 2988 | `本次整理` | 雷达斜 30° 的逐帧点云账本 + 代价图归因 + bug①② 的判决性签名 |
 | `docs/lio_drift_diagnosis.md` | 598 | `6ca978e 2026-10-07` | LIO 漂移分段诊断："才跑一会儿就飘"是否合理（唯一复现 = 高角速度甩转） |
 | `docs/lio_divergence_no_impact.md` | 505 | `95846c3 2026-10-07` | "没撞击里程计自己飘"的整栈归因 + 限速 A/B |
@@ -99,9 +101,9 @@
 | `docs/scan_context_probe_report.md` | 338 | `b626f37 2026-10-05` | A1 资产可行性探针：Scan Context 路线的准入判定 |
 | `docs/scan_context_samesource_gate_report.md` | 270 | `5c9c0a0 2026-10-05` | Scan Context 同源性硬门（真 `/scan` → PCD 库）实测 |
 | `docs/gazebo_sim_migration_plan.md` | 1862 | `057294c 2026-10-18` | Classic→新 Gazebo 迁移 spike + §9 纯 CPU 射线 BVH 实测（含单位 bug 修正） |
-| `docs/livox_viewer2_launch_notes.md` | 255 | `未入库` | LivoxViewer2 在 22.04 启动即崩的取证 + ROS2 驱动替代路线 |
+| `docs/livox_viewer2_launch_notes.md` | 255 | `本次整理` | LivoxViewer2 在 22.04 启动即崩的取证 + ROS2 驱动替代路线 |
 
-### ⑤ 历史 / 审计（17 份）
+### ⑤ 历史 / 审计（18 份）
 
 | 路径 | 行数 | 最后提交 | 解决什么问题 |
 |---|---:|---|---|
@@ -111,14 +113,15 @@
 | `docs/research_p2l_scan_stall.md` | 523 | `9c487ad 2026-09-23` | 旧链（livox→linefit→p2l）`/scan` 永久停发的调研（两条本仓缺陷） |
 | `docs/rm_algolab_plan.md` | 128 | `84f3de6 2026-09-20` | 宏架构早期规划（2026-08/09 草案） |
 | `docs/rm_bench_refactor_plan.md` | 205 | `84f3de6 2026-09-20` | 实验台改造路线 M0–M4 设计草案 |
-| `cartographer_map_stability_report.md` | 455 | `未入库` | 英文报告：cartographer 2D 地图"墙被擦掉/不稳"的源码级根因 |
-| `docs/mapping/建图操作指南.md` | 325 | `84f3de6 2026-09-20` | 当时会话的建图操作步骤（状态快照，现行看 runbook §1） |
-| `docs/mapping/立即开始建图.md` | 115 | `84f3de6 2026-09-20` | 当时会话的"立即开始"简明指南（状态快照） |
+| `docs/mapping/mapping_session_snapshots_merged.md` | 296 | `本次整理` | **合并版**：同一会话两份建图快照 → 键位/路线/观察/排错/pbstream 保存 + §9 与现行流程的差异 |
+| `docs/archive/mapping/建图操作指南.md` | 331 | `本次整理` | 已合并归档（原文 325 行 + 顶部 `STATUS`）：当时会话的建图操作步骤 |
+| `docs/archive/mapping/立即开始建图.md` | 121 | `本次整理` | 已合并归档（原文 115 行 + `STATUS`）：当时会话的"立即开始"简明指南 |
 | `docs/mapping/CARTOGRA_PBSTREAM_GUIDE.md` | 366 | `371d2ff 2026-09-21` | `.pbstream` 生成指南（含"需谨慎对待"的旧做法） |
-| `docs/package/配置包使用说明.md` | 468 | `ee6600c 2026-09-08` | 离线配置包使用说明（2026-09-08 状态） |
-| `docs/package/如何分发配置包.md` | 340 | `ee6600c 2026-09-08` | 如何把项目打包分发（2026-09-08） |
-| `docs/package/HZMI_RMSIMULATION_CONFIG_GUIDE.md` | 323 | `e8a07ca 2026-09-15` | 配置包使用指南（另一版本） |
-| `docs/package/README_PACKAGE.md` | 214 | `ee6600c 2026-09-08` | 配置包 README（另一版本） |
+| `docs/package/config_package_guide_merged.md` | 804 | `本次整理` | **合并版**：离线配置包使用 + 分发 + FAQ + 检查清单 + §11 2026-10 路径核对 |
+| `docs/archive/package/HZMI_RMSIMULATION_CONFIG_GUIDE.md` | 329 | `本次整理` | 已合并归档（原文 323 行 + `STATUS`）：配置包使用指南（最新最全那版） |
+| `docs/archive/package/配置包使用说明.md` | 474 | `本次整理` | 已合并归档（原文 468 行 + `STATUS`）：面向创建者的总体说明 |
+| `docs/archive/package/如何分发配置包.md` | 346 | `本次整理` | 已合并归档（原文 340 行 + `STATUS`）：打包/分发流程 |
+| `docs/archive/package/README_PACKAGE.md` | 220 | `本次整理` | 已合并归档（原文 214 行 + `STATUS`）：随包发出的 README |
 | `archive/pbstream_生成完成报告.md` | 204 | `ee6600c 2026-09-08` | pbstream 生成成功报告（2026-09 归档） |
 | `archive/reality_frozen/README.md` | 11 | `e8a07ca 2026-09-15` | 真车配置冻结快照说明（R5） |
 | `archive/reality_frozen/FROZEN.md` | 6 | `e8a07ca 2026-09-15` | 该目录"已冻结"的六行声明 |

@@ -1,3 +1,9 @@
+> **STATUS（2026-10 合并，已归档）**：本文件与 `配置包使用说明 / 如何分发配置包 / README_PACKAGE` 三份同主题文档已**合并**为
+> [`docs/package/config_package_guide_merged.md`](../../package/config_package_guide_merged.md)；
+> 原文 `git mv` 到此目录**保留历史**，仅供回溯。**内容冻结在 2026-03-19 的 v1.0.0 体系**：其中的
+> `./start_sentinel.sh`、`./save_pcd.sh` 等根目录脚本**已漂移**到 `tools/scripts/…`（见合并版 §11），
+> 现行跑法以 [`docs/smoke_test_runbook.md`](../../smoke_test_runbook.md) 为准。
+
 # HzMi_rmsimulation 离线配置包使用指南
 
 ## 📦 一、配置包介绍
