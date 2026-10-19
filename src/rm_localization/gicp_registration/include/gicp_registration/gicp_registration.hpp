@@ -54,6 +54,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/create_timer_ros.h>
@@ -116,6 +117,14 @@ private:
   rclcpp::Time publishTf(const Eigen::Matrix4d & T_map_odom);
   void publishPose(const Eigen::Matrix4d & T_map_odom, double score);
   void publishHealth(bool has_score, double score, bool healthy);
+  // **每帧一条**的判据诊断（~/gate，Float64MultiArray）：字段顺序见 src/gicp_registration.cpp 里
+  // publishGateMetrics 的注释。存在的理由：判据的输入（创新/dt/门限）在日志里是**限频**的
+  // （WARN_THROTTLE 1 s、采纳帧的 DEBUG 默认不可见）⇒ "逐帧"证据只能靠这条话题。
+  // 语义 = 只读观测，**不改变**任何判据/发布行为（与 ~/fitness_score、~/converged 同一契约）。
+  void publishGateMetrics(
+    double innov_xy, double innov_yaw_deg, double allow_xy, double allow_yaw_deg, double gate_dt,
+    double score, bool converged, bool accepted, size_t source_points, double align_ms,
+    int reject_streak, int flags);
 
   // ---- 参数（键名与依据逐条见 config/gicp_registration_sim.yaml） ----
   std::string pcd_path_;
@@ -297,6 +306,9 @@ private:
   // 与 ~/fitness_score（PCL 等价：内点平均平方距离 m²）**不是一回事**，故意分成两条话题，
   // 免得有人拿它去比 max_fitness_score 阈值（见 docs/gicp_backend_small_gicp.md 的"指标语义"）。
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr small_gicp_error_pub_;
+  // ~/gate：**每帧一条**的判据观测量（创新 / dt / 门限 / 采纳与否 / 拒绝连击）。与三个健康话题
+  // 同一契约：只由 align 组发布、不持状态锁发布。字段顺序见 publishGateMetrics 的注释。
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr gate_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;

@@ -63,7 +63,8 @@
 //         （旧代码是当场生效）。TF 可用性的判定时刻也从"点击时刻"挪到"下一帧开头"（≤ 一个 align 周期，
 //         只会让原本会被丢弃的点击更可能被采纳）。
 //     · 跨组共享的成员一律在既有 mutex_ 下读写（逐项清单见 .hpp 的"状态"块），本轮新增的唯一共享项是
-//       交接槽 pending_initial_pose_ / pending_initial_pose_valid_；三个健康话题只由 align 组发布，
+//       交接槽 pending_initial_pose_ / pending_initial_pose_valid_；健康/诊断话题（~/pose、
+//       ~/fitness_score、~/converged、~/gate、~/*small_gicp_error*）只由 align 组发布，
 //       故意**不**持状态锁发布 —— 一次阻塞的 DDS 写会把定时器线程一起拖住，等于把"饿死"带回来。
 
 #include "gicp_registration/gicp_registration.hpp"
@@ -501,6 +502,12 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "~/fitness_score", rclcpp::QoS(1).transient_local());
   converged_pub_ =
     create_publisher<std_msgs::msg::Bool>("~/converged", rclcpp::QoS(1).transient_local());
+  // ~/gate：判据的**逐帧**观测量（2026-10-21 新增）。为什么需要它：判据的输入（创新 / dt / 门限）
+  // 只出现在两类日志里 —— 未被采纳的 WARN 是 **1 s 限频**、被采纳的 DEBUG 默认不打印 ⇒
+  // "第一帧创新是多少、dt 是不是 0、门限取下限还是上限"这类问题在日志里**看不到逐帧**，
+  // 而它正是 §12.4 那个死锁的判据。这条话题每帧一条、只读、默认 QoS(10)（丢了不影响诊断结论：
+  // 分析端看的是"有没有/量级/分布"，不是逐条对齐）。字段顺序见 publishGateMetrics 的注释。
+  gate_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>("~/gate", rclcpp::QoS(10));
   // ~/small_gicp_error：**只在 backend=small_gicp 时创建**（PCL 路径下这条话题根本不存在 ⇒
   // "PCL 路径行为不变"包括"不多出话题"）。语义 = small_gicp RegistrationResult::error 原值，
   // **不是** m²、**不能**与 max_fitness_score 比较；与 ~/fitness_score 的分工见 .hpp 的成员注释。
@@ -547,7 +554,7 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     " transformation_epsilon=%.2e,\n"
     "        rotation_epsilon=%.2e, correspondence_randomness=%d, maximum_optimizer_iterations=%d\n"
     "  初值: use_initial_pose=%s initial_pose=[%s]%s\n"
-    "  输出: TF %s→%s @%.1f Hz + ~/pose + ~/fitness_score + ~/converged%s"
+    "  输出: TF %s→%s @%.1f Hz + ~/pose + ~/fitness_score + ~/converged + ~/gate（每帧判据观测量）%s"
     "（fitness warn=%.3f / accept=%.3f m²）\n"
     "  时间戳: TF 与 ~/pose 都用 now+%.2f s（tf_lookahead_sec，≈ AMCL transform_tolerance；"
     "点云时间戳不用来盖 TF）\n"
@@ -1009,6 +1016,7 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   const bool score_ok = converged && std::isfinite(score) && score <= max_fitness_score_;
   double innov_xy = 0.0, innov_yaw_deg = 0.0, allow_xy = 0.0, allow_yaw_deg = 0.0;
   innovationOf(guess, T_map_sensor, innov_xy, innov_yaw_deg);
+  int gate_flags = 0;  // ~/gate 的 flags 位（见下方 publishGateMetrics 调用处）
   // dt：本帧与**上次采纳帧**的点云时间戳差（查不到/首帧 ⇒ 0 ⇒ 用单帧下限）。
   // 为什么用点云戳而不是墙钟：点云戳是"这一帧数据属于哪个时刻"，与修正量的物理含义一致；
   // 墙钟在 CPU 过载时会被拉长，反而会把非法的大跳变"合法化"。
@@ -1134,6 +1142,21 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     }
   }
   publishHealth(true, score, accepted && score <= fitness_score_warn_);
+  // 判据的**逐帧**证据（~/gate）：必须在"采纳/拒绝"两支都走完之后发（要带本帧处理后的连击数）。
+  // flags 位定义（2026-10-21 新增；改前档恒为 0）：
+  //   bit0 = 本帧**跳过**了创新门限（无先验的首帧 / 重锚后的第一帧）
+  //   bit1 = 本帧**执行了重锚**（re-anchor，见 gate_reanchor_after_rejects）
+  //   bit2 = 本帧是"判失效"状态下的探针帧（见 lost_probe_period_sec）
+  {
+    int streak_now = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      streak_now = gate_reject_streak_;
+    }
+    publishGateMetrics(
+      innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, gate_dt, score, converged, accepted,
+      source->size(), align_ms, streak_now, gate_flags);
+  }
   // small_gicp 后端：**另发**一条 small_gicp 原生 error（无内点/未收敛时为 nan）。
   // 只在这条路里发布（PCL 路径下该 publisher 是 nullptr、话题不存在）⇒ 两个后端的
   // ~/fitness_score **定义完全一致**，不会被原生 error 悄悄改写。
@@ -1486,6 +1509,37 @@ void GicpNode::publishHealth(bool has_score, double score, bool healthy)
   std_msgs::msg::Bool conv;
   conv.data = healthy;
   converged_pub_->publish(conv);
+}
+
+void GicpNode::publishGateMetrics(
+  double innov_xy, double innov_yaw_deg, double allow_xy, double allow_yaw_deg, double gate_dt,
+  double score, bool converged, bool accepted, size_t source_points, double align_ms,
+  int reject_streak, int flags)
+{
+  // ============================ ~/gate 的字段契约 ============================
+  // Float64MultiArray，data 的**下标就是契约**（tools/scripts/localization/gicp_gate_probe.py
+  // 与 docs/frame_contract_v3_measurements.md 里「GICP 首帧门死锁」那一节都按这个顺序读；
+  // 改顺序 = 破坏可复现性）：
+  //   0  发布时刻（节点时钟秒；use_sim_time=true ⇒ 仿真时间）
+  //   1  创新：平移 (m)        —— 本帧结果相对**里程计预测位姿**的偏离
+  //   2  创新：yaw (°)
+  //   3  门限：平移 (m)        —— clamp(rate·dt, 下限, 上限)
+  //   4  门限：yaw (°)
+  //   5  dt (s)                —— 门限的 dt 来源见 gate_dt_from_last_received
+  //   6  fitness score (m²；无有效内点时为 nan)
+  //   7  本帧是否被采纳 (1/0)
+  //   8  converged (1/0)
+  //   9  下采样后的源点数
+  //   10 align 耗时 (ms)
+  //   11 本帧处理后的连续拒绝帧数
+  //   12 flags（bit0 跳过创新门限 / bit1 本帧重锚 / bit2 失效态探针帧）
+  // 语义与 ~/fitness_score、~/converged 一致：**只读观测**，不参与任何判据或发布决策。
+  std_msgs::msg::Float64MultiArray msg;
+  msg.data = {
+    now().seconds(), innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, gate_dt, score,
+    accepted ? 1.0 : 0.0, converged ? 1.0 : 0.0, static_cast<double>(source_points), align_ms,
+    static_cast<double>(reject_streak), static_cast<double>(flags)};
+  gate_pub_->publish(msg);
 }
 
 }  // namespace gicp_registration
