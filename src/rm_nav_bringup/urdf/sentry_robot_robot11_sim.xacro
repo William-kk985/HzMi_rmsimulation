@@ -853,6 +853,31 @@
   <gazebo reference="livox_frame"><material>Gazebo/LightBlueLaser</material></gazebo>
   <gazebo reference="imu_link"><material>Gazebo/BuildingFrame</material></gazebo>
 
+  <!-- ⑥ 【我们加的｜2026-10-20】**轮子对地摩擦**（★ Gazebo 只认 `<gazebo reference>` 这一种写法）
+       ———————————————————————————————————————
+       为什么（实测，见 docs/frame_contract_v3_measurements.md §22）：本模型被塌成**单个刚体**后，
+       轮子不能再靠滚动"让开"，原地转 = 4 个轮子同时**横向刮地** ⇒ 摩擦项直接吃掉角速度。
+       改前（Gazebo 缺省 μ=1，SDF 里 `surface/friction/ode` 是空的）：纯自转 wz=0.8 → **10.6%**（台架）/
+       **9.8%**（整栈 20 Hz）；纯前进 vx=0.3 → 79.3%（台架）/ 55.2%（整栈）。
+       加上 μ=0.02 后：台架自转 **95.8%**、整栈 20 Hz **92.9%** / 200 Hz **95.3%**（与默认模型 §20 同一条剂量-响应）。
+       ⚠️ 两个容易踩的坑，本文件都绕开了：
+         (a) `<mu1>/<mu2>` 写在 `<link>` **里面** = Gazebo 的 URDF 解析器**不认**（等于没写）；
+             必须写成 `<gazebo reference="<link>">`。`gz sdf -p` 之后每个 collision 都应真的出现
+             `<surface><friction><ode><mu>/<mu2>` 且等于这里给的值 —— 生成器每次都自证（不通过不写文件）。
+         (b) 轮子 `l6..l9` 已被 `robot11_weld_chassis.py` 塌进 base_link（它们不再是 link）
+             ⇒ 摩擦只能写在**根 link** 上（该 link 的**全部** collision 都会拿到这个 μ）。
+             物理上没关系：真正接地的只有 4 个轮 cylinder（整车最低点 −0.1025 m 在轮上），
+             其余 box 的最低点都在 −0.0780 m 以上、正常姿态下永不触地。
+       代价（**故意改的物理，不是几何**）：轮子对地静摩擦角 = atan(0.02) ≈ **1.1°** ⇒ 在更陡的坡上
+       停住会缓慢下滑（平面速度驱动爬坡不受影响，插件直接设速度、不需要抓地）。要更抓地就重新生成：
+       `—wheel-mu 0.1`（→ 自转 ≈82.3%、≈5.7° 坡）或 `—wheel-mu 0.05`（→ ≈89.6%、≈2.9°）。
+       生成：`python3 tools/scripts/regress/robot11_make_sim_xacro.py —wheel-mu 0.02`（缺省即此值）；
+       `—wheel-mu 0` 或 `—no-wheel-friction` = 回到"缺省 μ=1"的改前行为（不写这一块）。 -->
+  <gazebo reference="base_link">
+    <mu1>0.02</mu1>
+    <mu2>0.02</mu2>
+  </gazebo>
+
   <!-- ==================== 几何速查（实测值，来自 Phase 1/3；供 config 对照） ====================
        地面平面（body 系） z = **-0.102499**（四个轮 mesh 的最低点；轮 r=0.0580 心在 z=-0.0445）
        ⚠️ j2..j5 的 origin z=0.05735 是**转向关节**高度，**不是**轮心 —— 差 0.102 m
@@ -889,4 +914,10 @@
        几何/惯量守恒由 robot11_weld_chassis.py 自证（AABB 逐条相等，-0.10250 m 最低点）。
        回退：`robot11_make_sim_xacro.py —chassis articulated` —— 模型体（去注释）
        逐字节相同（实测 35025 B vs 35025 B），文件只多出文件头那段说明。
+       ★ 2026-10-20：**轮子对地摩擦 μ=0.02**（`<gazebo reference="base_link">` 的 mu1/mu2；
+       写在 `<link>` 里的 mu1/mu2 Gazebo **不认**）。上面那个 16.5% 是"只塌刚体、
+       不加摩擦"的旧数字；加摩擦后同一台架纯自转 wz=0.8 → **95.8%**
+       （改前 10.6%；整栈 20 Hz 9.8% → **92.9%**、200 Hz 95.3%）。几何一个字节没动，由
+       `gz sdf -p` 的逐条 AABB + 质量/Izz 自证。代价：静摩擦角 ≈ 1.1°，更陡的坡上
+       停住会滑（速度驱动爬坡不受影响）。剂量-响应/下游冒烟见 docs §22。
 --></robot>

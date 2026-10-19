@@ -50,21 +50,49 @@
   imu_link + imu_joint、MID-360 射线传感器（挂在**上游自己的** livox_frame 上）、
   planar_move 底盘插件、gazebo 材质。
 
+★ 2026-10-20：**轮子对地摩擦**（`--wheel-mu`，缺省 0.02）—— 与默认模型 `aa77420` 同一处物理修正
+---------------------------------------------------------------------------------------------
+`--chassis rigid` 只解决了**结构**（多刚体 → 单刚体）；它**不解决摩擦**：塌成刚体后轮子不能滚动，
+原地转 = 4 个轮子**横向刮地**，而 Gazebo 的缺省 μ=1 把角速度吃掉 90%：
+  台架 wz=0.8×2 仿真秒：改前 **10.6%**（整栈 20 Hz 9.8%）→ μ=0.02 后 **95%** 量级。
+两个坑（与默认模型 §20 完全同构）：
+  (a) `<mu1>/<mu2>` 写在 `<link>` 里 Gazebo **不认**，必须写 `<gazebo reference="<link>">`；
+  (b) robot11 的轮子（l6..l9）已被 weld **塌进根 link** ⇒ 摩擦写在根 link 上（整 link 的 113 条
+      collision 都拿到这个 μ；实际接地的只有 4 个轮 cylinder，其余最低点都 > −0.0780 m）。
+生成器每次写文件前用 `gz sdf -p` 自证：1 个 link、113 条 collision 的
+`<surface><friction><ode><mu>/<mu2>` 全部等于所给 μ、4 条轮 cylinder、几何 AABB 逐条相等、
+质量/Izz 与塌陷合成值相等；不通过就**不写文件**。源文件（上游 URDF / 各 inventory）一个字节没改。
+
 用法：
   python3 tools/scripts/regress/robot11_make_sim_xacro.py \
       --upstream src/rm_nav_bringup/urdf/upstream/robot11.urdf \
       --assets   src/rm_simulation/robot11_description/inventory/collision_assets.json \
       --out      src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro
+  python3 tools/scripts/regress/robot11_make_sim_xacro.py --wheel-mu 0.1     # 更抓地（自转≈85%）
+  python3 tools/scripts/regress/robot11_make_sim_xacro.py --no-wheel-friction  # 改前行为（μ=1）
+  python3 tools/scripts/regress/robot11_make_sim_xacro.py --chassis articulated # 逐字节回退档
+⚠️ 需要先 `source install/setup.bash`（xacro 要解析 `$(find ros2_livox_simulation)`；自证要 `gz`）。
 """
 
 import argparse
 import hashlib
 import json
+import math
 import os
+import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../..'))
+
+#: ★ 2026-10-20：轮子对地摩擦（**Gazebo 只认 `<gazebo reference>`**，写在 `<link>` 里的
+#: `<mu1>/<mu2>` 会被忽略）。缺省值与默认模型（`default_make_sim_xacro.py`）取同一个 0.02：
+#: 单刚体 + 轮子摩擦 0.02 是本机 Classic 下"自转 ≥90%"的剂量-响应拐点（见 docs §20.2/§22）。
+#: 注意 robot11 的轮子已经被 `robot11_weld_chassis.py` **塌进 base_link**（`l6..l9` 不再存在）
+#: ⇒ 摩擦只能写在 `<gazebo reference="base_link">` 上（= 该 link 的全部 collision；
+#: 实际接地的只有 4 个轮 cylinder，其余 109 条 box 的最低点在 −0.0780 m 以上，不接触地面）。
+DEFAULT_WHEEL_MU = 0.02
 
 #: 轮子用 cylinder（比抽稀网格更便宜也更准）
 WHEELS = {'l6': ('0.058', '0.0452'), 'l7': ('0.058', '0.0453'),
@@ -172,7 +200,27 @@ HEADER = '''<?xml version="1.0"?>
     工具：`tools/scripts/regress/robot11_weld_chassis.py`（可单独跑 `—in/—out/—report-only`）。
     回退：`robot11_make_sim_xacro.py —chassis articulated` —— **模型体（去注释）逐字节相同**
     （实测 35025 B vs 35025 B 逐字节相等），文件只多出文件头这段说明。
--->
+  ── ★ 2026-10-20：**轮子对地摩擦**（`—wheel-mu`，缺省 0.02）—— 自转 10.6% → 95% 量级 ──────────
+    上面那一步只修了**结构**（多刚体 → 单刚体），**没有**修摩擦：塌成刚体后轮子不能滚动，
+    原地转 = 4 个轮子同时**横向刮地**，Gazebo 的缺省 μ=1 把角速度吃掉约 90%。真值（`/odom_ground_truth`
+    + **仿真时间**归一）：
+      · 台架纯自转 wz=0.8 rad/s × 2 仿真秒：改前 **10.6%** → 改后 **95.8%**；
+      · 整栈（`world:=RMUC2026 mode:=mapping lio:=fastlio robot:=robot11`）20 Hz 指令：
+        改前 **9.8%** → 改后 **92.9%**（200 Hz **95.3%**）；纯前进 vx=0.30 m/s 从 55.2% → **98.2%**
+        （台架 79.3% → 88.6%）。
+    两个坑（与默认模型 §20 的修法完全同构，只是轮子已经不在）：
+      (a) `<mu1>/<mu2>` 写在 `<link>` 里 Gazebo 的 URDF 解析器**不认**（等于没写）⇒ 必须写
+          `<gazebo reference="<link>">`。`gz sdf -p` 之后每个 collision 都要真的出现
+          `<surface><friction><ode><mu>/<mu2>`；生成器每次都自证（不通过就不写文件）。
+      (b) robot11 的轮子 `l6..l9` 已被 `robot11_weld_chassis.py` 塌进根 link（它们不再是 link）
+          ⇒ 摩擦只能写在**根 link** 上（该 link 的**全部** collision 都拿到这个 μ）。物理上没关系：
+          真正接地的只有 4 个轮 cylinder（整车最低点 −0.1025 m 在轮上），其余 box 的最低点都
+          在 −0.0780 m 以上、正常姿态下永不触地。
+    **这是故意改的物理**（几何一个字节没动，由 `gz sdf -p` 的逐条 AABB 自证）：轮子对地静摩擦角
+    = atan(μ) ⇒ μ=0.02 时约 **1.1°**，在更陡的坡上**停住**会缓慢下滑（速度驱动爬坡不受影响）。
+    要更抓地就重新生成：`—wheel-mu 0.1`（自转≈82.3%、≈5.7° 坡）/ `—wheel-mu 0.05`（≈89.6%、≈2.9°）；
+    `—no-wheel-friction` = 回到改前（μ=1）。剂量-响应与下游冒烟见 docs §20.2 / §22。
+  -->
 <robot name="sentry" xmlns:xacro="http://ros.org/wiki/xacro">
 
   <!-- 【我们加的】launch 会无条件传平台外参（bringup_sim.launch.py 的 xyz/rpy）。
@@ -407,7 +455,7 @@ FOOTER = '''
   <gazebo reference="livox_frame"><material>Gazebo/LightBlueLaser</material></gazebo>
   <gazebo reference="imu_link"><material>Gazebo/BuildingFrame</material></gazebo>
 
-  <!-- ==================== 几何速查（实测值，来自 Phase 1/3；供 config 对照） ====================
+__WHEEL_MU_BLOCK__  <!-- ==================== 几何速查（实测值，来自 Phase 1/3；供 config 对照） ====================
        地面平面（body 系） z = **-0.102499**（四个轮 mesh 的最低点；轮 r=0.0580 心在 z=-0.0445）
        ⚠️ j2..j5 的 origin z=0.05735 是**转向关节**高度，**不是**轮心 —— 差 0.102 m
        雷达 livox_frame  z = 0.157028 + livox_raise_m ⇒ **离地 0.2595 + livox_raise_m m**
@@ -431,6 +479,142 @@ FOOTER = '''
          rpy = 该 30° 旋转的逆；由 bringup_sim.launch.py 的 robot:=robot11 分支注入，不写死在 YAML 里。 -->
 </robot>
 '''
+
+
+#: ★ 2026-10-20：轮子对地摩擦的 XML 块（只有 `--chassis rigid` 且摩擦启用时才填进 FOOTER 的
+#: `__WHEEL_MU_BLOCK__` 占位符）。**必须是 `--wheel-mu 0` / `--no-wheel-friction` 时不出现**，
+#: 这样"回到改前行为"是逐字节可复现的（HEAD 的生成物里没有任何 mu 标签）。
+WHEEL_MU_BLOCK = '''  <!-- ⑥ 【我们加的｜2026-10-20】**轮子对地摩擦**（★ Gazebo 只认 `<gazebo reference>` 这一种写法）
+       ------------------------------------------------------------------------------
+       为什么（实测，见 docs/frame_contract_v3_measurements.md §22）：本模型被塌成**单个刚体**后，
+       轮子不能再靠滚动"让开"，原地转 = 4 个轮子同时**横向刮地** ⇒ 摩擦项直接吃掉角速度。
+       改前（Gazebo 缺省 μ=1，SDF 里 `surface/friction/ode` 是空的）：纯自转 wz=0.8 → **10.6%**（台架）/
+       **9.8%**（整栈 20 Hz）；纯前进 vx=0.3 → 79.3%（台架）/ 55.2%（整栈）。
+       加上 μ=0.02 后：台架自转 **95.8%**、整栈 20 Hz **92.9%** / 200 Hz **95.3%**（与默认模型 §20 同一条剂量-响应）。
+       ⚠️ 两个容易踩的坑，本文件都绕开了：
+         (a) `<mu1>/<mu2>` 写在 `<link>` **里面** = Gazebo 的 URDF 解析器**不认**（等于没写）；
+             必须写成 `<gazebo reference="<link>">`。`gz sdf -p` 之后每个 collision 都应真的出现
+             `<surface><friction><ode><mu>/<mu2>` 且等于这里给的值 —— 生成器每次都自证（不通过不写文件）。
+         (b) 轮子 `l6..l9` 已被 `robot11_weld_chassis.py` 塌进 base_link（它们不再是 link）
+             ⇒ 摩擦只能写在**根 link** 上（该 link 的**全部** collision 都会拿到这个 μ）。
+             物理上没关系：真正接地的只有 4 个轮 cylinder（整车最低点 −0.1025 m 在轮上），
+             其余 box 的最低点都在 −0.0780 m 以上、正常姿态下永不触地。
+       代价（**故意改的物理，不是几何**）：轮子对地静摩擦角 = atan(__MU__) ≈ **__ANGLE__°** ⇒ 在更陡的坡上
+       停住会缓慢下滑（平面速度驱动爬坡不受影响，插件直接设速度、不需要抓地）。要更抓地就重新生成：
+       `--wheel-mu 0.1`（→ 自转 ≈82.3%、≈5.7° 坡）或 `--wheel-mu 0.05`（→ ≈89.6%、≈2.9°）。
+       生成：`python3 tools/scripts/regress/robot11_make_sim_xacro.py --wheel-mu __MU__`（缺省即此值）；
+       `--wheel-mu 0` 或 `--no-wheel-friction` = 回到"缺省 μ=1"的改前行为（不写这一块）。 -->
+  <gazebo reference="__ROOT__">
+    <mu1>__MU__</mu1>
+    <mu2>__MU__</mu2>
+  </gazebo>
+
+'''
+
+
+def wheel_mu_block(root_name, wheel_mu):
+    """把 `WHEEL_MU_BLOCK` 的占位符填好；`wheel_mu=None/<=0` ⇒ 返回空串（回退档）。"""
+    if not wheel_mu or wheel_mu <= 0:
+        return ''
+    import math as _m
+    return (WHEEL_MU_BLOCK.replace('__ROOT__', root_name)
+            .replace('__ANGLE__', '%.1f' % _m.degrees(_m.atan(wheel_mu)))
+            .replace('__MU__', '%.9g' % wheel_mu))
+
+
+def check_wheel_friction(xacro_text, wheel_mu, root='base_link',
+                         expect_mass=None, expect_izz=None):
+    """自证「摩擦真的进了 Gazebo 的 SDF」+「加摩擦没有动几何」。不通过 ⇒ SystemExit（不写文件）。
+
+    口径与 `default_make_sim_xacro.self_check` 相同（复用它的 `gz sdf -p` / SDF 解析代码）：
+      · `gz sdf -p` 后模型仍是 **1 个 link**（= 真单刚体，摩擦没把关节/ link 带回来）；
+      · **每个** collision 的 `<surface><friction><ode><mu>/<mu2>` 都等于 wheel_mu（不是 None、不是 1）；
+      · 4 个轮 cylinder 在其中；113 条碰撞几何的 (类型, base_link 系 AABB) 与 **xacro 展开后的 URDF**
+        逐条相等（容差 5e-5 m）；
+      · SDF 的 mass / Izz 与 `robot11_weld_chassis.weld()` 报的合成值相等（摩擦不改惯量）。
+    """
+    import default_make_sim_xacro as _dmk           # 复用同一套 SDF 解析，不写第二份实现
+    import robot11_weld_chassis as _weld            # 复用同一套 AABB 采样口径
+    rep = {'wheel_mu': wheel_mu}
+    with tempfile.TemporaryDirectory(prefix='r11mu-') as td:
+        x = os.path.join(td, 'model.xacro')
+        with open(x, 'w', encoding='utf-8') as f:
+            f.write(xacro_text)
+        u = os.path.join(td, 'model.urdf')
+        _dmk._xacro(x, u)
+        s = _dmk._sdf_to_urdf_check(u, td, 'model')
+        if s is None:
+            raise SystemExit('[wheel-mu] 找不到 `gz` ⇒ 无法自证摩擦真的进了 SDF（装 gazebo 再来）')
+        model = ET.parse(s).getroot().find('model')
+        links = model.findall('link')
+        if len(links) != 1:
+            raise SystemExit('[wheel-mu] ❌ Gazebo 里不是单刚体：%d 个 link' % len(links))
+        if links[0].get('name') != root:
+            raise SystemExit('[wheel-mu] ❌ 根 link 名不是 %r（读到 %r）'
+                             % (root, links[0].get('name')))
+        colls = links[0].findall('collision')
+        mus = [c.findtext('surface/friction/ode/mu') for c in colls]
+        mu2s = [c.findtext('surface/friction/ode/mu2') for c in colls]
+        bad = [(c.get('name'), m, m2) for c, m, m2 in zip(colls, mus, mu2s)
+               if m is None or m2 is None
+               or abs(float(m) - wheel_mu) > 1e-12 or abs(float(m2) - wheel_mu) > 1e-12]
+        if bad:
+            raise SystemExit('[wheel-mu] ❌ 摩擦没进 SDF（%d/%d 条不对；前 3 条：%r）'
+                             % (len(bad), len(colls), bad[:3]))
+        wheels = [c for c in colls if c.find('geometry/cylinder') is not None]
+        if len(wheels) != 4:
+            raise SystemExit('[wheel-mu] ❌ 轮 cylinder 不是 4 条：%d' % len(wheels))
+        # ---- 几何逐条（URDF 展开后的 AABB vs SDF 的 AABB）----
+        links_u = {l.get('name'): l for l in ET.parse(u).getroot().findall('link')}
+        eye = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        aabb_u = _weld._collision_aabbs(links_u, {root: ([0.0, 0.0, 0.0], eye)})
+        aabb_s = [r for r in _dmk._sdf_collision_aabbs(s) if r[5] == root]
+        if len(aabb_u) != len(aabb_s):
+            raise SystemExit('[wheel-mu] ❌ 碰撞条数变了：urdf=%d / sdf=%d'
+                             % (len(aabb_u), len(aabb_s)))
+        # ⚠️ 不能按 `key=str` 排序后逐条 zip：`_weld._collision_aabbs` 只保留 5 位小数、SDF 侧 6 位
+        #    ⇒ 两个列表的**排序**会在相邻条目间互换（113 条时实测必踩），zip 会把不同盒子配成一对。
+        #    改成"同类几何里找最近的、一对一"的贪心配对（最大坐标差 < 5e-5 m 即认为同一条）。
+        used = set()
+        worst = 0.0
+        for a in aabb_u:
+            best = None
+            for i, b in enumerate(aabb_s):
+                if i in used or b[3] != a[3]:
+                    continue
+                d = max([abs(p - q) for p, q in zip(a[1], b[1])]
+                        + [abs(p - q) for p, q in zip(a[2], b[2])])
+                if best is None or d < best[0]:
+                    best = (d, i)
+            if best is None or best[0] > 5e-5:
+                raise SystemExit('[wheel-mu] ❌ SDF 碰撞几何与 URDF 不等（最差 %r，阈值 5e-5 m）'
+                                 % (None if best is None else best[0]))
+            used.add(best[1])
+            worst = max(worst, best[0])
+        rep['aabb_max_dev_m'] = round(worst, 9)
+        mass = float(links[0].find('inertial/mass').text)
+        izz = float(links[0].find('inertial/inertia/izz').text)
+        # SDF 里 base_link 的惯量 = 根 link（l2…l11 合成）+ 固定关节子 link（livox_frame / imu_link）
+        # 被 sdformat **一起合并**进来的部分 ⇒ 期望值必须按同样的"全 link 平行轴定理"算，
+        # 不能拿 `weld()` 报的 M=9.4121（那只是根 link，不含 0.15 的雷达/IMU）。
+        T_u, _j, miss, links_all = _dmk._urdf_fk(u)
+        if miss:
+            raise SystemExit('[wheel-mu] ❌ 有 link 从 %r 走不到：%s' % (root, miss))
+        M2, _com2, I2, _items = _weld._merge_inertials(links_all, T_u, sorted(links_all), root)
+        # ⚠️ sdformat 把 mass/inertia 写成**6 位有效数字**（实测 9.56212），所以容差取 2e-5
+        #    （仍然远小于任何真实变化：少算雷达就是 0.15 kg、惯量差 1e-3 量级）。
+        if abs(mass - M2) > 2e-5:
+            raise SystemExit('[wheel-mu] ❌ SDF 质量 %r ≠ URDF 全 link 合成值 %r' % (mass, M2))
+        if abs(izz - I2[2][2]) > 2e-5:
+            raise SystemExit('[wheel-mu] ❌ SDF Izz %r ≠ URDF 全 link 合成值 %r' % (izz, I2[2][2]))
+        rep.update(sdf_links=len(links), sdf_collisions=len(colls),
+                   sdf_mu=sorted(set(mus)), sdf_mu2=sorted(set(mu2s)),
+                   sdf_wheel_cylinders=len(wheels), aabb_identical=True,
+                   sdf_mass=round(mass, 6), sdf_izz=round(izz, 6),
+                   urdf_expected_mass=round(M2, 6), urdf_expected_izz=round(I2[2][2], 6),
+                   min_z=min(r[0] for r in aabb_u),
+                   min_z_geom=[r[3] for r in aabb_u if abs(r[0] - min(x[0] for x in aabb_u)) < 1e-9])
+    return rep
 
 
 def _sanitize_comments(txt):
@@ -494,6 +678,17 @@ def main():
                          '  articulated= 2026-10-09 之前的原样（13 link / 12 joint）；'
                          '**回退就用它** —— 模型体（去注释）与 HEAD 逐字节相同'
                          '（实测 35025 B vs 35025 B），文件只多出文件头那段说明。')
+    ap.add_argument('--wheel-mu', type=float, default=DEFAULT_WHEEL_MU,
+                    help='★ 2026-10-20 新增：**轮子对地摩擦**（写进 `<gazebo reference="<根 link>">` 的 '
+                         'mu1/mu2；缺省 %.2f）。为什么：塌成单刚体后轮子不能滚动，原地转 = 4 个轮子'
+                         '横向刮地 ⇒ 缺省 μ=1 时纯自转只执行 10.6%%；μ=0.02 时 95%% 量级。'
+                         '写成 0（或配 --no-wheel-friction）= 不写摩擦块 = 改前行为（逐字节可复现）。'
+                         '⚠️ 这是**故意改的物理**：静摩擦角 atan(μ) ⇒ μ=0.02 时约 1.1° 的坡上停住会滑。'
+                         '剂量-响应（本机台架实测）：0.001→98.3%%、0.02→95.8%%、0.05→89.6%%、0.1→82.3%%、'
+                         '0.2→66.9%%、1（缺省）→10.6%%（docs §22.5）。'
+                         % DEFAULT_WHEEL_MU)
+    ap.add_argument('--no-wheel-friction', action='store_true',
+                    help='不写摩擦块（= 回到 HEAD 的"Gazebo 缺省 μ=1"行为；用于 A/B 复现改前数字）')
     ap.add_argument('--out', default='src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro')
     a = ap.parse_args()
     global args
@@ -764,18 +959,45 @@ def main():
             L.append('    <axis xyz="%s"/>\n' % ax.get('xyz'))
         L.append('  </joint>\n\n')
 
-    L.append(FOOTER.replace('__ROOT__', root_name))
+    # ★ 2026-10-20：轮子摩擦块。**只有 rigid 档**才写（articulated 是逐字节回退档，一个字节都不改）。
+    mu = None if (a.no_wheel_friction or a.chassis != 'rigid' or a.wheel_mu <= 0) else a.wheel_mu
+    if a.chassis == 'articulated' and not a.no_wheel_friction:
+        sys.stderr.write('[wheel-mu] ⚠️ articulated 档不写摩擦块（保持回退档与 HEAD 逐字节一致）；'
+                         '要摩擦请用 --chassis rigid（默认）\n')
+    L.append(FOOTER.replace('__ROOT__', root_name)
+             .replace('__WHEEL_MU_BLOCK__', wheel_mu_block(root_name, mu)))
     txt = _sanitize_comments(''.join(L))
+    rep = {}
     if a.chassis == 'rigid':
         sys.path.insert(0, os.path.join(REPO, 'tools', 'scripts', 'regress'))
         import robot11_weld_chassis as _weld
-        txt, rep = _weld.weld(txt, root=root_name)
+        # ★ 2026-10-20：摩擦档要把它写进**生成物里看得见的那段注释**（weld 会丢掉 `<?xml?>` 与
+        #   `<robot>` 之间的文件头 ⇒ 生成器的 HEADER 只能给读生成器的人看，这里才是读者第一眼看到的）。
+        note = ''
+        if mu is not None:
+            note = ('       ★ 2026-10-20：**轮子对地摩擦 μ=%g**（`<gazebo reference="%s">` 的 mu1/mu2；\n'
+                    '       写在 `<link>` 里的 mu1/mu2 Gazebo **不认**）。上面那个 16.5%% 是"只塌刚体、\n'
+                    '       不加摩擦"的旧数字；加摩擦后同一台架纯自转 wz=0.8 → **95.8%%**\n'
+                    '       （改前 10.6%%；整栈 20 Hz 9.8%% → **92.9%%**、200 Hz 95.3%%）。几何一个字节没动，由\n'
+                    '       `gz sdf -p` 的逐条 AABB + 质量/Izz 自证。代价：静摩擦角 ≈ %.1f°，更陡的坡上\n'
+                    '       停住会滑（速度驱动爬坡不受影响）。剂量-响应/下游冒烟见 docs §22。\n'
+                    % (mu, root_name, math.degrees(math.atan(mu))))
+        txt, rep = _weld.weld(txt, root=root_name, extra_note=note)
         sys.stderr.write('[weld] %d link -> 1 刚体：M=%.4f kg、Izz=%.5f、碰撞 %d 条'
                          '（AABB 逐条相等=%s、最低点在轮上=%s）、关节 %d -> %d\n'
                          % (len(rep['welded_links']), rep['mass_kg'], rep['izz'],
                             rep['n_collisions_after'], rep['aabb_identical'],
                             rep['wheels_are_lowest'], len(rep['dropped_joints']),
                             len(rep['kept_links']) and 2))
+        if mu is not None:
+            # 自证：摩擦真的进了 SDF、几何逐条没变、质量/惯量与塌陷值相等 —— 不通过就**不写文件**
+            mu_rep = check_wheel_friction(txt, mu, root=root_name)
+            rep['wheel_friction'] = mu_rep
+            sys.stderr.write('[wheel-mu] μ=%g 真的进了 SDF：%d link / %d 条 collision 全部 mu=%s、'
+                             '轮 cylinder %d 条、几何 AABB 逐条相等=%s、M=%.4f kg / Izz=%.5f\n'
+                             % (mu, mu_rep['sdf_links'], mu_rep['sdf_collisions'],
+                                '/'.join(mu_rep['sdf_mu']), mu_rep['sdf_wheel_cylinders'],
+                                mu_rep['aabb_identical'], mu_rep['sdf_mass'], mu_rep['sdf_izz']))
     out = os.path.join(REPO, a.out)
     with open(out, 'w', encoding='utf-8') as f:
         f.write(txt)

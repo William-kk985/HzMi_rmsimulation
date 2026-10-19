@@ -214,7 +214,8 @@ def _merge_inertials(links, T, weldable, root):
     return M, com, Itot, items
 
 
-def weld(xacro_text, root='base_link', keep=DEFAULT_KEEP, comment=True, strict=True):
+def weld(xacro_text, root='base_link', keep=DEFAULT_KEEP, comment=True, strict=True,
+         extra_note=''):
     """返回 (新 xacro 文本, report dict)。"""
     parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
     rroot = ET.fromstring(xacro_text, parser=parser)
@@ -373,8 +374,10 @@ def weld(xacro_text, root='base_link', keep=DEFAULT_KEEP, comment=True, strict=T
                '       几何/惯量守恒由 robot11_weld_chassis.py 自证（AABB 逐条相等，%.5f m 最低点）。\n'
                '       回退：`robot11_make_sim_xacro.py --chassis articulated` —— 模型体（去注释）\n'
                '       逐字节相同（实测 35025 B vs 35025 B），文件只多出文件头那段说明。\n'
+               '%s'
                % (len(weldable), ', '.join(sorted(weldable)), M, Itot[2][2],
-                  len(weld_joints), '/'.join(keep), rep['min_z_after'] or 0.0))
+                  len(weld_joints), '/'.join(keep), rep['min_z_after'] or 0.0,
+                  extra_note))
         rroot.append(ET.Comment(hdr.replace('--', '\u2014')))
     # ⑥ 串行化（保留注释；xacro 命名空间前缀由 register_namespace 还原）
     out = ET.tostring(rroot, encoding='unicode')
