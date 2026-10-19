@@ -3799,6 +3799,8 @@ p_sensor = sensor_rotᵀ·(p_parent − offset.Pos()) = (range+minDist)·(mount_
 | robot11 + `plugin`：墙面残差 | (0.0006, 0.1309, 0.1570) | **全 0.0000** | 修好 |
 | 默认模型：墙面残差 | (0.1200, 0, 0.1750) | **全 0.0000** | 修好 |
 | 默认模型：`h_meas`（RMUC2026） | 0.1007 / ERROR（§19） | 0.2754 / WARN | +0.1747 = 安装矢量 z；绝对值受 21.8#1 限制 |
+| 默认模型：下游（`fastlio` + linefit + p2l） | 未测（本轮无修前值） | `/segmentation/ground` **2568**、`/segmentation/obstacle` **3780** 点/帧、`/scan` **1166** 有限波束（66 帧中位） | 非空、量级正常（**只证"没坏"**，不是 before/after） |
+| 默认模型：声明帧地面峰 | −0.06（= base_link 高度，`d0b`） | **−0.235**（−0.235±0.02 内 627 点；`d4`） | 与 `h_urdf` 0.235 一致 |
 
 **nav 冒烟**（1 跑）：`local_costmap` **非空**（`n_lethal` 中位 **275.5**、最近致命 **0.7079 m**）、
 `h_meas` **0.2615 INFO**，数字见 21.7.1。
@@ -3831,6 +3833,13 @@ lio:=small_point_lio gravity_align_mode:=hybrid`（1 跑；`nav_band_probe.py --
 ⇒ **局部代价图非空、最近致命栅格 0.71 m 合理**，与 §13.8/§17 的 hybrid 基线同量级；这一跑同时
 证明 `sensor` 档在 nav 全栈里也没有被本轮改动影响（`h_meas` 0.2615、`/scan` 775 波束在带内）。
 原始数据 `.tmp_defect3/nav2/band.json`（100 个样本的逐样本明细也在里面）。
+
+**另一条下游冒烟**（默认模型，`world:=RMUL2026 mode:=mapping lio:=fastlio`，修后 1 跑）：插件运行期
+收据打出 `offset.Pos()=[0.120000 0.000000 0.175000] rpy=[0 0 0]`（= 被换算掉的那个矢量），
+`/segmentation/ground` **2568** 点/帧、`/segmentation/obstacle` **3780** 点/帧、`/scan` **1166**
+有限波束（66 帧中位），点云声明帧里的地面峰从 **−0.06 → −0.235**。⇒ 默认模型的 linefit/p2l **没有
+因为点云下移 0.175 m 而坏掉**（linefit 的 `sensor_height=0.226` 反而更贴近 −0.235）。⚠️ 这一条
+**没有修前对照**（旧 `.so` 未保留），只能证明"修后是健康的"，不能证明"下游输出逐字节不变"。
 
 ### 21.8 没能验证 / 仍未解释的（诚实清单）
 
