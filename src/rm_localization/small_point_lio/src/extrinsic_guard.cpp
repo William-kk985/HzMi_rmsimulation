@@ -173,5 +173,39 @@ namespace small_point_lio {
         }
     }
 
+    // ===================== 本仓新增（2026-10-20 防御）：TF 回退的判据 + 日志 =====================
+    // 为什么放在本 TU：与 §O.2 同一条理由 —— 本包 `-ffast-math -march=native`，把**新的浮点
+    // 表达式**放进 `small_point_lio_node.cpp`（odom 回调所在 TU）会改变 GCC 对那段 hot path 的
+    // FMA 收缩/内联决策 ⇒ `/odom` 与 `odom→base_link` 出现 ≤1 ulp 差。这里的判据含 std::isfinite
+    // 与四元数模长，属于"新的浮点表达式" ⇒ 必须留在独立 TU，由 odom 回调**out-of-line 调用**。
+    //
+    // 判据（都只读 msg，不改任何东西）：
+    //   ① 平移 3 个数、四元数 4 个数**全有限**（!NaN/!Inf）。tf2 允许 NaN 通过（它不做校验），
+    //      一旦把 NaN 位姿广播出去，下游 tf2/nav2 会一路 NaN（而日志里只有"等 TF"）。
+    //   ② 四元数模长 > 0.5：静态 TF 的 `w=0`（未初始化/写漏）或 URDF 里的退化旋转都在这里被抓到；
+    //      正常单位四元数模长 = 1（URDF/robot_state_publisher 给的都是归一化的）。
+    // 不满足 ⇒ 调用方把 T_bl 换成**单位阵**（等价于"没有安装外参"），这一帧照发 /Odometry。
+    __attribute__((noinline)) bool tf_transform_is_usable(const geometry_msgs::msg::TransformStamped &tf) {
+        const auto &t = tf.transform.translation;
+        const auto &q = tf.transform.rotation;
+        if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.z) ||
+            !std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) || !std::isfinite(q.w)) {
+            return false;
+        }
+        const double qn = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        return qn > 0.5;
+    }
+
+    __attribute__((noinline)) void log_tf_fallback(std::uint64_t count, const char *why,
+                                                   const std::string &detail) {
+        RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"),
+                     "TF 回退（2026-10-20 防御）：%s（%s）⇒ 本帧 T(livox←base_link) 按**单位阵**合成，"
+                     "/Odometry 与 odom→base_link **照发**（旧行为是直接 return ⇒ 整段里程计静默消失，"
+                     "下游只报\"等 TF\"）。累计 %llu 帧（限速 1 条/5 s）。"
+                     "TF 一恢复就自动回到正常路径（无粘滞）；要查："
+                     "`ros2 run tf2_ros tf2_echo base_link %s`、`ros2 topic echo /tf_static --once`、"
+                     "对照 URDF 里有没有这条 joint（robot11_mount:=sensor/urdf 时 base_link→livox_frame 带 30°）",
+                     why, detail.c_str(), static_cast<unsigned long long>(count), detail.c_str());
+    }
 
 }// namespace small_point_lio

@@ -3213,10 +3213,12 @@ E1 补丁只存在于 small_point_lio）`）。
    （`build/small_point_lio/libsmall_point_lio.so` = `58bebfb81537978a0c93067be09de1be`）。
    本轮所有数字都在 `zfix` 上取得（`meta.txt` 记 `bin_lib_small_point_lio_md5`）。
 
-## §19 第十一轮（**本机 date=2026-10-20T02:00–02:5x**）：两条独立缺陷 —— ④ `map_archive.sh save --resolution` 的**静默失败**（含调用方吞退出码）、② `lio:=small_point_lio` + 默认模型槽位的 **SIGSEGV**
+## §19 第十一轮（**本机 date=2026-10-20T02:00–03:05**）：两条独立缺陷 —— ④ `map_archive.sh save --resolution` 的**静默失败**（含调用方吞退出码）、② `lio:=small_point_lio` + 默认模型槽位的 **SIGSEGV**
 
 > **本节只新增**（append-only）：§1–§18 一个字都没改。写作时 §18 是最新 ⇒ 本节取 §19
 > （§19 落笔时仍空闲）。两条缺陷**各自一个提交**（④ 先、② 后），本节按同一顺序记。
+> ⚠️ 本轮有**并发 agent** 在同一份文档上写（他后来取了 §20，插在 §19.2 与 §19.3 之间写作；
+> 本节的 §19.3 已在提交前移回 §19 内部，顺序为 §19 → §20；两节内容互不引用、互不覆盖）。
 > 隔离口径与 §17/§18 逐字相同：每跑私有 `GAZEBO_MASTER_URI` / `HOME` / `ROS_DOMAIN_ID`、
 > `gui:=False`、`nav_rviz:=False lio_rviz:=False`、`setsid` + `timeout` +
 > `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）。
@@ -3229,7 +3231,15 @@ E1 补丁只存在于 small_point_lio）`）。
 > 了显式值而不是 mapper 的 0.05），坏参数（`banana`）⇒ `save` `rc=2` 且**一个文件都没写**，
 > 调用方 `run_remap_lowterrain.sh --map-resolution banana` ⇒ **`rc=2`**（修前是 `rc=0`，看着成功）。
 >
-> **②**：见 §19.3（SIGSEGV 的逐字 backtrace、根因、修法与 60 s 回归）。
+> **②**：报告里"默认模型 + `lio:=small_point_lio`，~12 s 后 SIGSEGV"在当前 HEAD 上**复现不出来**
+> （**0/53 跑**，全程挂 gdb）⇒ **那一次的 backtrace 没有拿到**，根因**未定位**（§19.3.6）。
+> 本轮修的是同一类"**退化帧 / 退化参数**"里**确定性可复现**的三条：
+> ① 缺 `gravity`/`extrinsic_*` 键 ⇒ 旧代码 `std::terminate`（**SIGABRT**，有逐字栈）；
+> ② 短列表 ⇒ 静默越界读；③ `base_link→livox_frame` 缺失/退化 ⇒ **`/odom` 一条都不发**
+> （= "没有 /odom"的机制；修后限速 ERROR + 单位阵回退，实测 `/Odometry_noframe` **8.141 Hz**）；
+> ④ `lio_tf_adapter` 的 `xyz`/`rpy` 长度 ⇒ 潜在 SIGSEGV（`std::vector::operator[]` 越界）。
+> 回归：默认模型 **75 s 无 crash、`/odom` 8.269 Hz**；`robot11+sensor` **70 s 无 crash**、
+> `ros2 param dump` **逐字节相同**（`869aa903…`）、`h_meas` 0.2618 vs 修前 0.2615。详见 §19.3。
 
 ### 19.2 ④ `map_archive.sh save --resolution` + 调用方退出码（`tools/scripts/**`，不碰 ROS 代码）
 
@@ -3269,6 +3279,144 @@ mode:=mapping world:=RMUC2026 map_name:d2_arch`，私有 DOMAIN=183 / port=11883
 
 > 口径说明：所有跑都用**测试专用** `map_name`（`d2_arch` / `d4_caller`），跑完已从
 > `src/rm_nav_bringup/map|PCD/` 删除；用户资产（`map/RMUC2026*`、`PCD/RMUC2026*`）一个字节没动。
+
+### 19.3 ② `lio:=small_point_lio` 的 SIGSEGV / "没有 /odom"：**复现失败** + 两条确定性死亡路径的修法
+
+> **先说结论（诚实边界）**：本节**没有**拿到"默认模型 + `lio:=small_point_lio`，~12 s 后
+> `exit code -11`"那一次崩溃的 backtrace —— 它在当前 HEAD 上**复现不出来**（`0/53` 跑，
+> 见 19.3.1）。因此下面修的不是"猜出来的那个栈"，而是**同一类（退化帧 / 退化参数）里
+> 确定性可复现、且真的会让节点死或让 `/odom` 整段消失**的三条路径；每一条都有修前/修后实测。
+> 详见 19.3.5 的"没能验证"。
+
+#### 19.3.1 复现尝试（全部带 gdb；`tools/scripts/lib/scoped_cleanup.sh` 隔离；无全机 pkill）
+
+| 配置（`mode:=mapping lio:=small_point_lio mapper:=slam_toolbox` + 其余默认） | 跑数 | 单跑时长 | 结果 |
+|---|---|---|---|
+| `world:=RMUC2026`（= §16.9#2 写的复现命令，默认 `robot`） | 24 | 60 s | 全部存活，`/odom` 7.5–8.2 Hz |
+| `world:=RMUL2026 robot:=robot11 robot11_mount:=sensor`（= 唯一有崩溃记录那次跑的参数） | 12+ | 90 s | 全部存活 |
+| `world:=RMUC2026` + `/cloud_registered` 订阅者（点云发布分支被真正执行） | 9 | 60 s | 全部存活 |
+| `robot:=hzmirm` / `robot:=robot11 robot11_mount:=plugin` / `world:=RMUL2026 spin_speed:=0.0` | 3+5 | 60 s | 全部存活 |
+| **合计** | **53** | 60–120 s | **SIGSEGV 0 次**；`/odom` 一直有 |
+
+跑法：把 `install/small_point_lio/lib/small_point_lio/small_point_lio_node` 临时换成
+`exec gdb -batch -ex run -ex 'thread apply all bt' …` 的包装脚本（**launch 的参数/时序/数据一字不改**），
+改完已还原成软链（`ptrace_scope=1` ⇒ 事后 attach 不允许，只能让 gdb 当父进程）。
+
+**唯一留存的崩溃记录**（上一轮建图跑，`git_head=dafcb4e`，`src/rm_localization/small_point_lio/**`
+在那之后**没有任何提交** ⇒ 代码与 HEAD 相同；记录在 `.tmp_maprebuild/v_wall_rmul/launch.log:91`）：
+
+```text
+[ERROR] [small_point_lio_node-8]: process has died [pid 130, exit code -11, cmd
+ '/home/weicheng/HzMi_rmsimulation/install/small_point_lio/lib/small_point_lio/small_point_lio_node
+  --ros-args -r __node:=small_point_lio --params-file …/config/mid360_sim_tuned.yaml
+  --params-file /tmp/launch_params_c2yt6rm1 -r /Odometry:=/odom'].
+```
+它**死前最后一条**自己的日志是 10.7 s 时的外参 readout（`外参守卫(§N.5#1)：T_bl=T(livox_frame←base_link)
+rpy=[30.000000, …]`），之后 23 s 无任何 ERROR/WARN ⇒ 不像断言/异常，更像运行期内存问题；
+但 `core_pattern` 走 apport（本机 `/var/crash` 只读）⇒ **没有 core 文件**，gdb 又只能事后 attach
+⇒ 那一跑已无法回溯。
+
+#### 19.3.2 修掉的确定性死亡路径 ①：**退化参数**（缺键 ⇒ SIGABRT；短列表 ⇒ 静默越界读）
+
+`parameters.cpp` 里 `gravity` / `extrinsic_T` / `extrinsic_R` 都是 `declare_parameter<T>(name)`
+（**无默认值**）+ **固定下标** `[0]…[8]`。实测两条后果（真跑，不是推演）：
+
+* **缺键**（参数文件少一个 `gravity:`）⇒ `declare_parameter` 抛 `ParameterTypeException`
+  ⇒ 构造函数里 `std::terminate` ⇒ **SIGABRT**（不是可控报错）。逐字 backtrace（gdb）：
+  ```text
+  #5  std::terminate() () from /lib/x86_64-linux-gnu/libstdc++.so.6
+  #6  __cxa_throw () from /lib/x86_64-linux-gnu/libstdc++.so.6
+  #9  rclcpp::Node::declare_parameter<std::vector<double, …>> (name="gravity", …)
+        at /opt/ros/humble/include/rclcpp/rclcpp/node_impl.hpp:231
+  #10 small_point_lio::Parameters::read_parameters (this=…, node=…)
+        at …/src/small_point_lio/src/small_point_lio/parameters.cpp:22
+  #11 small_point_lio::SmallPointLio::SmallPointLio (…) at …/src/small_point_lio.cpp:14
+  #13 small_point_lio::SmallPointLioNode::SmallPointLioNode (…) at …/src/small_point_lio_node.cpp:126
+  #23 main (…) at …/build/small_point_lio/rclcpp_components/node_main_small_point_lio_node.cpp:55
+  ```
+* **短列表**（`extrinsic_R: [1,0,0]` / `extrinsic_T: [0.05]`）⇒ **节点正常启动**、读的是堆上邻居字节
+  ⇒ 外参是垃圾（静默错，比崩溃更难查）。
+
+**修法**（`src/small_point_lio/parameters.cpp:9-56`）：新 `read_fixed_vector()` —— 先查
+`get_parameter_overrides()` 判断"这个键到底给没给"，再带默认值声明；**缺键 ⇒ WARN、长度不对 ⇒ ERROR**，
+两种情况都回退到**本仓三份 config 的契约值**（`gravity=[0,0,-9.81]`、`extrinsic_T=[0,0,0.05]`、
+`extrinsic_R=I`），**绝不越界、绝不 terminate**。实测：
+
+| 输入 | 修前 | 修后 |
+|---|---|---|
+| 参数文件缺 `gravity` | **SIGABRT**（上面那段栈） | `WARN 参数 gravity **没给** … ⇒ 用本仓契约默认值（3 个数）` + 节点继续跑 |
+| `extrinsic_R: [1,0,0]`（3 个） | 静默用垃圾外参 | `ERROR 参数 extrinsic_R 需要 9 个数，收到 3 个 ⇒ 用本仓契约默认值` |
+| `extrinsic_T: [0.05]`（1 个） | 静默用垃圾外参 | `ERROR 参数 extrinsic_T 需要 3 个数，收到 1 个 ⇒ …` |
+| 正常 `mid360_sim_tuned.yaml` | — | **0 条 ERROR/WARN**（行为不变；见 19.3.4 的逐字节 param dump） |
+
+#### 19.3.3 修掉的确定性死亡路径 ②：**查不到 / 退化的 `base_link→livox_frame`**（= "没有 /odom"）
+
+`small_point_lio_node.cpp` 的 odom 回调原来写：
+
+```cpp
+try { base_link_to_lidar_frame_transform = tf_buffer->lookupTransform(lidar_frame, "base_link", time_msg); }
+catch (tf2::TransformException &ex) { RCLCPP_ERROR(…); return; }        // ← 整帧 odom 被丢掉
+```
+即：那条静态 TF 晚到（实测 spawn 后 3~10 s 才有）/ 缺失 / 帧名写错时，`/Odometry` 与
+`odom→base_link` **一条都不发**（下游只报"等 TF"）—— 这正是"**没有 /odom**"的机制。
+**修法**（`small_point_lio_node.cpp:166-206` + 判据/日志在独立 TU `extrinsic_guard.cpp:180-232`）：
+
+* 抛异常 ⇒ 限速 ERROR（1 条/5 s + 累计计数）+ **T_bl := 单位阵**，本帧照发（= "没有安装外参"）；
+* 查到的变换**退化**（平移/四元数非有限，或四元数模长 ≤ 0.5，例如 `w=0` 的未初始化静态 TF）
+  ⇒ 同样按单位阵 + 限速 ERROR（那种 T_bl 乘进 tf2 只会得到 NaN 位姿，比"没有外参"更糟）。
+* TF 一恢复就回到正常路径（**无粘滞状态**）；判据/日志放独立 TU 的理由同 §O.2（本包 `-ffast-math`）。
+
+实测（同一套跑里再起一个**第二个** `small_point_lio` 实例，`-p lidar_frame:=dummy_frame_no_such`
+⇒ 永远查不到 TF，`/Odometry` remap 到 `/Odometry_noframe`）：
+
+| | 修前（代码路径：`return`） | 修后（实测） |
+|---|---|---|
+| `/Odometry_noframe` 速率 | **0（一条都没有）** | **8.141 Hz**（14 s 窗口） |
+| 日志 | 每帧一条 `Failed to lookup transform …` | 12 s 内**2 条**限速 ERROR（`TF 回退（2026-10-20 防御）…`），进程存活 |
+
+#### 19.3.4 修掉的确定性死亡路径 ③：`lio_tf_adapter` 的 `xyz`/`rpy` 长度（唯一"能真的 SIGSEGV"的一处）
+
+`lio_tf_adapter_node.cpp` 的 `odomCallback` 直接 `xyz_[0..2]` / `rpy_[0..2]`，而 `std::vector::operator[]`
+**不查长度** ⇒ 参数给 0/1/2 个数时是**越界读堆内存**（轻则补偿量垃圾、重则 SIGSEGV）。
+修法（`lio_tf_adapter_node.cpp:37-58`）：长度 ≠ 3 ⇒ **ERROR 一次 + 归零**（= 不做该项补偿），绝不越界。
+实测：`-p xyz:=[0.1] -p rpy:=[0.0]` ⇒ 两条 ERROR、节点正常启动并广播 TF（修前是越界读）。
+
+> **为什么把 ①②③ 归到"② 这个 SIGSEGV 任务"里**：三者都是"**退化/缺失的帧或外参**"这一类，
+> 且 ①② 都能**让节点直接死掉/让 /odom 整段消失**。但它们**不是**那一跑的同一份栈
+> （19.3.1 已把"那次 SIGSEGV"钉成**未复现**）—— 不许把它们当成"已定位那个 segfault"。
+
+#### 19.3.5 回归（≥60 s，无 crash + `/odom` 速率 + `robot11+sensor` 不变）
+
+`build/small_point_lio/libsmall_point_lio.so`：修前 `eb44ffa7…`（RelWithDebInfo）→ 修后
+`f1f00edb…`（**Release**，= 仓库默认 `colcon_defaults.yaml`；另有 RelWithDebInfo 的 A/B 一跑，
+数字一致）。所有跑 `gui:=False nav_rviz:=False lio_rviz:=False`，私有 DOMAIN/port。
+
+| 配置 | 时长 | SIGSEGV | `/odom` 速率 | `gravity_align_*` / `h_meas` | param dump |
+|---|---|---|---|---|---|
+| **默认模型** `world:=RMUC2026 mode:=mapping lio:=small_point_lio`（修前） | 70 s | 无 | 7.359 Hz | `rpy=[0,0,0] h=0.235 z=0.185`；`h_meas=0.1007`（ERROR，>0.05 带） | `e4f02edb…`（73 行） |
+| 同上（**修后**，Release） | **75 s** | **无** | **8.269 Hz** | `rpy=[0,0,0] h=0.235 z=0.185`；`h_meas=0.1012`（同一条 ERROR） | **`e4f02edb…`（逐字节相同）** |
+| **`robot:=robot11 robot11_mount:=sensor`**（修前） | 70 s | 无 | 4.744 Hz | `rpy=[-30,0,0] h=0.259527 z=0.216226`；`h_meas=0.2615` tilt 0.06° | `869aa903…`（73 行） |
+| 同上（**修后**，Release） | **70 s** | **无** | **4.706 Hz** | `rpy=[-30,0,0] h=0.259527 z=0.216226`；`h_meas=0.2618` tilt 0.08° | **`869aa903…`（逐字节相同）** |
+
+* `h_meas` 修前/修后差 0.0003 m（0.2615→0.2618）/ 0.0005 m（0.1007→0.1012）—— 与 §18.4 的
+  0.2616 m 同一量级（**地面拟合用的是初始帧点云，逐跑有 ~0.5 mm 抖动**），不是行为变化。
+* **`robot11 + sensor` 的数值行为不变的证据 = 两份 `ros2 param dump` 逐字节相同**
+  （`869aa903914f32ec69be97a86ccf33c6`，73 行；默认模型 `e4f02edb6908655f5d1c482b81a5e713`），
+  且 `/odom` 速率 4.744 → 4.706 Hz（同一量级，负载噪声）。代码层面：新增分支只在
+  "TF 缺失/退化" 或 "参数长度不对" 时执行 ⇒ 正常路径不进新分支。
+
+#### 19.3.6 这一条**没能**验证的（别当已验证）
+
+1. **那一跑 SIGSEGV 的 backtrace 拿不到**：53 跑未复现、无 core（apport/`/var/crash` 只读）、
+   `ptrace_scope=1` 只能让 gdb 当父进程（已用包装脚本做到，但没崩就没栈）。
+   ⇒ 下一步建议：**在上次崩溃那台机上**（同负载/同并发）用同一包装脚本重跑，或把 `core_pattern`
+   改成写本地文件后重跑；拿到栈之前，"根因"仍是**未定位**。
+2. `lio_tf_adapter` 那条越界读**没有**造出真实 SIGSEGV（glibc 最小 chunk 让 1~2 个 `double` 的
+   越界仍在可用区内）—— 它是"**能**崩"的潜在缺陷，不是"**已崩**"的证据。
+3. 默认模型的 `h_meas` 一直是 **ERROR 带**（0.10 vs URDF 0.235，|Δ|=0.13 m）：这是 §16.9#4 记过的
+   老问题（默认模型 `cloud_frame=parent` 与 `frame_id=livox_frame` 不一致 ⇒ 地面拟合量到的是
+   父 link 系的点），本轮**没有**碰，也没有把它当成本次回归的判据。
+
 
 ## §20 第十一轮（**本机 date=2026-10-20T02:00–03:0x**）：**默认模型（`robot:=''`）真的能原地转了** —— 单刚体底盘 + 轮子对地摩擦（角速度通道 4.3% → 95.4%）
 

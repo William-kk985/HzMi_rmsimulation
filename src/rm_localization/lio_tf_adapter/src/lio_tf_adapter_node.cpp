@@ -36,6 +36,22 @@ public:
     base_frame_ = this->declare_parameter<std::string>("base_frame", "base_link");
     xyz_ = this->declare_parameter<std::vector<double>>("xyz", {0.0, 0.0, 0.0});
     rpy_ = this->declare_parameter<std::vector<double>>("rpy", {0.0, 0.0, 0.0});
+    // ★ 2026-10-20（防御）：odomCallback 里是 `xyz_[0..2]` / `rpy_[0..2]` —— `std::vector::operator[]`
+    //   **不查长度**，参数若给了 0/1/2 个数（launch 求值失败、手写 params、`ros2 param set` 写短）
+    //   就是越界读堆内存 ⇒ 轻则补偿量是垃圾（车体位置/姿态静默错），重则 **SIGSEGV**。
+    //   这里长度不对就 ERROR 一次 + 归零（= 不做补偿，与"没配外参"同义），绝不越界。
+    const auto sanitize3 = [this](const char *name, std::vector<double> &v) {
+        if (v.size() == 3) {
+          return;
+        }
+        RCLCPP_ERROR(this->get_logger(),
+                     "参数 %s 需要 3 个数，收到 %zu 个 ⇒ 按 [0, 0, 0] 处理（不做该项补偿）；"
+                     "旧代码这里会越界读 std::vector（值来自堆上邻居字节 ⇒ 静默错补偿，甚至 SIGSEGV）",
+                     name, v.size());
+        v = {0.0, 0.0, 0.0};
+      };
+    sanitize3("xyz", xyz_);
+    sanitize3("rpy", rpy_);
 
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 

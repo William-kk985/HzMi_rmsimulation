@@ -62,6 +62,23 @@ namespace small_point_lio {
         void log_extrinsic_readout_once();             // #1：一次性 readout（noinline）
         void check_pose_consistency();                 // #2：读上面的快照 + last_odometry 做断言（noinline）
 
+        // ============ 本仓新增（2026-10-20 防御）：查不到 / 退化 TF 时**回退单位阵** ============
+        // 旧行为（唯一一条会把 /odom 整段吞掉的路径）：
+        //   odom 回调里 `lookupTransform(lidar_frame, "base_link", stamp)` 失败 ⇒ **直接 return**
+        //   ⇒ 这一帧既不发布 odom→base_link 也不发布 /Odometry。只要那条静态 TF 晚到（实测
+        //   机器人 spawn 后 3~10 s 才有）、缺失（URDF 没这条 joint / frame 名写错）或时间戳
+        //   对不上，整条里程计就**静默消失**（= "没有 /odom"），下游 tf2/nav2/slam_toolbox 只会
+        //   报"等 TF"，很难指回这里。
+        // 新行为：**限速 ERROR（1 条/5 s + 累计计数）+ T_bl := 单位阵**，/Odometry 照发；
+        //   数值上等价于"没有安装外参"（T_bl=I），TF 一恢复就回到正常路径（无粘滞状态）。
+        //   查到的变换若是**退化值**（非有限 / 四元数模长≈0，例如静态 TF 的 w=0）同样按单位阵处理
+        //   —— 那种 T_bl 送进 tf2 只会产出 NaN 位姿（下游一路 NaN，比"没有外参"更糟）。
+        // ★ 判据/日志函数都放在**独立 TU**（src/extrinsic_guard.cpp），理由同 §O.2：
+        //   本包 -ffast-math，别把新的浮点表达式塞进 odom 回调所在 TU。
+        std::uint64_t tf_lookup_failures_ = 0;                     // 累计"查不到 TF"的帧数（只计数）
+        std::uint64_t tf_degenerate_ = 0;                          // 累计"TF 存在但退化"的帧数（只计数）
+        std::chrono::steady_clock::time_point last_tf_error_{};    // 限速（1 条 / 5 s，墙钟）
+
         // ============ 本仓新增（契约 v3 §2.1 / I2：统一输出契约 = 选项 U，2026-10-20）============
         // 两个新参数（**默认值 = 现有行为，逐字节不变**）：
         //   publish_tf       (bool,   默认 true )：false ⇒ 不广播 odom→base_link（/Odometry 照发）。
@@ -85,5 +102,14 @@ namespace small_point_lio {
     public:
         explicit SmallPointLioNode(const rclcpp::NodeOptions &options);
     };
+
+    // ===================== 本仓新增（2026-10-20 防御）：TF 回退用的两个自由函数 =====================
+    // 实现都在 **src/extrinsic_guard.cpp**（独立 TU：本包 -ffast-math，见文件头 §O.2 的理由）。
+    //   · tf_transform_is_usable()：查到的 T_bl 是否是**可用**变换（平移/四元数全有限 + 四元数
+    //     模长足够大）。退化值（例如静态 TF 的 w=0、或 URDF 里写进 NaN）直接按单位阵处理。
+    //   · log_tf_fallback()：限速 ERROR（调用方已做 1 条/5 s 的门），把"为什么回退 + 累计帧数 +
+    //     后果（这一帧按 T_bl=I 合成）+ 怎么修"一次说清。
+    bool tf_transform_is_usable(const geometry_msgs::msg::TransformStamped &tf);
+    void log_tf_fallback(std::uint64_t count, const char *why, const std::string &detail);
 
 }// namespace small_point_lio

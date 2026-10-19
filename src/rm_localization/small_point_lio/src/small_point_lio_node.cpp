@@ -164,11 +164,46 @@ namespace small_point_lio {
             transform_stamped.header.frame_id = "odom";
             transform_stamped.child_frame_id = "base_link";
             geometry_msgs::msg::TransformStamped base_link_to_lidar_frame_transform;
-            try {
-                base_link_to_lidar_frame_transform = tf_buffer->lookupTransform(lidar_frame, "base_link", time_msg);
-            } catch (tf2::TransformException &ex) {
-                RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"), "Failed to lookup transform from base_link to %s: %s", lidar_frame.c_str(), ex.what());
-                return;
+            // ============ 本仓新增（2026-10-20 防御）：查不到 / 退化 TF ⇒ **回退单位阵**，不丢帧 ============
+            // 旧行为（这一行就是"没有 /odom"的直接来源）：
+            //     catch (...) { RCLCPP_ERROR(...); return; }        // ← 整帧 odom 被丢掉
+            //   只要 base_link→livox_frame 那条静态 TF 晚到（实测 spawn 后 3~10 s 才有）/ 缺失 /
+            //   帧名写错 / 时间戳对不上，/Odometry 与 odom→base_link **一条都不发**，而日志里只有
+            //   一句 "Failed to lookup transform"，下游（tf2 / nav2 / slam_toolbox）只会报"等 TF"。
+            // 新行为：**限速 ERROR（1 条/5 s + 累计计数）+ T_bl := 单位阵** ⇒ 本帧照发
+            //   （数值上等价于"没有安装外参"），TF 一恢复就回到正常路径（无粘滞状态）。
+            //   查到的变换**退化**（非有限 / 四元数模长≈0，如 w=0 的未初始化静态 TF）同样按单位阵
+            //   处理 —— 那种 T_bl 乘进 tf2 只会得到 NaN 位姿（下游一路 NaN，比"没有外参"更糟）。
+            // ★ 判据/日志在独立 TU（src/extrinsic_guard.cpp），见该文件头与 §O.2：本包 -ffast-math，
+            //   不把新的浮点表达式塞进 odom 回调所在 TU。
+            {
+                bool tf_ok = true;
+                try {
+                    base_link_to_lidar_frame_transform = tf_buffer->lookupTransform(lidar_frame, "base_link", time_msg);
+                } catch (tf2::TransformException &ex) {
+                    tf_ok = false;
+                    ++tf_lookup_failures_;
+                    const auto steady_now = std::chrono::steady_clock::now();
+                    if (tf_lookup_failures_ == 1 || steady_now - last_tf_error_ >= std::chrono::seconds(5)) {
+                        last_tf_error_ = steady_now;
+                        log_tf_fallback(tf_lookup_failures_, "lookupTransform 失败", ex.what());
+                    }
+                }
+                if (!tf_ok || !tf_transform_is_usable(base_link_to_lidar_frame_transform)) {
+                    if (tf_ok) {   // TF 在，但值是退化的（非有限/四元数模长≈0）
+                        ++tf_degenerate_;
+                        const auto steady_now = std::chrono::steady_clock::now();
+                        if (tf_degenerate_ == 1 || steady_now - last_tf_error_ >= std::chrono::seconds(5)) {
+                            last_tf_error_ = steady_now;
+                            log_tf_fallback(tf_degenerate_, "TF 存在但退化（非有限或四元数模长≈0）", lidar_frame);
+                        }
+                    }
+                    // 单位阵（= 没有安装外参）：translation 全 0、rotation = (0,0,0,1)
+                    base_link_to_lidar_frame_transform = geometry_msgs::msg::TransformStamped{};
+                    base_link_to_lidar_frame_transform.header.stamp = time_msg;
+                    base_link_to_lidar_frame_transform.header.frame_id = lidar_frame;
+                    base_link_to_lidar_frame_transform.child_frame_id = "base_link";
+                }
             }
             tf2::Transform tf_lidar_odom_to_lidar_frame;
             tf_lidar_odom_to_lidar_frame.setOrigin(tf2::Vector3(odometry.position.x(), odometry.position.y(), odometry.position.z()));
