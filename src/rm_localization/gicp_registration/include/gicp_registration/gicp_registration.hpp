@@ -89,8 +89,10 @@ private:
   // ---- 运动一致性门限 / 合理性检查 / 平滑（2026-10-06 新增）----
   // 本帧的"创新"= 配准结果相对**它自己的初值**（= 上次采纳的 map→odom ∘ 本帧里程计增量，
   // 也就是"里程计预测位姿"）挪动了多少。返回 (平移 m, yaw deg)。
+  // d_trans（可选）= 修正量的**分量**（≈map 系），只给 ~/gate 诊断用（常量错位指认真凶）。
   static void innovationOf(
-    const Eigen::Matrix4d & guess, const Eigen::Matrix4d & T_map_sensor, double & dxy, double & dyaw_deg);
+    const Eigen::Matrix4d & guess, const Eigen::Matrix4d & T_map_sensor, double & dxy,
+    double & dyaw_deg, Eigen::Vector3d * d_trans = nullptr);
   // 门限值 = clamp(rate·dt, min, max)（dt<=0 时按 min 处理）。两条都算出来给日志/状态行用。
   void gateThresholds(double dt, double & allow_xy, double & allow_yaw_deg) const;
   // 合理性：结果蕴含的 map→base_link（= T_map_odom_new ∘ T_odom_base）是否还在地图定义域里。
@@ -124,7 +126,7 @@ private:
   void publishGateMetrics(
     double innov_xy, double innov_yaw_deg, double allow_xy, double allow_yaw_deg, double gate_dt,
     double score, bool converged, bool accepted, size_t source_points, double align_ms,
-    int reject_streak, int flags);
+    int reject_streak, int flags, const Eigen::Vector3d & innov_vec);
 
   // ---- 参数（键名与依据逐条见 config/gicp_registration_sim.yaml） ----
   std::string pcd_path_;

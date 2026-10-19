@@ -59,6 +59,11 @@ FLAG_SKIP_INNOV, FLAG_REANCHOR, FLAG_LOST_PROBE = 1, 2, 4
 TL = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
                 history=HistoryPolicy.KEEP_LAST)
+# /clock 的发布端（Gazebo / ros_gz）是 **BEST_EFFORT**：用默认 RELIABLE 订阅会
+# "offering incompatible QoS. No messages will be received"（2026-10-21 实测踩到）⇒
+# 拿不到仿真时间，窗口就退化成墙钟。这里显式 BEST_EFFORT。
+CLOCK_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
+                       history=HistoryPolicy.KEEP_LAST)
 
 
 def pct(vals, q):
@@ -96,7 +101,7 @@ class GateProbe(Node):
         self.create_subscription(Bool, '/gicp_registration/converged',
                                  self._on_converged, TL)
         self.create_subscription(TFMessage, '/tf', self._on_tf, 200)
-        self.create_subscription(Clock, '/clock', self._on_clock, 10)
+        self.create_subscription(Clock, '/clock', self._on_clock, CLOCK_QOS)
 
     # ---------------- 回调 ----------------
     def _on_clock(self, msg):
@@ -141,7 +146,9 @@ class GateProbe(Node):
         if time.monotonic() - self.t_wall0 >= self.wall_timeout:
             return True
         if self.t0 is None:
-            return False
+            # 拿不到 /clock（时钟未起/QoS 不兼容）⇒ 用墙钟兜底：等够窗口 + 一点余量就收，
+            # 免得探针一直挂到 wall-timeout（此时 t 轴是墙钟，stats_window 的窗口也是墙钟）。
+            return (time.monotonic() - self.t_wall0) >= self.settle + self.window + 5.0
         return self._now_rel() >= self.settle + self.window + 2.0
 
     # ---------------- 统计 ----------------
