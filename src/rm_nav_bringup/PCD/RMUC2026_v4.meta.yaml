@@ -1,0 +1,50 @@
+name: RMUC2026_v4
+kind: pcd
+world: RMUC2026
+created_at: '2026-10-19T22:55:54+08:00'
+updated_at: '2026-10-20T00:05:20+08:00'
+spawn_pose:
+  x: 10.925
+  y: 2.525
+  z: 0.2
+  yaw: 0.0
+map_start_pose:
+- 0.0
+- 0.0
+- 0.0
+resolution: null
+frames:
+  map: map
+  odom: odom
+  base: base_link
+  convention: map 系 = 出生点相对系（原点 = 机器人出生点，x 前 y 左，单位 m/rad）；odom = LIO 里程计系；base =
+    base_link。因此同一 world 只要出生点不变，map(0,0,0) 恒等于出生点。
+files:
+- RMUC2026_v4.pcd
+file_sizes:
+  RMUC2026_v4.pcd: 2348281
+versions:
+  ros_distro: humble
+  packages:
+    rm_nav_bringup: 0.0.0
+    slam_toolbox: 2.6.10
+    cloud_accumulator: 0.1.0
+written_by: rm_nav_bringup/scripts/map_asset_guard.py
+accumulated_points: 37582242
+voxel_size: 0.1
+bbox:
+- - -25.60093613803085
+  - -9.553858174214893
+  - -0.5068339627201797
+- - 3.732866075195079
+  - 7.230010330672401
+  - 1.8024145203850732
+z_span: 2.309248483105253
+health_warning: false
+dropped_points_height: 3061
+dropped_points_range: 1007
+skipped_frames_jump: 0
+skipped_frames_tf_fallback: 190
+source: cloud_accumulator
+tf_frames_ok: 6094
+tf_frames_failed: 195
