@@ -141,20 +141,17 @@ namespace gazebo
         {
             downSample = 1;
         }
-        // ★★ 2026-10-09：点云**表达在哪个系** —— 新增可选 SDF 参数 `<cloud_frame>parent|sensor</cloud_frame>`。
-        //   缺省（元素不存在）= `parent` ⇒ 与 2026-10-07 起的行为**逐字节相同**（含所有其它模型）。
-        //   `sensor` 时点云坐标 = range·(mount_rot·ray)（真·传感器系），与 `frame_id`（= `<sensor name>`
-        //   = 本仓的 `livox_frame`，它的 TF 位姿由 URDF 关节给出）**自洽**。
-        //   为什么需要这个开关：本插件原来把点表达在**父 link 系**（axis = offset.Rot()·mount_rot·ray），
-        //   只有当"关节 rpy = 0"（= `livox_mount:=plugin` 档，倾角记在 `<tilt_rpy>` 里）时，
-        //   父 link 系才**恰好**等于 `livox_frame`（帧与数据自洽）。一旦倾角记进关节
-        //   （`livox_mount:=urdf`），`livox_frame` 就斜了 30°，而点云还留在水平系 ⇒
-        //   **帧与数据差 30°**：任何用 TF 变换这朵云的消费者（LIO 的 /cloud_registered、RViz、
-        //   p2l 的 target_frame）都会看到"整个场景被刚性转了 30°"
-        //   （实测 30.970°，反变换回去 1.041°，见 docs/tilted_lidar_fidelity.md §I.5.1）。
-        //   `sensor` 就是"让数据回到它自称的那个帧里"这一档（真机驱动本来就是这样）。
-        //   ⚠️ 世界里的射线方向**不受本开关影响**（射线仍用 offset.Rot()·mount_rot·ray 生成），
-        //      只改"报出来的坐标用哪个系表达"。
+        // ★★ 2026-10-21（**缺陷③ 收口**）：点云**永远**表达在 `header.frame_id` 那个帧里。
+        //   历史（2026-10-09 引入的可选 SDF 参数 `<cloud_frame>parent|sensor</cloud_frame>`）：
+        //     · 缺省 `parent`：点算在**父 link 系**里（axis = offset.Rot()·mount_rot·ray + offset.Pos()），
+        //       而 `header.frame_id` 一直是 `<sensor name>`（= 本仓 `livox_frame`）⇒ **两者不同系**。
+        //       本仓的 fixed 关节被 sdformat 合并（`gz sdf -p` 实测：模型只剩 base_link、ray 传感器
+        //       `<pose>` = 关节 origin）⇒ 父 link 系 = **base_link 系** ⇒ 整朵云偏了一个安装矢量
+        //       （默认模型 (0.12, 0, 0.175)、robot11 (0.000562, 0.130916, 0.157028) m），
+        //       任何按 frame_id 查 TF 的消费者都会**再叠一次**（双重应用）。
+        //     · `sensor`：点 = range·(mount_rot·ray)，与 frame_id 自洽（2026-10-21 已修好）。
+        //   ⇒ 现在两档**出点公式相同**（parent 档的点被显式换算进传感器系，见 OnNewLaserScans 里的
+        //      代数），`<cloud_frame>` 元素**保留**（老 SDF/URDF 照常加载）但不再改变坐标系。
         cloud_frame_sensor_ = false;
         if (sdfPtr->HasElement("cloud_frame"))
         {
@@ -162,10 +159,6 @@ namespace gazebo
             if (cloud_frame == "sensor")
             {
                 cloud_frame_sensor_ = true;
-                RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
-                            "cloud_frame = sensor ⇒ 点云表达在**传感器系**（frame_id = %s 的那个帧），"
-                            "下游需要 gravity_aligned_frame / target_frame 做重力对齐",
-                            raySensor->Name().c_str());
             }
             else if (cloud_frame != "parent")
             {
@@ -173,10 +166,16 @@ namespace gazebo
                             "cloud_frame 取值 %s 不认识（只认 parent | sensor）⇒ 按 parent 处理",
                             cloud_frame.c_str());
             }
+            RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
+                        "cloud_frame = %s（**历史开关**；自 2026-10-21 起两档等价：点云永远表达在 "
+                        "frame_id = %s 的那个系里，缺陷③）",
+                        cloud_frame_sensor_ ? "sensor" : "parent", raySensor->Name().c_str());
         }
         // ★★ 2026-10-09：**点 = range·axis 漏了射线起点**（共享代码修复 + 一个回退开关）。
-        //   缺省（元素不存在）= **修好的语义**：`point = range·axis + minDist·axis + offset.Pos()`；
+        //   缺省（元素不存在）= **修好的语义**：`point = range·axis + minDist·axis`（传感器系）；
         //   显式写 `false` = 2026-10-09 之前的老行为（`point = range·axis`，逐字节）。
+        //   （2026-10-21 起 `offset.Pos()` 不再出现在出点公式里 —— 它只属于父 link 系，见缺陷③；
+        //     `sensor` 档本来就是不含它的那一档，所以这一档逐字节不变。）
         //   为什么默认改成"修好的"：老行为让**每一个点**沿自己的射线朝传感器方向内移 `minDist`
         //   （本仓 `minDist` = 0.1 m）⇒ 地面不再是平面（近处抬高、远处压低，实测 r 0.25–0.35
         //   → z −0.208、r 2–4 → −0.253，真值 −0.2595）、`sensor_height` 标定偏 0.8 mm~5 cm、
@@ -190,9 +189,8 @@ namespace gazebo
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"),
                     "range_from_origin = %s ⇒ 点 = %s（缺省 = 修好的语义；写 false = 旧行为）",
                     range_from_origin_ ? "true" : "false",
-                    !range_from_origin_ ? "range·axis（旧行为）"
-                                        : (cloud_frame_sensor_ ? "range·axis + minDist·axis（传感器系，**不含** offset.Pos()）"
-                                                               : "range·axis + minDist·axis + offset.Pos()"));
+                    !range_from_origin_ ? "range·axis（旧行为；坐标系仍 = frame_id）"
+                                        : "range·axis + minDist·axis（传感器系 = frame_id，**不含** offset.Pos()）");
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "sample: %ld", samplesStep);
         RCLCPP_INFO(rclcpp::get_logger("LivoxPointsPlugin"), "downsample: %ld", downSample);
         // 这行日志用于确认加载的是修好时间基的插件（旧库打的是墙钟偏移）
@@ -299,19 +297,23 @@ namespace gazebo
         //   我们**需要**：射线在物理上真的斜（否则下视盲区、地面环半径、点云几何全不对）。
         //   做法：新增 SDF 参数 `<tilt_rpy>roll pitch yaw</tilt_rpy>`（弧度；缺省 = 单位阵）：
         //     · 打射线时：axis = offset.Rot() · mount_rot · ray · x̂   （射线真的按倾角偏）
-        //     · 发布点时（缺省 `<cloud_frame>parent</cloud_frame>`）：
-        //                axis = sensor_rot · mount_rot · ray · x̂     （点 = **父 link 系**里的命中点）
-        //     · 发布点时（`<cloud_frame>sensor</cloud_frame>`，2026-10-09 新增）：
-        //                axis = mount_rot · ray · x̂                   （点 = **传感器系**里的命中点，
-        //                                                               与 frame_id=<sensor name> 自洽）
-        //   ⇒ 对**已有**的每个传感器（没有这个参数、也没有 `<cloud_frame>`）= 单位阵/父 link 系
-        //     ⇒ **输出逐字节不变**。
+        //     · 发布点时（2026-10-21 起**两档相同**）：axis = mount_rot · ray · x̂
+        //                （点 = **传感器系** = header.frame_id 声称的那个帧里的命中点）
         //   实测（robot11）：仰角谱仍是 −7…+52°（传感器自身 FoV），但它在 world 里是斜的：
         //   地面最近环 0.43 m、下视到 −37°、地面点占 ~20%；而修之前"姿态只加在射线上、
         //   不加在点上"会让 linefit 只能判 2.8% 地面。
         const auto sensor_offset = laserCollision ? laserCollision->RelativePose()
                                                   : ignition::math::Pose3d::Zero;
         const auto sensor_rot = sensor_offset.Rot();
+
+        // ★★ 2026-10-21（**缺陷③**）：点云与 `header.frame_id` 必须**同系**。
+        //   拍一次收据：这个偏移过去被**双重应用**过（云里加一次、下游按 TF 再加一次）。
+        RCLCPP_INFO_ONCE(rclcpp::get_logger("LivoxPointsPlugin"),
+                         "cloud_frame：点云**永远**表达在 frame_id（= <sensor name>）那个系里；"
+                         "父 link 系的安装偏移 offset.Pos()=[%.6f %.6f %.6f] rpy=[%.6f %.6f %.6f] "
+                         "已在出点公式里换算掉（缺陷③，2026-10-21；两档等价）",
+                         sensor_offset.Pos().X(), sensor_offset.Pos().Y(), sensor_offset.Pos().Z(),
+                         sensor_rot.Euler().X(), sensor_rot.Euler().Y(), sensor_rot.Euler().Z());
 
         // 遍历射线扫描点对
         for (const auto &pair : points_pair) {
@@ -327,42 +329,39 @@ namespace gazebo
             auto rotate_info = pair.second;
             ignition::math::Quaterniond ray;
             ray.Euler(ignition::math::Vector3d(0.0, rotate_info.zenith, rotate_info.azimuth));
-            // ★★ 2026-10-09（`<cloud_frame>sensor</cloud_frame>`，见 Load 里的说明）：
-            //   `sensor` 档 ⇒ axis = mount_rot·ray（**真·传感器系**：mount_rot = 传感器在父 link 里的
-            //     姿态，ray 是传感器系里的采样方向 ⇒ 坐标与 frame_id=<sensor name> 自洽）；
-            //   缺省(`parent`) 档 ⇒ **原样** axis = sensor_rot·mount_rot·ray（父 link 系，逐字节不变）。
-            //   两档的**世界射线**逐条相同（RayShape 用的是 Load/InitializeRays 里的
-            //   offset.Rot()·mount_rot·ray，本行只决定"报出来的坐标用哪个系"）。
-            auto axis = cloud_frame_sensor_
-                                ? (mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0))
-                                : (sensor_rot * mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0));
+            // ★★ 2026-10-21（**缺陷③**：`parent` 档的镜像问题）：
+            //   2026-10-09~10-20 期间这里有一条按 `<cloud_frame>` 分叉的式子：
+            //       `parent` 档 ⇒ axis = sensor_rot·mount_rot·ray（**父 link 系**方向），
+            //                     出点再 `+ sensor_offset.Pos()` ⇒ 点确实在父 link 系里，
+            //       但 `header.frame_id` 一直是 `<sensor name>`（= `livox_frame`）⇒ **不同系**。
+            //   本仓的 fixed 关节被 sdformat 合并（`gz sdf -p` 实测：ray 传感器 parent = base_link、
+            //   `<pose>` = 关节 origin）⇒ 父 link 系 = **base_link 系** ⇒ 整朵云比自称的帧多一个
+            //   安装矢量（默认模型 (0.12, 0, 0.175) m、robot11 (0.000562, 0.130916, 0.157028) m），
+            //   下游按 frame_id 查 TF（LIO 的 extrinsic、linefit 的 gravity_aligned_frame、
+            //   p2l 的 target_frame、nav2 costmap、cloud_accumulator）⇒ **再叠一次**。
+            //   修法（不新增开关）：把 `parent` 档的点**换算进传感器系**。代数（一行）：
+            //       p_parent = (range+minDist)·(sensor_rot·mount_rot·ray) + offset.Pos()
+            //       p_sensor = sensor_rotᵀ·(p_parent − offset.Pos())
+            //                = (range+minDist)·(mount_rot·ray)        ← 与 `sensor` 档同一条式子
+            //   ⇒ 两档出点**逐字节相同**，且都等于 `header.frame_id` 声称的那个帧；
+            //     世界里的射线方向**不变**（RayShape 仍用 offset.Rot()·mount_rot·ray 生成，
+            //     见 InitializeRays / Load）。
+            //   ⚠️ 结果：`offset.Pos()` 不再出现在出点公式里（它只属于父 link 系）；
+            //      `sensor` 档本来就不含它 ⇒ **那一档逐字节不变**（回归基线）。
+            auto axis = mount_rot_ * ray * ignition::math::Vector3d(1.0, 0.0, 0.0);
             // ★★ 2026-10-09（**共享代码改动**，见文件头/§K）：`range` 是**从射线起点**量的距离。
-            //   射线起点在 `InitializeRays()` 里是 `minDist·axis + offset.Pos()`：
+            //   射线起点在 `InitializeRays()` 里是 `minDist·axis + offset.Pos()`（父 link 系）：
             //     · `minDist` = SDF `<range><min>`（本仓所有模型 = **0.1 m**）
             //     · `offset.Pos()` = 传感器在父 link 里的位置（本仓 `livox_frame` = (0.00056, 0.1309, 0.1570)）
-            //   而命中点在父 link 系里是 `range·axis + offset.Pos()`。
-            //   ⇒ 老代码只发 `range·axis`（既漏了 `minDist·axis`、也漏了 `offset.Pos()`）
-            //     ⇒ 每个点沿自己的射线**朝传感器方向内移 0.1 m**、并且整朵云少了一个平移。
-            //   实测（robot11，独立于本行）：地面点 z 随距离单调变化 —— r 0.25–0.35 → −0.208、
-            //   r 2–4 → −0.253，而真值 −0.2595；正是"沿射线内移 0.1 m"应有的样子
-            //   （docs/robot_models.md §12.3.1 / 本插件 §K 的 A/B）。
+            //   命中点在父 link 系里是 `range·axis_parent + minDist·axis_parent + offset.Pos()`；
+            //   换算进传感器系（= 上面的 p_sensor 代数）后只剩 `(range+minDist)·axis`。
+            //   ⇒ 老代码只发 `range·axis`（漏了 `minDist·axis`）⇒ 每个点沿自己的射线**朝传感器
+            //     方向内移 0.1 m**。实测（robot11，独立于本行）：地面点 z 随距离单调变化 ——
+            //     r 0.25–0.35 → −0.208、r 2–4 → −0.253，而真值 −0.2595；正是"沿射线内移 0.1 m"
+            //     应有的样子（docs/robot_models.md §12.3.1 / 本插件 §K 的 A/B）。
             //   ⚠️ 这是**共享代码**：所有模型都走这一行 ⇒ 逐模型 A/B 见 §K；
-            //      回退 = SDF `<range_from_origin>false</range_from_origin>`（老行为，逐字节）。
-            // ★★ 2026-10-21（**修 sensor 档的坐标系 bug**；parent 档逐字节不变，见 §12）：
-            //   `sensor_offset.Pos()` 是**父 link 系**的矢量，只有 `parent` 档的 `axis`
-            //   （= sensor_rot·mount_rot·ray）与它同系 ⇒ 可以相加。
-            //   `sensor` 档的 `axis` 已经是**传感器系**矢量（= mount_rot·ray），命中点在该系里
-            //   就是 `(range+minDist)·axis`（射线起点在传感器系原点）；再叠加父 link 系的
-            //   `sensor_offset.Pos()` ⇒ **整朵云被刚性平移** `R_joint·offset.Pos()`
-            //   （robot11 = (0.0006, 0.1919, **0.07053**) m，见 docs 的 §12）。
-            //   实测：h_meas 恒 0.1894 / 0.1906（RMUL / RMUC，两界都 ERROR）、雷达可见地面比
-            //   **真值接触地面**（GT base_link z − 0.102499）高 70.5 mm、整朵云沿 base_link
-            //   +y 偏 191.9 mm。改后 h_meas = 0.2595（INFO）。
-            //   ⚠️ 不加新开关：sensor 档的默认行为就是"修好的"；回退 = 把 `cloud_origin`
-            //      改回 `sensor_offset.Pos()`（一行）。`range_from_origin:=false` 仍只管 range 语义。
-            const ignition::math::Vector3d cloud_origin =
-                cloud_frame_sensor_ ? ignition::math::Vector3d::Zero : sensor_offset.Pos();
-            auto point = range_from_origin_ ? (range * axis + minDist * axis + cloud_origin)
+            //      回退 = SDF `<range_from_origin>false</range_from_origin>`（老行为）。
+            auto point = range_from_origin_ ? (range * axis + minDist * axis)
                                             : (range * axis);
 
             // 填充 CustomMsg 点云消息
