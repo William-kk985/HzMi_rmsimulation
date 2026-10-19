@@ -654,6 +654,11 @@ what becomes the red channel):
 | `/map` 是子图纹理混合、最大值 **75**（不是 100）、`CreateOccupancyGridMsg` 的取整公式 | §4(b) |
 | 本仓 `/scan` 的 `range_data.misses` **恒空**、`missing_data_ray_length` 在本仓**无效** | §3(b) |
 
+> 【引用】**原文 §0 还有三条细节本文 §1–§4 未逐字覆盖，补记于此**：① `/map` 的
+> `ProbabilityToLogOddsInteger` 把 `p ∈ [0.1, 0.9]` 映到 `[1, 255]`，再取 `delta = 128 − 该值`；
+> ② 源码注释原话：*"walls will look too gray"*（对应"最大只到 75 而不是 100"）；
+> ③ **重叠子图会在合成时叠加、把值推得更高** ⇒ 同一面墙的发布值可能高于单个子图的 75。
+
 ### 5.2 量化推论（原文 §0 的算术，正文未逐条列）
 
 【引用】默认 `hit 0.55 / miss 0.49` 下：单次 hit 的 log-odds `ln(0.55/0.45) = +0.2007`、单次 miss `ln(0.49/0.51) = −0.0400` ⇒ **1 次 hit 恰好抵 5.02 次 miss**；从 unknown 到饱和需 **11 次 hit** 或 **55 次 miss**；clamp 到 `±2.1972`（`ln 9`）后，**已饱和的墙仍需 55 次 miss** 才会掉到"free"。
