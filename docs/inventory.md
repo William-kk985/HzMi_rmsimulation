@@ -68,7 +68,7 @@
 | `docs/slope_speed_limiting.md` | 348 | `95846c3 2026-10-07` | 前瞻坡度/台阶限速：物理推导 + 整栈 A/B |
 | `docs/traversability_plan.md` | 652 | `fc226bb 2026-10-07` | 3D 派生可通行性（坡度/落空/净空）设计计划，未实现 |
 | `docs/scan_context_plan.md` | 738 | `413415d 2026-10-05` | Scan Context 类全局地点识别接入方案，未落地 |
-| `docs/cartographer_2d_occupancy_semantics.md` | 963 | `本次整理` | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导）+ §5 合并附录（issue 调查 / TSDF / slam_toolbox / nav2 阈值 / 调参表） |
+| `docs/cartographer_2d_occupancy_semantics.md` | 967 | `本次整理` | cartographer 2D 占据栅格语义逐行考据（含 `/map` 上限 75 的推导）+ §5 合并附录（issue 调查 / TSDF / slam_toolbox / nav2 阈值 / 调参表） |
 | `docs/livox_sensor_prior_art.md` | 508 | `03c8498 2026-10-18` | 非重复扫描 Livox 在新 Gazebo 上的既有实现调研 + REUSE/ADAPT/WRITE 裁决 + §10 编译实测 |
 | `docs/kinodynamic_esdf_mpc_notes.md` | 270 | `7097602 2026-10-05` | `865749/Kinodynamic_esdf_mpc` 调研笔记（外部仓库） |
 | `docs/slam_nav_goal_strategies.md` | 418 | `09578ed 2026-10-05` | "目标怎么给"四种方式的外部调研 |
