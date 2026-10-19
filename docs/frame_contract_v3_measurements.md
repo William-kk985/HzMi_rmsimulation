@@ -3595,3 +3595,278 @@ URDF→SDF 合并），不搬几何 ⇒ 从根上不可能搬错（§M 的 robot
   需要重新看 §20.2 的剂量-响应。
 * 台架脚本 `.tmp_wz/bench/*` 是 **gitignored** 的临时工具（§M 沿用），本轮没有把它提升成
   仓库内工具；可复现的权威口径是 §20.3 的 `drive_probe.py` 命令 + §20.5 的生成器自检。
+
+## §21 第十二轮（**本机 date=2026-10-20T02:44–03:06**）：**缺陷③ 判决** —— Livox 插件 `cloud_frame=parent` 把点算在**父 link（= base_link）系**、`header.frame_id` 却写 `livox_frame`
+
+> **本节只新增**（append-only）：§10–§20 一个字没改；写作时 §19/§20 已占 ⇒ 本节取 **§21**。
+> 只动**一个源码文件**（`src/rm_simulation/livox_laser_simulation_RO2/src/livox_points_plugin.cpp`）
+> + 本节：**不碰** `small_point_lio/**`、`lio_tf_adapter/**`、地图资产、任何 YAML/launch/URDF。
+> **提交**：插件修复 = `7a544bf`（本节文档独自一个提交；两者都不含别人的在途改动）。
+> 隔离与收尾口径与 §13/§17/§19 逐字相同：每跑私有 `GAZEBO_MASTER_URI` / `HOME` / `ROS_DOMAIN_ID`、
+> `gui:=False`、`nav_rviz:=False lio_rviz:=False`、`world:=X` **不带前导 `--`**、`setsid` + 硬超时 +
+> `tools/scripts/lib/scoped_cleanup.sh` 收尾（**无全机 pkill**）。每跑 `meta.txt` 记
+> `date/git_head/launch_md5/plugin_cpp_md5/plugin_so_md5/lio_so_md5/ros_domain_id/gazebo_master_uri`；
+> 原始数据 `.tmp_defect3/<tag>/`（gitignored，含 `probe.json` + `probe_pts.npz`）。
+> 探针两个：`.tmp_defect3/probe.py`（**声明帧**里拟合地面 + 用 GT `odom_ground_truth` 与 URDF
+> `base_link←livox_frame` 把云搬到 world + **直接 import §13.4 的 `wall_witness.py`** 当独立尺子）与
+> `.tmp_defect3/hmeas_replay.py`（**同一帧云**重放 LIO 的地面互检，做"修前 vs 修后"的同云 A/B）。
+
+### 21.1 一句话结论
+
+> **③ 是真的，而且只在 `parent` 档**（= 默认模型 `robot:=''`、`robot11_mount:=plugin`（robot11 的
+> 默认档）、`:=urdf`、`hzmirm` 的缺省；`sensor` 档 2026-10-21 已经修好，本轮**源码一行没动**）。
+> 根因不是"哪个 mode 算错了"，而是**父 link 根本不是 `livox_frame`**：sdformat 的 URDF→SDF 把
+> fixed 关节**合并**，传感器的 parent 变成 **`base_link`**、`<pose>` 变成关节 origin（21.3 有
+> `gz sdf -p` 的静态证据）⇒ `parent` 档出的点 = **base_link 系**坐标，而 `header.frame_id`
+> 写的是 `<sensor name>` = `livox_frame`。两者差**一个安装矢量**，实测（RMUL2026、静止、GT 真值）：
+>
+> | 模型 | 墙 x=2.5 (+x) | 墙 x=5.0 (−x) | 墙 y=8.5 (−y) | world 地面 z | **声明帧里的平移残差 = 安装矢量本身** |
+> |---|---|---|---|---|---|
+> | 默认模型（`(0.12,0,0.175)`） | **+0.1200** | **−0.1200** | **+0.0000** | **+0.1750** | **(+0.1200, 0.0000, +0.1750)** |
+> | robot11（`(0.000562,0.130916,0.157028)`） | **+0.0006** | **−0.0006** | **−0.1309** | **+0.1550** | **(+0.0006, +0.1309, +0.1570)** |
+>
+> 三个分量逐项对上安装矢量（x/y 误差 ≤0.2 mm；z 受 mesh 台阶限制 ±6 mm）。**修后四个真实墙面
+> （x=2.5 / x=5.0 / x=10.0 / y=8.5）与地面残差全部 0.0000 m**（§13.4 登记过的四个"相邻面进窗"假读数
+> x=2.22 / x=14.78 / y=0.22 / y=8.78 仍是 +0.28，与本 bug 无关）；robot11 的 `plugin` 与 `sensor`
+> 两档出点趋于逐字节相同（`h_meas` 0.2618 vs 0.2616、墙残差都 0.0000、`d_decl` 0.2594 vs 0.2595）。
+> 同云重放（21.5.2）给出**干净的 Δ = +0.1750 / +0.1572 / +0.0701 m**，其中 +0.0701 正好复现了
+> §13 的 sensor 档 bug（重放修前 0.1889 ≈ §13 现场记的 0.1894）⇒ 同一把尺子、两轮独立复现。
+
+### 21.2 代码审计（每个 `<cloud_frame>` 值：点在哪个系 / `frame_id` / 加不加 offset）
+
+**修前**（HEAD `e0db764`；行号是该提交的 `livox_points_plugin.cpp`）：
+
+| `<cloud_frame>` | (a) 点在哪个系 | (b) `header.frame_id` | (c) `offset.Pos()` 加不加 | 自洽？ |
+|---|---|---|---|---|
+| `parent`（**缺省**：默认模型 / hzmirm / robot11 `plugin`\|`urdf`） | **父 link = base_link**：`axis = sensor_rot·mount_rot·ray`（`:336-338`）+ `cloud_origin = sensor_offset.Pos()`（`:363-364`），`point = range·axis + minDist·axis + cloud_origin`（`:365-366`） | `raySensor->Name()` = **`livox_frame`**（`:264` CustomMsg、`:270` PointCloud2） | **加**（父 link 系矢量） | ❌ **不同系** |
+| `sensor`（`robot11_mount:=sensor`） | **传感器系 = livox_frame**：`axis = mount_rot·ray`（`:337`），`cloud_origin = Zero`（`:363`） | 同上 = `livox_frame` | 不加（`Zero`） | ✅（2026-10-21 已修，§13） |
+
+* `offset` 的来源：`laserCollision` 建在 `_parent->ParentName()` 上、`SetRelativePose(_parent->Pose())`
+  ⇒ `sensor_offset = 传感器在父 link 里的 pose`（`:312-314`；`Load` 里 `:111-114`）。
+* **射线**始终按父 link 系生成（`Load:215` / `InitializeRays:433`：`offset.Rot()·mount_rot·ray`），
+  本轮**不动**——世界里的射线方向本来就对（21.4 的墙面能对上就是证据）。
+* 另有一条只给 Gazebo `laserscan` 消息用的 `laserMsg.scan.frame = _parent->ParentName()`（`:106`），
+  它**一直**写的是真父 link，与本 bug 无关（也无消费者）。
+
+**修后**（本提交）：
+
+| `<cloud_frame>` | (a) 点在哪个系 | (b) `header.frame_id` | (c) `offset` | 自洽？ |
+|---|---|---|---|---|
+| `parent` | **livox_frame**：`axis = mount_rot·ray`（`:351`），`point = range·axis + minDist·axis`（`:364-365`） | `livox_frame`（`:262`/`:268`） | 不加（父 link 系矢量**换算掉**了） | ✅ |
+| `sensor` | 同上（**同一条式子**） | 同上 | 不加（与修前逐字节相同） | ✅ |
+
+`<cloud_frame>` 元素**保留**（老 SDF/URDF 照常加载、不报错），但两档从此**等价**；启动日志会打一行
+收据（`cloud_frame = …（**历史开关**；自 2026-10-21 起两档等价…）`），运行期还有一条 `INFO_ONCE`
+把**被换算掉的安装偏移**打出来（`:311-316`）。
+
+### 21.3 为什么"父 link 系"其实就是 `base_link`（静态证据，不用起仿真）
+
+1. URDF 里传感器挂在 `${name}` link 上：`ros2_livox_simulation/urdf/mid360.xacro` 的
+   `<gazebo reference="${name}"><sensor …><pose>0 0 0 0 0 0</pose>`（robot11 是自己抄的同一段）。
+   按 URDF 读，父 link = `livox_frame`、传感器 pose = 0。
+2. **但 Gazebo 读的不是 URDF**：`gz sdf -p <展开后的 urdf>` 的结果里整个模型**只剩一个 link**
+   `base_link`，ray 传感器直接在它下面、`<pose>` = 关节 origin：
+
+   ```
+   默认模型：<link name='base_link'> … <sensor name='livox_frame' type='ray'> … <pose>0.12 0 0.175 0 -0 0</pose>
+   robot11 ：<pose>0.000561701465 0.130915824457 0.157028169683 0 -0 0</pose>（plugin 档 rpy=0）
+   ```
+
+   ⇒ `_parent->ParentName()` = `…::base_link`，`laserCollision->RelativePose()` = 关节 origin
+   ⇒ 这正是插件注释里写的 `offset.Pos()`（robot11 = `(0.000562, 0.130916, 0.157028)`）。
+3. 复现命令（无需仿真）：`xacro install/rm_nav_bringup/share/rm_nav_bringup/urdf/sentry_robot_sim_rigid.xacro > /tmp/x.urdf && gz sdf -p /tmp/x.urdf | grep -A2 "sensor name"`。
+   ⚠️ 合并 fixed 关节是**转换器**的行为（Gazebo Classic 11 实测）；若某天换转换器保留 `livox_frame`
+   link，则 `offset` 会变成 0——本修法与 `offset` 是否为 0 无关（代数恒等），旧代码只是"偶然正确"。
+
+### 21.4 判决性实验（**独立于 h_meas**：已知墙面 + 地面）
+
+口径：`world:=RMUL2026 mode:=mapping lio:=small_point_lio`（默认模型 / `robot:=robot11` / 再
+`robot11_mount:=sensor`），出生点 (4.3, 3.35)、GT 静止（`GT base_link z`：默认模型 0.059997、
+robot11 0.102499/0.102494）。取 `/livox/lidar/pointcloud` 一帧（frame_id 实测就是 `livox_frame`），
+
+* **① 声明帧地面**：沿"world up 在声明帧里"（由 GT + TF 算出）拟合地面，得 `d_decl`；
+  真值 = **传感器原点的 world 高度** `h_true = (R_wb·t_bl + t_wb).z`（默认模型 0.23500、
+  robot11 0.25956/0.25957）。
+* **② world 地面**：把云按**声明帧 = livox_frame** 搬到 world（= 下游做法）⇒ 地面应 ≈0
+  （RMUL2026 的可行驶面是 1 cm 级台阶的 mesh：`sensor` 档实测 world z 直方图峰 **+0.005**、
+  SVD 面 **−0.003**，§13.3 已登记"常数偏移只准到 ±6 mm"——不是本 bug）。
+* **③ 已知墙面**：§13.4 的 `wall_witness.py`（RMUL2026 mesh 的竖直面），残差 = 点云平移在该面
+  法向上的投影。
+
+| tag | 模型 / 挂法 | 云 | ① `d_decl`（原点下方最大平面） | `h_true` | ③ x=2.5 (n=+x) | ③ x=5.0 (n=−x) | ③ y=8.5 (n=−y) | ② world 地面（注） |
+|---|---|---|---|---|---|---|---|---|
+| `d0b` | 默认模型 | parent | **0.0585** | 0.23500 | **+0.1200** | **−0.1200** | +0.0000 | **+0.1750** |
+| `p0b` | robot11 `plugin` | parent | **0.1026** | 0.25956 | +0.0006 | −0.0006 | **−0.1309** | +0.1550 |
+| `s0b` | robot11 `sensor` | sensor | 0.2596 | 0.25957 | −0.0000 | +0.0000 | +0.0000 | +0.0050 |
+| `d2` | 默认模型（RMUC2026） | parent | 0.2341 | 0.23500 | n/a（RMUC mesh 不可用，§16.9） | n/a | n/a | −0.0050/+0.0016 |
+| `d1` | 默认模型 | parent（**修后**） | 0.2337※ | 0.23500 | **+0.0000** | **−0.0000** | **+0.0000** | +0.0056 |
+| `p1` | robot11 `plugin` | parent（**修后**） | 0.2594 | 0.25957 | **+0.0000** | **−0.0000** | **+0.0000** | −0.0010 |
+| `s1` | robot11 `sensor` | sensor（**修后**） | 0.2595 | 0.25956 | **+0.0000** | **−0.0000** | **+0.0000** | −0.0022 |
+
+※ `d1` 的"原点下方最大平面"被**台面**抢走了（RMUL2026 有一块 25.5 m² 的抬高面在 world +0.196，
+修后它落在传感器下方 0.039 m、点数比地面多）⇒ 0.2337 取的是 `r∈0.8–8` 那一档的地面峰；
+`d_decl`=0.0388 那一档是台面。这不影响判决（墙面残差全 0.0000 + world 地面 +0.0056）。
+**② 列**：取**地面**那个平面；`d0b` 的最强平面其实是台面（+0.3652），故那里取"最低的大水平面"
+（+0.1750，n=578）；`p0b`/`d2`/`d1`/`p1`/`s1` 取全点 SVD 最大的那个面（就是地面）。
+
+**判读**
+
+1. **`parent` 档的残差矢量 = 安装矢量本身**：默认模型 `(+0.1200, 0, +0.1750)` vs
+   `(0.12, 0, 0.175)`；robot11 `(+0.0006, +0.1309, +0.1570)` vs `(0.000562, 0.130916, 0.157028)`。
+   不是"地面高了"，是**整朵云被搬走了**——与 §13.4 当年对 `sensor` 档的判据同一形态。
+2. **`sensor` 档前后都干净**（0.2596 对 0.25957；墙 0.0000）⇒ 回归基线成立。
+3. 默认模型的 y 分量**永远是 0**（安装矢量 y=0）⇒ 它的 y 墙残差 0.0000 是**空检查**；
+   x 墙（+0.1200）才是默认模型的水平证人。
+4. 修后 robot11 的 `plugin` 与 `sensor` **两档一致**（0.2594 vs 0.2595、墙都 0.0000、world 地面
+   −0.0010 vs −0.0022）⇒ 两档的差别只剩"帧怎么定义（倾角记在关节还是 `<tilt_rpy>`）"，
+   不再有"数据与帧不同系"。
+5. 表里只列了三个墙面；RMUL2026 的 **x=10.0（n=−x）** 也是 0.0000（修前 −0.0006 / 修后 +0.0000），
+   与前两个 x 面一致。
+
+### 21.5 `h_meas` 前后（两种口径，别混）
+
+#### 21.5.1 现场值（LIO 自己打的 `gravity_align_h_check`，每次初始化一条）
+
+| run | 世界 / 模型 / 挂法 | `h_urdf` | `h_meas`（修前 → 修后） | 电平 | 备注 |
+|---|---|---|---|---|---|
+| `s0b`→`s1` | RMUL2026 / robot11 / `sensor` | 0.259527 | **0.2618 → 0.2616** | INFO | 回归基线（Δ 0.2 mm = 拟合噪声） |
+| `p0b`→`p1` | RMUL2026 / robot11 / `plugin` | 0.259527 | **0.1045 → 0.2618** | ERROR → **INFO** | 修后与 `sensor` 档同值 |
+| `d2`（修后） | RMUC2026 / 默认模型 / parent | 0.235000 | （§19 修前 **0.1007**）→ **0.2754** | （ERROR）→ **WARN** | Δ = **+0.1747** ≈ 安装矢量 z |
+| `d1`（修后） | RMUL2026 / 默认模型 / parent | 0.235000 | （`d0` 修前 **0.1215**）→ **0.0973** | ERROR → ERROR | **不可用**，见 21.8#2 |
+| `nav2`（修后） | RMUL2026 / robot11 / `sensor` / nav | 0.259527 | **0.2615** | INFO | nav 冒烟里再确认一次 |
+
+⚠️ **默认模型的 `h_meas` 不是一把干净的尺子**（修前修后都不是），两条独立原因见 21.8#1/#2；
+它的**修前 0.1007 → 修后 0.2754**（RMUC2026，同一 recipe）恰好等于 `+0.1747`，与安装矢量 z 一致，
+这本身是"父 link 系"假设的又一个证人（0.1007 就是**初始化时刻 base_link 的高度**）。
+
+#### 21.5.2 同云重放（**决定性的 A/B**：同一帧云，只把旧公式加回去）
+
+`hmeas_replay.py` 用 `gravity_align_ground.cpp` 的同一套约束（`d∈[0.05,0.60]`、法向 vs world-up
+≤20°、tol 2 cm、`r∈[0.5,8]`、2000 点子采样、固定种子）在**已落定的一帧**上重放：
+
+* **修前(plugin)** 的云 = 修后的云 **+ `offset.Pos()`**（默认模型 `(0.12,0,0.175)`、robot11
+  `(0.000562,0.130916,0.157028)`）——这是**逐字节**的旧公式（`parent` 档加的就是它）；
+* **修前(`sensor`，2026-10-21 之前)** 的云 = 修后的云 + `offset.Pos()`（同一个 bug 的未旋转版）。
+
+| tag（云） | 修前 `d` | 修后 `d` | **Δ** | 安装矢量 |
+|---|---|---|---|---|
+| `d2`（默认模型 / RMUC2026） | **0.0579** | **0.2329** | **+0.1750** | z = 0.175（x/y 不影响地面垂距） |
+| `p1`（robot11 / `plugin`） | **0.1020** | **0.2592** | **+0.1572** | z = 0.157028 |
+| `s1`（robot11 / `sensor`） | **0.1889** | **0.2589** | **+0.0701** | z = `(R_joint·offset).z` = 0.0705（§13） |
+| `d1`（默认模型 / RMUL2026） | 0.0503（tilt 13.8°） | 0.0548（tilt 0.87°） | +0.0044 | ❌ 台面抢峰（21.8#2） |
+
+* `d2` 一行是**最干净**的：同一帧云、同一算法，Δ 恰好 = 安装矢量 z（0.1750）。
+* `s1` 一行把 §13 的 sensor 档 bug **独立复现**了一遍：重放 0.1889 vs §13 现场 0.1894
+  （差 0.5 mm）；Δ 0.0701 vs §13 的 `R_joint·offset.Pos()` = 0.07053。
+* `d1` 说明：一旦"声明帧里的地面"被场景里的**抬高台面**抢走，`h_meas` 就完全失去判别力
+  （修前修后都落在台面附近）。
+
+### 21.6 修法（最小 diff）与为什么不改 `frame_id`
+
+**修法**：把 `parent` 档的点**换算进传感器系**（不新增开关、不动射线）：
+
+```
+p_parent = (range+minDist)·(sensor_rot·mount_rot·ray) + offset.Pos()
+p_sensor = sensor_rotᵀ·(p_parent − offset.Pos()) = (range+minDist)·(mount_rot·ray)
+```
+
+⇒ 与 `sensor` 档**同一条式子**（`livox_points_plugin.cpp:351`、`:364-365`），
+`cloud_origin`（`:363-364` 修前）整条删除 ⇒ `offset.Pos()` 不再出现在出点公式里。
+`range_from_origin:=false`（老行为）也只差 `minDist·axis`，坐标系同样正确（`:364-365`）。
+`sensor` 档的表达式一个字没动（它本来就相当于 `+ Vector3d::Zero`）⇒ **数学恒等**。
+
+**为什么不去改 `frame_id`（把父 link 声明出来）**——先查了每个消费者：
+
+| 消费者 | 它怎么用 `frame_id` | 改 `frame_id=base_link` 会怎样 |
+|---|---|---|
+| `small_point_lio`（`/livox/lidar` CustomMsg） | **不看消息里的 frame_id**，但配置契约写死 `lidar_frame: livox_frame`「必须与 `/livox/lidar` 的 `header.frame_id` 和 URDF 帧名一致」（`config/mid360_sim.yaml:14`）；`extrinsic_T/R` 是**雷达系→IMU 系**；`odometry_convention` 按 `lidar_frame` 定 `child_frame_id`/TF | 要么改 `lidar_frame` + 三份配置的 `extrinsic_*`（= 动 `small_point_lio/**`，本轮**禁止**），要么继续"数据在 base_link、算法以为在 livox_frame"（bug 只是搬进 LIO 里） |
+| `linefit` | `gravity_aligned_frame: ""` ⇒ **不查 TF**，直接假设"点云自带帧的 z 轴朝上"（`ground_segmentation_node.cc:114`）；只用旋转 | 改成 base_link 要同步改 `gravity_aligned_frame`/`sensor_height`（YAML，本轮禁止）；数据侧不改则一定要动它 |
+| `pointcloud_to_laserscan` | `target_frame: ""` ⇒ **不查 TF**，输出 `scan.header.frame_id = cloud.header.frame_id`（`pointcloud_to_laserscan_node.cpp:151`）；`max_height` 等 z 过滤发生在**点云自带帧** | 输出帧会变成 `base_link` ⇒ nav2 的 TF 链与 z 带语义全变（要改 YAML + 复标定） |
+| `cloud_accumulator` | 用 `msg.header.frame_id → target_frame` 查 TF（`accumulator_node.py:276`） | 会自动用 base_link，**这个**没问题 |
+| nav2 costmap / RViz | 按 `scan.header.frame_id` 查 TF | 同上 |
+
+⇒ 有一个消费者（`small_point_lio`）**要求 `frame_id = livox_frame`**，而"把父 link 声明出来"
+还必须改三份 LIO 配置/外参（禁止动）⇒ 按任务书的判据，**改点、不改声明**：把点换算进
+`livox_frame`，`frame_id` 保持 `livox_frame`（`:262`/`:268`）。
+
+### 21.7 回归 + nav 冒烟
+
+| 项 | 修前 | 修后 | 判据 |
+|---|---|---|---|
+| robot11 + `sensor`：`h_meas` | 0.2618（`s0b`） | **0.2616**（`s1`）/ **0.2615**（nav 跑） | INFO，Δ≤0.3 mm ⇒ 不变 |
+| robot11 + `sensor`：墙面残差 | 全 0.0000 | **全 0.0000** | 不变 |
+| robot11 + `plugin`：`h_meas` | **0.1045 ERROR** | **0.2618 INFO** | 修好 |
+| robot11 + `plugin`：墙面残差 | (0.0006, 0.1309, 0.1570) | **全 0.0000** | 修好 |
+| 默认模型：墙面残差 | (0.1200, 0, 0.1750) | **全 0.0000** | 修好 |
+| 默认模型：`h_meas`（RMUC2026） | 0.1007 / ERROR（§19） | 0.2754 / WARN | +0.1747 = 安装矢量 z；绝对值受 21.8#1 限制 |
+
+**nav 冒烟**（1 跑）：`local_costmap` **非空**（`n_lethal` 中位 **275.5**、最近致命 **0.7079 m**）、
+`h_meas` **0.2615 INFO**，数字见 21.7.1。
+⚠️ 任务书给的那条命令**少了 `lio:=small_point_lio`**：`gravity_align_mode:=hybrid` 只对
+`small_point_lio` 生效，launch 会**硬报错**（`[launch] gravity_align_mode:=hybrid 只对
+lio:=small_point_lio 生效`）——不是本改动的回归，补上 `lio:=` 即可。
+
+#### 21.7.1 nav 冒烟实测
+
+命令：`world:=RMUL2026 mode:=nav localization:=gicp robot:=robot11 robot11_mount:=sensor
+lio:=small_point_lio gravity_align_mode:=hybrid`（1 跑；`nav_band_probe.py --settle 20 --window 20`，
+100 个局部代价图样本 / 200 帧 `/scan`）：
+
+| 量 | 中位 | min–max | 判据 |
+|---|---|---|---|
+| local `n_lethal` | **275.5** | 265–290 | **>100 ⇒ 非空** ✅（§13.8 hybrid 基线 292） |
+| local `n_inscribed` | 9433.5 | 9274–9697 | 同量级（§13.8 9575） |
+| local `n_free` | 42470 | 42206–42775 | 同量级（42374） |
+| local `n_unknown` | 0 | 0 | — |
+| `nearest_lethal_m` | **0.7079** | 0.7041–0.7177 | 合理（§13.8 0.7070） |
+| `n_lethal_ahead`（2.0×0.6 m） | 31 | 22–37 | 同量级（§13.8 30） |
+| `n_lethal_within_1m` | 37 | 27–48 | 同量级（41） |
+| `/scan` 有限波束/帧 | 775 | 755–788 | §13.8 775 ✅ |
+| `/scan` 在带 `[0,2]` / 带下 / 带上 | 775 / **0 / 0** | — | 无整盘掉带 |
+| `/scan` z(odom) p50 | +0.0365 | +0.0351–0.0381 | §13.8 hybrid +0.0358 |
+| global `n_lethal` | 3725 | 3723–3726 | §13.8 3713 ✅ |
+| global `nearest_lethal_m` | 0.4586 | 0.4577–0.4590 | — |
+| 同跑 `h_meas` | **0.2615 INFO** | — | robot11+`sensor` 基线不变 |
+
+⇒ **局部代价图非空、最近致命栅格 0.71 m 合理**，与 §13.8/§17 的 hybrid 基线同量级；这一跑同时
+证明 `sensor` 档在 nav 全栈里也没有被本轮改动影响（`h_meas` 0.2615、`/scan` 775 波束在带内）。
+原始数据 `.tmp_defect3/nav2/band.json`（100 个样本的逐样本明细也在里面）。
+
+### 21.8 没能验证 / 仍未解释的（诚实清单）
+
+1. **默认模型的 `h_meas` 绝对值不可用（修前修后都不可用）**：默认模型的出生 z=0.2、轮底 0.06、
+   `planar_move` 每步把 vz 清零 ⇒ 下沉 ≈2.2 cm/s（§13.7 对 robot11 的同一机制实测）⇒ 落差
+   14 cm 要 **6.4 s**；而
+   `small_point_lio` 的初始化门只有 ~2 s 的 IMU（`fix_gravity_direction` 要 200 条）⇒ **初始化发生
+   在还没落地时**（本机实测：`gravity_align_init` 在插件加载后 **5.56 s**）。所以
+   `h_meas` 量到的是"**初始化那一刻**传感器离地高度"：修前（RMUC2026）= **0.1007** = 当时
+   `base_link` 的高度（parent 档的签名），修后 = **0.2754 = 0.1007 + 0.175**。
+   ⇒ "默认模型 ⇒ `h_meas ≈ 0.235` INFO"**在本设置下拿不到**；要拿到得把出生 z 降到 ≈0.08 或把
+   LIO 初始化延后到落地之后（那是 launch/世界的改动，本轮不许动）。**这一条是既有问题**
+   （与插件无关）：`robot11` 的落差只有 9.75 cm（4.4 s 落完）⇒ 它的 `h_meas` 一直是 INFO。
+2. **RMUL2026 里默认模型的 `h_meas` 被抬高台面抢峰**：mesh 里有一块 **25.5 m²** 的水平面在
+   world **+0.196**（§13.3 的"高台"）。修后它正好落在传感器下方 **0.039 m**：LIO 的约束是
+   `d≥0.05`，于是 RANSAC 在 2 cm 容差里挑到一个**斜 0.84° 的混合面**（0.0973）。修前它在
+   传感器**上方** 0.136 m（`d<0` 被排除），拟合落在别处（0.1171/0.1215）。两个值都**不能**
+   当"地面高度"读。⇒ 在 RMUL2026，默认模型的 `h_meas` 是**弱判据**，判决必须靠 21.4 的墙/地面。
+3. **z 分量的精度只到 ±6 mm**（RMUL2026 可行驶面是 1 cm 级台阶的 mesh，§13.3 已登记）；
+   x/y 分量到 0.1 mm。所以"残差 = 安装矢量"这句话在 x/y 上是**精确**的，z 上是"±6 mm 内相等"。
+4. **默认模型的 y 分量是空检查**（安装矢量 y=0）⇒ 它的 y 墙残差 0.0000 不代表任何东西。
+5. **`robot11_mount:=urdf` 的后果没实测、而且会变**：修后它与 `sensor` 档出点相同（数据真的在
+   斜 30° 的 `livox_frame` 里），但 `urdf` 档的 linefit 配置**没有** `gravity_aligned_frame`（只有
+   `sensor` 档有）⇒ linefit 的"z 轴朝上"假设不再成立。`urdf` 本来就是登记过的坏档（§"帧与数据差
+   30°"），现在只是把不一致从**上游**搬到了**下游**。要用这一档请按 `sensor` 档那套覆盖配置；
+   本轮按任务书**不改 YAML**。
+6. **`hzmirm` 槽位（雷达 z=+0.8）没跑**：静态推算它的 `parent` 档旧行为会偏 `(0,0,0.8)`，但本轮
+   **没有实测**（它的 0.8 m 高雷达 + 云台 geometry 需要另一套世界/姿态）。
+7. **地图资产没重建**（本轮禁止动）：§16.9#4 记的"驱动版 3D 地面 **+0.283 m**（world）/
+   `map→odom z=+0.403`"**不能**说已解释。本轮只证明了**点云侧**默认模型有 **+0.175**（z）+
+   **+0.12**（x）的常数偏移；`0.283 − 0.175 = 0.108` 那部分仍然**没有解释**，需要按 §16.4 的
+   recipe 重跑一次建图才能验（本轮时间/资产限制，未做）。
+8. **单跑**：每种配置 1 跑（无 3 跑中位）；nav 冒烟 1 跑。
+9. **`sensor` 档"逐字节不变"是源码级 + 实测量级证据**，不是二进制级位相同重放：源码里被删掉的
+   是 `+ Vector3d::Zero`（数学恒等），实测 `h_meas` 0.2618→0.2616、墙残差 0.0000→0.0000、
+   `d_decl` 0.2596→0.2595。
+10. **`<cloud_frame>` 现在是 no-op**：老 SDF/URDF（`robot11_mount:=sensor` 会传
+    `<cloud_frame>sensor</cloud_frame>`）继续能加载，但两档等价。若将来真要让消费者选"父 link 系
+    的云"，正确做法是**同时**改 `frame_id` + 所有消费者的契约（21.6 的表），不是只改插件。
