@@ -232,25 +232,27 @@ def _check_gravity_align_contract(context):
             "lio:=small_point_lio，或把 gravity_align_mode 设回 off" % (mode, lio or '(空)'))
     # 先验必须真的能从 URDF 推出来（robot 未知 / 轴写错 ⇒ 在这里报，而不是到节点里才发现）
     rpy = _urdf_livox_mount_rpy_deg(context)
-    # ★ 2026-10-21（E1b）：z 原点。`sensor` = 旧行为；`ground` = odom 的 z=0 放在初始化时刻的地面，
-    #   高度由 `_gravity_align_h()` 从 **URDF** 算（轮几何 + livox 关节）。这里只做取值检查 +
-    #   把 h 打进日志（节点初始化时还会用第一帧点云拟合地面互检）。
+    # ★ 2026-10-21（E1b + URDF 解析）：z 原点。`sensor` = 旧行为；`ground` = odom 的 z=0 放在
+    #   初始化时刻的地面，高度 `_gravity_align_h()` = **解析出的 livox_z + 地面偏移表**。
+    #   这里只做取值检查 + 把 h（以及它到底来自解析还是回退表）打进日志；节点初始化时还会用
+    #   第一帧点云拟合地面互检（LIO 侧 gravity_align_ground.cpp，本 launch 不重复那段逻辑）。
     z_origin = (LaunchConfiguration('gravity_align_z_origin').perform(context) or '').strip() or 'sensor'
     if z_origin not in ('sensor', 'ground'):
         raise RuntimeError(
             "[launch] gravity_align_z_origin:=%r 不是可用取值（sensor | ground）" % z_origin)
     h = _gravity_align_h(context)
+    mount_src = _mount_source_label(context)
     return [LogInfo(msg=(
         '[gravity_align] mode=%s ⇒ 统一输出契约启用：LIO publish_tf:=false + odom_convention:=sensor、'
-        'lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy 由 URDF 自动算出 = '
+        'lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy（来源=%s）= '
         '[%.6f, %.6f, %.6f]°（robot=%r mount=%r axis=%r）；'
-        'z_origin=%s gravity_align_h(URDF)=%.6f m（%s）'
-        % (mode, rpy[0], rpy[1], rpy[2],
+        'z_origin=%s gravity_align_h=%s → %.6f m（%s）'
+        % (mode, mount_src, rpy[0], rpy[1], rpy[2],
            LaunchConfiguration('robot').perform(context),
            (LaunchConfiguration('robot11_mount').perform(context) or ''),
            (LaunchConfiguration('livox_tilt_axis').perform(context) or ''),
-           z_origin, h,
-           ('odom 的 z=0 = 初始化时刻的地面；h = base_link 离地 + livox z 偏置'
+           z_origin, mount_src, h,
+           ('odom 的 z=0 = 初始化时刻的地面；h = base_link 离地（表） + livox z（解析）'
             if z_origin == 'ground' else
             'odom 原点 = 初始化时刻的传感器原点（旧行为；地面不在 z=0）'))))]
 
@@ -298,53 +300,550 @@ def _lio_adapter_robot11(axis, raise_m=0.0, mount='plugin'):
     return ([round(v, 9) for v in t], [round(v, 9) for v in rpy_out])
 
 
+# =============================================================================
+# URDF 安装参数解析器（2026-10-21）—— 从**这次真要 spawn 的 xacro** 读安装参数
+# -----------------------------------------------------------------------------
+# `_robot_xacro_args()` 同时喂 `robot_description` 与解析器（同一份参数，不许各写一套）。
+# 从 `livox_frame`/`imu_link` 沿 child→parent 合成到 `base_link`（只允许 fixed 关节）：
+#   T(base←livox) → gravity_align_rpy（度）+ gravity_align_h 的 livox_z（+地面偏移表）；
+#   T(imu←base)   → lio_tf_adapter 的 xyz/rpy（**弧度**，含 livox→imu 的 0.05 m）。
+# 缓存 (robot,mount,全部参数,urdf)；解析 vs 旧表差 >0.05° 或 >1 mm ⇒ WARN 但保留解析值；
+# 已知模型解析失败 ⇒ WARN + 旧表回退；未知模型 ⇒ 硬报错。
+# =============================================================================
+import math as _math
+import xml.etree.ElementTree as _ET
+
+#: 解析值 vs 旧表的告警阈值（契约口径：0.05° / 1 mm）
+_RPY_AXIS_TOL_DEG = 0.05
+_XYZ_AXIS_TOL_M = 0.001
+
+#: (robot, mount, xacro 参数, urdf 路径) → 解析结果 dict | None（None = 解析失败、已回退旧表）
+_MOUNT_PARSE_CACHE = {}
+
+#: linefit 每个槽位的参数文件（与 generate_launch_description 里 _RobotSlotFile 的 slot_map 同源；
+#: 解析器只**读**它做交叉检查，不修改任何参数 —— 默认路径零改动）
+_LINEFIT_SLOT_FILES = {
+    '': ('config', 'segmentation_sim.yaml'),
+    'hzmirm': ('config', 'segmentation_sim_hzmirm.yaml'),
+    'robot11': ('config', 'segmentation_sim_robot11.yaml'),
+}
+
+
+class _MountParseError(RuntimeError):
+    """URDF/xacro 解析失败（可回退旧表；与"用户参数写错"的 RuntimeError 区分开）。"""
+
+
+class _MountUnitError(RuntimeError):
+    """弧度参数里出现了 |值| > π（= 度/弧度混用的硬错误；不回退、不许静默变成 30 rad）。"""
+
+
+def _assert_radians(what, values, where):
+    """守卫：弧度参数的每个分量必须落在 ±π（+1e-6）内。
+
+    为什么是硬错误（不是 WARN/回退）：`30.0`（度）当弧度进 `setRPY()` 会让
+    `odom→base_link` 滚转 −110.7°、scan z −0.552、local costmap 几乎空（2026-10-21 实测踩到）。
+    这类泄漏只会来自**单位换算写错**，必须在第一个消费者处停机，而不是"回退旧表"继续跑。
+    """
+    bad = [v for v in values if abs(v) > _math.pi + 1e-6]
+    if bad:
+        raise _MountUnitError(
+            "[launch] %s 的取值超出 ±π：%s（rad）；where=%s。\n"
+            "  这几乎一定是**度/弧度混用**：URDF <origin rpy>、TF、tf2 的 setRPY()/四元数都是"
+            "**弧度**；表里的 -30° 必须只在**唯一一处**乘 M_PI/180。\n"
+            "  ⇒ 拒绝继续（不会把 30 rad 静默写进 TF）；请检查 _R_to_rpy_rad() 的调用方与所有"
+            "带 '°' 的变量。" % (what, values, where))
+
+
+def _known_robot(context):
+    """robot 槽位 → 已登记模型名；未登记 ⇒ 保持原来的硬报错（不回退、不猜）。"""
+    robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+    if robot not in _ROBOT_SLOTS:
+        raise RuntimeError(
+            "[launch] 需要从 URDF 推出 `base_link→livox_frame` 的安装参数，但 robot:=%r "
+            "这一档本 launch 没有它的安装几何（目前只有 ''|hzmirm|robot11）。"
+            "请改用已知模型，或把该模型加进 _ROBOT_SLOTS（**不要**手填一个数兜底）" % robot)
+    return robot
+
+
+def _urdf_path_for_robot(robot):
+    """robot 槽位 → 包 share 下的 xacro 绝对路径（与 _RobotSlot 选的是同一个文件）。"""
+    return os.path.join(get_package_share_directory('rm_nav_bringup'), 'urdf',
+                        _ROBOT_SLOTS[robot][0])
+
+
+def _xacro_unquote(value):
+    """去掉 measurement_params_sim.yaml 里为了让 shlex 不切分而写的**字面双引号**。"""
+    v = str(value).strip()
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        return v[1:-1]
+    return v
+
+
+def _platform_livox_origin():
+    """默认模型 xacro 的 `xyz`/`rpy` 实参（与 generate_launch_description 读的是**同一份 YAML**）。"""
+    path = os.path.join(get_package_share_directory('hzmi_rm_simulation'), 'config',
+                        'measurement_params_sim.yaml')
+    with open(path, encoding='utf-8') as f:
+        d = yaml.safe_load(f)['base_link2livox_frame']
+    return _xacro_unquote(d['xyz']), _xacro_unquote(d['rpy'])
+
+
+def _robot_xacro_args(context, xyz, rpy):
+    """**唯一真源**：robot_description 的 xacro 命令行参数列表。
+
+    返回 [(name, value, needs_quote)]，顺序 = 原 command 字符串的顺序。
+    `_RobotXacroCommand.perform`（真的 spawn 用）与 `_robot_xacro_mappings`（解析器用）都走这里
+    ⇒ "解析的模型"与"spawn 的模型"在参数层面不可能分叉。改这里两边同时变。
+    """
+    args = [('xyz', _xacro_unquote(xyz), True), ('rpy', _xacro_unquote(rpy), True)]
+    robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+    if robot == 'hzmirm':
+        # 云台角：默认 0 = 与上游 URDF 数值等价；非 0 时解析器会跟着转（E1 的 rpy 也一直跟着）
+        args += [('turret_yaw_deg', LaunchConfiguration('turret_yaw_deg').perform(context), False),
+                 ('turret_pitch_deg', LaunchConfiguration('turret_pitch_deg').perform(context), False)]
+    elif robot == 'robot11':
+        axis = (LaunchConfiguration('livox_tilt_axis').perform(context) or '').strip()
+        if axis not in _LIVOX_TILT_RPY:
+            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
+        # 值里带空格 ⇒ 必须加引号，否则 xacro 会把它当成多个输入文件
+        args += [('livox_tilt_rpy', _LIVOX_TILT_RPY[axis], True),
+                 ('livox_mount', _validate_livox_mount(
+                     LaunchConfiguration('robot11_mount').perform(context)), False),
+                 ('livox_raise_m',
+                  (LaunchConfiguration('livox_raise_m').perform(context) or '').strip() or '0.0', False),
+                 ('visual_decimated',
+                  'true' if (LaunchConfiguration('robot11_visual').perform(context) or '').strip()
+                  == 'decimated' else 'false', False)]
+    return args
+
+
+def _render_robot_xacro_command(context, urdf_path, xyz, rpy):
+    """把 `_robot_xacro_args` 渲染成 command 字符串（与 1b5db4b 的 `_RobotXacroCommand` 逐字节相同）。"""
+    parts = ['xacro ', urdf_path]
+    for name, value, needs_quote in _robot_xacro_args(context, xyz, rpy):
+        parts += [' ', name, ':=', ('"%s"' % value) if needs_quote else value]
+    return ''.join(parts)
+
+
+def _robot_xacro_mappings(context):
+    """解析器要传给 `xacro.process_file` 的 mappings（= 上面那份参数，去掉引号）。"""
+    xyz, rpy = _platform_livox_origin()
+    return {name: value for name, value, _ in _robot_xacro_args(context, xyz, rpy)}
+
+
+def _expand_urdf_xml(path, mappings):
+    """展开 xacro → XML 文本。返回 (xml_text, source)。
+
+    两级（够用且不引第三份机制）：
+      ① in-process `xacro.process_file` —— 与 launch 真 spawn 的 `xacro` CLI **同一个库**、
+         同一份 mappings（`_robot_xacro_mappings`）；空文档视为失败。
+      ② 仅当文件**本来就是 plain URDF** 时直接读 XML（含 xacro 构造 ⇒ 明确失败，不猜）。
+    ⚠️ 不再单独起 `xacro` CLI 子进程：CLI 依赖的就是这个 Python 模块，两级已覆盖本仓槽位；
+    删掉它是为了不把"解析器"变成一个自带进程管理的子系统（复杂度审查，2026-10-21）。
+    """
+    errors = []
+    try:
+        import xacro
+        doc = xacro.process_file(path, mappings=dict(mappings))
+        xml_text = doc.toxml() if hasattr(doc, 'toxml') else str(doc)
+        if not xml_text.strip():
+            raise RuntimeError('xacro returned an empty document')
+        return xml_text, 'xacro.process_file'
+    except Exception as e:                                   # noqa: BLE001 - 只用于回退
+        errors.append('xacro.process_file: %s: %s' % (type(e).__name__, e))
+    try:
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        if 'xacro:' in text or '<xacro' in text:
+            errors.append('plain-XML fallback not applicable: file still contains xacro constructs')
+        else:
+            return text, 'plain XML (URDF)'
+    except Exception as e:                                   # noqa: BLE001
+        errors.append('read plain XML: %s: %s' % (type(e).__name__, e))
+    raise _MountParseError('cannot expand %s: %s' % (path, ' | '.join(errors)))
+
+
+def _T_from_origin(origin_el, label):
+    """`<origin xyz rpy>`（URDF 约定：R = Rz(yaw)·Ry(pitch)·Rx(roll)）→ 4x4。"""
+    xyz = [0.0, 0.0, 0.0]
+    rpy_rad = [0.0, 0.0, 0.0]
+    if origin_el is not None:
+        for attr, dst in (('xyz', xyz), ('rpy', rpy_rad)):
+            raw = (origin_el.get(attr) or '').split()
+            if raw:
+                if len(raw) != 3:
+                    raise _MountParseError('%s: <origin %s="%s"> 不是 3 个数'
+                                           % (label, attr, ' '.join(raw)))
+                dst[:] = [float(v) for v in raw]
+    R = _rpy_deg_to_R(rpy_rad)          # 该函数名里的 deg 是历史误名：参数是**弧度**
+    return [[R[0][0], R[0][1], R[0][2], xyz[0]],
+            [R[1][0], R[1][1], R[1][2], xyz[1]],
+            [R[2][0], R[2][1], R[2][2], xyz[2]],
+            [0.0, 0.0, 0.0, 1.0]]
+
+
+def _round9(v):
+    """round 9 位，并把 -0.0 归一成 +0.0（数值相同，避免 YAML/日志里出现 -0.000000 的假漂移）。"""
+    return round(v, 9) + 0.0
+
+
+def _mat4_mul(A, B):
+    return [[sum(A[i][k] * B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def _mat3_transpose(R):
+    return [[R[j][i] for j in range(3)] for i in range(3)]
+
+
+def _R_to_rpy_rad(R):
+    """旋转矩阵 → URDF rpy（**弧度**），与 `_rpy_deg_to_R` 的 Rz·Ry·Rx 约定互逆。"""
+    sy = _math.hypot(R[0][0], R[1][0])
+    if sy > 1e-9:
+        roll = _math.atan2(R[2][1], R[2][2])
+        pitch = _math.atan2(-R[2][0], sy)
+        yaw = _math.atan2(R[1][0], R[0][0])
+    else:                       # 万向锁：roll/yaw 只有组合有意义，取 roll=0 的标准解
+        roll = 0.0
+        pitch = _math.atan2(-R[2][0], sy)
+        yaw = _math.atan2(-R[0][1], R[1][1])
+    return [roll, pitch, yaw]
+
+
+def _R_to_rpy_deg(R):
+    """旋转矩阵 → rpy（**度**）；只用于 `gravity_align_rpy`（LIO 参数是度）。"""
+    return [_math.degrees(v) for v in _R_to_rpy_rad(R)]
+
+
+def _compose_fixed_chain(xml_text, target_link, root_link, label):
+    """沿 target→root 的关节树合成 T(root ← target)，只允许 fixed 关节。
+
+    返回 (4x4, chain)；chain = [{'joint','type','child','parent'}, ...]（从 target 往上）。
+    """
+    try:
+        doc = _ET.fromstring(xml_text)
+    except _ET.ParseError as e:
+        raise _MountParseError('%s: 展开后的 XML 解析失败：%s' % (label, e))
+    links = {el.get('name') for el in doc.findall('link')}
+    for name in (target_link, root_link):
+        if name not in links:
+            raise _MountParseError(
+                '%s: 解析出的 URDF 里没有 link %r（目标/根帧）；现有 links=%s'
+                % (label, name, sorted(n for n in links if n)[:20]))
+    child2joint = {}
+    for joint in doc.findall('joint'):
+        parent_el, child_el = joint.find('parent'), joint.find('child')
+        if parent_el is None or child_el is None:
+            continue
+        child2joint[child_el.get('link')] = (parent_el.get('link'), joint.get('name') or '?',
+                                            (joint.get('type') or '').strip(), joint.find('origin'))
+    T = [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    chain, seen, cur = [], set(), target_link
+    while cur != root_link:
+        if cur in seen:
+            raise _MountParseError('%s: 关节树成环（link %r 重复出现）' % (label, cur))
+        seen.add(cur)
+        entry = child2joint.get(cur)
+        if entry is None:
+            raise _MountParseError(
+                '%s: 从 %r 往上找不到父关节（断树 / 根不是 %r）；已走链路=%s'
+                % (label, cur, root_link, ' → '.join([root_link] + [c['child'] for c in reversed(chain)])))
+        parent, jname, jtype, origin_el = entry
+        chain.append({'joint': jname, 'type': jtype, 'child': cur, 'parent': parent})
+        if jtype != 'fixed':
+            raise _MountParseError(
+                "%s: 安装链上出现**非 fixed** 关节 %r（type=%s）：%s → %s。"
+                "本解析器只合成 fixed 关节（不猜运动学）：请把该安装链改成 fixed，"
+                "或先把它固定到该跑姿态再把角度写进 URDF；**不要**在 launch 里手填。"
+                % (label, jname, jtype, parent, cur))
+        T = _mat4_mul(_T_from_origin(origin_el, '%s joint %r' % (label, jname)), T)
+        cur = parent
+    return T, chain
+
+
+def _parse_mount_from_urdf(urdf_path, mappings, robot='?', mount='?'):
+    """展开 + 解析。返回 dict（rpy_deg/xyz/livox_z/adapter_*/chain/source/urdf...）。"""
+    xml_text, source = _expand_urdf_xml(urdf_path, mappings)
+    label = '%s (robot=%r mount=%r)' % (urdf_path, robot, mount)
+    T_livox, chain = _compose_fixed_chain(xml_text, 'livox_frame', 'base_link', label)
+    R = [row[:3] for row in T_livox[:3]]
+    p = [T_livox[i][3] for i in range(3)]
+    out = {
+        'robot': robot, 'mount': mount, 'urdf': urdf_path, 'source': source,
+        'rpy_deg': [_round9(v) for v in _R_to_rpy_deg(R)],
+        'xyz': [_round9(v) for v in p],
+        'livox_z': p[2],
+        'chain': chain,
+        'adapter_xyz': None, 'adapter_rpy': None, 'imu_chain': None, 'imu_error': None,
+    }
+    # IMU 链（adapter 的 T(imu←base)）；IMU 不在链上时不让整次解析失败（h/rpy 仍然可用）
+    try:
+        T_imu, imu_chain = _compose_fixed_chain(xml_text, 'imu_link', 'base_link', label)
+        R_imu = [row[:3] for row in T_imu[:3]]
+        p_imu = [T_imu[i][3] for i in range(3)]
+        Rt = _mat3_transpose(R_imu)                       # R(imu←base) = R(base←imu)ᵀ
+        t = [-sum(Rt[i][j] * p_imu[j] for j in range(3)) for i in range(3)]
+        out['adapter_xyz'] = [_round9(v) for v in t]
+        out['adapter_rpy'] = [_round9(v) for v in _R_to_rpy_rad(Rt)]   # ⚠️ 弧度：lio_tf_adapter 的 rpy 进 setRPY()
+        _assert_radians('T(imu_link←base_link) 的 rpy', out['adapter_rpy'], label)
+        out['imu_chain'] = imu_chain
+    except _MountParseError as e:
+        out['imu_error'] = str(e)
+    return out
+
+
+def _urdf_livox_mount_table(context):
+    """**旧规则表**（1b5db4b 及以前 launch 里那张）：只作交叉校验与解析失败时的回退。"""
+    robot = _known_robot(context)
+    if robot == 'robot11':
+        axis = (LaunchConfiguration('livox_tilt_axis').perform(context) or '').strip()
+        if axis not in _LIVOX_TILT_RPY:
+            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
+        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+        raise_m = float((LaunchConfiguration('livox_raise_m').perform(context) or '').strip() or '0.0')
+        rpy = ([0.0, 0.0, 0.0] if mount == 'plugin' else
+               [round(_math.degrees(float(v)), 9) for v in _LIVOX_TILT_RPY[axis].split()])
+        xyz = [0.000561701465058485, 0.130915824456595, 0.15702816968305 + raise_m]
+    elif robot == 'hzmirm':
+        yaw = float((LaunchConfiguration('turret_yaw_deg').perform(context) or '').strip() or '0.0')
+        pitch = float((LaunchConfiguration('turret_pitch_deg').perform(context) or '').strip() or '0.0')
+        R = _rpy_deg_to_R([0.0, _math.radians(pitch), _math.radians(yaw)])
+        z_off = 0.2
+        xyz = [R[0][2] * z_off, R[1][2] * z_off, 0.6 + R[2][2] * z_off]
+        rpy = _R_to_rpy_deg(R)
+    else:                                   # 默认模型：平台外参 YAML = xacro 的 xyz/rpy 实参
+        xyz_s, rpy_s = _platform_livox_origin()
+        xyz = [float(v) for v in xyz_s.split()]
+        rpy = [float(v) for v in rpy_s.split()]
+        if len(xyz) != 3 or len(rpy) != 3:
+            raise RuntimeError('[launch] measurement_params_sim.yaml 的 base_link2livox_frame '
+                               '不是 3+3 个数：xyz=%r rpy=%r' % (xyz_s, rpy_s))
+    return {'rpy_deg': [_round9(v) for v in rpy], 'xyz': [_round9(v) for v in xyz],
+            'livox_z': xyz[2]}
+
+
+def _adapter_table(context):
+    """旧表的 adapter 补偿量（T(imu←base)），解析失败时回退。"""
+    robot = _known_robot(context)
+    if robot == 'robot11':
+        axis = (LaunchConfiguration('livox_tilt_axis').perform(context) or '').strip()
+        if axis not in _LIVOX_TILT_RPY:
+            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
+        raise_m = (LaunchConfiguration('livox_raise_m').perform(context) or '').strip() or '0.0'
+        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+        return _lio_adapter_robot11(axis, raise_m, mount)
+    if robot == 'hzmirm':
+        return [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
+    return [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
+
+
+def _linefit_yaml_path(robot):
+    rel = _LINEFIT_SLOT_FILES.get(robot)
+    if rel is None:
+        return None
+    try:
+        share = get_package_share_directory('linefit_ground_segmentation_ros')
+    except PackageNotFoundError:
+        return None
+    path = os.path.join(share, *rel)
+    return path if os.path.isfile(path) else None
+
+
+def _read_sensor_height(path):
+    with open(path, encoding='utf-8') as f:
+        data = yaml.safe_load(f)
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == 'sensor_height' and isinstance(v, (int, float)):
+                    return float(v)
+                found = walk(v)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for v in node:
+                found = walk(v)
+                if found is not None:
+                    return found
+        return None
+    return walk(data)
+
+
+def _check_linefit_sensor_height(robot, h_parsed):
+    """交叉检查（**只 WARN、不改任何参数**）：linefit YAML 的 sensor_height vs 解析出的 h。
+
+    ⚠️ 本 launch 从不给 linefit 传 sensor_height（它按 robot 槽位选整份 YAML）；两份都是
+    "雷达离地高度"的副本 ⇒ 这里只负责让它**不能悄悄漂**：URDF 一改，YAML 没跟上就报。
+    """
+    path = _linefit_yaml_path(robot)
+    if path is None:
+        return
+    try:
+        yaml_h = _read_sensor_height(path)
+    except Exception as e:                                   # noqa: BLE001
+        print('[bringup_sim][WARN] linefit 参数交叉检查读不了 %s：%s' % (path, e), flush=True)
+        return
+    if yaml_h is None or abs(yaml_h - h_parsed) <= 0.01:
+        return
+    print('[bringup_sim][WARN] linefit sensor_height 与 URDF 解析高度不一致：'
+          'yaml=%.6f m vs parsed h=%.6f m（Δ=%+.4f m）← %s。'
+          '本 launch **不改**该 YAML（避免第二真源/默认路径变化），请同步它。'
+          % (yaml_h, h_parsed, yaml_h - h_parsed, path), flush=True)
+
+
+def _fmt_vec(v):
+    return '[%s]' % ', '.join('%.6f' % x for x in v)
+
+
+def _angle_diff_deg(a, b):
+    return (a - b + 180.0) % 360.0 - 180.0
+
+
+def _warn_mount_drift(parsed, table, robot, mount, path):
+    """解析值 vs 旧表：>0.05°/轴 或 >1 mm/xyz ⇒ 响亮 WARN，并**保留解析值**。"""
+    d_rpy = [_angle_diff_deg(p, t) for p, t in zip(parsed['rpy_deg'], table['rpy_deg'])]
+    d_xyz = [p - t for p, t in zip(parsed['xyz'], table['xyz'])]
+    if (max(abs(v) for v in d_rpy) <= _RPY_AXIS_TOL_DEG
+            and max(abs(v) for v in d_xyz) <= _XYZ_AXIS_TOL_M):
+        return
+    print('[bringup_sim][WARN] URDF 安装参数与旧表不一致（**保留解析值** = 这次真的 spawn 的模型）：\n'
+          '  robot=%r mount=%r urdf=%s（source=%s）\n'
+          '  rpy(parsed)=%s° vs rpy(table)=%s°  Δ=%s°\n'
+          '  xyz(parsed)=%s m vs xyz(table)=%s m  Δ=%s m\n'
+          '  ⇒ 表只作交叉校验；若解析值才是实物，请同步 docs/frame_contract_v3.md §13 '
+          '与 linefit 的 sensor_height。'
+          % (robot, mount, path, parsed['source'],
+             _fmt_vec(parsed['rpy_deg']), _fmt_vec(table['rpy_deg']), _fmt_vec(d_rpy),
+             _fmt_vec(parsed['xyz']), _fmt_vec(table['xyz']), _fmt_vec(d_xyz)), flush=True)
+
+
+def _warn_adapter_drift(parsed, robot, mount, path, context):
+    """解析出的 T(imu←base) vs 旧表（阈值同 0.05°/1 mm）：不一致 ⇒ WARN。
+
+    ⚠️ `lio_tf_adapter` 的 `rpy` 参数是**弧度**（C++ `q_offset.setRPY(rpy_[0], ...)`），
+    而 `gravity_align_rpy` 是**度** —— 两个参数单位不同，别把解析器的度直接喂给 adapter。
+
+    为什么连 adapter 也要比：`lio_tf_adapter_hzmirm_node`（mode=off 的 legacy 非-spl 路径）
+    仍用字面值 `[0,0,-0.75]` —— 本函数保证"URDF 改了但那个字面值没跟"时**至少是响的**。
+    """
+    if parsed.get('adapter_xyz') is None:
+        return
+    try:
+        t_xyz, t_rpy = _adapter_table(context)
+    except Exception:                                        # noqa: BLE001 - 只是交叉检查
+        return
+    d_rpy = [_angle_diff_deg(_math.degrees(p), _math.degrees(t))
+             for p, t in zip(parsed['adapter_rpy'], t_rpy)]
+    d_xyz = [p - t for p, t in zip(parsed['adapter_xyz'], t_xyz)]
+    if (max(abs(v) for v in d_rpy) <= _RPY_AXIS_TOL_DEG
+            and max(abs(v) for v in d_xyz) <= _XYZ_AXIS_TOL_M):
+        return
+    print('[bringup_sim][WARN] adapter 的 T(imu<-base_link) 与旧表不一致（**保留解析值**）：\n'
+          '  robot=%r mount=%r urdf=%s\n'
+          '  xyz(parsed)=%s m vs xyz(table)=%s m  Δ=%s m\n'
+          '  rpy(parsed)=%s rad vs rpy(table)=%s rad  Δ=%s°\n'
+          '  ⇒ mode!=off 的 spl adapter 用解析值；legacy `lio_tf_adapter_hzmirm_node` 若仍写字面值，'
+          '请同步它（这是"URDF 改了、字面值没跟"的告警）。'
+          % (robot, mount, path,
+             _fmt_vec(parsed['adapter_xyz']), _fmt_vec(t_xyz), _fmt_vec(d_xyz),
+             _fmt_vec(parsed['adapter_rpy']), _fmt_vec(t_rpy), _fmt_vec(d_rpy)), flush=True)
+
+
+def _parsed_livox_mount(context, urdf_path=None, mappings=None, robot=None, mount=None,
+                        use_cache=True):
+    """解析入口（带缓存/交叉校验/回退）。
+
+    正常路径（launch 用）：`_parsed_livox_mount(context)`。
+    测试路径（决定性 30°→20°）：传 `urdf_path=` / `mappings=` / `robot=` / `mount=` 指向 scratch 副本。
+    返回：解析 dict；解析失败（已知模型）⇒ 已打 WARN，返回 None（调用方回退旧表）。
+    """
+    robot = robot if robot is not None else _known_robot(context)
+    if robot not in _ROBOT_SLOTS:
+        raise RuntimeError("[launch] robot:=%r 不在 _ROBOT_SLOTS 里" % robot)
+    if mount is None:
+        mount = (_validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
+                 if robot == 'robot11' else '')
+    if mappings is None:
+        mappings = _robot_xacro_mappings(context)          # 配置错误（轴/挂法非法）不吞、直接抛
+    if urdf_path is None:
+        urdf_path = _urdf_path_for_robot(robot)
+    key = (robot, mount, tuple(sorted(mappings.items())), urdf_path)
+    if use_cache and key in _MOUNT_PARSE_CACHE:
+        return _MOUNT_PARSE_CACHE[key]
+    try:
+        parsed = _parse_mount_from_urdf(urdf_path, mappings, robot=robot, mount=mount)
+        # 防御式再查一次：解析器内部的 guard 是主防线；这里保证"任何 _parse_mount_from_urdf
+        # 实现返回的 adapter rpy"都必须是弧度（测试会 monkeypatch 它来模拟度泄漏）。
+        if parsed.get('adapter_rpy') is not None:
+            _assert_radians('T(imu_link←base_link) 的 rpy', parsed['adapter_rpy'],
+                            'robot=%r mount=%r' % (robot, mount))
+    except _MountUnitError:
+        raise                                            # 单位 bug = 硬错误，绝不回退成"能跑"
+    except Exception as e:                                   # noqa: BLE001 - 只回退，不掩盖参数错
+        if use_cache:
+            _MOUNT_PARSE_CACHE[key] = None
+        print('[bringup_sim][WARN] 从 URDF 解析安装参数失败 ⇒ **本次回退旧表**（不是静默）：\n'
+              '  robot=%r mount=%r urdf=%s\n  原因：%s: %s\n'
+              '  ⇒ rpy/xyz/h 用 _urdf_livox_mount_table()/表内几何；请修好 xacro 或 URDF。'
+              % (robot, mount, urdf_path, type(e).__name__, e), flush=True)
+        return None
+    # ★ 启动日志：度 + 弧度并排，肉眼可查（单位 bug 的现场证据）；缓存 ⇒ 每条 run 只打一次。
+    print('[bringup_sim] URDF mount T(base_link<-livox_frame): robot=%r mount=%r '
+          'rpy=%s° = %s rad, xyz=%s m, livox_z=%.9f, source=%s'
+          % (robot, mount,
+             _fmt_vec(parsed['rpy_deg']),
+             _fmt_vec([_math.radians(v) for v in parsed['rpy_deg']]),
+             _fmt_vec(parsed['xyz']), parsed['livox_z'], parsed['source']), flush=True)
+    # 解析成功：与旧表交叉校验（只 WARN，不改变返回值 = 解析值）
+    try:
+        table = _urdf_livox_mount_table(context)
+    except Exception as e:                                   # noqa: BLE001
+        table = None
+        print('[bringup_sim][WARN] 解析成功但旧表交叉校验不可用：%s: %s' % (type(e).__name__, e),
+              flush=True)
+    if table is not None:
+        _warn_mount_drift(parsed, table, robot, mount, urdf_path)
+        off = _HZMI_BASE_LINK_HEIGHT_M.get(robot)
+        if off is not None:
+            _check_linefit_sensor_height(robot, round(off + parsed['livox_z'], 9))
+    _warn_adapter_drift(parsed, robot, mount, urdf_path, context)
+    if use_cache:
+        _MOUNT_PARSE_CACHE[key] = parsed
+    return parsed
+
+
 #: ★ 2026-10-20：E1 重力对齐（docs/frame_contract_v3.md §4）的四档来源。
 #:   **默认 off = 现状**（不改任何一条路径、不给任何节点多加一个参数）；推荐 hybrid。
 _GRAVITY_ALIGN_MODES = ('off', 'urdf', 'imu', 'hybrid')
 
 
 def _urdf_livox_mount_rpy_deg(context):
-    """从 **URDF/launch 里的那条安装关节** 算出 `base_link→livox_frame` 的 rpy（度）。
+    """`base_link→livox_frame` 的 rpy（度）—— **从这次真的要 spawn 的 xacro 里解析出来的**。
 
-    这就是 E1 的先验 `gravity_align_rpy`（"车体水平时雷达在世界里的姿态"）——**唯一事实来源是
-    URDF**，本函数只是把它读出来，**任何地方都不许再手填一个数**（契约 v3 §4.1/§9(b)：手填 =
-    第二个所有者，而 `urdf` 档对错的先验**没有任何告警**，你会静默地按错角度把 odom 摆正）。
+    这就是 E1 的先验 `gravity_align_rpy`（"车体水平时雷达在世界里的姿态"）。**唯一事实来源是
+    URDF**：`_parsed_livox_mount()` 用与 `robot_description` **同一份** xacro 参数展开模型，
+    再沿 fixed 关节链合成 T(base_link←livox_frame) ⇒ 改 URDF（或加机器人）launch 自动跟着变。
 
-    规则与 xacro 逐字同源：
-      · `robot:=robot11 robot11_mount:=plugin`（默认）⇒ **(0,0,0)**：30° 记在插件 `<tilt_rpy>` 里，
-        `livox_frame` 这个帧本身是重力对齐的（xacro 里 `rpy = 0 if mount=='plugin' else tilt`）；
-      · `robot:=robot11 robot11_mount:=urdf|sensor` ⇒ **−30°** 绕 `livox_tilt_axis`（= URDF 关节 rpy，
-        = `-0.523598775598293 rad`；这两种挂法下 IMU 也跟着雷达斜 ⇒ body 系斜 ⇒ 必须对齐）；
-      · `robot:=hzmirm` ⇒ `R(base←lidar) = Rz(turret_yaw)·Ry(turret_pitch)`（两个云台关节；
-        因为 roll 恒为 0，它的 rpy 恰好就是 `(0, pitch, yaw)`）；
-      · 默认模型（`robot:=''`）⇒ **(0,0,0)**（雷达与 `base_link` 同姿态）。
+    旧规则表（`_urdf_livox_mount_table()`）**仍然保留**，但只做两件事：
+      ① 与解析值交叉校验：差 >0.05°/轴（或 >1 mm/xyz）⇒ 响亮 WARN，**保留解析值**（它才是真模型）；
+      ② 已知模型解析失败时回退 + WARN（坏 parser 不许挡住所有 launch）。
+    未知模型仍然**硬报错**（`_known_robot`），不回退、不猜。
 
     ⚠️ 这里**只**回答"URDF 说雷达相对车体是什么姿态"，不回答"URDF 与实物是否一致"——
     后者是 `gravity_align_mode:=hybrid` 的 Δ 互检（≥5° ⇒ ERROR + 改用 IMU）负责的事。
     """
-    import math as _m
-    robot = (LaunchConfiguration('robot').perform(context) or '').strip()
-    if robot == 'robot11':
-        axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
-        if axis not in _LIVOX_TILT_RPY:
-            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
-        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        if mount == 'plugin':
-            # 倾角在插件里 ⇒ 帧是水平的 ⇒ 先验 = 单位阵（E1 对这一档是**真正的 no-op**）
-            return [0.0, 0.0, 0.0]
-        tilt_rad = [float(x) for x in _LIVOX_TILT_RPY[axis].split()]
-        return [round(_m.degrees(x), 9) for x in tilt_rad]
-    if robot == 'hzmirm':
-        yaw = float(LaunchConfiguration('turret_yaw_deg').perform(context).strip() or '0.0')
-        pitch = float(LaunchConfiguration('turret_pitch_deg').perform(context).strip() or '0.0')
-        return [0.0, round(pitch, 9), round(yaw, 9)]
-    if robot == '':
-        return [0.0, 0.0, 0.0]
-    raise RuntimeError(
-        "[launch] gravity_align_mode != off 时需要从 URDF 推出 `base_link→livox_frame` 的 rpy，"
-        "但 robot:=%r 这一档本 launch 没有它的安装几何（目前只有 ''|hzmirm|robot11）。"
-        "请改用已知模型，或在 _urdf_livox_mount_rpy_deg 里补上该模型的安装关节（**不要**手填参数）"
-        % robot)
+    parsed = _parsed_livox_mount(context)
+    if parsed is not None:
+        return parsed['rpy_deg']
+    return _urdf_livox_mount_table(context)['rpy_deg']
+
+
+def _mount_source_label(context):
+    """banner 用：这次 rpy/xyz/h 到底来自**解析**（哪个 source）还是**旧表回退**。"""
+    parsed = _parsed_livox_mount(context)
+    if parsed is not None:
+        return 'URDF-%s' % parsed['source']
+    return 'table-fallback'
 
 
 class _GravityAlignRpy(Substitution):
@@ -362,64 +861,68 @@ class _GravityAlignRpy(Substitution):
         return '%s()' % type(self).__name__
 
 
-#: 各模型 **base_link 原点离地高度**（m）—— E1b `gravity_align_h` 的加数之一。
-#: 与 `_lio_adapter_robot11()` 里那串几何**同源**（都是"URDF 说雷达/车体在哪"，不是手抄的巧合）：
-#:   · robot11 ：0.102499 = 四个轮 mesh 的最低点（xacro 几何速查「地面平面（body 系）z = -0.102499」；
-#:               轮 r=0.0580、轮心 z=-0.0445 ⇒ 0.0445+0.0580 = 0.1025）；
-#:   · hzmirm  ：0.0      = 轮 r=0.08、轮心在 base_link z=0.08 ⇒ 轮底正好在 base_link z=0
-#:               （⇒ base_link 原点就在地面上）；
-#:   · 默认模型：0.06     = 轮 r=0.06、轮心在 base_link z=0（sentry_robot_sim.xacro 的
-#:               base_to_wheel* origin z=0）⇒ 轮底 z=-0.06。
-#: ⚠️ 这个表只能描述"URDF 里的几何"；URDF 与实物是否一致由节点初始化时的**地面拟合互检**负责
-#:    （|h_meas−h_urdf| ≥0.05 m ⇒ ERROR，见契约 v3 §4.3）。
+#: 各模型 **base_link 原点离地高度**（m）—— E1b `gravity_align_h` 里**唯一不是 URDF 能直接给**的量。
+#: 轮子/车体几何都在 URDF 里，但"URDF 摆到 Gazebo 地面上时 base_link 原点离地多高"= 轮半径 +
+#: 轮心高度（以及轮胎下沉，见下）⇒ 保留一张**小的、逐台有证据**的表，作为先验。
+#: `_gravity_align_h()` = 本表 + **解析出的 livox_z**（后者随 URDF 自动变，不再是手填常数）。
+#: 证据（全部来自本仓文件）：
+#:   · robot11 0.102499：`urdf/sentry_robot_robot11_sim.xacro` 的「地面平面（body 系）
+#:     z = -0.102499」（轮 r=0.058、轮心 z=-0.044502 ⇒ 0.044502+0.058=0.102502，与 -0.102499
+#:     差 3 µm = mesh 离散误差）；`robot11_weld_chassis.py` 合成刚体自检同样报“最低点 -0.10250 m”。
+#:   · hzmirm 0.0：`base_to_wheel_*` 的 origin z=0.08、轮 cylinder 半径=0.08 ⇒ 轮底 = base_link z=0。
+#:   · 默认模型 0.06：`radius_wheel=0.06`、`base_to_wheel*` origin z=0 ⇒ 轮底 z=-0.06。
+#: ⚠️ 与实物/Gazebo 的差（轮胎下沉）不在这张表里：默认模型 linefit 的 0.226 vs 0.235 就是 ~9 mm
+#:    下沉；robot11 的 0.2595 与几何 0.259527 差 0.03 mm（几乎无下沉）。运行时由节点初始化时的
+#:    **地面拟合互检**负责（|h_meas−h_urdf| ≥0.03/0.05 m ⇒ WARN/ERROR，见契约 v3 §4.3 与
+#:    `small_point_lio/src/gravity_align_ground.cpp`）；本 launch 只提供先验，不重复那段逻辑。
 _HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06}
 
 
-def _gravity_align_h(context):
-    """传感器（`livox_frame` 原点）离地高度 h（米）—— E1b `gravity_align_h` 的**唯一真源**。
+def _gravity_align_h_table(context):
+    """**旧表**推出的 h（解析失败时的回退；数值与 1b5db4b 的 `_gravity_align_h` 逐位相同）。"""
+    robot = _known_robot(context)
+    off = _HZMI_BASE_LINK_HEIGHT_M.get(robot)
+    if off is None:
+        raise RuntimeError(
+            "[launch] gravity_align_h 缺 robot:=%r 的**地面偏移**（base_link 原点离地）：请把该模型"
+            "加进 _HZMI_BASE_LINK_HEIGHT_M（用轮半径+轮心高度从它的 URDF 推，**不要**手填一个凑数的值）"
+            % robot)
+    return round(off + _urdf_livox_mount_table(context)['livox_z'], 9)
 
-    h = **base_link 原点离地高度**（URDF/轮几何）
-      + **livox_frame 原点在 base_link 里的 z 偏置**（URDF 关节 / xacro 几何）
+
+def _gravity_align_h(context):
+    """传感器（`livox_frame` 原点）离地高度 h（米）—— E1b `gravity_align_h` 的先验。
+
+    h = **base_link 原点离地高度**（`_HZMI_BASE_LINK_HEIGHT_M`：URDF 给不了的那一个量，逐台有证据）
+      + **livox_frame 原点在 base_link 里的 z**（**解析**出来的 T(base_link←livox_frame)，随 URDF 变）
 
     逐模型（默认姿态、`livox_raise_m:=0`）：
-      · `robot:=robot11`（sensor/urdf 挂法，30° 斜装只改朝向、不改原点位置）：
-            0.102499 + 0.15702816968305 = **0.259527 m**
-            （与 linefit 的 `sensor_height: 0.2595` 交叉一致；`sensor` 档点云真的在传感器系）
-      · `robot:=hzmirm`（云台 pitch=0）：
-            0.0 + (0.3 + 0.3 + 0.2·cos(pitch)) = **0.800000 m**（pitch=0；= linefit 的 0.80）
-            推导：base→turret_base (0,0,0.3) · turret_base→turret_head (0,0,0.3) ·
-                  turret_head→lidar (0,0,0.2)；只有最后一段被 Ry(pitch) 转过 ⇒ z = 0.6+0.2cos(pitch)
+      · `robot:=robot11`：0.102499 + 0.15702816968305 = **0.259527 m**
+        （与 linefit 的 `sensor_height: 0.2595` 交叉一致；`sensor` 档点云真的在传感器系）
+      · `robot:=hzmirm`（云台 pitch=0）：0.0 + (0.3+0.3+0.2·cos(pitch)) = **0.800000 m**
+        （= linefit 的 0.80；解析器会自己走 base→turret→head→lidar→livox 的关节链）
       · 默认模型（`robot:=''`）：0.06 + 0.175 = **0.235000 m**
-            （linefit 的 `sensor_height: 0.226` 是 Gazebo 实测值 = 轮胎下沉 ~9 mm；
-             URDF 几何值是 0.235 —— 两者差 9 mm，落在节点的 INFO 带内）
+        （linefit 的 `sensor_height: 0.226` 是 Gazebo 实测值 = 轮胎下沉 ~9 mm；URDF 几何值是 0.235）
 
-    ⚠️ 与 `_urdf_livox_mount_rpy_deg()` 一样：这里只回答"URDF 说雷达在哪"，**不是**实测值；
-    `livox_raise_m`（robot11 的 B 方案）会让雷达真的抬高 ⇒ 这里跟着加（linefit 的 YAML 不跟，
-    那份文件由用户同步，见 config/segmentation_sim_robot11.yaml 的 ⚠️）。
+    ⚠️ 这里只回答"URDF 说雷达在哪"，**不是**实测值；`livox_raise_m`（robot11 的 B 方案）会
+    真的抬高雷达 ⇒ 解析出的 livox_z 自动跟着加（linefit 的 YAML 不跟，那份由用户同步，见
+    config/segmentation_sim_robot11.yaml 的 ⚠️；解析器在高度漂移 >1 cm 时会打 WARN）。
     """
-    import math as _m
-    robot = (LaunchConfiguration('robot').perform(context) or '').strip()
-    if robot == 'robot11':
-        # 轴/挂法只为校验参数合法（sensor/urdf/plugin 三种挂法的**原点位置**相同，只是朝向不同）。
-        if LaunchConfiguration('livox_tilt_axis').perform(context).strip() not in _LIVOX_TILT_RPY:
-            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % (
-                LaunchConfiguration('livox_tilt_axis').perform(context).strip(),))
-        _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        raise_m = float(LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0')
-        return round(_HZMI_BASE_LINK_HEIGHT_M['robot11'] + 0.15702816968305 + raise_m, 9)
-    if robot == 'hzmirm':
-        pitch = float(LaunchConfiguration('turret_pitch_deg').perform(context).strip() or '0.0')
-        return round(_HZMI_BASE_LINK_HEIGHT_M['hzmirm'] + 0.6 + 0.2 * _m.cos(_m.radians(pitch)), 9)
-    if robot == '':
-        return round(_HZMI_BASE_LINK_HEIGHT_M[''] + 0.175, 9)
-    raise RuntimeError(
-        "[launch] gravity_align_h 需要从 URDF 推出传感器离地高度，但 robot:=%r 这一档本 launch "
-        "没有它的几何（目前只有 ''|hzmirm|robot11）。请在 _gravity_align_h 里补上该模型的"
-        "轮几何与 livox 关节高度（**不要**手填参数）" % robot)
+    robot = _known_robot(context)
+    off = _HZMI_BASE_LINK_HEIGHT_M.get(robot)
+    if off is None:
+        raise RuntimeError(
+            "[launch] gravity_align_h 缺 robot:=%r 的**地面偏移**（base_link 原点离地）：请把该模型"
+            "加进 _HZMI_BASE_LINK_HEIGHT_M（用轮半径+轮心高度从它的 URDF 推，**不要**手填一个凑数的值）"
+            % robot)
+    parsed = _parsed_livox_mount(context)
+    if parsed is not None:
+        return round(off + parsed['livox_z'], 9)
+    return _gravity_align_h_table(context)
 
 
 class _GravityAlignH(Substitution):
-    """`gravity_align_h` 参数：标量（米）。取值来自 `_gravity_align_h()`（= URDF），不是常数。"""
+    """`gravity_align_h` 参数：标量（米）= 地面偏移表 + **解析出的 livox_z**（不是常数）。"""
 
     def perform(self, context):
         return repr(float(_gravity_align_h(context)))
@@ -429,19 +932,17 @@ class _GravityAlignH(Substitution):
 
 
 class _LioAdapterExtrinsic(Substitution):
-    """`lio_tf_adapter` 的 `xyz`/`rpy` = **T(imu_link ← base_link)**，按机器人槽位从 URDF 几何算。
+    """`lio_tf_adapter` 的 `xyz`/`rpy` = **T(imu_link ← base_link)**，**从这次 spawn 的 xacro 解析**。
 
     为什么是 imu_link 而不是 livox_frame：三份 LIO 配置的 `extrinsic_T=[0,0,0.05]` 把 livox 原点
     搬到 IMU 系，估计器状态是 **odom←IMU body**；适配器的语义 `t_out = t_lio + q_lio·t_offset`
     要求 t_offset 就是"base_link 原点在 body(=imu_link) 系里的位置" ⇒ 含那 0.05 m。
 
-    三个槽位各一条规则（**都是几何，不是手填的巧合**）：
-      · `robot:=robot11`   ⇒ `_lio_adapter_robot11()`（30° 倾角 + 0.05 m；与 E1 的
-        `gravity_align_rpy` 来自**同一条** URDF 边 `base_link→livox_frame`）；
-      · `robot:=hzmirm`    ⇒ `[0,0,-0.75] / [0,0,0]`（imu_link = base_link+(0,0,0.75)；
-        ⚠️ 云台角 `turret_yaw_deg`/`turret_pitch_deg` ≠ 0 时这里**没有**跟着转 —— 与既有的
-        `lio_tf_adapter_hzmirm_node` **同一处已知缺口**，本轮未动、不做承诺）；
-      · 默认模型（`robot:=''`）⇒ `[-0.12, 0, -0.125] / [0,0,0]`（= `lio_tf_adapter.yaml` 里的同名默认值）。
+    ★ 2026-10-21：不再按"三个槽位各一条规则"手写。`_parsed_livox_mount()` 沿
+      `base_link → livox_frame → imu_link` 的 **fixed 关节链**合成 T(base←imu)，再取逆得到
+      T(imu←base)（xyz = −Rᵀ·p，rpy = Rᵀ 的 rpy）⇒ 云台转动/雷达抬高/URDF 改几何都会自动流到这里。
+      旧规则表（`_adapter_table`）只在解析失败时回退（已打 WARN）；两边数值在 1b5db4b 的所有
+      槽位/挂法上逐位一致（见 docs/frame_contract_v3_measurements.md §10）。
     """
 
     def __init__(self, which):
@@ -449,22 +950,14 @@ class _LioAdapterExtrinsic(Substitution):
         self.__which = which
 
     def perform(self, context):
-        robot = (LaunchConfiguration('robot').perform(context) or '').strip()
-        if robot == 'robot11':
-            axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
-            if axis not in _LIVOX_TILT_RPY:
-                raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
-            raise_m = LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0'
-            mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-            xyz, rpy = _lio_adapter_robot11(axis, raise_m, mount)
-        elif robot == 'hzmirm':
-            xyz, rpy = [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
-        elif robot == '':
-            xyz, rpy = [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
+        robot = _known_robot(context)   # robot 未登记 ⇒ 硬报错（与 _urdf_livox_mount_rpy_deg 同一条）
+        parsed = _parsed_livox_mount(context)
+        if parsed is not None and parsed.get('adapter_xyz') is not None:
+            xyz, rpy = parsed['adapter_xyz'], parsed['adapter_rpy']
         else:
-            raise RuntimeError(
-                "[launch] gravity_align_mode != off 需要给 lio_tf_adapter 算 T(imu_link←base_link)，"
-                "但 robot:=%r 这一档本 launch 没有它的安装几何（目前只有 ''|hzmirm|robot11）" % robot)
+            xyz, rpy = _adapter_table(context)      # 解析失败/imu_link 不在链上 ⇒ 旧表 + WARN 已打过
+        _assert_radians('lio_tf_adapter 的 rpy 参数（T(imu<-base_link)）', rpy,
+                        'robot=%r which=%s' % (robot, self.__which))
         v = xyz if self.__which == 'xyz' else rpy
         return '[%s]' % ', '.join(repr(float(x)) for x in v)
 
@@ -476,6 +969,9 @@ class _LioAdapterRobot11(Substitution):
     """把 robot11 的杆臂算成一段 **YAML 列表字符串**（launch_ros 会对 Substitution 的求值结果
     做 yaml.safe_load ⇒ 正好还原成 double 数组；见 launch_ros/utilities/evaluate_parameters.py）。
 
+    ★ 2026-10-21：数值来自 `_parsed_livox_mount()`（展开这次真 spawn 的 xacro → fixed 关节链），
+    不再来自 `_LIVOX_TILT_RPY` 规则表；旧表（`_adapter_table`）只在解析失败时回退 + WARN。
+
     惰性：只有 `robot:=robot11` 且 LIO 不是 none/cartographer/small_point_lio 时才会被求值。
     """
 
@@ -484,12 +980,13 @@ class _LioAdapterRobot11(Substitution):
         self.__which = which
 
     def perform(self, context):
-        axis = LaunchConfiguration('livox_tilt_axis').perform(context).strip()
-        if axis not in _LIVOX_TILT_RPY:
-            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
-        raise_m = LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0'
-        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        xyz, rpy = _lio_adapter_robot11(axis, raise_m, mount)
+        parsed = _parsed_livox_mount(context)
+        if parsed is not None and parsed.get('adapter_xyz') is not None:
+            xyz, rpy = parsed['adapter_xyz'], parsed['adapter_rpy']
+        else:
+            xyz, rpy = _adapter_table(context)
+        _assert_radians('lio_tf_adapter 的 rpy 参数（T(imu<-base_link)）', rpy,
+                        'robot=robot11 which=%s' % self.__which)
         v = xyz if self.__which == 'xyz' else rpy
         return '[%s]' % ', '.join(repr(float(x)) for x in v)
 
@@ -601,6 +1098,10 @@ class _RobotSlot(Substitution):
 class _RobotXacroCommand(Substitution):
     """拼出 `xacro <模型> xyz:=… rpy:=… [云台角]` 这条命令（惰性）。
 
+    ★ 2026-10-21：参数列表现由 `_robot_xacro_args()` **唯一真源**生成 —— 与 URDF 解析器
+    （`_robot_xacro_mappings`）共用同一份 ⇒ "解析的模型" 与 "spawn 的模型" 在参数上不会分叉。
+    对 1b5db4b 的所有槽位/挂法/轴，渲染出的字符串**逐字节不变**（含 robot11 的引号规则）。
+
     默认槽位的输出与改造前逐字节相同；只有 hzmirm 槽位才追加 turret_yaw_deg / turret_pitch_deg
     （默认 0 ⇒ 与上游 URDF 数值等价；非 0 用于试"雷达斜放/云台转动"假设，见 docs/robot_models.md §3）。
     """
@@ -612,36 +1113,8 @@ class _RobotXacroCommand(Substitution):
         self.__rpy = rpy
 
     def perform(self, context):
-        cmd = ['xacro ', self.__slot.perform(context), ' xyz:=', self.__xyz, ' rpy:=', self.__rpy]
-        slot = LaunchConfiguration('robot').perform(context).strip()
-        if slot == 'hzmirm':
-            cmd += [' turret_yaw_deg:=', LaunchConfiguration('turret_yaw_deg').perform(context),
-                    ' turret_pitch_deg:=', LaunchConfiguration('turret_pitch_deg').perform(context)]
-        elif slot == 'robot11':
-            # ★ 2026-10-07：robot11 的雷达 30° 安装轴（roll|pitch，上游两份材料矛盾 ⇒ 不猜）。
-            #   ⚠️ 值里带空格 ⇒ **必须像 xyz/rpy 那样加引号**，否则 xacro 会把它当成多个输入文件
-            #   （实测报 `xacro: error: expected exactly one input file as argument`）。
-            cmd += [' livox_tilt_rpy:="',
-                    _LIVOX_TILT_RPY[LaunchConfiguration('livox_tilt_axis').perform(context).strip()],
-                    '"']
-            # ★ 2026-10-08：**安装倾角记在哪儿**（plugin = 今天的行为 / urdf = 实物的物理安装）。
-            #   ⚠️ 与 livox_tilt_rpy 不同，这个值**不带空格**，不需要引号。
-            cmd += [' livox_mount:=',
-                    _validate_livox_mount(
-                        LaunchConfiguration('robot11_mount').perform(context))]
-            # ★ Phase 3：B 方案（抬高雷达）的开关。默认 0 ⇒ 与上游几何逐字相同。
-            cmd += [' livox_raise_m:=',
-                    LaunchConfiguration('livox_raise_m').perform(context).strip() or '0.0']
-            # ★ Phase 4 新增 / **Phase 5 改指向**：视觉 mesh 档位（`decimated` | `full`）。
-            #   只影响 `<visual>`，不影响任何 `<collision>`/传感器/插件 ⇒ 物理与契约不变。
-            #   Phase 5 起 `decimated` 指的是**专用视觉 LOD**（`meshes/decimated/`，整车 163,995 面），
-            #   不再是 Phase 4 借用的**碰撞档**抽稀件（`meshes/generated/`，整车 9,700 面 ——
-            #   `l11` 只有 1,200 面，拿它当视觉会把云台/发射机构糊成一团）。
-            #   两个 arg 的优先级：`visual_decimated` 非空时赢（= 命令行优先），都为空 ⇒ decimated。
-            cmd += [' visual_decimated:=',
-                    'true' if LaunchConfiguration('robot11_visual').perform(
-                        context).strip() == 'decimated' else 'false']
-        return ''.join(cmd)
+        return _render_robot_xacro_command(context, self.__slot.perform(context),
+                                           self.__xyz, self.__rpy)
 
     def describe(self):
         return '%s(%s)' % (type(self).__name__, self.__slot.describe())
