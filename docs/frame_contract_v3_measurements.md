@@ -1941,3 +1941,374 @@ spread（288–345）之外一点点，**不做定量结论**（n=1）。
 > 这次用"插入一个地图里没有的盒子"证明**全局 scan 层一个格子都没落地**（局部最近 lethal
 > 0.71 → 0.33 m，全局 3713/16886/10176 一格不变，而 3713 = 2D 地图的 occupied 格数）——
 > **不是 gicp 的锅**（`map→odom` 活着、TF 0 丢弃、off/hybrid 两档都 100% 采纳），是全局层另一个待修 defect。
+
+
+## §15 第七轮（**本机 date=2026-10-19T23:24–23:59**）：`global_obstacle:=scan` 的全局层为什么"哑" —— **nav2 的 z 闸 × map 帧扫描面 z = −0.179 m**；修法、盒子试验、全局半判决
+
+> **本节只新增**（append-only）：§1–§14 一个字都没改。§14 是上一节（另一个 agent），本节取
+> **第一个未占用**的编号 ⇒ §15。
+>
+> **对象**：`docs/rm_navigation` 的 `global_obstacle` 槽位里 `scan` 这一档（§14.7 用盒子试验
+> **证明**它"全局层一个格子都没落地"，并把它登记为"**另一个** defect，待修"）。本轮把它**定位到根因、
+> 修掉、并逐格验收**；同时把 §14 遗留的"**全局半**（off / hybrid）"补测完。
+>
+> **代码**（两处，都 opt-in）：
+> ① `src/rm_nav_bringup/config/nav2_params_sim_global_scan_obstacle.yaml`（**新增**，只含 2 个键）；
+> ② `src/rm_nav_bringup/launch/bringup_sim.launch.py` 的 `_Nav2ParamsForSlot` 从"单一 robot11 覆盖层"
+> 泛化成"**带命中条件的覆盖层列表**"（`global_obstacle == 'scan'` 时才合并 ①）。
+> `src/rm_navigation/**` **一个字节都没改**（仍是只读参照）；`src/rm_localization/**`、`src/rm_simulation/**`、
+> 地图资产、§10–§14 也都没动。探针 = `.tmp_ab/exp15/gscan_probe.py`（gitignored，只订阅 + 显式
+> `/spawn_entity` / `/delete_entity`）。
+>
+> **冻结（md5）**：**7 跑**（2 改前 + 5 改后；另有 1 跑因 install/ 没 link 新 config 而起不来，
+> 见 15.11 第 9 条）的 `libgicp_registration.so` = **`53c7067d…`**（§14 修好门之后的那个）、
+> `libsmall_point_lio.so` = **`58bebfb8…`**（= §10/§13 的 zfix），每跑**跑前=跑后**；
+> launch md5：**改前 2 跑 `6d38e74e…`**（diagnosis）、**改后 5 跑 `3ac66e6d…`**（= 本轮 fix 之后），
+> 每跑 `跑前=跑后`（唯一变量 = 本轮这两处改动）。原始数据 `.tmp_ab/exp15_*/`（gitignored）。
+
+### 15.1 一句话结论
+
+> **全局层不是没订阅、不是被 disable、不是 TF 丢包、不是量程/滚动窗/边界** —— 它**收到并成功
+> 变换**了每一条 `/scan`，然后被 nav2 的**高度闸静默清空**：`ObservationBuffer::bufferCloud`
+> （`nav2_costmap_2d/src/observation_buffer.cpp:143-144`）用**每源**的
+> `[scan.min_obstacle_height, scan.max_obstacle_height]` 对**搬到代价图帧之后**的点做 z 过滤，
+> 而本仓的全局图帧是 `map`、`/scan` 是**二维平盘**（所有点的 z = 扫描面在该帧里的 z）
+> ⇒ 实测 **map 帧 z p50 = −0.1786 [−0.237, −0.126]**、**774/774 条全部 < 0.0**（默认下界）
+> ⇒ 云里 0 个点 ⇒ `updateBounds` 的 marking / raytrace 两个循环都空转 ⇒ 全局图**恒定等于
+> static_layer + inflation_layer**，而且**没有任何日志/告警/dropped 计数**。
+> 同一份 `/scan` 在**局部**图（`global_frame: odom`）里 z p50 = **+0.030**（774/774 在带内）⇒ 局部正常。
+> 修法：**只给 `global_obstacle:=scan` 这一档**把两个 `min_obstacle_height`（观测缓冲区闸 +
+> 图层第二道闸）放到 **−1.0**，上界 2.0 不动。改后：盒子试验里**全局格逐格变化并精确回退**
+> （空地上 0→254，删除后 254→0，121/121 格），全局 lethal **3713 → 3859–3910**（**min≠max**），
+> **默认 `global_obstacle:=stvl` 路径逐字节不变**（合并出的参数文件 md5 与改动前**逐字节相同**、
+> `--show-args` 401 行**逐字相同**、stvl 跑全局 lethal **3727 [3725–3732]** 与 §14 参考同一档）。
+> **全局半的答案**：`global_obstacle:=scan` 修好后，**off 与 hybrid 两档全局层都工作**，而且
+> **不共享"斜 odom"的病** —— `map→odom` 把 30° 安装/重力对齐**整笔吸收**（off 档 `map→odom`
+> 的 q.x = −0.2557 ≈ **29.6° roll**），所以 map 帧里扫描面在**两档都是平的**
+> （off 跨度 0.1251 m vs hybrid 0.1166 m；odom 帧里 off 的跨度是 **2.88 m**）。
+
+### 15.2 协议（与 §10.4/§12/§14 逐字相同）+ 本轮新增的唯一动作
+
+**7 跑**（`settle=20/22 s`，窗口 20–22 仿真秒；`gui:=False`、`nav_rviz:=False lio_rviz:=False`、
+`spin_speed:=0.0`、`world:=RMUL2026`、`robot:=robot11 robot11_mount:=sensor`、`lio:=small_point_lio`、
+`localization:=gicp`）：
+
+```bash
+# A. 改前（诊断 + 盒子）：全局走 2D scan，hybrid；盒子 0.45 m 车头前方，插 14.1 s 再删
+BOXES="--box 0:0.45" SETTLE=22 WINDOW=56 .tmp_ab/exp15/run_one.sh exp15_diag_r2 \
+    world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp global_obstacle:=scan \
+    robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 gravity_align_mode:=hybrid
+# B. 改后（盒子试验，两个位姿各插一次）：车头 0.45 m + 车尾 0.60 m
+BOXES="--box 0:0.45 --box 180:0.60" SETTLE=22 WINDOW=76 .tmp_ab/exp15/run_one.sh exp15_fix_box_r2 \
+    ... global_obstacle:=scan ... gravity_align_mode:=hybrid
+# C. 改后 全局半（off / hybrid，各 1 跑；1 跑/档）
+NOBOX=1 BOXES="--before-s 22" SETTLE=22 WINDOW=48 .tmp_ab/exp15/run_one.sh exp15_gscan_off_r1 \
+    ... global_obstacle:=scan ... gravity_align_mode:=off
+NOBOX=1 BOXES="--before-s 22" SETTLE=22 WINDOW=48 .tmp_ab/exp15/run_one.sh exp15_gscan_hyb_r1 \
+    ... global_obstacle:=scan ... gravity_align_mode:=hybrid
+# D. 改后 默认路径回归（global_obstacle:=stvl）
+NOBOX=1 BOXES="--before-s 22" SETTLE=22 WINDOW=48 .tmp_ab/exp15/run_one.sh exp15_stvl_default_r1 \
+    ... global_obstacle:=stvl ... gravity_align_mode:=hybrid
+```
+
+* **隔离**：`run_one.sh` 与 `spl_ab_bench.sh`/`exp12/run_one.sh` 同口径（`HOME=.tmp_ab/home-<tag>`、
+  按 tag 散列 `ROS_DOMAIN_ID`、**先探空端口再占** `GAZEBO_MASTER_URI`、unset DISPLAY、`setsid` 起栈、
+  收尾只用 `tools/scripts/lib/scoped_cleanup.sh` 清**本进程组/本 master URI**，**无全机 pkill**）。
+* **探针** `gscan_probe.py`（新增，gitignored）：
+  ① 运行期 `ros2 param dump` + 逐键 `ros2 param get` 回读**两张图**的参数（**在 base 段才跑** ——
+     第一版在进程启动时跑，拿到的是 `Node not found`，见 15.11）；
+  ② `/scan` 波束端点用 TF 分别搬到 **odom** 与 **map**，给 z 统计与 `[0,2]` / `[−1,2]` 带内条数；
+  ③ 两张 `costmap_raw` 的逐帧计数 + 每段**整张栅格**（`grids.npz`）；
+  ④ 决定性动作：`/spawn_entity` 插一个 **25×25×30 cm 静态盒子**（SDF 内联、`static=true`），
+     位姿 = `/odom_ground_truth` 的**世界**真值 + `bearing:dist`，测完 `/delete_entity` 删掉；
+  ⑤ 盒子在两张图里的位置用 **TF + 真值偏移**换算（不用"新增 lethal 的质心"—— 第一版那样做会被
+     墙/噪声的翻动带偏，见 15.11）。
+* **口径**："in-band"= 波束端点 z ∈ `[0, 2]`（= 文件里的 `min/max_obstacle_height`）；
+  `[−1,2]` 是本轮修法之后的**有效**带。`nearest` / `ahead` 一律用**车在该栅格帧里的位姿**算
+  （`map` 帧用 `map→odom ∘ odom→base_link_fake`）—— §14 的 `navband` 探针在这一点上有个**口径 bug**
+  （全局图也用 odom 位姿），订正见 15.11。
+
+### 15.3 诊断 A：运行期参数回读 —— **"该有的都有"，唯一的功能性差异是帧**
+
+`global_obstacle:=scan`、运行期真值（`ros2 param get`，`exp15_fix_box_r2`；除 15.7 的两个
+`min_obstacle_height` 外，其余键在改前/改后**逐字相同** —— 见 15.7 的合并文件 2 行 diff）：
+
+| 键 | **global_costmap**（哑的那张） | **local_costmap**（正常的那张） | 判决 |
+|---|---|---|---|
+| `plugins` | `['static_layer','obstacle_layer','stvl_layer','inflation_layer']` | `['obstacle_layer','obstacle_cloud_layer','stvl_layer','inflation_layer']` | 图层**在** plugins 里 ✅ |
+| `obstacle_layer.enabled` | **true** | **true** | 不是"没开" ✅ |
+| `stvl_layer.enabled` | false（`scan` 档按真值表关掉） | false | 槽位切换**生效** ✅ |
+| `obstacle_layer.observation_sources` | `scan` | `scan` | ✅ |
+| `obstacle_layer.scan.topic` | **`/scan`** | **`/scan`** | 同源 ✅ |
+| `obstacle_layer.scan.data_type` | **`LaserScan`** | **`LaserScan`** | ✅ |
+| `obstacle_layer.scan.marking` / `clearing` | **true / true** | **true / true** | ✅ |
+| `obstacle_layer.scan.obstacle_max_range` / `raytrace_max_range` | **10.0 / 10.0** | **6.0 / 6.0** | 都不是瓶颈（盒子 0.45 m）✅ |
+| `obstacle_layer.scan.obstacle_min_range` | 0.1 | 0.1 | ✅ |
+| `obstacle_layer.scan.expected_update_rate` | 0.0 | 0.0 | 不判 stale（不可能是"永久 not current"）✅ |
+| `obstacle_layer.scan.min/max_obstacle_height`（**每源**） | **0.0 / 2.0** | **0.0 / 2.0** | ← **同一组数**，但见 15.6 |
+| `obstacle_layer.min/max_obstacle_height`（**图层**） | 0.0 / 2.0 | 0.0 / 2.0 | 同上 |
+| `global_frame` | **`map`** | **`odom`** | ← **唯一的本质差异** |
+| `rolling_window` / `resolution` / `width`×`height` | false / 0.04（被 static 撑成 0.05） / 5×5 | true / 0.02 / 5×5 | 见 15.4 |
+| `track_unknown_space` | true | false | 见 15.4（只改"没看见"的取值） |
+| `update_frequency` / `publish_frequency` | 5.0 / 2.0 | 20.0 / 10.0 | 见 15.5 |
+| `transform_tolerance` | 0.3 | 0.3 | ✅ |
+| `robot_base_frame` | `base_link_fake` | `base_link_fake` | ✅ |
+| `static_layer.*` / `inflation_layer.inflation_radius` | `map_subscribe_transient_local=true` / 0.65 | —（无 static 层）/ 0.60 | robot11 覆盖层，正常 |
+
+⇒ 任务书列的 8 个"常见嫌疑"（`obstacle_layer` 不在 plugins / `enabled:false` / 不同
+`observation_sources` / 错 `topic` / 缺 `data_type: LaserScan` / `min|max_obstacle_height` 与 local
+不一致 / marking·clearing 关 / `expected_update_rate` 判 stale）**逐条排除**。
+**两张图的 z 带配置完全相同，却一张活一张死** ⇒ 差异只能来自"**同一个数在哪个帧里量**"。
+
+### 15.4 诊断 B：栅格几何 / 滚动窗 / 量程 —— 都不是（而且能算死）
+
+* `StaticLayer` 在 configure 期把全局图 resize 成 **249 × 173 @ 0.05 m/pix = 43077 格**
+  （`launch.log` 逐字：`StaticLayer: Resizing costmap to 249 X 173 at 0.050000 m/pix`），
+  `RMUL2026.yaml` 的 `origin=[-2.2,-3.15]` ⇒ 全局图**正好覆盖整张 pgm**，车与盒子都远在界内。
+* **离线常数对齐**：`RMUL2026.pgm`（249×173，`mode: trinary`、`occupied_thresh 0.65`）里
+  **occupied(0) = 3713**、中介灰(205) = 5169（`p=(255−205)/255=0.196 < free_thresh 0.25` ⇒ 算 **free**）、
+  free(254) = 34195。于是"只有 static+inflation"时应有：
+   lethal = **3713**；inscribed = 16886；free = (34195+5169) − 16886 − 12302(**软带 1..252 格**) = **10176**。
+  ⇒ 改前实测**逐值相等**（3713 / 16886 / 10176，**53 帧 min=max**）——这不是"差不多"，是**恒等**。
+* `rolling_window: false` ⇒ 没有"窗口把盒子切掉"的可能；`obstacle_max_range: 10.0` ≥ `/scan` 的
+  `range_max`，0.45 m 的盒子在量程正中。
+
+### 15.5 诊断 C：TF / 时序 —— 也不是（而且证据是"没有证据"）
+
+* 改前那一跑（`exp15_diag_r2`）全局节点 **`Message Filter dropping` = 0 条**、
+  planner `Extrapolation Error` = **0 条**（`grep -ac` 全 0），`gcp` 采纳 **100%**、`判失效` 0 条。
+* 全局图 `costmap_raw` 在 20 s 窗口里到了 **53 帧**（≈2.6 Hz，`publish_frequency: 2.0`），
+  `update_frequency: 5.0`，`header.stamp` 单调推进 ⇒ 图层**在跑**（只是没有东西可标）。
+* `launch.log` configure 段逐字：`Using plugin "obstacle_layer"` → `Subscribed to Topics: scan` →
+  `Initialized plugin "obstacle_layer"` ⇒ 订阅**建起来了**。
+* **关键反证**：`enabled/观测源/TF` 任一项坏掉，改一个 `min_obstacle_height` 是不可能把它救活的；
+  而本轮**只**改这两个数就活了（15.8）。⇒ 病在"进云之后、标格之前"那一段。
+
+### 15.6 诊断 D（决定性）：**扫描面在 map 帧里的 z = −0.179 m**，默认下界 0.0 把它整盘切掉
+
+同一帧 `/scan` 的波束端点（scan 帧里 z=0 的平盘）用 TF 搬到两个代价图帧后的 z 统计
+（`exp15_diag_r2`，321 帧中位；"带内/=下/=上"= `[0,2]`）：
+
+| 目标帧 | z p50 (m) | z ∈ [min, max] (m) | **在 [0,2] 带内** | 带下 | 带上 |
+|---|---|---|---|---|---|
+| **odom**（局部图帧） | **+0.0354** | [+0.0150, +0.0648] | **774 / 774** | 0 | 0 |
+| **map**（全局图帧） | **−0.1786** | [−0.2370, −0.1259] | **0 / 774** | **774** | 0 |
+
+**源码链（三处，每一处都静默）**：
+
+1. `ObstacleLayer::laserScanCallback` → `projector_.transformLaserScanToPointCloud(...)`
+   （z 在 scan 帧里恒为 0）→ `buffer->bufferCloud(cloud)`；
+2. `ObservationBuffer::bufferCloud`（`nav2_costmap_2d/src/observation_buffer.cpp:143-144`）：
+   ```cpp
+   if ((*iter_z) <= max_obstacle_height_ && (*iter_z) >= min_obstacle_height_) { copy; ++point_count; }
+   ```
+   —— **`iter_z` 是"已搬到 `global_frame_`"的点的 z**，两个闸值来自**每源**的
+   `scan.min_obstacle_height / scan.max_obstacle_height`。**不匹配就丢，`modifier.resize(point_count)`
+   之后云里 0 点，无日志、无 WARN、无 dropped 计数。**
+3. `ObstacleLayer::updateBounds`（`plugins/obstacle_layer.cpp:466-511`）对云里**剩下的**点做
+   `pz < min_obstacle_height_`（**图层**级第二道闸，`:470`）与射程过滤，然后 `costmap_[index] = LETHAL`。
+   云空 ⇒ marking/clearing 都空转（`raytraceFreespace` 也吃同一个 buffer）。
+
+**为什么 map 帧的 z 是 −0.179**：实测 `map→odom` 的平移 z = **−0.2154**、`odom→base_link` 的
+z = **+0.0300**（同一跑）⇒ `map←base_link` 的 z = **−0.1854**，与直接量的 −0.1786 吻合（差 = 车体
+俯仰的投影项）。**两档一致**：off 档 −0.0474 + (−0.1323) = **−0.1797**、hybrid −0.2098 + (+0.0302)
+= **−0.1796** ⇒ **map 帧恒定在扫描面上方 ~0.18 m**，与重力档无关（这也正好解释了 §14.7 里
+off/hybrid 两档的全局 lethal **都**恰好等于 3713）。
+⇒ 只要下界是 0.0，**这条槽位在任何重力档下都不可能标一个格子**。
+
+### 15.7 修法（两处改动、opt-in、逐字节可回退）
+
+**① 新文件 `src/rm_nav_bringup/config/nav2_params_sim_global_scan_obstacle.yaml`**（只含 2 个键）：
+
+```yaml
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      obstacle_layer:
+        min_obstacle_height: -1.0        # ② 图层级第二道闸（obstacle_layer.cpp:470）
+        scan:
+          min_obstacle_height: -1.0      # ① 观测缓冲区闸（observation_buffer.cpp:143）
+```
+
+**② `src/rm_nav_bringup/launch/bringup_sim.launch.py`**：
+* `_Nav2ParamsForSlot`（**`:997` 起**）从"`base + 单一 robot11 覆盖层`"改成
+  "`base + 带命中条件的覆盖层列表`"；不命中任何覆盖层 ⇒ **原样返回 base 路径**（不写临时文件）。
+* 调用点（**`:1795` 起**）传两层：
+  `('robot11', …/nav2_params_sim_robot11_costmap.yaml, ctx.robot=='robot11')`、
+  `('global_scan', …/nav2_params_sim_global_scan_obstacle.yaml, ctx.global_obstacle=='scan')`。
+* 临时文件命名 = `nav2_params_sim_<命中的 tag 用 _ 连>_merged.yaml` ⇒ robot11 单独命中时
+  **仍是** `nav2_params_sim_robot11_merged.yaml`（与改动前同名）。
+
+**为什么必须改两处**：`ObservationBuffer` 的闸（每源键）先丢点，`updateBounds` 的闸（图层键）对
+"活下来的点"再丢一次；只改任一处，points 仍然到不了 `costmap_[index] = LETHAL`。
+
+**为什么是 −1.0**：map 帧的扫描面 z 是**定位器输出**（`map→odom` 的 z 随初始位姿/地图偏置变，
+本轮实测 −0.18，量级 ±0.2 m），不是几何常数 ⇒ 下界放到 −1.0 给 ≥0.8 m 余量，同时对 2D `/scan`
+**不引入任何新语义**：LaserScan 没有高度信息，**所有点的 z 都等于"扫描面在该帧里的 z"**，
+放宽下界只可能让"整条平盘"进带，不可能把地面点混进来（与本仓
+`nav2_params_sim_robot11_costmap.yaml` 文件头 §K.1 的论证同口径）。上界 2.0 **不动**。
+
+**为什么 opt-in**：命中条件 = `global_obstacle == 'scan'`。默认 `stvl`/`none` 不命中 ⇒
+`_Nav2ParamsForSlot` 返回 base（或只合并 robot11 那层）⇒ 参数文件**逐字节不变**：
+
+| 证据 | 结果 |
+|---|---|
+| 默认档（`robot11`+`stvl`）**合并出的 YAML md5**：新代码 vs **改动前实现的逐字副本** | **`e9b39f36…` == `e9b39f36…`（逐字节相同，9526 B）** |
+| 非 robot11 + `stvl` | 返回 base 路径本身（不写临时文件）|
+| `stvl` 档 vs `scan` 档 合并文件 diff | **只有 2 行**（`+min_obstacle_height: -1.0` ×2）|
+| `ros2 launch <file> --show-args`（改动前 HEAD 文件 vs 改动后） | **401 行逐字相同** |
+| 新增/删除的 launch 参数、节点、话题 | **0 个**（改动只有 `_Nav2ParamsForSlot` 内部 + 调用点 + 一个新 yaml）|
+| 默认档实跑（15.10） | 全局 lethal **3727 [3725–3732]**、`scan.min_obstacle_height` 回读 **0.0** |
+
+### 15.8 决定性试验：盒子（25×25×30 cm，地图里没有）
+
+**改前**（`exp15_diag_r2`，hybrid，盒子插在**车头 0.45 m**，驻留 14.1 s，然后删除）——
+**局部立刻看见、全局逐格不动**：
+
+| 量 | 盒子前 | 盒子在（14.1 s） | 删除后 |
+|---|---|---|---|
+| 局部 窗 ±0.25 m @ odom(0.42, 0.047)：lethal / inscribed / free | 0 / 291 / 15 | **5 / 709 / 0** | 0 / 291 / 15（**精确回退**）|
+| 局部 窗内变化格数 | — | **729 / 729（全窗）** | 729 |
+| **全局** 窗 ±0.25 m @ map(0.364, −0.022)：lethal / inscribed | 41 / 91 | **41 / 91** | 41 / 91 |
+| **全局** 窗 ±0.50 m：lethal / inscribed | 75 / 269 | **75 / 269** | 75 / 269 |
+| **全局整张图变化格数** | — | **0** | **0** |
+| 全局 lethal / inscribed / free（逐帧） | 3713 / 16886 / 10176 | **3713 / 16886 / 10176（53 帧 min=max）** | 同 |
+
+**改后**（`exp15_fix_box_r2`，hybrid，**两个位姿各插一次**：① 车头 0.45 m 驻留 8.1 s；
+② 车尾 0.60 m 驻留 3.7 s —— 车尾那一处**两张图都是空地**，所以是最干净的判据）：
+
+| 量 | base（无盒） | ① 车头 0.45 m | ① 删除后 | ② 车尾 0.60 m | ② 删除后 |
+|---|---|---|---|---|---|
+| **局部** 最近 lethal (m) | 0.7125 | **0.3197** | 0.7165 | 0.4804 | 0.7125 |
+| **全局** 最近 lethal (m) | 0.5503 | **0.4003** | 0.5503 | 0.4499 | 0.5503 |
+| **全局** 整张图 lethal / inscribed / free | 3956 / 17083 / 9664 | 3868 / 17381 / 9645 | 3896 / 17292 / 9556 | 3885 / 17274 / 9266 | 3881 / 17294 / 9658 |
+| **全局** 窗 ±0.25 m lethal / inscribed / free | 37 / 73 / 0 | **40 / 81 / 0** | 37 / 73 / 0 | **0 / 0 / 121 → 4 / 87 / 0** | **0 / 0 / 121** |
+| **全局** 窗内变化格数（相对上一段） | — | **14**（±0.5 m：105） | **14（回退）** | **121 / 121（全窗，0→254）** | **121（回退，254→0）** |
+| **局部** 窗 ±0.25 m lethal（② 位） | 0 | — | — | **0 → 10** | **10 → 0（729/729 格回退）** |
+
+读法：① 位在**地图的膨胀带里**（static+inflation 那格本来就是 253/254），所以全局只能看到
+`253→254` 与膨胀环的**小台阶**（±0.25 m 14 格、±0.5 m 105 格）—— 但**它就是变了**，而且删除后
+**逐格回退**；② 位在**两张图的空地**上，于是得到最干净的一组：全局 `0→254`（4 个 lethal 格 +
+87 个 inscribed + 121 格里 free 121→0），删除后**逐格回到 0**。**改前 ① 位是 0 格变化，改后
+同一位姿 14 格变化** ⇒ 单一变量（那两个 `min_obstacle_height`）就是全部原因。
+
+**整张图的 liveness（改后）**：`exp15_gscan_hyb_r1` 的 36 帧全局 lethal **3851–3878（min≠max）**、
+inscribed 17020–17407、free 9546–9942；`off` 档 37 帧 **3888–3919** / 17006–17417 / 9470–9925。
+改前那跑是 **3713/16886/10176 逐帧恒定（53 帧 min=max）**。
+
+### 15.9 全局半判决：`mode:=nav localization:=gicp global_obstacle:=scan` × {off, hybrid}（改后，1 跑/档）
+
+> 两档的 gicp 都活着（`采纳 782/782`、`判失效 0`；`map→odom` 整跑；hybrid 档
+> `Message Filter dropping` = 0、`Extrapolation Error` = 0）。
+
+| run | 局部 lethal / inscribed / free | 局部 最近 · ahead | 局部 in-band（**odom** `[0,2]`） | **全局** lethal / inscribed / free / unknown（43077 格） | 全局 最近 · ahead | **全局 in-band（map `[0,2]` / `[−1,2]`）** | 全局逐帧 lethal min–max | map 帧 z p50 [min, max] |
+|---|---|---|---|---|---|---|---|---|
+| `exp15_gscan_off_r1`（off） | 293 / 8855 / 44318 | 0.7625 · 12 | **329 / 774**（带下 438、带上 3） | **3888 / 17006 / 9925 / 0** | 0.5504 · 90 | **0 / 774** → **774 / 774** | **3888–3919（min≠max）** | −0.1761 [−0.2442, −0.1191] |
+| `exp15_gscan_off_r2`（off，**不做参数回读** ⇒ 干净 TF） | 284 / 8996 / 44129 | 0.7538 · 12 | **333 / 774**（带下 439、带上 3） | **3855.5 / 17179.5 / 9705 / 0** | 0.4975 · 93 | **0 / 775** → **775 / 775** | **3848–3868（min≠max）** | −0.1787 [−0.2434, −0.1261] |
+| `exp15_gscan_hyb_r1`（hybrid） | 345 / 9461 / 42449 | 0.7046 · 22 | **776 / 776** | **3859 / 17194.5 / 9708.5 / 0** | 0.5001 · 91 | **0 / 776** → **776 / 776** | **3851–3878（min≠max）** | −0.1787 [−0.2428, −0.1262] |
+| （改前对照）`exp15_diag_r2`（hybrid） | 303 / 9528 / 42351.5（`navband`，280 帧）| 0.7193 · 20 | 774 / 774 | **3713 / 16886 / 10176 / 0** | 0.4508† · 82†（†= 口径 bug，见 15.11）| 0 / 774 → **0 / 774** | **3713–3713（min=max，53 帧）** | −0.1786 [−0.2370, −0.1259] |
+
+**判决**：
+1. **全局层活了，两档都活**：全局 lethal 从"恒等于 static 的 3713"变成 **3848–3919**（比 static 多
+   **+135…+206** 格 = 2D scan 真正标进去的墙/障碍），`nearest`/`ahead` 也随之变化；
+   **in-band 从 0/774 变成 774/774**（`[−1,2]` 带）。off 两跑（3888 带探针扰动 / 3855.5 干净）
+   给出本轮唯一的 n=2 spread：**lethal ±16、nearest ±0.026 m、ahead ±2**（见 15.11 第 1 条）。
+2. **全局半不共享"斜 odom"的病** —— 这是本轮最反直觉的一条：**off 档的 30° 斜面在 `map` 帧里
+   *消失***。证据：odom 帧里 off 的波束 z 跨度 **−0.417…+2.458 m（2.88 m）**、只有 **329/774** 在
+   `[0,2]` 带内；同一时刻 map 帧里 **−0.244…−0.119（0.125 m）**、**774/774** 都在 `[−1,2]` 带内。
+   机理在 TF 里看得见：off 档 **`map→odom` 的四元数 q = [−0.2557, 0.0075, −0.0009, 0.9667]**
+   ⇒ roll = 2·asin(0.2557) ≈ **29.6°**，正是把 `odom→base_link` 的 30° 安装倾角**反向抵消**掉的那一笔。
+   ⇒ **局部图（odom）有病、全局图（map）没病**，两档的全局半都"整盘可见"。
+   （§12.4 第 4 条那条"off 会把倾角**加倍**成 ~60°、只剩 1.19 m 条带"的**推断**在活定位器下
+   **不成立**：那条推断的前提是"`map→odom` 从未被修正且等于初始值"，而本轮 `map→odom` 一直是活的；
+   §14.7 第 3 条已经指出 off 档 map 帧的位置 z 恒定，本轮把**姿态**也量了：不是加倍，是**抵消**。）
+3. **`off` 档全局的"看得见"不等于"和 hybrid 一样"**：全局 lethal 3888(off) vs 3859(hybrid)、
+   inscribed 17006 vs 17194.5、ahead 90 vs 91、nearest 0.5504 vs 0.5001 —— 同量级、同向，
+   但 **n=1/档**，不做定量比较（噪声带参考 §10.4：lethal ±10、ahead ±3）。
+4. **局部半的判决与 §14.8 逐项重合**：off 局部 in-band **329/774**（带下 438）vs hybrid **776/776**；
+   off lethal 293 / nearest 0.7625 / ahead 12 vs hybrid 345 / 0.7046 / 22 —— 与 §14.8 的
+   333/776、284、0.7544、17 与 775/775、339、0.7043、21 同档（差在两个 `/scan` 有限波束档位
+   774 vs 776 与逐跑浮动）。
+
+### 15.10 默认路径回归（`global_obstacle:=stvl`，hybrid，1 跑）
+
+| 量 | 本轮 `exp15_stvl_default_r1`（改动后） | §14 的 stvl 参考（`zt_gate_after_r1` / `selfheal`） | 判决 |
+|---|---|---|---|
+| 全局 lethal（逐帧 min–max） | **3727（3725–3732）** | 3725–3728 | **同档** ✅ |
+| 全局 inscribed | 16872（16867–16874） | 16871–16875 | **同档** ✅ |
+| 全局 free / unknown | 10176 / 0 | 10176 / 0 | 逐值同 ✅ |
+| 全局 `min≠max` | **是**（stvl 在改图） | 是 | ✅ |
+| 运行期 `obstacle_layer.enabled` / `stvl_layer.enabled` | **false / true** | false / true | ✅ |
+| 运行期 `obstacle_layer.scan.min_obstacle_height` / `obstacle_layer.min_obstacle_height` | **0.0 / 0.0**（覆盖层**没生效**） | 0.0 / 0.0 | ✅ |
+| 局部 lethal / 最近 · ahead | 411 / 0.7074 · 38 | 249–292 / 0.705–0.712 · 21–30 | 同量级（stvl 档的局部源与 scan 档不同，见 §14.8 注）|
+| `Message Filter dropping` / `Extrapolation Error` | **0 / 0** | 0 / 3 | ✅ |
+| 合并参数文件 md5 / `--show-args` | `e9b39f36…`（= 改动前逐字节）/ 401 行逐字相同 | — | **逐字节不变** ✅ |
+
+⇒ **默认路径的"参数文件 + 参数面 + 行为数字"三层都没变**：新覆盖层在该档**不命中**，
+`global_obstacle:=stvl` 的全局图仍是 STVL 撑着的 3725–3732（§14 的同一档）。
+
+### 15.11 本轮没能验证 / 诚实边界
+
+1. **参数回读本身会扰动栈（已量化、已规避）**：探针第一版在"进程一启动"就跑
+   `ros2 param dump`（那时 nav2 还没起来 ⇒ 拿到 `Node not found`），第二版挪到 **base 段**（nav2 已活）
+   —— 后者在 **3 跑里 2 跑**触发了 `Message Filter dropping`（`off_r1` 42 条 / `fix_box_r2` 26 条，
+   两本图都有）与 planner `Extrapolation Error`（276 / 144 条）：**全部指向同一条"卡住的旧戳"**
+   （例如 `at time 669.182`，一直重试到跑尾）。**不做回读的 2 跑都是 0 / 0**（改前的 `exp15_diag_r2`
+   ——它的回读在 nav2 起来前就失败了、几乎零服务流量；改后的 `exp15_gscan_off_r2` 加了
+   `--no-params`）。⇒ 判为**探针副作用**（约 40 次 `ros2 param get` 子进程 + 1 次 dump 的服务/发现
+   风暴把 MessageFilter 的队列拖过了 TF 缓存窗口），**不是** fix 的后果。**但相关性不完美**：
+   同样做了回读的 `exp15_gscan_hyb_r1` 与 `exp15_stvl_default_r1` 都是 **0 / 0** ⇒ "回读"是必要
+   不充分条件，**这条残留没有逐条归因**。为拿到"干净 TF"的全局半数，`exp15_gscan_off_r2`
+   用 `--no-params` 重跑（15.9 第 2 行）——**两跑同配置、同 md5，全局 lethal 3888 vs 3855.5、
+   nearest 0.5504 vs 0.4975 的差就是这层扰动的量级**（也是本轮 n=2 的唯一 spread 数据）。
+2. **`map` 帧为什么比扫描面高 0.179 m，没有归因到具体代码行**：本测量到的是
+   `map→odom`(z) + `odom→base_link`(z) = −0.2154 + 0.0300 = **−0.1854**（与直接量的 −0.1786 差 7 mm
+   = 车体俯仰投影）。**没有**去审 `gicp_registration.cpp` 的 `initial_pose` 初始化式
+   （§12.4 第 4 条 / §14.10 第 3 条把它登记为"未审"）。**修法不依赖这个数的来源**：只要它落在
+   (−1.0, 2.0) 里就行。
+3. **`−1.0` 是余量，不是标定**：没有任何实验去扫"下界取多少最优"。它的安全性来自
+   "LaserScan 是平盘、z 不带高度信息"这一语义论证（15.7），不是来自实测的调参。
+4. **盒子试验的剂量**：改前 ① 位驻留 14.1 s；改后 ① 位 8.1 s、② 位 3.7 s（探针相位计时器
+   第一版有个 bug：切相位时没重置 `phase_t`，导致驻留被截短；栅格证据不受影响，因为
+   "全局整张图 0 格变化"在改前是**53 帧**的结论）。② 车尾 3.7 s 只覆盖 **6 帧**全局图。
+5. **§14 的 `navband` 探针在全局图上有个口径 bug（本节订正）**：它用 `odom→base_link_fake`
+   的位姿去索引**全局（map 帧）**栅格（`nav_band_probe.py:188` 的 `_grid_stats` 固定查
+   `odom`）。因此 §14.7 的"全局 最近 lethal 0.4573 / 0.4499 / 0.4526"与"ahead 81/82"是
+   **用错帧的位姿**算的；本节同一跑用**map 帧位姿**重算得到 **0.5504 / 0.5001 / 0.5559** 与
+   **90 / 91 / 82**（ahead 巧合地接近，nearest 差 ~0.1 m = 车在 map 与 odom 里的位置差）。
+   **§14 的数不被推翻**（那里只用来判"全局没变"，与本 bug 无关），但**跨节比 nearest 时要用本节口径**。
+6. **n 很小**：15.9 的 off 两跑（其中一跑用于规避探针副作用的复算）、hybrid 一跑；
+   15.8 的盒子是"1 次插入/位姿"；15.10 的 stvl 一跑。**"0 格 vs 14 格/121 格"这种量级的差
+   不需要噪声带**，但 lethal 的 ±10 级差不要拿来判优劣。
+7. **只测 `robot:=robot11 robot11_mount:=sensor`、`world:=RMUL2026`、`lio:=small_point_lio`、
+   `localization:=gicp`**。没测：`amcl`/`small_gicp` 后端、`mode:=slam_nav`（那张 map 的 z 基准
+   不同 —— §12.6 第 2 条说 slam_toolbox 把 map 锚在车起始高度，scan 面会压在带子**下边界**，
+   修好后大概率也能标，但**未实测**）、`robot11_mount:=plugin|urdf`、`RMUC2026`。
+8. **`global_obstacle:=none`** 没回归（它不命中新覆盖层，按 15.7 的合并逻辑与改动前等价，
+   但**没有**单独跑一跑去证明）。
+
+### 15.12 一句话给用户
+
+> **全局层"哑"不是没开、不是 TF 丢包，是 nav2 的**高度闸**在**错的帧**里量了一下**：
+> `ObservationBuffer` 把 `/scan`（二维平盘）搬到**代价图帧**后用 `[scan.min_obstacle_height,
+> scan.max_obstacle_height] = [0.0, 2.0]` 过滤 z —— 而全局图的帧是 `map`，本仓 map 帧在扫描面
+> **上方 0.179 m**（实测 `map→odom` z −0.2154 + `odom→base_link` z +0.0300 = −0.1854）⇒
+> **774/774 条波束全部 < 0.0** ⇒ 云被**静默**清空（无日志/无告警/无 dropped 计数）⇒ 全局图
+> 恒等于 static+inflation（3713/16886/10176，53 帧 min=max），而局部图用 `odom`（扫描面 z=+0.030）
+> 一切正常。**修法两行 yaml**：给 `global_obstacle:=scan` 这一档加一份覆盖层，把
+> **观测缓冲区闸 + 图层闸**两个 `min_obstacle_height` 都放到 **−1.0**（上界 2.0 不动）——
+> 对 2D 平盘这只是"让整条盘进带"，不引入任何高度语义。**改后盒子试验逐格过**：
+> 空地上全局 `0→254`（121/121 格 0→253/254）、删除后 **254→0 精确回退**，车头 0.45 m 那处
+> 从"0 格变化"变成"14 格变化"；全局 lethal **3713 → 3851–3919（min≠max）**；
+> **默认 `stvl` 路径逐字节不变**（合并参数文件 md5 相同、`--show-args` 401 行相同、
+> stvl 跑 3727[3725–3732] 与 §14 同档）。**全局半也有答案了**：修好后 off/hybrid **两档全局都活**，
+> 而且**不共享斜 odom 的病** —— off 档 `map→odom` 带 **29.6° roll**，把 30° 安装倾角**反向抵消**，
+> 所以 map 帧里扫描面两档都平（跨度 0.125 vs 0.113 m）；"斜 odom ⇒ 半平面丢失"只发生在
+> **局部（odom）图**上（off in-band 329/774、hybrid 776/776）。
+
+9. **一次"起不来"的记录（可复现性）**：`exp15_fix_box_r1` 的 launch 直接报
+   `[launch] global_scan 的 nav2 覆盖层不在：…/install/rm_nav_bringup/share/rm_nav_bringup/config/
+   nav2_params_sim_global_scan_obstacle.yaml` 然后整栈退出 —— 本仓是 `--symlink-install`，但
+   **新增文件**不会自动进 `install/` 的 config 目录。`colcon build --symlink-install
+   --packages-select rm_nav_bringup`（0.16 s）之后 symlink 出现，重跑即通。
+   ⇒ 换机器/换 clone 复现本节时，**先 build 再跑**。

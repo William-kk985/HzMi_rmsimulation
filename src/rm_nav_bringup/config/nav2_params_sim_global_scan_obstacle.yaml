@@ -1,0 +1,49 @@
+# =============================================================================
+# nav2_params_sim_global_scan_obstacle.yaml —— `global_obstacle:=scan` 槽位专用的
+# **全局 2D scan 层高度带**覆盖（唯一改动 = 两个 min_obstacle_height）
+#
+# 这是什么：一份**只含两个叶子键**的覆盖层。launch 在 `global_obstacle:=scan` 时把它
+# **深合并**到公共段 `nav2_params_sim_base.yaml` 之上（`_Nav2ParamsForSlot`），生成一份
+# 临时参数文件再喂给 nav2；其它槽位值（默认 `stvl` / `none`）**原样**用 base，本文件不参与。
+#
+# ★ 2026-10-19 为什么需要它（根因 + 实测，见 docs/frame_contract_v3_measurements.md §15）：
+#   现象：`global_obstacle:=scan` 时全局代价图的 lethal/inscribed/free **恒等于
+#   static_layer + inflation_layer**（3713 / 16886 / 10176，33–93 帧 min=max），
+#   而 3713 恰好 = `RMUL2026.pgm` 的 occupied 格数 ⇒ 2D scan 层**一个格子都没标**；
+#   同一份 `/scan` 喂的局部图层（`global_frame: odom`）**正常**（lethal 284–373、最近 lethal 0.70–0.72 m）。
+#   机理（不是 enabled/TF/topic 的问题，运行期逐项回读过）：
+#     · `/scan` 是**二维平盘**：nav2 先 `projectLaser`（z 强行置 0）、再 `transformLaserScanToPointCloud`
+#       搬到**scan 自己的帧**，最后由 `ObservationBuffer::bufferCloud` 搬到**代价图帧**；
+#     · `ObservationBuffer::bufferCloud`（nav2_costmap_2d/src/observation_buffer.cpp:143-144）
+#       用 `[min_obstacle_height_, max_obstacle_height_]`（= **per-source** `scan.*` 两个键）
+#       对**搬完之后**的点做 z 过滤，**静默丢弃**（没有日志、没有告警、没有 dropped 计数）；
+#     · 全局图的帧是 `map`，而本仓的 map 是**出生点相对系**（`RMUL2026.yaml` origin 由建图导出）
+#       ⇒ 静止时扫描面在 map 里的 z ≈ −0.18 m（实测：p50 −0.1786、min −0.237、max −0.126）；
+#     · 于是 775/775 条波束**全部 < 0.0 = 默认下界** ⇒ 云被清空 ⇒ `updateBounds` 的
+#       marking/clearing 两个循环都空转 ⇒ 全局图只剩 static+inflation，而且**全程无提示**。
+#     · 局部图用 `odom`（`odom→base_link` 的 z ≈ +0.036）⇒ 775/775 全在带内 ⇒ 局部正常。
+#   ⇒ 修法：**只给全局这一路**把下界放到扫描面之下（−1.0 m），上界 2.0 不动。
+#     `-1.0` 的余量理由：map 帧的扫描面 z 由 `map→odom`（定位器初值，±0.2 m 量级）+
+#     `odom→base_link`（robot11 0.036）共同决定，实测 −0.18；off 档（odom 里 30° 斜面）
+#     会落在同一量级的另一侧 ⇒ −1.0 m 对两档都留 ≥0.8 m 余量。
+#   ⚠️ 为什么**必须改两处**（少一处就还是不标）：
+#     ① `obstacle_layer.scan.min_obstacle_height` = `ObservationBuffer` 的闸（云里就没点了）；
+#     ② `obstacle_layer.min_obstacle_height` = `ObstacleLayer::updateBounds` 里**第二道**闸
+#        （obstacle_layer.cpp:470 `if (pz < min_obstacle_height_) continue;`，默认也是 0.0）。
+#   ⚠️ 对 2D `/scan` 来说这两个键**只是"扫描面高度"的常量闸**（LaserScan 没有高度信息，
+#     所有点的 z 都等于扫描面在该帧里的 z）⇒ 放宽下界**不可能**把地面点放进来；
+#     它不会改变"什么算障碍"的语义，只是让整条平盘能进带（与
+#     `nav2_params_sim_robot11_costmap.yaml` 文件头 §K.1 的论证同一口径）。
+#
+# 校验/回退：去掉 `global_obstacle:=scan` ⇒ 读的仍是 base（0.0 / 2.0），本文件不参与；
+#   实测（盒子试验 before/after 逐格 diff、全局半 off/hybrid 两跑）见 §15。
+# =============================================================================
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      obstacle_layer:
+        # ② 图层级的第二道 z 闸（ObstacleLayer::updateBounds）
+        min_obstacle_height: -1.0
+        scan:
+          # ① 观测缓冲区的 z 闸（ObservationBuffer::bufferCloud）
+          min_obstacle_height: -1.0

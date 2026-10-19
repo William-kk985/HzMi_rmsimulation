@@ -995,36 +995,51 @@ class _LioAdapterRobot11(Substitution):
 
 
 class _Nav2ParamsForSlot(Substitution):
-    """nav2 的**公共段**参数文件：`robot:=robot11` 时把槽位覆盖层**深合并**进公共段。
+    """nav2 的**公共段**参数文件：按槽位把覆盖层**深合并**进公共段。
 
     为什么用"运行时合并"而不是多加一份参数文件：`bringup_rm_navigation.py` 只认三个槽
     （params_file / planner / controller），三份都被占满了；而 `src/rm_navigation/**/params`
-    是别的任务的目录（本主题禁改）。⇒ 在**我们自己的 launch** 里把
-    `rm_nav_bringup/config/nav2_params_sim_robot11_costmap.yaml`（只含几何键）深合并到公共段之上，
+    是别的任务的目录（本主题禁改）。⇒ 在**我们自己的 launch** 里把覆盖层深合并到公共段之上，
     写成一份临时 YAML 再传下去。
 
-    · 非 robot11 槽位：**原样返回公共段路径**（不合并、不写临时文件 ⇒ 行为与以前逐字节一致）；
-    · robot11：合并（覆盖层的键赢），临时文件落在 `$ROS_LOG_DIR`（拿不到就 /tmp）。
-    · 合并是**深**的（只覆盖叶子键）⇒ 公共段里其它一切（含注释以外的全部键）保持不变。
+    覆盖层（**全部 opt-in，逐个带命中条件**；一个都不命中 ⇒ 原样返回公共段路径、不写临时文件
+    ⇒ 行为与以前逐字节一致）：
+      · `robot:=robot11`        → config/nav2_params_sim_robot11_costmap.yaml（代价图几何）
+      · `global_obstacle:=scan` → config/nav2_params_sim_global_scan_obstacle.yaml
+                                  （全局 2D scan 层的 min_obstacle_height；根因见
+                                   docs/frame_contract_v3_measurements.md §15）
+    合并是**深**的（只覆盖叶子键）⇒ 公共段里其它一切保持不变；临时文件落在 `$ROS_LOG_DIR`。
     """
 
-    def __init__(self, base_path, override_path):
+    def __init__(self, base_path, layers=()):
+        """@param layers ((tag, override_path, predicate(context)->bool), ...)；按顺序合并。"""
         super().__init__()
         self.__base = base_path
-        self.__override = override_path
+        self.__layers = tuple(layers)
+
+    @staticmethod
+    def _cfg(context, name, default=''):
+        """读 launch 配置（**容错**）：还没声明/取不到 ⇒ 返回 default（不抛 SubstitutionFailure）。"""
+        try:
+            return str(context.launch_configurations.get(name, default)).strip()
+        except Exception:                                             # noqa: BLE001
+            return default
 
     def perform(self, context):
         import tempfile
 
         import yaml as _yaml
-        if LaunchConfiguration('robot').perform(context).strip() != 'robot11':
+        active = []
+        for tag, path, pred in self.__layers:
+            if not pred(context):
+                continue
+            if not os.path.isfile(path):
+                raise RuntimeError('[launch] %s 的 nav2 覆盖层不在：%s' % (tag, path))
+            active.append((tag, path))
+        if not active:
             return self.__base
-        if not os.path.isfile(self.__override):
-            raise RuntimeError('[launch] robot:=robot11 的 nav2 覆盖层不在：%s' % self.__override)
         with open(self.__base) as f:
             base = _yaml.safe_load(f)
-        with open(self.__override) as f:
-            over = _yaml.safe_load(f)
 
         def deep_merge(dst, src):
             for k, v in src.items():
@@ -1033,15 +1048,19 @@ class _Nav2ParamsForSlot(Substitution):
                 else:
                     dst[k] = v
 
-        deep_merge(base, over)
+        for _tag, path in active:
+            with open(path) as f:
+                deep_merge(base, _yaml.safe_load(f))
         out_dir = os.environ.get('ROS_LOG_DIR') or tempfile.gettempdir()
-        out = os.path.join(out_dir, 'nav2_params_sim_robot11_merged.yaml')
+        out = os.path.join(out_dir, 'nav2_params_sim_%s_merged.yaml' %
+                           '_'.join(tag for tag, _p in active))
         with open(out, 'w') as f:
             _yaml.safe_dump(base, f, allow_unicode=True, sort_keys=False)
         return out
 
     def describe(self):
-        return '%s(base=%s, override=%s)' % (type(self).__name__, self.__base, self.__override)
+        return '%s(base=%s, layers=%s)' % (
+            type(self).__name__, self.__base, [t for t, _p, _f in self.__layers])
 
 
 class _SlotSpinSpeedDefault(Substitution):
@@ -1769,13 +1788,27 @@ def generate_launch_description():
             "'nav2_params_sim_controller_' + '", LaunchConfiguration('nav'), "' + '.yaml'"])]),
     ]
     # 逐槽位传参（老的入参名 params_file 保留 = 公共段 ⇒ 单文件用法仍然可用）
-    # ★ 2026-10-07 Phase 3：公共段按槽位走一遍**深合并**（只有 robot11 会真的合并出临时文件；
-    #   其它槽位原样返回同一份 base ⇒ 默认模型逐字节不变）。覆盖层只含代价图几何键
-    #   （robot11 足印内切 0.300 / 外接 0.3565）—— 见 rm_nav_bringup/config/
-    #   nav2_params_sim_robot11_costmap.yaml 的文件头与 docs/robot_models.md §11.6/§11.9。
+    # ★ 2026-10-07 Phase 3：公共段按槽位走一遍**深合并**（一个覆盖层都不命中时原样返回同一份
+    #   base ⇒ 默认槽位逐字节不变）。
+    #   · robot:=robot11            → 覆盖层只含代价图几何键（足印内切 0.300 / 外接 0.3565）——
+    #     rm_nav_bringup/config/nav2_params_sim_robot11_costmap.yaml
+    #     （文件头与 docs/robot_models.md §11.6/§11.9）。
+    #   · global_obstacle:=scan     → 覆盖层只含**全局 2D scan 层的 min_obstacle_height**（−1.0）——
+    #     rm_nav_bringup/config/nav2_params_sim_global_scan_obstacle.yaml。
+    #     为什么必须有这一层：扫描面在 map 帧里的 z ≈ −0.18 m，被 nav2 的 z 闸**静默**全丢
+    #     ⇒ 全局图恒等于 static+inflation（根因/实测见 docs/frame_contract_v3_measurements.md §15）。
+    #     默认 `global_obstacle:=stvl` 不命中 ⇒ 参数文件逐字节不变。
     nav2_base_params_for_slot = _Nav2ParamsForSlot(
         os.path.join(nav2_params_dir, 'nav2_params_sim_base.yaml'),
-        os.path.join(rm_nav_bringup_dir, 'config', 'nav2_params_sim_robot11_costmap.yaml'))
+        layers=(
+            ('robot11',
+             os.path.join(rm_nav_bringup_dir, 'config', 'nav2_params_sim_robot11_costmap.yaml'),
+             lambda ctx: _Nav2ParamsForSlot._cfg(ctx, 'robot') == 'robot11'),
+            ('global_scan',
+             os.path.join(rm_nav_bringup_dir, 'config',
+                          'nav2_params_sim_global_scan_obstacle.yaml'),
+             lambda ctx: _Nav2ParamsForSlot._cfg(ctx, 'global_obstacle') == 'scan'),
+        ))
     nav2_params_launch_args = {
         'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）
         'params_file_planner': nav2_params_file_dir[1],     # planner_server 槽
