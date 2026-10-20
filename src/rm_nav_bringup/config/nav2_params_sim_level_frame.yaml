@@ -1,0 +1,36 @@
+# =============================================================================
+# nav2_params_sim_level_frame.yaml —— `level_frame:=odom_level`（默认档）的**局部帧**覆盖层
+#
+# 这是什么：一份**只含两个叶子键**的增量覆盖层。launch 在 `level_frame == 'odom_level'` 时把它
+# **深合并**到公共段 `nav2_params_sim_base.yaml` 之上（`_Nav2ParamsForSlot`），生成一份临时
+# 参数文件再喂给 nav2。回滚档（`level_frame:=odom`）**整层不命中** ⇒ 参数文件与改动前逐字节相同。
+#
+# 为什么只改这两处（迁移清单，详见 docs/frame_contract_v3_measurements.md §29）：
+#   · `local_costmap.global_frame`：局部代价图的帧必须是**重力对齐**的帧 —— nav2 的
+#     `obstacle_layer` 把 `/scan` 先 `projectLaser`（z 强行置 0）再搬到代价图帧，若该帧斜 30°
+#     （= LIO 的原始 `odom`，斜装时），每条波束的 z 就随 x/y 变化 ⇒ 高度带只留下一个斜板
+#     （实测 in-band 43%）。`odom_level` 是"`odom` 的常量重力对齐版本" ⇒ 语义与 `odom` 完全一致，
+#     但**正**。§4.11 的静态边保证它连续（不跳变）且唯一发布者。
+#   · `behavior_server.global_frame`：它吃的是**局部**代价图（`costmap_topic:
+#     local_costmap/costmap_raw`）⇒ 与它同帧最自洽（两者之间本来有静态 TF，行为等价，
+#     这里只是把"用哪个帧表达"收敛到同一条真源）。
+#
+# 明确**不动**的（本层一个字节都不碰）：
+#   · `global_costmap.global_frame: map` —— 全局层留在 `map`（重定位的边 `map→odom` 之上，
+#     地图资产就在 map 里）；`stvl` 的全局 profile（`stvl_layer.*`）与
+#     `global_obstacle:=scan` 的 −1.0 覆盖层**逐字节不变**；
+#   · `/scan` 的 `frame_id` 仍是 `base_link`、p2l 的 `target_frame: base_link`、
+#     linefit 的 `gravity_aligned_frame: base_link`（这些本来就在 base_link = 车体系）；
+#   · 重定位槽的 `odom_frame_id: odom`（`map→odom` 仍是重定位器的边，契约 I3）。
+#
+# 值由 launch 参数绑定（`bindings`）：覆盖文件里的 `odom_level` 只是**形状/默认值**，
+# 真值 = `LaunchConfiguration('level_frame')` ⇒ 本文件不会被"改一处忘一处"。
+# 回滚：`level_frame:=odom` ⇒ 本层 predicate 为假 ⇒ 不合并（逐字节回到 `nav2_params_sim_base.yaml`）。
+# =============================================================================
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      global_frame: odom_level
+behavior_server:
+  ros__parameters:
+    global_frame: odom_level

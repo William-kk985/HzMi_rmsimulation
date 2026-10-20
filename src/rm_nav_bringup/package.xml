@@ -21,6 +21,10 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
+  <!-- odom_level_tf.py（契约 v3 §4.11）：静态边 odom→odom_level（写 /tf_static，latched）
+       + 只读互检（/cloud_registered 拟合地面、IMU 静止均值）。 -->
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

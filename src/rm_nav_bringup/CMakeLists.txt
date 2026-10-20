@@ -45,6 +45,10 @@ install(PROGRAMS
   # ★ 2026-10-21：band_guard（nav2 高度带静默丢波束的只读诊断，opt-in；
   #   launch arg band_guard:=True 才起，见 docs/frame_contract_v3_measurements.md §17）
   scripts/band_guard.py
+  # ★ 2026-10-21（契约 v3 §4.11）：静态边 odom→odom_level 的**唯一发布者**（latched）+ 两条
+  #   只读互检（h_meas / URDF↔IMU Δ）。level_frame:=odom_level（默认）时由 launch 起，
+  #   把"重力对齐"从估计器补丁（E1）搬到帧图上。
+  scripts/odom_level_tf.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

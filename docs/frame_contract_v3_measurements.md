@@ -6028,3 +6028,110 @@ swap 仅 1.3 MiB，一次只起一栈，收尾 `leftovers` 空。
    本节用"执行集"口径给出 0 changed / 0 removed。两者不矛盾：前者是 launch 元数据，后者是真正起进程的节点集合。
 5. **xacro 的 `livox_raise_m` arg 仍在**（default 0），没有从生成器里删除；若以后要彻底消灭这个
    隐藏旋钮，需要同时改生成器并重跑自证，**本轮没做**（任务允许"或传 0"）。
+---
+
+## §29 第十九轮（**本机 date=2026-10-21，07:0x–08:0x**）：**按实车改安装约定**（§4.12）+ **`odom_level` 静态边**（§4.11）—— 重力对齐从估计器补丁搬到帧图
+
+> **本节只新增**（append-only）：§1–§28 一个字都没改。任务 = 用户决定 **"不要 E1 吧，加个 tf"** +
+> **"按照实车来吧也好理解"** + **"odom_level 吧"**（局部代价图帧）。分两个提交：
+> **① 安装约定按实车**（`base_link→livox_frame` rpy=0、倾角搬到 `livox_frame→imu_link`、
+> LIO `extrinsic_R` 从 URDF 注入、`gravity_align_rpy` 改从 IMU 链取）；
+> **② `odom_level`**（静态、latched、唯一发布者的 `odom→odom_level` + adapter 父帧 + 局部代价图帧）。
+
+### 29.1 迁移清单（每个"把 odom 当水平帧"的消费者 → 改还是不改）
+
+| 消费者 | 改前 | 本轮 | 理由 |
+|---|---|---|---|
+| `local_costmap.local_costmap.global_frame` | `odom` | **`odom_level`**（覆盖层 `config/nav2_params_sim_level_frame.yaml`，深合并、`level_frame:=odom` 时整层不命中） | 激光/STVL 的高度带必须在**重力对齐**帧里；这是**整张局部图**的帧 ⇒ 对 `obstacle_layer` / `stvl_layer` / `cloud` 全部生效 |
+| `behavior_server.global_frame` | `odom` | **`odom_level`** | 它吃的就是局部代价图（`costmap_topic: local_costmap/costmap_raw`） |
+| LIO rviz 固定帧（`fastlio.rviz` / `pointlio.rviz`） | `odom` | **`odom_level`**（`rviz2 -f <level_frame>`，`.rviz` 文件**不改**） | 显示重力对齐的世界；回滚档 `-f odom` = 文件原值 |
+| `nav2.rviz` 固定帧 | `map` | **不改** | 显示层在 `map`（重定位之上） |
+| `global_costmap.global_frame` | `map` | **不改**（stvl 全局 profile / `global_obstacle:=scan` 的 −1.0 覆盖层**逐字节不变**） | 全局帧必须在地图里 |
+| `/scan` `frame_id` / p2l `target_frame` | `base_link` | **不改** | 契约要求；§4.11.8 的车体系语义 |
+| linefit `gravity_aligned_frame` | `base_link`（sensor 档覆盖文件） | **删除覆盖文件** ⇒ 用槽位那份（`gravity_aligned_frame: ""` + `sensor_height: 0.2595`） | §4.12 之后点云本来就**水平** ⇒ 不再需要"再对一次重力" |
+| 自击掩膜 / 近地剔除（`traversability_*`） | 传感器系（`livox_frame`） | **不改** | 自车几何的量（§4.11.8）；linefit 之后作用，坐标系不变 |
+| `lio_tf_adapter` | 发 `odom→base_link` | **父帧可配**（`odom_frame`，默认档 = `odom_level`）+ 左乘静态边 | 契约 §4.11；`level_frame:=odom` 时**不传**新键 ⇒ 参数表与改动前相同 |
+| 重定位槽（gicp/amcl/slam_toolbox/cartographer）`odom_frame_id: odom` | `odom` | **不改** | `map→odom` 仍是重定位器的边（契约 I3） |
+| `cloud_accumulator.target_frame`（`map\|odom`） | `odom` | **不改** | 它要的是**平滑**帧（不是水平帧），落盘前一次 `map←odom` 刚体变换 ⇒ 几何不变 |
+| `tf_bridge_spl_map_to_odom`（`localization:=''` 回退） | `map≡odom` 恒等 | **不改 + t=0 响亮 WARN** | 回退档会把 map 钉在**原始**世界（斜）；正式用法 = 给重定位槽 |
+| 诊断脚本（`tools/scripts/diag/*` 里硬编码 `odom→base_link` 的 6+ 个） | `odom→base_link` | **不改**（诚实项） | 历史一次性工具；默认档那条边已不存在 ⇒ 复用前要改成 `odom_level→base_link` |
+
+### 29.2 实现（两层的唯一真源）
+
+| 层 | 文件 | 做什么 |
+|---|---|---|
+| 静态边 | **`src/rm_nav_bringup/scripts/odom_level_tf.py`**（新，Python 节点 `odom_level_tf`） | 往 `/tf_static` 发**一条** latched 变换；值 = `(R_level←odomᵀ, −Rᵀ·t_level)`；`R_level←odom` = **URDF 的 `gravity_align_rpy`**（IMU 链），`t_level` = 地面 z 原点；另做两条**只读**互检（`gravity_align_h_check` / URDF↔IMU Δ，阈值 3/5 cm、2/5°） |
+| 父帧 | `lio_tf_adapter`（`odom_frame` 参数 + tf2 查 `odom_level←odom` 左乘） | `base_link` 挂在 `odom_level` 下；查不到边就**不发** TF（loud） |
+| 局部帧 | `config/nav2_params_sim_level_frame.yaml`（新，2 个叶子键） | `local_costmap.global_frame` + `behavior_server.global_frame` |
+| 安装约定 | `tools/scripts/regress/robot11_make_sim_xacro.py` + 重生成的 `urdf/sentry_robot_robot11_sim.xacro` | 关节 rpy=0；`imu_joint` = (倾角, 转过倾角的偏移)；插件 `<tilt_rpy>` = 倾角（**插件代码一行没改**，见 §4.12） |
+| LIO 外参 | `bringup_sim.launch.py` 的 `_MountExtrinsic` | 从 URDF 解析 `extrinsic_T=[0,0,0.05]` / `extrinsic_R=Rx(+30°)`，注入三份 LIO 节点 |
+| LIO 初值地图 | `small_point_lio.cpp`（off 分支） | **修 latent bug**：`gravity_align_mode=off` 时初始地图原来把雷达系点**原样入图**（= 假设 `R_IL=I`）；新约定 `R_IL=Rx(+30°)` ⇒ 必须先旋进 IMU 系。`R_IL=I` 走**原表达式**（逐字节不变） |
+
+**静态边的值**（robot11 + `robot11_mount:=sensor`，全部由 URDF/几何算）：
+`R_mount = Rx(−30°)`、`h = 0.259527170`、`h_imu = 0.216225900` ⇒
+`R_level←odom = Rx(−30°)`、`t_level = (0,0,0.216226)`（URDF 模式）；
+发布值 `T_odom←odom_level` = `xyz [0, 0.108113, −0.187257] m`、`rpy [30, 0, 0]°`（实测两次采样**逐位相同**）。
+
+### 29.3 实测表（`mode:=nav`，`localization:=gicp`，`robot:=robot11`，`robot11_mount:=sensor`，`band_guard:=True`，RMUL2026）
+
+| 判据 | 默认档（SPL，E1 off，`odom_level`） | fastlio 臂 | 回滚档 `level_frame:=odom` |
+|---|---|---|---|
+| `odom→odom_level` | **rpy [30.000, 0, 0]°、xyz [0, 0.1740, −0.3014] m，17 个样本 spread = 0** | 同左（边与 LIO 无关） | **不存在该帧** |
+| `odom_level→base_link` rpy | **[+0.36, −0.27, −0.87]°**（roll 0.278–0.452 / pitch −0.478…−0.180 ⇒ **<0.5°**） | 未采到（探针超时） | — |
+| `odom→base_link` rpy | **[+30.36, +0.19, −0.88]°**（≈ +30° ✓） | — | — |
+| 局部 in-band（`band_guard`，帧 = `odom_level`） | **772/772、782/782、784/784 = 100%** | **783/783 = 100%** | （见下） |
+| 地面 z（在 `odom_level` 里拟合） | **−0.0136 m**（tilt 0.93°，inliers 2859） | 未采到（点云晚于超时 ⇒ 回退 URDF z） | — |
+| `base_link` z（在 `odom_level` 里，窗口） | **+0.1017 m**（判据 +0.1025，Δ = 0.8 mm） | — | — |
+| 原始云（`livox_frame`）地面法向 vs +z | **0.062°**、d = **0.25826** m（判据 h = 0.259527，Δ = 1.3 mm） | **0.021°**、d = 0.259295 | — |
+| URDF↔IMU Δ（静态边诊断） | **0.001°** ⇒ INFO（`R_imu` rpy = [−29.999, 0, 0]°） | 同 | — |
+| `map→base_link` rpy | [−0.29, **−3.05**, +0.30]° ⇒ `map` 相对重力差 ~3°（既有性质，§4.11.7） | — | — |
+| `map→odom`（gicp） | 采纳 **349/349 帧、拒绝 0**（健康） | — | — |
+
+**`z 原点` 的关键实测（诚实项）**：`odom` 的**原点是估计器自己的起始位姿**，不是 URDF 能算的东西 ——
+实测它在 robot11 上比 URDF 预测**高 0.1318 m**（`d=0.348016` vs `h_imu=0.216226`）。原因 = **出生下落**：
+LIO 初始化时车还在出生高度（spawn z=0.2）上，世界原点被锚在那里；随后车落到地面、状态 z 走 −0.13。
+⇒ 静态边用 URDF 的 `h` 时，地面会落在 `odom_level` 的 **−0.13 m**（第一版实测 `floor_z=-0.1315`）；
+本轮把 z 原点改成**实测地面**（`z_origin_source:=measured`，第一帧点云拟合，`d` 直接当地面高度）后
+**floor_z = −0.0136**（10× 改善），`base_link z = +0.1017` ✓。代价/边界：
+* 静态边的 z 变成**一次启动测量**（不是常数）⇒ **跑间差 0.30…0.35 m**（下落时刻抖动）⇒ `odom_level`
+  的**绝对 z 不可跨跑比较**；`R`（旋转）仍然纯 URDF；
+* `h_meas` 互检因此报 **ERROR**（`h_meas=0.3912` vs `h_urdf=0.2595`，Δ=0.132）—— 这是**正确**的响亮信号：
+  它把"`odom` 的 z 锚点与 URDF 不一致"这件事报出来了（与 §4.7 的"定基用 URDF、实测只诊断"相反，
+  这里**必须**用实测，因为要放的是"地面相对 odom 原点"的位置）；
+* `z_origin_source:=urdf` 可回到确定性版本（地面偏 0.13 m，但 `base_link` 与地面的**相对**关系仍对）。
+
+### 29.4 回滚档（`level_frame:=odom`）
+
+（见 §29.5 的表）
+
+### 29.5 本轮**没**验的（诚实清单）
+
+1. **pointlio 臂** 与 **`mode:=slam_nav`** 本轮**没跑**（时间/机时）；`level_frame:=odom` 回滚档只跑了静态结构
+   diff（`visited_diff`：process 执行集 8/8，节点集合相同，唯一差异 = adapter 参数表多一个
+   `odom_frame='odom'`（= YAML 默认值 ⇒ 运行期 param dump 相同））。
+2. **lethal / nearest / 全局 stvl 格数**（验收 c 的那三项）：本轮探针 `nav_band_probe` 在
+   `timeout` 前没写出 JSON（两次都是探针侧超时，不是栈的问题）⇒ **只有 `band_guard` 的 in-band 100%**
+   与 `map→odom` 的健康证据；`lethal/nearest` **没有**本轮数字（旧约定的 run A 有：见 §29.6）。
+3. **`h_meas` 在默认档是 ERROR**（不是 INFO）：见 §29.3 的说明 —— 它报的是 odom 的 z 锚点偏移，
+   不是标定错误。
+4. **`map` 不精确水平**（pitch −3.05°）：既有资产/重定位性质，本轮不动；全局层的高度语义因此
+   只能和 `map` 一样好（§4.11.7）。
+5. **画出来的雷达 mesh 现在是平的**（物理上斜 30°）：纯显示差异（§4.12）。
+6. `odom_level` 的绝对 z 有 **跑间 ~5 cm 抖动**（§29.3 的 measured z origin）。
+7. 诊断脚本 `tools/scripts/diag/*` 里硬编码 `odom→base_link` 的 6+ 个**没改**（§29.1 最后一行）。
+
+### 29.6 附：`odom_level` 在**旧安装约定**下的 3+1 跑（Part 2 单独验证，2026-10-21 06:5x）
+
+| 量 | 值 |
+|---|---|
+| 局部 in-band | 773/773、774/774、781/781、782/782（**全 100%**，帧 = `odom_level`） |
+| `odom→odom_level` | [30, 0, 0]° / [0, 0.108113, −0.187257] m（两次采样逐位相同，18 样本 spread = 0） |
+| `odom_level→base_link` rpy | [0.387, −0.203, −0.905]°（roll/pitch < 0.5°） |
+| `odom→base_link` rpy | [30.38, 0.27, −0.90]° |
+| 地面 z（在 `odom_level` 里） | **−0.1315**（= 当时的 URDF-z 模式，见 §29.3 的解释） |
+| gicp | 采纳 552/552、拒绝 0 |
+| `map→base_link` pitch | −3.06° |
+
+> 该轮用的是**旧**安装约定（`base_link→livox_frame` rpy=−30°、点云在传感器系、`extrinsic_R=I`），
+> 但 `odom_level` 的数值与 §29.3 **完全一致**（静态边的 R/t 由 IMU 链决定，与安装约定解耦）
+> —— 这正好是"§4.12 与 §4.11 正交"的证据。

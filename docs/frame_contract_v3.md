@@ -152,6 +152,11 @@ v3 要求每个槽位**声明**三项能力：`cap_global`（能否无先验整�
 
 ## §2 TF 帧树（最终版，无 `odom_grav`）
 
+> ★ 2026-10-21（**§4.11 起生效，本节保留为"回滚档 / E1 实验臂"的形状**）：默认路径的帧树已经变成
+> `map ─► odom ─► odom_level ─► base_link`（重力对齐从估计器补丁搬到**静态边**）。
+> 本节以下正文、§3 的 I1–I7 与 §4.7/§4.8/§4.10 在**默认档**上被 §4.11 取代；
+> `level_frame:=odom`（回滚）时**逐字生效**。新增那条边的定义/所有者/不变量只看 §4.11。
+
 ```
 map ──(local_tracker / M1–M4 中被选中的那一个)──► odom ──(lio_tf_adapter)──► base_link ──(URDF)──► livox_frame
                                                                                    │                └► imu_link
@@ -506,6 +511,237 @@ gravity_align_mode` = **`hybrid`**（M §18.4）。
 5. 上表的 off 臂数字来自**不同轮次**（M §10.4 的 3 跑/档、§13.8 的 1 跑/档、§17.8 的守卫 run），
    不是同一批次重新配对；量级/方向一致，但**不许**逐格当同一次实验比较。
    本轮的 auto 臂是**单跑**（n=1），只作"默认值真的落到 hybrid"的存在性证据，不作性能/精度 A/B。
+
+---
+
+## §4.11 `odom_level`：重力对齐做成**帧图**的事（2026-10-21，默认路径）
+
+> **本节只新增**（append-only）：§4.1–§4.10 / §13 的正文一个字都没改。本节是**用户决定**：
+> "不要 E1 吧，加个 tf"。它**取代**下面三处在**默认路径**上的效力（回滚档 `level_frame:=odom`
+> 时三处逐字生效，保留为历史/实验臂）：
+> * **§4.7**（odom 的 z 原点约定，E1b）—— z 原点现在由静态边给，公式没变（`z_origin_state_z` 的
+>   推导被原样复用），只是执行者从估计器换成 `odom_level_tf`；
+> * **§4.8**（世界地面校准是前置条件）—— **仍然成立**（`h` 的前提），默认档同样依赖它；
+> * **§4.10**（`gravity_align_mode:=auto` ⇒ hybrid）—— 默认档 `auto` **解析成 off**；
+>   只有回滚档保留 §4.10 的规则。
+>
+> 实测/迁移清单/回归矩阵见 `docs/frame_contract_v3_measurements.md` §29。
+
+### 4.11.1 决定与帧树
+
+```yaml
+level_frame: odom_level      # odom_level（默认）| odom（回滚到 §4.7/§4.10 的行为）
+```
+
+```
+map ──(重定位器: gicp|amcl|beluga|slam_toolbox|cartographer…  可跳变)──► odom
+                                                                         │  ★ 新增：静态边（latched，唯一发布者 odom_level_tf）
+                                                                         ▼
+                                                                     odom_level ──(lio_tf_adapter)──► base_link ──(URDF)──► livox_frame
+                                                                                                          │                └► imu_link
+                                                                                                          └──(fake_vel_transform)──► base_link_fake
+```
+
+| 帧 | 定义 | 所有者（唯一） |
+|---|---|---|
+| `odom` | **LIO 的原始世界系**。IMU 斜装 ⇒ 它就是斜的（robot11 sensor 档 = 车体水平时 z 轴相对重力斜 **30°**）；z 原点 = 初始化时刻的状态原点（IMU body）。**没有任何节点会把重力对齐写进它** | 估计器（发 `/Odometry` + 不参与 TF 时由 adapter 发） |
+| **`odom_level`** | `odom` 的**常量**变换：z 轴朝上（重力对齐）、原点在**初始化时刻的地面**（`z=0 ≈ 地面`；robot11 的 `base_link z ≈ +0.1025`）、x/y 取"IMU 在地面的垂足" | **`odom_level_tf`**（`rm_nav_bringup/scripts/odom_level_tf.py`）**独占**：它往 `/tf_static` 发**一条** latched 变换 |
+| `base_link` | 车体 | `lio_tf_adapter`（父帧 = `odom_level`） |
+
+**数值（robot11 + `robot11_mount:=sensor`，全部由 URDF + 几何算出，禁手填）**：
+
+```text
+R_mount = R(base_link←livox_frame) = Rz(0)·Ry(0)·Rx(−30°)            # launch 从这次 spawn 的 xacro 解析
+h       = 0.259527170 m                                              # base_link 离地 0.102499 + livox_z 0.157028
+t_IL    = extrinsic_T = (0, 0, 0.05) m                               # livox 原点在 IMU body 系
+h_imu   = h − (R_mount·t_IL)_z = 0.259527170 − 0.05·cos30° = 0.216225900 m
+T_odom←odom_level :  R = R_mountᵀ = Rx(+30°)
+                     t = −R_mountᵀ·(0,0,h_imu) = (0, +0.108112950, −0.187257122) m
+⇒ 期望：地面 z(odom_level) = 0、livox z = h、base_link z = +0.102499（实测见 M §29）
+```
+
+**一般式**（三个"输入事实"，`odom_level_tf` 的参数 `input_world` / `input_z` / `output_z`）：
+
+```text
+R_level←odom = R_mount   当输入世界**未**重力对齐（input_world=tilted：SPL-off / fastlio）
+             = I         当输入世界**已经**重力对齐（input_world=level：pointlio 的 Set_init /
+                         E1 实验臂 / none / cartographer）—— **绝不能再转一次**
+t_level      = (0,0,h_imu)  当 input_z=sensor 且 output_z=ground（默认）
+             = (0,0,0)      其它（E1 已把地面放到 0 / 明确要 sensor 档）
+发布值 = (R_level←odomᵀ, −R_level←odomᵀ·t_level)      # 即 T_odom←odom_level，是上面那个的**逆**
+```
+
+### 4.11.2 不变量（I1/I5 在默认档上的新落点）
+
+| # | 不变量 | 判据（可执行） |
+|---|---|---|
+| **I8** | **`odom→odom_level` 是静态边**：值在整跑里**逐位不变**（不随 LIO/重定位/时间变） | `/tf_static` 上两条采样（窗口首末）逐字段相同；`odom_level_tf` **不发** `/tf`（只发 `/tf_static`） |
+| **I9** | **唯一发布者**：全栈只有一个节点声明这条边 | `ros2 topic info /tf_static -v` 的发布者 + 逐消息解析 ⇒ 该边只出现 1 次；`grep -rn "odom_level" src/` 只有 `odom_level_tf.py` 写 `/tf_static` |
+| **I10** | **`odom_level` 是"z 朝上 + 原点在地面"** | 点云在 `odom_level` 里拟合地面：`floor_z ∈ 0 ± 0.006 m`、`tilt < 0.7°`；静止时 `base_link z ≈ +0.102499`（robot11） |
+| **I11** | **`odom_level→base_link` 只含车体真姿态**（roll/pitch ≈ 0，yaw 任意） | 静止窗口 `tf2_echo odom_level base_link` 的 roll/pitch **< 0.5°** |
+| **I12** | **无环**：`odom_level` 不是"第二个父"；`base_link` 只有一个父 | `base_link` 的父帧集合 = {`odom_level`}；`odom_level` 的父帧集合 = {`odom`}；`map→odom` 仍是重定位器的边 |
+| **I13** | **`odom` 上没有重力假设**：消费者不得把 `odom` 当水平帧 | 局部代价图 / LIO rviz 固定帧 / adapter 父帧都用 `odom_level`；`odom` 只出现在 `map→odom`（重定位）与"原始世界"语义里 |
+
+**E1 的语义在新的位置**：§4.5 的验收线（残余地面倾角 < 0.7°）与 §4.7 的 z 原点约定**没有变**，
+只是"谁来做"从**估计器初始化**（改 `kf.x.rotation/position` + 初始地图）换成
+**一条静态变换**。数学上等价（同一组 `R_ws` / `h_imu` 公式），工程上分成两件事：
+**标定**（静态边，确定性）与**估计**（LIO，不动它）。
+
+### 4.11.3 参数与默认值
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `level_frame` | **`odom_level`** | 本节的**总开关**。`odom` = 回滚：逐字节回到 §4.7/§4.10 的行为（不发布静态边、`auto ⇒ hybrid`、adapter 父帧 = `odom`、局部代价图 = `odom`） |
+| `gravity_align_mode` | `auto` | **默认档解析成 `off`**（E1 不在默认路径上）。显式 `urdf|imu|hybrid` 仍打 E1 补丁（**实验臂**，A/B 用）⇒ 那时静态边退化成**恒等**（`input_world=level, input_z=ground`） |
+| `gravity_align_rpy` / `gravity_align_h` | 从 URDF 自动算 | **同名同义**，现在同时喂两个地方：E1 实验臂（`small_point_lio` 的参数）与静态边（`odom_level_tf`）。**仍然禁止手填** |
+| `gravity_align_z_origin` | `ground` | 默认档：`odom_level` 的 z 原点（`ground` ⇒ 地面在 0；`sensor` ⇒ 原点留在 IMU，**A/B 复现旧行为用**，nav2 局部高度带会掉出去） |
+
+`level_frame:=odom_level` 时被**换成** `odom_level` 的三个消费者（其余一个不动，见 M §29）：
+
+1. `local_costmap.local_costmap.global_frame`（nav2 覆盖层 `rm_nav_bringup/config/nav2_params_sim_level_frame.yaml`，
+   深合并，回滚档整层不命中）；
+2. `behavior_server.global_frame`（它吃的就是局部代价图）；
+3. LIO rviz 的固定帧（`rviz2 -f <level_frame>`，`.rviz` 文件不改）。
+
+**保持不变**（有意）：`global_costmap.global_frame = map`（**stvl 全局 profile 与
+`global_obstacle:=scan` 的 −1.0 覆盖层逐字节不变**）、`/scan` 的 `frame_id = base_link`、
+p2l 的 `target_frame: base_link`、linefit 的 `gravity_aligned_frame: base_link`、
+重定位槽的 `odom_frame_id: odom`（`map→odom` 仍是重定位器的边，契约 I3）、
+`fake_vel_transform` 的 `base_link→base_link_fake`。
+
+### 4.11.4 互检（loud, never silent；**只作诊断，不改发布值**）
+
+| 检查 | 数据 | 阈值 | 级别 | 行为 |
+|---|---|---|---|---|
+| `gravity_align_h_check` | 一帧 `/cloud_registered` 拟合地面 ⇒ `h_meas`（传感器到地面垂距）vs `h(URDF)` | <0.03 / 0.03–0.05 / ≥0.05 m | INFO / WARN / ERROR | **定基仍用 URDF 值**（确定性）—— 与 §4.7 第 4 条逐字一致 |
+| URDF↔IMU `Δ` | 静止 200 帧 `/imu/data` 均值 ⇒ `R_imu` vs `R_mount` | <2° / 2–5° / ≥5° | INFO / WARN / ERROR | **不会**改用 IMU 值（见下） |
+
+**⚠️ 与 E1 `hybrid` 档有意不同**：`hybrid` 在 Δ≥2° 时**改用 IMU**（把实测提升成"第二个所有者"）；
+静态边**不这么做** —— 它的值是**标定事实**，唯一所有者是 URDF，实测只负责**响亮报错**。
+需要"IMU 救援"的场景请走实验臂：`gravity_align_mode:=hybrid`（+ `level_frame:=odom`），
+那条路径的语义与 §4.3/§4.10 **逐字不变**。
+
+### 4.11.5 回滚
+
+```text
+level_frame:=odom      ⇒ 行为与 2026-10-21 之前逐字节相同（§4.7/§4.10 全部生效）
+```
+
+逐项证据（M §29）：节点集合相同、E1 有效值回到 `hybrid`、`odom→base_link` 仍由 LIO 自己发
+（adapter 不启动）、局部代价图 `global_frame=odom`、没有 `odom_level` 这个帧、合并后的 nav2
+参数文件与改动前逐字节相同。
+
+### 4.11.6 边界（明确不在本节范围）
+
+1. **`lio:=cartographer` / `lio:=none`**：静态边做成**恒等别名**（`odom_level ≡ odom`）——
+   只为了让局部代价图/消费者的**帧名**统一，**不对**这两个槽位的世界系做任何重力假设
+   （cartographer 自己发 `odom→base_link`，`odom_level` 只是它的别名）。
+2. **`localization:=''`（LIO 当绝对定位的回退用法）**：静态桥 `map≡odom` 把 `map` 钉在**原始世界**上
+   ⇒ 全局代价图（`map`）不跟着摆正，只有局部（`odom_level`）是正的。launch 在 t=0 **响亮 WARN**
+   （不是回归：改动前这条回退路径同样是"斜 odom + 正 map 资产"）。正式用法 = 给重定位槽。
+3. **`lio:=fastlio` / `pointlio`**：静态边照用（`tilted` / `level` 两档），但它们的**初始化门**
+   （FAST-LIO 的 `IMU_init`、Point-LIO 的 `Set_init`）不在本契约内；本节只承诺"给这条边一个
+   正确的值"，不承诺这两个估计器自己的残余倾角（实测见 M §29）。
+4. **`hzmirm` 的云台转动**（`turret_pitch_deg ≠ 0`）：静态边的 `R_mount` 是**默认姿态**下的安装值，
+   云台一动 `livox_frame` 相对 `base_link` 就变 ⇒ 这条边不再准确（与改动前的 E1/adapter 同一个
+   局限，未新增）。
+5. **`mapping` 模式**：静态边照发（`odom_level` 存在），但建图资产/`cloud_accumulator` 的
+   `target_frame:=odom` 选项现在指**原始世界**（它本来就是"平滑帧"语义，不是"水平帧"，
+   落盘前有一次 `map←odom` 刚体变换 ⇒ 几何不变）。
+
+### 4.11.7 局部/全局帧的最终归属（2026-10-21 用户确认）
+
+| 消费者 | 帧 | 为什么 |
+|---|---|---|
+| **局部代价图**（`local_costmap.global_frame`） | **`odom_level`** | 这一条是**整张图**的帧，不是某一层的开关 ⇒ **所有**局部障碍层（`obstacle_layer` 的 2D scan、`stvl_layer`、`cloud` / `voxel` 变体、`inflation`）都在 `odom_level` 里 ⇒ STVL 的 3D 点的"方向"与点云那个"正"的帧一致（用户原话："STVL 的方向要和点云'正'的帧一致"）。覆盖层 `nav2_params_sim_level_frame.yaml` 只写这一个叶子键 ⇒ 与 `local_obstacle:=scan\|cloud\|both\|stvl\|stvl_both` **全部兼容**（换层不换帧）。 |
+| **全局代价图**（`global_costmap.global_frame`） | **`map`**（不变） | `map` 是重定位器 `map→odom` 之上的**全局**帧；全局层的 z 闸问题由 `global_obstacle:=scan` 的 −1.0 覆盖层处理（§15/§25.6，本轮**一个字节都没动**）。 |
+| `/scan` 的 `frame_id` | **`base_link`**（不变） | 契约要求；p2l `target_frame: base_link` 保持。 |
+| linefit / p2l / 自击掩膜 / 近地剔除 | **`base_link` / `livox_frame`**（不变） | 它们是**自车/传感器系**的量（`sensor_height`、"离传感器的高度"、自击 AABB）⇒ 见 §4.11.8 的两帧语义。 |
+
+**`map` 是不是水平的？（实测，2026-10-21）** `mode:=nav`（`localization:=gicp`）下
+`map→base_link` 的 rpy ≈ **[−0.29, −3.05, +0.30]°**（7 跑样本一致）⇒ `map` 相对重力**差 ~3°**
+（这是**地图资产 + GICP 对齐**的既有性质，不是本轮引入的；`odom_level→base_link` 的
+roll/pitch 是 **<0.5°**）。⇒ 全局层的"水平"只能和 `map` 一样好；把**障碍高度语义**放在
+`odom_level`（或 §4.11 之后的 `map`，前提是重定位把倾角吸收干净）是正确做法，但**不要**指望
+`map` 精确水平。`mode:=mapping` 时 nav2 **根本不启动**（launch 里 `start_navigation2` 只在
+`nav`/`slam_nav` 下执行）⇒ "全局代价图在斜的 map 里"这个情形**不存在**。
+
+**高度带的数值（本轮不动）**：局部 2D scan 层 `min_obstacle_height = scan_band_min`（默认
+**−0.05**，§26）+ `max = 2.0`；STVL 的 3D 带保持原值。**注意**：`odom_level` 的原点现在在
+地面上 ⇒ 高度带第一次有了"离地高度"的物理语义 ⇒ COD 那种 `[0.1, 1.0]`（离地 10 cm–1 m）的
+写法**现在是可表达的**（以前在斜 `odom` 里不可表达）。本轮**不改**它（只记录）。
+
+### 4.11.8 两帧语义（写死，避免以后再混）
+
+| 帧类 | 例子 | 能用来做什么 | **不能**用来做什么 |
+|---|---|---|---|
+| **车体/传感器系** | `base_link`、`base_link_fake`、`livox_frame`、`imu_link` | 自击裁剪、传感器量程/盲区、`sensor_height`、"离传感器多高"、点云→2D 投影的目标帧 | **障碍物高度语义** —— `base_link` 在坡/台阶上会**跟着车体倾**，同一高度的障碍在它里面不是常量 |
+| **重力对齐世界系** | **`odom_level`**、`map` | 高度带（`min/max_obstacle_height`）、地面/台阶/近地剔除、3D 点的"上"方向、建图资产的 z | 自车几何（车体系才有意义） |
+
+---
+
+## §4.12 雷达安装约定：**按实车**（2026-10-21）
+
+> **本节只新增**（append-only）。用户决定："按照实车来吧也好理解"。
+> 它**取代** §4.11 之前 sim 侧的"倾角记在 URDF 关节上"这一约定（`robot11_mount` 的
+> plugin / urdf / sensor 三档），但**不改**任何物理几何、`h`、`h_imu`、也不改 §4.11 的静态边数值。
+
+### 4.12.1 实车是什么样
+
+1. Livox 驱动器的 `extrinsic_parameter`（roll 180 / yaw 90）**只旋点云**：它把点从传感器系
+   旋进机器人系；驱动器的 **IMU 通路用另一套 `extrinsic_global`（单位阵）**，IMU 数据不被它旋
+   （依据：`pub_handler.cpp:131-150`）。
+2. 因此实车的 TF `base_link→livox_frame` 的 **rpy = 0**（只有平移），而**物理上的倾斜**在
+   IMU 那条链上（`livox_frame→imu_link` 带着安装倾角 ⇒ 加速度计真的感受到它）。
+
+### 4.12.2 sim 怎么复现（`robot:=robot11`）
+
+| 面 | 改前（2026-10-20 及以前） | **改后（= 实车约定）** |
+|---|---|---|
+| `base_link→livox_frame` | `rpy = Rx(−30°)`、`xyz = (0.000562, 0.130916, 0.157028)` | **`rpy = 0`**、`xyz` **逐位不变** |
+| `livox_frame→imu_link` | `rpy = 0`、`xyz = (0, 0, −0.05)` | **`rpy = Rx(−30°)`**、`xyz = Rx(−30°)·(0,0,−0.05) = (0, −0.025, −0.043301)` |
+| ⤷ 派生：`base_link→imu_link` | `rpy = Rx(−30°)`、`xyz = (0.000562, 0.105916, 0.113727)` | **完全相同**（物理几何一个字节没动） |
+| 插件 `<tilt_rpy>` | 单位阵（倾角由 link 姿态带斜） | **`Rx(−30°)`**（射线真的斜） |
+| 点云表达 | 传感器系（`frame_id=livox_frame`，而该帧自己斜 30°） | **水平**的 `livox_frame`（与实车驱动器旋完点云后的语义一致） |
+| LIO `extrinsic_R` | `I`（IMU 与雷达同姿态） | **`Rx(+30°)`**（水平点云 → 斜的 IMU 系；由 launch 从 URDF 解析注入） |
+| LIO `extrinsic_T` | `[0, 0, 0.05]` | **`[0, 0, 0.05]`（不变）** |
+| `gravity_align_rpy`（= E1 先验 / §4.11 的 `R_grav`）来源 | `base_link→livox_frame` | **`base_link→imu_link`**（值同样是 `[−30, 0, 0]°` ⇒ **§4.11 静态边的数值不变**） |
+| `robot11_mount` | `plugin｜urdf｜sensor` | **只剩 `sensor`**（另两个实验臂删除，传它们**硬报错**） |
+
+**三方一致性（写死在这里，改任何一处都要三处一起改）**：
+
+```text
+驱动器/插件把点云旋进机器人系的旋转  R_pub
+   =  TF 的 R(base_link←livox_frame)      ← 现在 = I（实车 TF 的 rpy=0）
+   ∘  TF 的 R(livox_frame←imu_link)       ← 现在 = Rx(−30°)（物理倾角）
+   ∘  LIO  extrinsic_R 的逆               ← 现在 = Rx(+30°)，即把"水平点云"搬回"斜的 IMU 系"
+⇒ 点云在 livox_frame 里是**水平**的（地面法向 ≈ +z），IMU 在 `imu_link` 里是**斜**的，
+  估计器靠 extrinsic_R 把两者接上；`odom` 因此仍然是 **IMU 系的原始世界**（§4.11 的前提不变）。
+```
+
+**为什么插件一行 C++ 都没改**：`livox_points_plugin.cpp` 的出点公式本来就是
+`point = (range+minDist)·(mount_rot·ray·x̂)` —— 它把点表达在 `header.frame_id` 声称的那个帧里，
+而射线方向是 `offset.Rot()·mount_rot·ray·x̂`（父 link 系）。所以只要
+**关节 rpy = 0（`offset.Rot()=I`）+ `<tilt_rpy>` = 倾角**，射线就真的斜、点就落在水平的
+`livox_frame` 里 —— 正是"驱动器只旋点云"的语义。改前那 30° 的错位是**关节**斜了、点却按
+`frame_id` 除以斜帧造成的（缺陷③）。真正要改的只有 URDF 的两条链 + LIO 外参（本节的表）。
+
+### 4.12.3 这条约定影响了什么（逐项）
+
+| 项 | 影响 |
+|---|---|
+| `h = 0.259527 m`（livox 离地） | **不变**（livox 原点的平移没动） |
+| `h_imu = 0.216226 m`、§4.11 的静态边 `R_grav` / `t` | **不变**（IMU 的物理位姿没动） |
+| linefit | `robot11_mount:=sensor` 的 `gravity_aligned_frame: base_link` **覆盖文件已删除**：点云本来就水平 ⇒ 回到槽位那份 `segmentation_sim_robot11.yaml`（`gravity_aligned_frame: ""` + `sensor_height: 0.2595`） |
+| p2l | 仍用 `target_frame: base_link`（契约要求 `/scan` 在 `base_link`；点云水平后这条只是"换帧"，语义不变） |
+| `lio_tf_adapter` | **不用改**：它的 `T(imu←base_link)` 与改动前逐位相同（IMU 的物理位姿没动） |
+| 默认模型 / `hzmirm` | **零改动**：它们的 IMU 链本来就没有倾角（解析出来的 `extrinsic_R` = I、`gravity_rpy` = 0） |
+| 画出来的雷达 mesh | 现在**水平**（物理上斜）—— 纯显示差异，与实车的"TF 是平的"一致 |
+| `robot11_mount:=plugin｜urdf` | **删除**（硬报错）。它们是"倾角记在哪"的实验臂，新约定下没有意义 |
+
+**验收（实测见 measurements §29）**：`base_link→livox_frame` rpy = 0；`base_link→imu_link`
+rpy = −30°；原始云（`livox_frame`）里地面法向 vs +z ≈ 0°；`odom→base_link`（`gravity_align_mode:=off`）
+仍 ≈ +30°（odom = IMU 原始世界）；nav 局部 in-band 100%（叠加 §4.11 的 `odom_level` 之后）。
 
 ---
 
