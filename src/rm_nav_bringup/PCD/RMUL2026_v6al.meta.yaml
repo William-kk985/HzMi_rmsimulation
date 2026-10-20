@@ -1,0 +1,90 @@
+name: RMUL2026_v6al
+kind: pcd
+world: RMUL2026
+created_at: '2026-10-20T19:48:26+08:00'
+updated_at: '2026-10-20T19:48:26+08:00'
+spawn_pose:
+  x: 4.3
+  y: 3.35
+  z: 0.2
+  yaw: 0.0
+map_start_pose:
+- 0.0
+- 0.0
+- 0.0
+resolution: null
+frames:
+  map: map
+  odom: odom
+  base: base_link
+  convention: map 系 = 出生点相对系（原点 = 机器人出生点，x 前 y 左，单位 m/rad）；odom = LIO 里程计系；base =
+    base_link。因此同一 world 只要出生点不变，map(0,0,0) 恒等于出生点。
+files:
+- RMUL2026_v6al.pcd
+file_sizes:
+  RMUL2026_v6al.pcd: 886233
+versions:
+  ros_distro: humble
+  packages:
+    rm_nav_bringup: 0.0.0
+    slam_toolbox: 2.6.10
+    cloud_accumulator: 0.1.0
+written_by: rm_nav_bringup/scripts/map_asset_guard.py
+source: cloud_accumulator（§24 的 RMUL2026_v6 会话产物）
+derived_from: RMUL2026_v6.pcd（md5 580e6f406ba2ae37120dc2bc3d2e09d7）
+accumulated_points: 16392462
+voxel_size: 0.1
+bbox:
+- - -2.1816
+  - 10.4373
+- - -3.2078
+  - 5.4581
+- - -0.3204
+  - 1.1025
+z_span: 1.4229
+health_warning: false
+dropped_points_height: 0
+dropped_points_range: 779882
+skipped_frames_jump: 0
+skipped_frames_legacy: 73
+tf_frames_ok: 2320
+tf_frames_failed: 73
+accumulation_frame: odom
+post_transform_to_map:
+  rule: 一次刚体 map←odom，取 map→odom 时序末值（§24.5）
+  used_trace_sample: 876.382
+  xyz:
+  - -0.16355
+  - -0.06217
+  - 0.27247
+  yaw_deg: 0.3687
+post_transform_align:
+  rule: 离线刚体后处理（§26）：p' = R(dyaw)·p + t，map 系内、绕 map 原点；**只平移，不旋转**
+  dyaw_deg: 0.0
+  t_m:
+  - 0.1408
+  - -0.0147
+  dz: 0.0461
+  tz_anchor: 地面（真值分区 ground，rel<0.05）→ world z=0；world←map z 取本跑 align.json 的 +0.0129
+  wall_witness:
+    tool: .tmp_map2/wall_resid.py（峰 + 中位精修）+ .tmp_align/fit_faces.py（面级 LS）
+    zrange:
+    - 0.15
+    - 0.6
+    faces_used:
+    - x=2.5
+    - x=14.5
+    - y=0.5
+    - y=8.5
+    raw_p50_before: 0.15516
+    raw_p50_after: 0.01392
+    old_default_pcd_p50: 0.04365
+  floor:
+    ground_z_map_before: -0.059
+    ground_z_map_after: -0.0135
+    ground_z_world_after: -0.0006
+    platform_z_world_after: 0.2292
+    platform_truth: 0.2
+  files:
+    pcd: RMUL2026_v6al.pcd（md5 1d5ca30e9d0268d971306f4f497cfb4f）
+    grid: map/RMUL2026_v6al_spl.pgm+.yaml（md5 7ec12dc3… / 501b454b…）
