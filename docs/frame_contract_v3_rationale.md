@@ -558,7 +558,8 @@ pb2025 之所以能成，是因为 point_lio 里 `gravity` 只是 `Set_init` 的
   ② `urdf` 档**没有任何告警**（S1 §9.4(5) 风险列）：先验错 ⇒ 世界按错角度摆正，且你无从发现；
   ③ 自动算的值与实物同源，换支架只需改 URDF。
 * **风险**：URDF 本身的轴/方向有争议（`robot_models.md:653` 的 `rpy="0 -0.5236 0"`= pitch vs CSV= roll；
-  S4 §7.2 O6）⇒ 自动算会**忠实继承**这个争议。缓解：默认 `livox_tilt_axis:=roll`（CSV 字面值），
+  S4 §7.2 O6）⇒ 自动算会**忠实继承**这个争议。缓解：默认 `livox_tilt_axis:=roll`（CSV 字面值；
+  该 launch 开关已于 2026-10-21 删除并冻结 `roll`，见 measurements §28），
   且 `hybrid` 的 Δ 互检会把"URDF 与实物不符"变成 ERROR（`v8b` 的 Δ=42.2° 就是这么被抓到的）。
 * **回退**：允许手填（不推荐），或改 `gravity_align_mode:=hybrid` 让互检兜底。
 * **替代方案（被否）**：在 launch 里再写一份 `gravity_align_rpy` 的默认值 —— 那是第二个所有者（P2），且与 URDF 漂移后会**静默不一致**。

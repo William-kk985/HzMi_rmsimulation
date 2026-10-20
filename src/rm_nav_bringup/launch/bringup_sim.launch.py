@@ -143,22 +143,12 @@ _ROBOT_SLOTS = {
                 '雷达在底盘上、斜 30° 下俯、离地 0.2595 m）'),
 }
 
-#: robot:=robot11 的雷达 30° 安装：**上游两份材料自相矛盾**（URDF 原文写 pitch、
-#: SolidWorks CSV 写 roll），Phase 2 只能证明"轴看得出来、哪个对文件说了算"。
-#: ★ 2026-10-07 Phase 3：**用户按实物确认 = 绕 roll**（"30° 是绕 roll 轴"）⇒ 默认 roll 从
-#:   "机器导出的 CSV 更可信"升级为"实物判据"；`pitch` 保留为对照开关（几何上等价，只差绕 z 一转）。
-_LIVOX_TILT_RPY = {
-    # 默认：SolidWorks CSV 的 Joint Origin Roll = -0.523598775598293（**用户已按实物确认**）
-    'roll': '-0.523598775598293 0 0',
-    # URDF 原文那一行 rpy="0 -0.5236 0"（保留供对照/回退）
-    'pitch': '0 -0.523598775598293 0',
-}
-
-#: robot:=robot11 的 A 方案（碰撞挖视锥）默认抬高量：**0 = 与上游几何逐字相同**。
-#: 非 0 = B 方案（把雷达抬到顶板上方）—— 只是"实测对照"用；抬高会改变雷达离地高度，
-#: linefit 的 sensor_height 必须同步改（见 config/segmentation_sim_robot11.yaml 的 ⚠️ 与
-#: docs/robot_models.md §11 的 B 复现步骤）。本 launch **不替你改 YAML**（避免第二个真源）。
-_LIVOX_RAISE_DEFAULT = '0.0'
+#: robot:=robot11 的雷达 30° 安装：**冻结为 roll**（2026-10-21 删除 `livox_tilt_axis` 开关）。
+#: 值 = SolidWorks CSV 的 Joint Origin Roll = -0.523598775598293（用户 2026-10-07 按实物确认
+#: "30° 是绕 roll 轴"）；上游 URDF 原文写的 pitch 只是台架对照（几何等价，只差绕 z 一转）⇒ 随
+#: 开关一起删除。⚠️ 这是**传给 xacro 的输入**（`livox_tilt_rpy`），不是运行时真值：安装 rpy
+#: 由 `_parsed_livox_mount()` 从这次真要 spawn 的 URDF 解析；这里冻结的只是生成模型时的取值。
+_LIVOX_TILT_RPY_ROLL = '-0.523598775598293 0 0'
 
 #: ★ 2026-10-08：robot:=robot11 的**雷达安装方式**（30° 倾角记在哪个坐标系上）。
 #:   · 'plugin'（**默认 = 2026-10-07 起的行为，逐字节不变**）：`body_to_livox` 关节 rpy = 0
@@ -220,7 +210,7 @@ def _check_gravity_align_contract(context):
          要么按 ROS 2 的"未声明参数"规则无声丢掉 ⇒ 你以为对齐了，其实 odom 还是斜 30°。
       2. `robot` 是 launch 不认识的模型 ⇒ 推不出 `base_link→livox_frame` 的 rpy ⇒ 先验无从谈起
          （**不许**手填一个数兜底，那是第二个所有者，见契约 §4.1）。
-      3. `livox_tilt_axis` / `robot11_mount` 取值非法 ⇒ 让 `_urdf_livox_mount_rpy_deg` 在这里就抛。
+      3. `robot11_mount` 取值非法 ⇒ 让 `_urdf_livox_mount_rpy_deg` 在这里就抛。
     ⚠️ 必须作为 **Action**（OpaqueFunction）放在 `declare_LIO_cmd` / `declare_gravity_align_mode_cmd` /
     `declare_robot11_mount_cmd` **之后**：`LaunchConfiguration(...).perform()` 读的是"已经声明过"的值，
     声明顺序反了会直接抛 "does not exist"（与 `_check_robot11_mount_combination` 同一个坑）。
@@ -239,7 +229,7 @@ def _check_gravity_align_contract(context):
             "small_point_lio 包里；fastlio/pointlio/cartographer 没有 gravity_align_mode / "
             "gravity_align_rpy 这些参数，传了也不会生效）⇒ 当前 lio:=%s：请改成 "
             "lio:=small_point_lio，或把 gravity_align_mode 设回 off" % (mode, lio or '(空)'))
-    # 先验必须真的能从 URDF 推出来（robot 未知 / 轴写错 ⇒ 在这里报，而不是到节点里才发现）
+    # 先验必须真的能从 URDF 推出来（robot 未知 / mount 写错 ⇒ 在这里报，而不是到节点里才发现）
     rpy = _urdf_livox_mount_rpy_deg(context)
     # ★ 2026-10-21（E1b + URDF 解析）：z 原点。`sensor` = 旧行为；`ground` = odom 的 z=0 放在
     #   初始化时刻的地面，高度 `_gravity_align_h()` = **解析出的 livox_z + 地面偏移表**。
@@ -254,12 +244,11 @@ def _check_gravity_align_contract(context):
     return [LogInfo(msg=(
         '[gravity_align] mode=%s ⇒ 统一输出契约启用：LIO publish_tf:=false + odom_convention:=sensor、'
         'lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy（来源=%s）= '
-        '[%.6f, %.6f, %.6f]°（robot=%r mount=%r axis=%r）；'
+        '[%.6f, %.6f, %.6f]°（robot=%r mount=%r）；'
         'z_origin=%s gravity_align_h=%s → %.6f m（%s）'
         % (mode, mount_src, rpy[0], rpy[1], rpy[2],
            LaunchConfiguration('robot').perform(context),
            (LaunchConfiguration('robot11_mount').perform(context) or ''),
-           (LaunchConfiguration('livox_tilt_axis').perform(context) or ''),
            z_origin, mount_src, h,
            ('odom 的 z=0 = 初始化时刻的地面；h = base_link 离地（表） + livox z（解析）'
             if z_origin == 'ground' else
@@ -280,7 +269,7 @@ def _rpy_deg_to_R(rpy_rad):
                  for k in range(3)) for m in range(3)] for i in range(3)]
 
 
-def _lio_adapter_robot11(axis, raise_m=0.0, mount='plugin'):
+def _lio_adapter_robot11(mount='plugin'):
     """robot:=robot11 的 lio_tf_adapter 补偿量（xyz = base_link 原点在 imu 系下的坐标，rpy = 其姿态）。
 
     纯几何、无魔法：imu_link 的位姿 = body_to_livox(rpy) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
@@ -289,15 +278,15 @@ def _lio_adapter_robot11(axis, raise_m=0.0, mount='plugin'):
 
     ★ 2026-10-08：`mount` 决定 `body_to_livox` 的 rpy 取哪个值（与 xacro 里的同一个规则）：
       · `plugin`（默认）：rpy = 0 ⇒ 与 Phase 3 的返回值**逐位相同**（旋转为单位阵、xyz = −p_imu）；
-      · `urdf`          ：rpy = 倾角（roll/pitch 30°）⇒ **旋转不再是单位阵**，xyz 也要用 Rᵀ 转一次。
+      · `urdf`          ：rpy = 倾角（roll 30°，轴已冻结）⇒ **旋转不再是单位阵**，xyz 也要用 Rᵀ 转一次。
     两种挂法下 imu 的**离地高度**都还是 0.216226 m（30° 只改朝向、不改高度？—— 不：见 §C 实测，
     `urdf` 档 imu 随雷达一起斜 ⇒ 离地高度由 R 决定；本函数按几何**算**出来，不写死）。
     """
     import math as _m
-    tilt = [float(v) for v in _LIVOX_TILT_RPY[axis].split()]
+    tilt = [float(v) for v in _LIVOX_TILT_RPY_ROLL.split()]
     mount = (mount or 'plugin').strip() or 'plugin'
     rpy = [0.0, 0.0, 0.0] if mount == 'plugin' else tilt
-    p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305 + float(raise_m))
+    p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305)
     R = _rpy_deg_to_R(rpy)                      # R_body←livox
     # imu 原点在 body 系 = p_livox + R·(0,0,−0.05)；姿态 = R
     off = [R[i][2] * -0.05 for i in range(3)]
@@ -411,15 +400,12 @@ def _robot_xacro_args(context, xyz, rpy):
         args += [('turret_yaw_deg', LaunchConfiguration('turret_yaw_deg').perform(context), False),
                  ('turret_pitch_deg', LaunchConfiguration('turret_pitch_deg').perform(context), False)]
     elif robot == 'robot11':
-        axis = (LaunchConfiguration('livox_tilt_axis').perform(context) or '').strip()
-        if axis not in _LIVOX_TILT_RPY:
-            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
-        # 值里带空格 ⇒ 必须加引号，否则 xacro 会把它当成多个输入文件
-        args += [('livox_tilt_rpy', _LIVOX_TILT_RPY[axis], True),
+        # ★ 2026-10-21：倾角轴已冻结为 roll（= 2026-10-07 起的默认值），不再有 launch 开关；
+        #   `livox_raise_m` 也不再从 launch 传（xacro 的默认值就是 0 = 与上游几何逐字相同）。
+        # 值里带空格 ⇒ 必须加引号，否则 xacro 会把它当成多个输入文件。
+        args += [('livox_tilt_rpy', _LIVOX_TILT_RPY_ROLL, True),
                  ('livox_mount', _validate_livox_mount(
                      LaunchConfiguration('robot11_mount').perform(context)), False),
-                 ('livox_raise_m',
-                  (LaunchConfiguration('livox_raise_m').perform(context) or '').strip() or '0.0', False),
                  ('visual_decimated',
                   'true' if (LaunchConfiguration('robot11_visual').perform(context) or '').strip()
                   == 'decimated' else 'false', False)]
@@ -427,7 +413,11 @@ def _robot_xacro_args(context, xyz, rpy):
 
 
 def _render_robot_xacro_command(context, urdf_path, xyz, rpy):
-    """把 `_robot_xacro_args` 渲染成 command 字符串（与 1b5db4b 的 `_RobotXacroCommand` 逐字节相同）。"""
+    """把 `_robot_xacro_args` 渲染成 command 字符串。
+
+    ★ 2026-10-21：robot11 的 `livox_raise_m:=0.0` 已删除（冻结 0），command 字符串因此比 1b5db4b
+    少这一个参数；xacro 同默认值 ⇒ **生成的 robot_description 仍逐字节相同**（见 measurements §28）。
+    """
     parts = ['xacro ', urdf_path]
     for name, value, needs_quote in _robot_xacro_args(context, xyz, rpy):
         parts += [' ', name, ':=', ('"%s"' % value) if needs_quote else value]
@@ -604,14 +594,10 @@ def _urdf_livox_mount_table(context):
     """**旧规则表**（1b5db4b 及以前 launch 里那张）：只作交叉校验与解析失败时的回退。"""
     robot = _known_robot(context)
     if robot == 'robot11':
-        axis = (LaunchConfiguration('livox_tilt_axis').perform(context) or '').strip()
-        if axis not in _LIVOX_TILT_RPY:
-            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
         mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        raise_m = float((LaunchConfiguration('livox_raise_m').perform(context) or '').strip() or '0.0')
         rpy = ([0.0, 0.0, 0.0] if mount == 'plugin' else
-               [round(_math.degrees(float(v)), 9) for v in _LIVOX_TILT_RPY[axis].split()])
-        xyz = [0.000561701465058485, 0.130915824456595, 0.15702816968305 + raise_m]
+               [round(_math.degrees(float(v)), 9) for v in _LIVOX_TILT_RPY_ROLL.split()])
+        xyz = [0.000561701465058485, 0.130915824456595, 0.15702816968305]
     elif robot == 'hzmirm':
         yaw = float((LaunchConfiguration('turret_yaw_deg').perform(context) or '').strip() or '0.0')
         pitch = float((LaunchConfiguration('turret_pitch_deg').perform(context) or '').strip() or '0.0')
@@ -634,12 +620,8 @@ def _adapter_table(context):
     """旧表的 adapter 补偿量（T(imu←base)），解析失败时回退。"""
     robot = _known_robot(context)
     if robot == 'robot11':
-        axis = (LaunchConfiguration('livox_tilt_axis').perform(context) or '').strip()
-        if axis not in _LIVOX_TILT_RPY:
-            raise RuntimeError("[launch] livox_tilt_axis:=%r 不是可用取值（roll | pitch）" % axis)
-        raise_m = (LaunchConfiguration('livox_raise_m').perform(context) or '').strip() or '0.0'
         mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        return _lio_adapter_robot11(axis, raise_m, mount)
+        return _lio_adapter_robot11(mount)
     if robot == 'hzmirm':
         return [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
     return [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
@@ -971,7 +953,7 @@ def _gravity_align_h(context):
     h = **base_link 原点离地高度**（`_HZMI_BASE_LINK_HEIGHT_M`：URDF 给不了的那一个量，逐台有证据）
       + **livox_frame 原点在 base_link 里的 z**（**解析**出来的 T(base_link←livox_frame)，随 URDF 变）
 
-    逐模型（默认姿态、`livox_raise_m:=0`）：
+    逐模型（默认姿态）：
       · `robot:=robot11`：0.102499 + 0.15702816968305 = **0.259527 m**
         （与 linefit 的 `sensor_height: 0.2595` 交叉一致；`sensor` 档点云真的在传感器系）
       · `robot:=hzmirm`（云台 pitch=0）：0.0 + (0.3+0.3+0.2·cos(pitch)) = **0.800000 m**
@@ -979,9 +961,9 @@ def _gravity_align_h(context):
       · 默认模型（`robot:=''`）：0.06 + 0.175 = **0.235000 m**
         （linefit 的 `sensor_height: 0.226` 是 Gazebo 实测值 = 轮胎下沉 ~9 mm；URDF 几何值是 0.235）
 
-    ⚠️ 这里只回答"URDF 说雷达在哪"，**不是**实测值；`livox_raise_m`（robot11 的 B 方案）会
-    真的抬高雷达 ⇒ 解析出的 livox_z 自动跟着加（linefit 的 YAML 不跟，那份由用户同步，见
-    config/segmentation_sim_robot11.yaml 的 ⚠️；解析器在高度漂移 >1 cm 时会打 WARN）。
+    ⚠️ 这里只回答"URDF 说雷达在哪"，**不是**实测值。`livox_raise_m` 已在 2026-10-21 从 launch
+    删除（冻结 0；xacro 仍保留同名 arg，默认 0 ⇒ 默认生成的 URDF 逐字节不变）。若要复现 B 方案，
+    只能改 scratch 生成器/xacro；同时 linefit 的 `sensor_height` 必须手工同步（本 launch 不替改）。
     """
     robot = _known_robot(context)
     off = _HZMI_BASE_LINK_HEIGHT_M.get(robot)
@@ -1015,7 +997,7 @@ class _LioAdapterExtrinsic(Substitution):
 
     ★ 2026-10-21：不再按"三个槽位各一条规则"手写。`_parsed_livox_mount()` 沿
       `base_link → livox_frame → imu_link` 的 **fixed 关节链**合成 T(base←imu)，再取逆得到
-      T(imu←base)（xyz = −Rᵀ·p，rpy = Rᵀ 的 rpy）⇒ 云台转动/雷达抬高/URDF 改几何都会自动流到这里。
+      T(imu←base)（xyz = −Rᵀ·p，rpy = Rᵀ 的 rpy）⇒ 云台转动/URDF 改几何都会自动流到这里。
       旧规则表（`_adapter_table`）只在解析失败时回退（已打 WARN）；两边数值在 1b5db4b 的所有
       槽位/挂法上逐位一致（见 docs/frame_contract_v3_measurements.md §10）。
     """
@@ -1045,7 +1027,7 @@ class _LioAdapterRobot11(Substitution):
     做 yaml.safe_load ⇒ 正好还原成 double 数组；见 launch_ros/utilities/evaluate_parameters.py）。
 
     ★ 2026-10-21：数值来自 `_parsed_livox_mount()`（展开这次真 spawn 的 xacro → fixed 关节链），
-    不再来自 `_LIVOX_TILT_RPY` 规则表；旧表（`_adapter_table`）只在解析失败时回退 + WARN。
+    不再来自倾角轴规则表（轴已冻结为 roll）；旧表（`_adapter_table`）只在解析失败时回退 + WARN。
 
     惰性：只有 `robot:=robot11` 且 LIO 不是 none/cartographer/small_point_lio 时才会被求值。
     """
@@ -1778,8 +1760,8 @@ def generate_launch_description():
     #   · robot11  → segmentation_sim_robot11.yaml（Phase 3 新增）：sensor_height = 雷达离地
     #                 **实测 0.2595**（默认模型 0.226 / hzmirm 0.80）、
     #                 gravity_aligned_frame=""（点云在源头已重力对齐 ⇒ 该键不需要、也不能开）。
-    #                 ⚠️ 若用 livox_raise_m≠0 跑 B 方案，那份 YAML 的 sensor_height 必须同步
-    #                    （0.2595 + raise，实测值），本 launch 不替改（避免第二个真源）。
+    #                 ⚠️ `livox_raise_m` 已从 launch 删除（冻结 0）；若用 scratch 生成器复现 B 方案，
+    #                    那份 YAML 的 sensor_height 必须手工同步（0.2595 + raise），本 launch 不替改。
     segmentation_params = _RobotSlotFile(
         'linefit_ground_segmentation_ros',
         ('config', 'segmentation_sim.yaml'),
@@ -2151,35 +2133,13 @@ def generate_launch_description():
                     "范围/数值对照见 docs/robot_models.md",
         choices=['', 'hzmirm', 'robot11'])
 
-    # ★ 2026-10-07：robot:=robot11 的雷达 30° 安装轴 —— **上游两份材料自相矛盾，不猜，实测**：
-    #   · URDF 原文 `body_to_livox` 的 rpy="0 -0.5236 0"（绕 y = pitch）
-    #   · 同一台车的 SolidWorks CSV 写 Joint Origin Roll = -0.523598775598293（绕 x = roll）
-    #   几何事实（docs/robot_models.md §9.5）：MID-360 方位 360° ⇒ 两个候选的**世界仰角谱与
-    #   地面环半径完全相同**（都下俯 30°，盲区都是半径 ~0.34 m 的圆），只差一个绕 z 的旋转；
-    #   **唯一判据是"最朝下的那一束指向 body 的哪个方位"**（roll → ±y / pitch → ±x）。
-    declare_livox_tilt_axis_cmd = DeclareLaunchArgument(
-        'livox_tilt_axis',
-        default_value='roll',
-        description='仅 robot:=robot11：雷达 30° 倾斜绕哪个轴（roll=绕 x / pitch=绕 y）。'
-                    '默认 roll = SolidWorks CSV 的字面值（URDF 原文写的是 pitch，两者矛盾）。'
-                    '⚠️ 对 360° 的 MID-360，两个取值在**仰角/地面可见性/盲区半径上完全等价**，'
-                    '只改变"最朝下的方位"（roll→±y，pitch→±x）；实测见 docs/robot_models.md §10.5。'
-                    '★ Phase 3：倾角实现位置 = `<gazebo><sensor><pose>`（射线真的斜），'
-                    '而 livox_frame 这个帧是重力对齐的（理由：linefit 的 gravity_aligned_frame '
-                    '路径在本仓有 C++ bug，见 docs/robot_models.md §11）',
-        choices=['roll', 'pitch'])
-
-    # ★ 2026-10-07 Phase 3：robot:=robot11 的 B 方案开关（把雷达整体抬高多少米）。
-    #   默认 0.0 ⇒ 与上游 URDF 几何**逐字相同**（xacro 里 origin z = 0.15702816968305 + 0）。
-    declare_livox_raise_m_cmd = DeclareLaunchArgument(
-        'livox_raise_m',
-        default_value=_LIVOX_RAISE_DEFAULT,
-        description='仅 robot:=robot11：把 livox_frame（连同 imu_link）在 body 系里抬高的米数。'
-                    '0.0 = 上游几何（A 方案：靠碰撞挖视锥让雷达看得见）；'
-                    '非 0 = B 方案（保留 4 个 box，把雷达抬到顶板上方）—— 离线实测：'
-                    '+0.06 m 才把自击从 96.6% 降到 19.8%、**+0.10 m 起才与 A 等价**。'
-                    '⚠️ 抬高会改变雷达离地高度 ⇒ linefit 的 sensor_height 必须同步 = 0.2595 + 本值'
-                    '（改 config/segmentation_sim_robot11.yaml；见 docs/robot_models.md §11 的复现步骤）')
+    # ★ 2026-10-21：robot:=robot11 的 30° 安装轴**已冻结为 roll**，`livox_tilt_axis` 与
+    #   `livox_raise_m` 两个 launch 参数已删除（详见 docs/frame_contract_v3_measurements.md §28）：
+    #     · 轴：值 = SolidWorks CSV 的 roll 形式 `-0.523598775598293 0 0`（用户按实物确认）；
+    #       pitch 只是台架对照，已在 `_LIVOX_TILT_RPY_ROLL` 的注释里留档，要复现只能改 scratch 生成器。
+    #     · 抬高：冻结 0（上游几何）；xacro 仍保留 `livox_raise_m` arg 且默认 0 ⇒ 生成物逐字节不变。
+    #   ⚠️ 这两个值原来都是"生成模型的输入"，不是运行时真值：安装 rpy/xyz 由 URDF 解析
+    #   （`_parsed_livox_mount()`）唯一定义，所以删除开关不会改变默认路径。
 
     # ★ 2026-10-08：robot:=robot11 的**雷达安装方式**开关（opt-in；默认 = 2026-10-07 起的行为）。
     #   用户诉求原话："我就是要学斜放置怎么处理…雷达给我按我给你的放好，算法不管后面再看怎么调试，
@@ -3121,7 +3081,7 @@ def generate_launch_description():
     #   【MID-360 的 IMU 与雷达同壳】这条物理事实跟着雷达一起斜
     #   （好处：三份 LIO 配置的 extrinsic_T=[0,0,0.05]/extrinsic_R=I **一个字节都不用改**）。
     #   ⇒ LIO 的 body 系 = 斜 30° 的 IMU 系 ⇒ 必须用 rpy 把它转回水平的 base_link。
-    #   数值由 _LioAdapterRobot11 从 URDF 几何**算**出来（不是手抄），随 livox_tilt_axis 变；
+    #   数值由 _LioAdapterRobot11 从 URDF 几何**算**出来（不是手抄），随 URDF/安装方式变；
     #   用 Substitution 惰性求值（照抄本文件 _PackageShareFile 的设计原则：不选这个槽位零成本）。
     lio_tf_adapter_robot11_node = Node(
         condition = IfCondition(PythonExpression([
@@ -3596,9 +3556,6 @@ def generate_launch_description():
     ld.add_action(declare_sim_backend_cmd)
     ld.add_action(declare_turret_yaw_deg_cmd)
     ld.add_action(declare_turret_pitch_deg_cmd)
-    # ★ 2026-10-07：robot:=robot11 的雷达安装轴（roll | pitch；上游两份材料矛盾 ⇒ 不猜）
-    ld.add_action(declare_livox_tilt_axis_cmd)
-    ld.add_action(declare_livox_raise_m_cmd)
     # ★ 2026-10-08：robot:=robot11 的雷达**安装方式**（倾角记在插件 vs 记在 URDF 关节）
     ld.add_action(declare_robot11_mount_cmd)
     # ★ 2026-10-20：E1 重力对齐 + 统一输出契约（默认 auto ⇒ lio:=fastlio 下有效值 off =
@@ -3629,8 +3586,7 @@ def generate_launch_description():
         msg=['[robot] 模型槽位 = robot11（urdf/sentry_robot_robot11_sim.xacro）：用户的哨兵，'
              '真 mesh 视觉 + 真 inertial；雷达在**底盘**上（不在云台）斜 30° 下俯，离地 0.2595 m；'
              '足印内切 0.300 / 外接 0.3565 m；质量 9.5521 kg。',
-             '  · 雷达倾斜轴 livox_tilt_axis=', LaunchConfiguration('livox_tilt_axis'),
-             '（roll = SolidWorks CSV 的字面值；两条候选在仰角/盲区上等价，只差最朝下的方位）',
+             '  · 雷达倾斜轴 = roll（冻结值 = SolidWorks CSV 的字面值；livox_tilt_axis 开关已删除）',
              '  · 视觉 mesh：robot11_visual=', LaunchConfiguration('robot11_visual'),
              '（decimated = **专用视觉 LOD** meshes/decimated/*.stl：整车 2,821,320 → 163,995 面、'
              '141.07 → 8.20 MB，逐 mesh 的包围盒差/表面误差/剪影 IoU 量化在 '
@@ -3672,7 +3628,7 @@ def generate_launch_description():
     ld.add_action(OpaqueFunction(function=_check_robot11_mount_combination))
     # ★ 2026-10-20：gravity_align_mode 的组合检查（只在**有效值**!=off 时才执行 ⇒ 默认路径**零动作**；
     #   2026-10-20：条件改用 _GravityAlignEffectiveMode ⇒ `auto` + 非 SPL 不再误触发；
-    #   位置必须在 declare_LIO_cmd 之后：它要读 lio / robot / robot11_mount / livox_tilt_axis，
+    #   位置必须在 declare_LIO_cmd 之后：它要读 lio / robot / robot11_mount，
     #   而 launch 的 DeclareLaunchArgument 是**按顺序**生效的）。
     ld.add_action(GroupAction(
         condition=IfCondition(PythonExpression([

@@ -688,14 +688,14 @@ colcon build --symlink-install --packages-select robot11 rm_nav_bringup hzmi_rm_
 ros2 launch rm_nav_bringup bringup_sim.launch.py \
   world:=RMUL2026 mode:=mapping lio:=small_point_lio robot:=robot11 \
   map_autocontinue:=False nav_rviz:=False lio_rviz:=False
-# ③ 换"30° 绕哪个轴"（默认 roll = SolidWorks CSV；pitch = URDF 原文）
-#   ... robot:=robot11 livox_tilt_axis:=pitch ...
+# ③ 换"30° 绕哪个轴"：launch 开关 livox_tilt_axis 已于 2026-10-21 删除（冻结 roll）；
+#    pitch 只能改 scratch 生成器/xacro 的 livox_tilt_rpy（见 measurements §28）
 # ④ 只起 Gazebo + 模型
 ros2 launch hzmi_rm_simulation rm_simulation.launch.py robot:=robot11 world:=RMUC2026
 # ⑤ 一条命令量齐（隔离无头跑 + 探针 + 契约检查）→ .tmp_robotslot/<tag>/
 tools/scripts/regress/run_robot_model_probe.sh r11 --duration 20 --drive-seconds 10 \
   --dump-cloud .tmp_robotslot/r11/frames --dump-scan .tmp_robotslot/r11/scans \
-  -- world:=RMUL2026 mode:=mapping lio:=small_point_lio robot:=robot11 livox_tilt_axis:=roll \
+  -- world:=RMUL2026 mode:=mapping lio:=small_point_lio robot:=robot11 \
      map_autocontinue:=False
 ```
 
@@ -707,7 +707,7 @@ tools/scripts/regress/run_robot_model_probe.sh r11 --duration 20 --drive-seconds
 | `tools/scripts/regress/robot11_make_sim_xacro.py` | 上者的**生成器**（provenance 是构造性的：可逐字节重算）|
 | `tools/scripts/regress/robot11_geometry.py` | 零位 FK + 地面/足印/雷达倾角候选（§9.4/§9.5）|
 | `tools/scripts/regress/robot11_gz_collision_bench.py` | Gazebo 碰撞代价实测（§9.3）|
-| `bringup_sim.launch.py` | `robot` 的 `choices` 加 `'robot11'`；新增 `livox_tilt_axis`；新增互斥的 `lio_tf_adapter_robot11_node` |
+| `bringup_sim.launch.py` | `robot` 的 `choices` 加 `'robot11'`；新增互斥的 `lio_tf_adapter_robot11_node`；`livox_tilt_axis` 已于 2026-10-21 删除（冻结 `roll`） |
 | `hzmi_rm_simulation/launch/rm_simulation.launch.py` | `robot` 的 `choices` 加 `'robot11'`（只起 Gazebo）|
 
 **"默认路径没变"的证据**（可复现，`_RobotXacroCommand` 的单元级比对，见 §10.7 工具）：
@@ -722,7 +722,7 @@ tools/scripts/regress/run_robot_model_probe.sh r11 --duration 20 --drive-seconds
 | 12 条 `<inertial>`（质量/惯量/质心）| **上游原样** | 这份 URDF **自带惯性**（与 hzmirm 那份不同）⇒ 不需要我们补；合计 **9.5521 kg** |
 | 12 个 `<visual>`（`package://robot11/meshes/*.STL`）| **上游原样** | **原始 mesh，视觉零损失** |
 | `<collision>` ×12 | **我们换掉** | 上游 12 个全是 mesh（`body` 208 万面）。换成：`body` = 4 个 DP box；`l2..l5/l10/l11` = 各自 mesh 包围盒的 box；`l6..l9` = cylinder(r=0.058, l=0.045)；**`livox_frame` 与 `imu_link` 故意不给碰撞**（理由见 §10.5）|
-| `body_to_livox` 的 `rpy` | **上游原样 + 参数化** | 默认 = CSV 的 `-0.523598775598293 0 0`（roll）；`livox_tilt_axis:=pitch` 换成 `0 -0.523598775598293 0`（URDF 原文）|
+| `body_to_livox` 的 `rpy` | **上游原样 + 参数化** | 默认 = CSV 的 `-0.523598775598293 0 0`（roll）；`livox_tilt_axis:=pitch` 换成 `0 -0.523598775598293 0`（URDF 原文）。该 launch 开关已于 2026-10-21 删除（冻结 roll）；pitch 只能 scratch 改 `livox_tilt_rpy` |
 | `imu_link` + `imu_joint`（fixed，挂 `livox_frame` 下方 0.05 m，**跟着雷达斜 30°**）| **我们加的** | 见 §10.3 的三条理由 |
 | MID-360 射线传感器（`type="ray"`，挂在**上游自己的** `livox_frame` 上，sensor 名 = `livox_frame` ⇒ 点云 `frame_id` = `livox_frame`）| **我们加的** | **没有**用 `ros2_livox_simulation` 的 `mid360` 宏：宏会 new 一个同名 link + 关节，与上游的 `livox_frame` 冲突 ⇒ 把宏里那段 `<sensor type="ray">` 逐字抄过来、只改 sensor 名。参数与宏一致：100×360 / 10 Hz / 0.1–200 m / σ=2 mm / 垂直 −7.22°…+55.22° |
 | `libgazebo_ros_planar_move.so` 底盘插件 | **我们加的**（与默认模型同款）| `cmd_vel→/cmd_vel_chassis`、`odom→/odom_ground_truth`、`publish_odom_tf=false` ⇒ 契约不变 |
@@ -741,7 +741,7 @@ tools/scripts/regress/run_robot_model_probe.sh r11 --duration 20 --drive-seconds
    `extrinsic_R`（更大的改动面、且要同时改三处才自洽）；
 3. **后果可控**：IMU 的 z 轴相对 `base_link` 斜 30° ⇒ 由 `lio_tf_adapter` 的 **`rpy`** 精确补偿
    （该节点本来就支持 rpy）。补偿量**不是手抄的**，是 launch 里的 `_LioAdapterRobot11` 从
-   URDF 几何算出来的（`T_imu_link←base_link`，随 `livox_tilt_axis` 变）：
+   URDF 几何算出来的（`T_imu_link←base_link`，随固定的 roll 安装变；`livox_tilt_axis` 已删除）：
 
    | 候选 | `xyz`（T_imu←base_link）| `rpy` |
    |---|---|---|
@@ -865,7 +865,7 @@ MID-360 的方位是 **360°** ⇒ "绕 x 转 30°"与"绕 y 转 30°"给出的*
 |---|---|
 | 只退回默认模型 | **什么都不用改**：去掉 `robot:=robot11` 即可（默认路径从未改动）|
 | 退掉整套 robot11 槽位 | `git revert <本主题 commit>`；删掉 `robot11_description/`、`urdf/upstream/robot11.urdf`、`sentry_robot_robot11_sim.xacro`、`robot11_*.py` 后，`robot:=robot11` 会给一条可操作的错 |
-| 只换倾斜轴 | 加 `livox_tilt_axis:=pitch`（或 `roll`）|
+| 只换倾斜轴 | **旧 launch 开关已删除（2026-10-21）**；只能改 scratch 生成器/xacro 的 `livox_tilt_rpy`（pitch 形式 `0 -0.523598775598293 0`）|
 | 只换 `body` 的碰撞表示 | `python3 tools/scripts/regress/robot11_make_sim_xacro.py --body-collision mesh`（重新生成 xacro；**这条路未验**，见 §10.6）|
 | 重新生成 xacro | `python3 tools/scripts/regress/robot11_make_sim_xacro.py`（上游 URDF 改了就重跑）|
 
@@ -983,7 +983,7 @@ Gazebo 在"打一帧射线"里出不来（spawn 阶段的空间重建也一起�
 | 1 | 12 个 `<collision>` | 全是 mesh（`body` 208 万面） | `body` = 76 个 box（A 方案）；云台 `l10/l11` = 7/22 个 box；轮 = cylinder；其余 = 网格包围盒 box | 10-07 P1/P3 | Phase 1 实测：原网格一接触 RTF 0.20 / RSS +587 MB；Phase 3 实测：4 个实心 box 让 75.5% 的点变自击 |
 | 2 | `body` 的根 link 名 | `body` | **`base_link`** | 10-07 P3 | 全链路契约帧名（LIO 源码硬编码）；**上游 SolidWorks CSV 里本来就叫 `base_link`**；不改名实测 TF 断树、`/odom` 0 条 |
 | 3 | `body_to_livox` 的 `rpy` | `-0.523598775598293 0 0`（CSV 的 roll 形式） | **`0 0 0`**（帧重力对齐），倾角搬到插件参数 `<tilt_rpy>` | 10-07 P3 | linefit 的 `gravity_aligned_frame` 在本仓有 C++ bug（§11.4）；帧正、点云就正（插件把点发布在父 link 系）；**射线仍真的斜 30°** |
-| 4 | `body_to_livox` 的 `origin.z` | `0.15702816968305` | `0.15702816968305 + $(arg livox_raise_m)`（**默认 0**） | 10-07 P3 | 只为 B 方案的实测对照；默认路径与上游逐字相同 |
+| 4 | `body_to_livox` 的 `origin.z` | `0.15702816968305` | `0.15702816968305 + $(arg livox_raise_m)`（xacro arg **默认 0**；launch 已于 2026-10-21 删除、不再传） | 10-07 P3 | 只为 B 方案的实测对照；默认路径与上游逐字相同 |
 | 5 | `imu_link` + `imu_joint` | 上游**没有** | 固定关节、沿 body −z 走 0.05 m（跟随雷达位置） | 10-07 P2 | 三份 LIO 配置的 `extrinsic_T=[0,0,0.05]`、`extrinsic_R=I` **逐字节不用改**；IMU 与雷达"只差 0.05 m 平移"这条几何没变（IMU 的**绝对**姿态从"跟着斜"变成"与 body 同姿态"，LIO 自己会估） |
 | 6 | MID-360 射线传感器 | 上游**没有** | `<sensor type="ray" name="livox_frame">`（参数与 `mid360.xacro` 宏逐字一致）+ **新增 `<tilt_rpy>`** | 10-07 P2/P3 | 本栈需要 ≥10 Hz 的 `/livox/lidar`；`<tilt_rpy>` 装安装倾角（缺省单位阵 ⇒ 其它模型逐字节不变） |
 | 7 | 底盘插件 / IMU 传感器 / 材质 | 上游**没有** | `libgazebo_ros_planar_move.so`（`cmd_vel→/cmd_vel_chassis`、`odom→/odom_ground_truth`、`publish_odom_tf=false`）、`gazebo_ros_imu_sensor`（100 Hz → `/livox/imu`）、13 条材质 | 10-07 P2 | 与默认模型同款 ⇒ 契约不变（单一 `/cmd_vel_chassis` 订阅、单一真值里程计） |
@@ -1086,13 +1086,13 @@ python3 tools/scripts/regress/robot11_livox_fov.py --compare          # mesh / 4
 python3 tools/scripts/regress/robot11_livox_fov.py --emit-carved      # 重算 A 的 box 清单
 python3 tools/scripts/regress/robot11_livox_fov.py --emit-turret-boxes # 重算云台细盒
 
-# ④ 换 30° 绕哪个轴（默认 roll = 用户按实物确认）
-#    ... robot:=robot11 livox_tilt_axis:=pitch ...
+# ④ 换 30° 绕哪个轴：launch 开关 livox_tilt_axis 已于 2026-10-21 删除（冻结 roll）；
+#    pitch 只能改 scratch 生成器/xacro 的 livox_tilt_rpy
 
-# ⑤ B 方案复现（抬高雷达）—— **必须同时改 linefit 的 sensor_height**
+# ⑤ B 方案复现（抬高雷达）—— launch 参数 livox_raise_m 已于 2026-10-21 删除（冻结 0）；
+#    只能 scratch 生成 + **必须同时改 linefit 的 sensor_height**：
 #    python3 tools/scripts/regress/robot11_make_sim_xacro.py --livox-raise-m 0.10   # 生成物
 #    把 config/segmentation_sim_robot11.yaml 的 sensor_height 改成 0.3595（= 0.2595 + 0.10）
-#    ... robot:=robot11 livox_raise_m:=0.10 ...
 
 # ⑥ 退回默认模型：去掉 robot:=robot11 即可（默认路径从未改动）
 ```
@@ -1160,7 +1160,7 @@ launch 里新增 `_Nav2ParamsForSlot`：`robot:=robot11` 时把这份覆盖层**
 4. **`<1 m` 的近场点里"云台自击"与"真障碍"仍未分离**（本轮的归因是**离线射线求交**：
    近点里 100% 落在 `l10/l11` 上，中位距离 0.14 m ⇒ 但那是**零位关节角**下的云台；`j10/j11` 是
    `continuous`，仿真里没有控制器 ⇒ 云台姿态不会变）；
-5. **`livox_raise_m≠0`（B 方案）与 linefit `sensor_height` 的同步是**手工**的**（launch 不替改 YAML）
+5. **`livox_raise_m≠0`（B 方案）与 linefit `sensor_height` 的同步是**手工**的**（launch 参数已于 2026-10-21 删除，只能 scratch 生成；launch 不替改 YAML）
    ⇒ 忘记改就会出现"地面线整体偏 h"的静默错误；本轮 B 的实测就是手工同步后跑的；
 6. **插件 `<tilt_rpy>` 只验证了 roll 一档**（`-0.5236 0 0`）；`pitch` 档没跑 Gazebo（几何上等价，只差绕 z 一转）；
 7. **IMU 的绝对姿态**从"跟着雷达斜 30°"改成"与 body 同姿态"（§11.3 第 5 项）：LIO 实测正常

@@ -111,6 +111,8 @@ v3 要求每个槽位**声明**三项能力：`cap_global`（能否无先验整�
 * `robot11_mount_axis` —— **本仓不存在此参数**（全仓 `grep` 无命中，已核）。真正存在的是
   `livox_tilt_axis`（`roll|pitch`，L:1407-1416），随 P2 一并删除；其取值之争见 S4 §7.2 O6
   （URDF 写 pitch、CSV 写 roll；`livox_tilt_axis` 默认 `roll`）。
+  **2026-10-21 已实施**：launch 中 `livox_tilt_axis` 删除并冻结 `roll`；`livox_raise_m` 同时删除并冻结 0
+  （证据与默认路径逐字节不变见 `docs/frame_contract_v3_measurements.md` §28）。
 * v3 中 `sensor` 的语义**升格为唯一语义**：倾角在 URDF 里，点云表达在**传感器系**，
   `frame_id=livox_frame` 与数据自洽（S6 §J.3、S8 §2.2）。`plugin`（平帧 + 斜数据）与
   `urdf`（斜帧 + 平数据，诊断档）在 v3b 删除；v3a 期间仅作别名接受并打 DEPRECATED（§7）。
@@ -171,7 +173,7 @@ map ──(local_tracker / M1–M4 中被选中的那一个)──► odom ─�
 |---|---|---|---|---|---|
 | `map→odom` | **`local_tracker`**（M1 时是同一个一体机；M4 时是融合器） | dynamic | 10 Hz（AMCL 离散更新，有效 1–10 Hz）【引用 S3 §5.1】 | `T_map←odom`；2D 追踪器只给 `(x,y,yaw)`（S2 §3.2），3D 追踪器可 6DoF | **缺失** ⇒ nav2 `TransformAvailable` 失败、控制器中止（S3 §3.2 E6）；**冻结** ⇒ 无任何内建检测，实测 575/581 样本仍在发 `/cmd_vel_nav`、最坏盲开 **110 m**（S3 §6.1 R5） |
 | `odom→base_link` | **`lio_tf_adapter`** | dynamic | 9.999–10.000 Hz【实测 S1 §9.3】 | **合成** `T_ol·T_bl`（`q=q_lio·q_off`、`p=p_lio+R_lio·t_off`），S4 §3.5 | 缺失 ⇒ 无里程计；**共轭** ⇒ 假俯仰 **4.890°**（真值 0.003°，S5 §3.2）；**双重变换** ⇒ 场景刚性转 **30.970°**（S5 §3.1）；守卫 `fe0dc31` 会在旋转残差 >`1e-6 rad` 时限速 ERROR |
-| `base_link→livox_frame` | **URDF**（`robot_state_publisher`） | static | 一次（latched） | `R_x(−30°)` + `t=(0.000562,0.130916,0.157028)`（`\|t\|=0.204443 m`）【实测 S4 §2.2 / S5 §3.1】 | 与插件 `<tilt_rpy>` 同时存在 ⇒ **双倍倾角**；写错轴 ⇒ `livox_tilt_axis` 之争（S4 §7.2 O6） |
+| `base_link→livox_frame` | **URDF**（`robot_state_publisher`） | static | 一次（latched） | `R_x(−30°)` + `t=(0.000562,0.130916,0.157028)`（`\|t\|=0.204443 m`）【实测 S4 §2.2 / S5 §3.1】 | 与插件 `<tilt_rpy>` 同时存在 ⇒ **双倍倾角**；写错轴 ⇒ `livox_tilt_axis` 之争（S4 §7.2 O6；该参数已于 2026-10-21 删除并冻结 `roll`，见 measurements §28） |
 | `base_link→imu_link` | **URDF** | static | 一次（latched） | IMU 安装位姿；MID-360 内置 IMU 的 `T_IL` 是**估计器参数**、不是这条 TF（S5 §1.2） | 与 LIO `extrinsic_T/R` 混用 ⇒ "转两次"（S5 §3.1 引 #433） |
 | `base_link→base_link_fake` | **`fake_vel_transform`** | dynamic | 20 Hz【实测 L:2400】 | **只含 yaw**（小陀螺角），pitch/roll 透传（S4 §7.1 I6） | 缺失 ⇒ nav2 的 `robot_base_frame` 解析不到；`spin_speed≠0` 时它凭空转而雷达不跟着转（L:1348） |
 
@@ -337,11 +339,11 @@ gravity_init:       [0.0, 4.893, -8.481] # 可选：body 系重力向下（省�
    `R_ws·(R_IL·p + t_IL) + position`；只要 `position` 在上面设好，地图与状态就同步搬，
    **不要**另写一份 `+h`（那是第二个真源）。**只改旋转不改平移 = E1 遗留的 bug**
    （地面被抬到 −h，nav2 局部代价图整盘掉出高度带）；反过来只改平移不改旋转也不行。
-3. **`h` 逐模型（默认姿态、`livox_raise_m:=0`，全部从 URDF/轮几何算，不手填）**：
+3. **`h` 逐模型（默认姿态；`livox_raise_m` 已于 2026-10-21 删除并冻结 0，全部从 URDF/轮几何算，不手填）**：
 
    | 模型 | `base_link` 原点离地 | `livox_frame` z 偏置 | **`h`** | 依据 |
    |---|---|---|---|---|
-   | `robot:=robot11` | 0.102499 | 0.15702816968305（+`livox_raise_m`） | **0.259527** | 轮 mesh 最低点 −0.102499；`body_to_livox` 关节 z；与 linefit `sensor_height: 0.2595` 交叉一致 |
+   | `robot:=robot11` | 0.102499 | 0.15702816968305（launch 的 `livox_raise_m` 已删除、冻结 0） | **0.259527** | 轮 mesh 最低点 −0.102499；`body_to_livox` 关节 z；与 linefit `sensor_height: 0.2595` 交叉一致 |
    | `robot:=hzmirm` | 0.0 | 0.6 + 0.2·cos(`turret_pitch_deg`) | **0.800000**（pitch=0） | 轮 r=0.08 心 z=0.08 ⇒ 轮底在 base_link z=0；云台链 0.3+0.3+0.2 |
    | 默认模型（`robot:=''`） | 0.06 | 0.175 | **0.235000** | 轮 r=0.06 心 z=0；`measurement_params_sim.yaml` 的 xyz z |
 
@@ -660,7 +662,7 @@ gravity_align_mode` = **`hybrid`**（M §18.4）。
 | `robot11_mount:=sensor` | 原样（= v3 的唯一语义） | （无，语义合并进 `robot`） | v3b（参数消失，行为不变） |
 | `robot11_mount:=plugin` | **原样**，打 `DEPRECATED: 平帧+斜数据，v3b 移除` | 暂时保留 | v3b（**唯一的破坏性变更**） |
 | `robot11_mount:=urdf` | **原样**，打 `DEPRECATED: 诊断档，v3b 移除` | 暂时保留 | v3b |
-| `livox_tilt_axis` | 原样 | （无） | v3b |
+| `livox_tilt_axis` | **已删除（2026-10-21，冻结 `roll`）** | （无） | 已落地 |
 | `world`/`gui`/`nav_rviz`/`robot_visual`/`spin_speed`/`cloud_accumulator`/`map_name`/`sim_backend` | **原样**，语义不变 | 仿真/显示层 | 不删 |
 
 **"现有命令零改动"的验收**：任一 HEAD 上验证过的命令行，在 v3a 上**逐字节相同的参数**必须跑出
@@ -769,6 +771,8 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 * **删什么**：`robot11_mount`（`plugin|urdf|sensor`，L:1437-1452）与其 `choices=list(_LIVOX_MOUNTS)`
   （L:172、L:1453）、`_validate_livox_mount`（L:175-181）、`livox_tilt_axis`（L:1407-1416）。
   `robot11_mount_axis` **本仓不存在**（全仓 grep 无命中）——任务书里这个名字对应的是 `livox_tilt_axis`。
+  **2026-10-21 已实施**：`livox_tilt_axis` 与 `livox_raise_m` 已从 launch 删除（冻结 `roll` / 0），
+  生成物逐字节不变；见 `docs/frame_contract_v3_measurements.md` §28。
 * **为什么**：三档并存 = 倾角有三个所有者（P2、S4 §7.2 O3）；`<tilt_rpy>` 让 TF 说"平"、数据说"斜"（S8 §2.2）。
 * **删之前必须做**：`sensor` 语义成为唯一语义（倾角在 URDF、点云在传感器系）；Classic 默认档从 `plugin` 迁到
   `sensor`（**唯一的破坏性变更**，必须单独一个 commit + 回归）；gz 后端的 `robot11_mount:=sensor` 硬要求消失（S8 §0）。
@@ -908,10 +912,10 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
   ② 文件本来就是 plain URDF 时直读 XML。都失败 ⇒ **已知模型 WARN + 旧表回退**（banner 标
   `table-fallback`）；**未知模型硬报错**。
 - **消费方**：`gravity_align_rpy`（E1）、`_LioAdapterExtrinsic`/`_LioAdapterRobot11`（adapter 的
-  xyz/rpy）、`gravity_align_h`（= 地面偏移表 + 解析出的 `livox_z`；`livox_raise_m` 自动跟随）。
+  xyz/rpy）、`gravity_align_h`（= 地面偏移表 + 解析出的 `livox_z`；`livox_raise_m` 已于 2026-10-21 删除并冻结 0）。
 - **交叉校验**：解析 vs 旧表差 **>0.05°/轴 或 >1 mm** ⇒ 响亮 WARN（两个值 + 哪个 URDF/slot 产出），
   **保留解析值**；linefit 的 `sensor_height` 与该槽位 YAML 差 **>1 cm** 也 WARN（**不改** YAML）。
-- **仍用字面值（有意）**：robot11 的 30° 是 launch **传给 xacro 的输入**（`_LIVOX_TILT_RPY`）；
+- **仍用字面值（有意）**：robot11 的 30° 是 launch **传给 xacro 的输入**（`_LIVOX_TILT_RPY_ROLL`，冻结 roll；2026-10-21 起无 launch 开关）；
   地面偏移 `_HZMI_BASE_LINK_HEIGHT_M` 是 URDF 给不了的那一个先验（轮半径+轮心，逐台有证据）；
   `lio_tf_adapter_hzmirm_node`（mode=off 的 legacy 非-spl 路径）与默认模型的
   `lio_tf_adapter.yaml` 不改（换参数会动默认 Action 树/默认路径，解析值已与它们交叉校验）。

@@ -5915,3 +5915,116 @@ cp -f .tmp_align/global_scan_obstacle.yaml.orig src/rm_nav_bringup/config/…
 > 但理由变了：**在提升后的图上 `0.0` 与 `−1.0` 逐样本相同**（扫描面 z p50 从 **−0.179 → +0.119 m**，
 > §15 的病灶被换图治好了），**但余量只剩 4–12 mm** ⇒ `−1.0` 从"必需"降级为"兜底"，保留。
 
+
+---
+
+## §28 第十八轮（**本机 date=2026-10-21T05:50–06:10**）：删除两个冗余 launch 参数 `livox_tilt_axis` / `livox_raise_m` —— 值冻结、默认路径逐字节不变
+
+> **本节只新增**（append-only）：§1–§27 一个字都没改。任务口径：这两个参数都是"**生成模型的输入**"，
+> 不是运行时真值 —— 安装 rpy/xyz 自 `f9bf4a9` 起由 `_parsed_livox_mount()` 从**这次真要 spawn 的 URDF**
+> 解析（`gravity_align_rpy` / `gravity_align_h` / `lio_tf_adapter` 的 xyz,rpy 全走它）。删掉 launch 开关
+> 后，只要**冻结值**与删除前默认路径传的值相同，生成的 `robot_description` 就应逐字节不变。
+
+### 28.1 删了什么、冻结成什么
+
+| 参数 | 原声明 | 冻结值 | 处理 |
+|---|---|---|---|
+| `livox_tilt_axis` | `default='roll'`，`choices=['roll','pitch']` | **`roll`**；传给 xacro 的 `livox_tilt_rpy` 字符串 = **`-0.523598775598293 0 0`**（SolidWorks CSV 的 Joint Origin Roll；用户 2026-10-07 按实物确认） | launch 里**删除**声明/校验/`_robot_xacro_args` 分支/`_urdf_livox_mount_table`/`_adapter_table`/`_check_gravity_align_contract` 日志/横幅；`_LIVOX_TILT_RPY` 双值字典 → 单值 `_LIVOX_TILT_RPY_ROLL`。**xacro 没有 `livox_tilt_axis` arg**，它有 `livox_tilt_rpy`：launch 继续用**同一 key/引号格式**传冻结值，xacro/生成器**未改** |
+| `livox_raise_m` | `default='0.0'` | **`0`** | launch 里**删除**声明/`_robot_xacro_args` 条目/`_gravity_align_h` 回退表里的 `+ raise_m`/`_lio_adapter_robot11` 的 `raise_m`/所有 B 方案注释。**xacro 仍保留 `livox_raise_m` arg 且 default=0**；launch 不再传 ⇒ xacro 用默认 0，生成物逐字节不变。**没有**改 xacro/生成器（`sentry_robot_robot11_sim.xacro` 是生成物，手改会被重跑覆盖） |
+
+删除后的 launch 声明数：**41 → 39**（`--show-args` 总数 103 → 101；只少这两块，其余 101 个块逐字相同）。
+`robot:=robot11` 的 `robot_description` 命令字符串只少一个 token：` livox_raise_m:=0.0`；
+`livox_tilt_rpy:="-0.523598775598293 0 0"` 与引号规则逐字保留。默认模型/hzmirm 的命令字符串不变。
+
+### 28.2 默认路径逐字节证据（主验收）
+
+**(a) `--show-args`（Humble，私有 HOME/ROS_LOG_DIR）**
+
+* 我们的 `DeclareLaunchArgument`：**41 → 39**；`--show-args` 总块数 **103 → 101**；
+* 逐块比较：只删掉 `livox_tilt_axis` 与 `livox_raise_m` 两块，**没有**任何其它块 changed/added；
+* `ros2 launch … --show-args` **exit 0**。
+
+**(b) 生成的 `robot_description`（= xacro stdout；`robot11_mount:=plugin|urdf|sensor` 全跑）**
+
+| robot | mount | 删除前 md5 / 字节 | 删除后 md5 / 字节 | 判 |
+|---|---|---|---|---|
+| `''`（默认） | plugin | `bc62af22f7be49395525978b1264750c` / 10353 | 同左 | ✅ 逐字节 |
+| `''` | urdf | 同上（mount 不参与默认模型） | 同上 | ✅ |
+| `''` | sensor | 同上 | 同上 | ✅ |
+| `hzmirm` | plugin | `a13e053090bf1344a06d58241bf845f9` / 18630 | 同左 | ✅ |
+| `hzmirm` | urdf | 同上（mount 不参与 hzmirm） | 同上 | ✅ |
+| `hzmirm` | sensor | 同上 | 同上 | ✅ |
+| `robot11` | plugin | `f4f8110d46eaf46dd3c3e2542f39a8e0` / 46955 | 同左 | ✅ |
+| `robot11` | urdf | `14775e7fd159a115feeaf0cd340dc018` / 46955 | 同左 | ✅ |
+| `robot11` | sensor | `b59a62144c4ffa827780c67f4dcf5e93` / 46997 | 同左 | ✅ |
+
+**活栈复核**：nav 跑里 `ros2 param dump /robot_state_publisher` 的 `robot_description` =
+**46997 B / md5 `b59a62144c4ffa827780c67f4dcf5e93`**，与上表 `robot11 + sensor` 逐字节一致。
+（`pitch` 参考：删除前 `robot11` 三档的 `livox_tilt_rpy` 为 `0 -0.523598775598293 0`，生成物 md5
+`2d41b65c… / 9c2b59e6… / c8071e7a…`；删除后该取值**不再可从 launch 选择**。）
+
+**(c) `_gravity_align_h`（默认姿态；删除前/后逐位相同）**
+
+| robot | h（m） | 活栈 `ros2 param get /small_point_lio gravity_align_h` |
+|---|---|---|
+| `robot11` | **0.25952717**（`0.102499 + 0.15702816968305`） | `0.25952717` |
+| `hzmirm` | **0.800000** | —（本次 nav 用 robot11） |
+| `''` | **0.235000** | — |
+
+活栈另读到：`gravity_align_mode=hybrid`、`gravity_align_rpy=[-30.0,0.0,0.0]`、`gravity_align_z_origin=ground`、
+`lio_tf_adapter rpy=[0.523598776,0.0,0.0]`、`xyz=[-0.000561701,-0.034862345,-0.151448296]` ——
+与删除前解析值逐位相同。
+
+**(d) `launch_increment_diff.py`（old = `eaea119` 的 launch 副本；new = 本次）**
+
+* 整棵 Action 树：**OLD 72 / NEW 70 / 共有 69**；消失 = **2 个 `DeclareLaunchArgument`**
+  （`livox_tilt_axis`、`livox_raise_m`）+ 1 个 `LogInfo`（robot11 横幅里那行轴文本被静态 `roll` 文案替换）；
+  新增 = 1 个 `LogInfo`（替换后的横幅）。共有 Action 相对顺序**一致**。
+* **执行集**（只取真正起进程的 `Node` / `IncludeLaunchDescription` / `ExecuteProcess`，含
+  `TimerAction`/`GroupAction` 内嵌）：**OLD 37 / NEW 37，changed/removed = 0，added = 0，order = OK**。
+  ⇒ 删除的只是 2 个声明动作与 1 句日志文本，**没有任何节点/参数/包含的 launch 改变**。
+
+### 28.3 nav 冒烟（RMUL2026 / robot11 / sensor / `hybrid` 默认 / `band_guard:=True`）
+
+**命令**（一条 bash 调用里起栈 + 采证 + 收尾；隔离与 §23–§27 同口径）：
+`world:=RMUL2026 mode:=nav localization:=gicp lio:=small_point_lio ground:=linefit spin_speed:=0.0
+robot:=robot11 robot11_mount:=sensor band_guard:=True nav_rviz:=False lio_rviz:=False gui:=False`
+（`gravity_align_mode` 留默认 `auto` ⇒ `lio=small_point_lio` ⇒ 有效值 **hybrid**）。
+隔离：私有 `HOME=.tmp_map2/home-smoke_v28_combined/`、`ROS_DOMAIN_ID=138`、
+`GAZEBO_MASTER_URI=http://127.0.0.1:11738`、`gui:=False`、`world:=X` **不带前导 `--`**、
+`setsid` + `tools/scripts/lib/scoped_cleanup.sh` + 硬超时，**无全机 pkill**；跑前 `free` 可用 **12 GiB**、
+swap 仅 1.3 MiB，一次只起一栈，收尾 `leftovers` 空。
+
+| 判据 | 实测 | 判 |
+|---|---|---|
+| **`band_guard` in-band** | 6 个样本 **全 100%**：`772/772, 782/782, 781/781, 769/769, 764/764, 771/771`，`below=0 above=0`、`one-sided=no`、`band=[-0.050,2.000]` | ✅ |
+| **`h_meas`** | `h_urdf=0.2595 m h_meas=0.2617 m / \|Δ\|=0.0021 m < 0.03 ⇒ INFO`（inliers 14436、tilt 0.07°、resid p50 1.7 mm） | ✅ |
+| **`odom→base_link` rpy** | 12 s 中位 **`[-0.060, -0.356, -1.062]°`**（范围 roll −0.143…+0.014 / pitch −0.497…−0.264 / yaw −1.121…−0.963）；同一跑较早的静态样本为 `[+0.088, −0.458, −0.122]°`。roll/pitch 与 §25 参考 `[+0.06,−0.47,−0.63]` 同量级；yaw 静止窗有 ~1° 级漂移，**不是 30° 残余** | ✅（量级） |
+| **`robot_description`** | 活栈 `46997 B / md5 b59a…` = 基线 `robot11+sensor` 逐字节 | ✅ |
+
+### 28.4 破坏性变更（exactly what ROS 2 does）
+
+* **传旧参数现在不会报错，也不会警告**：ROS 2 Humble 的 `ros2 launch` 把未知的 `<name>:=<value>`
+  放进 launch context，但**没有 `DeclareLaunchArgument` 就没有任何节点读它** ⇒ **静默忽略**。
+  实测：最小 launch + `livox_tilt_axis:=pitch` 与真 launch + `livox_tilt_axis:=pitch livox_raise_m:=0.10`
+  （`-p`）都 **exit 0、stderr 空、无 WARN/ERROR**；跑起来仍是冻结的 **roll / 0**。
+* **要恢复旧行为**：只能改 **scratch** 副本（或 `git show eaea119:src/rm_nav_bringup/launch/bringup_sim.launch.py`）：
+  * `pitch`：xacro 侧仍有 `livox_tilt_rpy` arg ⇒ 直接给 xacro 传
+    `livox_tilt_rpy:="0 -0.523598775598293 0"`（或改 scratch 生成器的默认），**不再经过 launch**；
+  * `raise`：xacro 侧仍有 `livox_raise_m` arg（default 0）⇒ 直接给 xacro 传
+    `livox_raise_m:=0.10`，或用 scratch `robot11_make_sim_xacro.py --livox-raise-m 0.10` 生成；
+    **必须手工**把 `linefit` 的 `sensor_height` 改成 `0.2595 + raise`（这正是删除它的理由：
+    这个同步是第二个真源，launch 不替你做）。
+* **`pitch`/`raise` 变体现在只需要 scratch 生成器/xacro**，与 launch 参数无关；本仓库的 xacro/生成器
+  **没有改**（`sentry_robot_robot11_sim.xacro` 仍带这两个 arg，默认值就是冻结值）。
+
+### 28.5 本轮没验证 / 诚实清单
+
+1. **nav 只跑了 1 次**（§28.3 那跑，外加 1 次更短的 TF/参数采样）；没有 3 跑中位，也没有重跑
+   §25 的 6 跑矩阵。`odom→base_link` 的 yaw 是单跑单窗，范围 ~1°，不能当成长期漂移结论。
+2. **没有重跑 B 方案（raise≠0）与 pitch 对照**：它们已不属于 launch 行为，只验证了"旧参数被静默忽略"。
+3. **没有在真机/非 Humble 上验证未知 launch arg 的行为**；结论只覆盖本机 Humble。
+4. **`launch_increment_diff.py` 的整树比较必然报 2 个声明 + 1 句横幅日志的变化**（见 §28.2(d)）；
+   本节用"执行集"口径给出 0 changed / 0 removed。两者不矛盾：前者是 launch 元数据，后者是真正起进程的节点集合。
+5. **xacro 的 `livox_raise_m` arg 仍在**（default 0），没有从生成器里删除；若以后要彻底消灭这个
+   隐藏旋钮，需要同时改生成器并重跑自证，**本轮没做**（任务允许"或传 0"）。
