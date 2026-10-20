@@ -311,6 +311,21 @@ namespace small_point_lio {
                 // ⚠️ 原实现把**雷达系**的初始点直接塞进地图（等价于假设 init 时 R=I、t=0）。
                 //    一旦 R=rot_init≠I（上面刚改过），初始地图会被整体转过 rot_init ⇒ 必须用与逐点
                 //    更新相同的出点公式。gravity_align_mode=off 时保留原写法（默认行为不变）。
+                // ★★ 2026-10-21（契约 §4.12，**按实车改安装约定**）：`gravity_align_mode=off` 这条
+                //   分支原来把**雷达系**的初始点**原样**塞进地图（= 假设点云与 IMU 同姿态、同原点）。
+                //   旧约定下这条假设成立（点云在传感器系、IMU 与雷达同姿态 ⇒ R_IL=I），
+                //   但**新约定**里点云是**水平**的（`base_link→livox_frame` rpy=0）、IMU 是**斜**的
+                //   ⇒ `R_IL = Rx(+30°) ≠ I`。此时若仍原样入图，初始地图会比世界系**整体差 R_IL**
+                //   （实测：robot11 + `gravity_align_mode:=off` ⇒ `map→odom` 跑到 1e5 m、GICP 全线
+                //   `score=nan` = 发散）。修法 = 与逐点更新**同一个**旋转（只差那 5 cm 平移，
+                //   与改动前 off 分支的既有偏差一致、不新增）：
+                //       · `R_IL == I`（默认模型 / hzmirm / 旧约定）⇒ **原表达式一个字符都不动**
+                //         （`add_point(point.position)`，逐字节相同）；
+                //       · `R_IL != I`（robot11 新约定）⇒ 先旋进 IMU 系再入图。
+                const Eigen::Matrix<state::value_type, 3, 3> R_IL_init =
+                        parameters.extrinsic_est_en ? estimator.kf.x.offset_R_L_I : estimator.Lidar_R_wrt_IMU;
+                const bool R_IL_is_identity =
+                        (R_IL_init - Eigen::Matrix<state::value_type, 3, 3>::Identity()).norm() < static_cast<state::value_type>(1e-12);
                 for (const auto &point: preprocess.point_deque) {
                     if (gravity_aligned) {
                         Eigen::Matrix<state::value_type, 3, 1> point_imu_frame;
@@ -320,8 +335,10 @@ namespace small_point_lio {
                             point_imu_frame = estimator.Lidar_R_wrt_IMU * point.position.cast<state::value_type>() + estimator.Lidar_T_wrt_IMU;
                         }
                         estimator.ivox->add_point((estimator.kf.x.rotation * point_imu_frame + estimator.kf.x.position).cast<float>());
-                    } else {
+                    } else if (R_IL_is_identity) {
                         estimator.ivox->add_point(point.position);
+                    } else {
+                        estimator.ivox->add_point((R_IL_init * point.position.cast<state::value_type>()).cast<float>());
                     }
                 }
                 if (gravity_aligned) {

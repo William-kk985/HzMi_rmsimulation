@@ -51,17 +51,29 @@
        ⚠️ `plugin` / `urdf` 两档的渲染结果**逐字节不变**（只有 `sensor` 档才多发一个
        `<cloud_frame>` 元素；它的两处 property 取值与 urdf 档完全相同）—— 见 §J 的静态证据。
        ========================================================================== -->
-  <xacro:arg name="livox_mount" default="plugin" />
-  <xacro:property name="livox_mount_p" value="$(arg livox_mount)" />
+  <xacro:arg name="livox_mount" default="sensor" />
   <xacro:property name="livox_tilt_rpy_p" value="$(arg livox_tilt_rpy)" />
-  <!-- 倾角记在**关节**上的两档（urdf / sensor）：关节 rpy = 倾角、插件 <tilt_rpy> = 单位阵 -->
-  <xacro:property name="livox_mount_tilt_in_joint" value="${livox_mount_p.strip() in ('urdf', 'sensor')}" />
-  <!-- 点云表达在**传感器系**的那一档（sensor；缺省/plugin/urdf = 父 link 系） -->
-  <xacro:property name="livox_mount_sensor" value="${livox_mount_p.strip() == 'sensor'}" />
-  <!-- 关节 rpy：urdf/sensor 档 = 倾角；plugin 档 = 0 -->
-  <xacro:property name="livox_joint_rpy" value="${livox_tilt_rpy_p if livox_mount_tilt_in_joint else '0 0 0'}" />
-  <!-- 插件 <tilt_rpy>：plugin 档 = 倾角；urdf/sensor 档 = 单位阵（射线已由 link 姿态带斜） -->
-  <xacro:property name="livox_plugin_tilt_rpy" value="${'0 0 0' if livox_mount_tilt_in_joint else livox_tilt_rpy_p}" />
+  <!-- ★★★ 2026-10-21（**按实车改约定**）：`livox_mount` 已**不再改变几何**（只剩一个值 `sensor`，
+       见文件头的"实车约定"）。下面四条 property 因此是**常量**，保留成 property 只是为了让
+       下游（`<joint>` / `<sensor>`）的引用不动。 -->
+  <xacro:property name="livox_mount_tilt_in_joint" value="False" />
+  <xacro:property name="livox_mount_sensor" value="False" />
+  <!-- 关节 rpy：**永远 0**（`base_link→livox_frame` 只有平移 ⇒ 与实车的 TF 一致） -->
+  <xacro:property name="livox_joint_rpy" value="0 0 0" />
+  <!-- 插件 <tilt_rpy>：**永远 = 倾角**（射线真的斜；点按"实车驱动器的做法"旋进这个水平帧，
+       见 livox_points_plugin.cpp 的出点公式：`point = (range+minDist)·(mount_rot·ray·x̂)`）。 -->
+  <xacro:property name="livox_plugin_tilt_rpy" value="${livox_tilt_rpy_p}" />
+  <!-- IMU 的安装偏移（在 `livox_frame` 里）：`Rx(r)·Ry(p)·Rz(y) · (0,0,-0.05)`。
+       为什么要在 xacro 里算：`imu_joint` 现在是**唯一**知道"IMU 相对雷达斜 30°"的地方
+       （TF：`base_link→livox_frame` rpy=0、`livox_frame→imu_link` rpy=倾角），
+       而 IMU 的**物理位置**必须与改动前逐位相同 ⇒ 偏移要跟着倾角转。 -->
+  <xacro:property name="livox_tilt_vals" value="${[float(v) for v in livox_tilt_rpy_p.split()]}" />
+  <xacro:property name="tr" value="${livox_tilt_vals[0]}" />
+  <xacro:property name="tp" value="${livox_tilt_vals[1]}" />
+  <xacro:property name="ty" value="${livox_tilt_vals[2]}" />
+  <xacro:property name="imu_v1" value="${(0.0, 0.05 * sin(tr), -0.05 * cos(tr))}" />
+  <xacro:property name="imu_v2" value="${(imu_v1[0] * cos(tp) + imu_v1[2] * sin(tp), imu_v1[1],                            -imu_v1[0] * sin(tp) + imu_v1[2] * cos(tp))}" />
+  <xacro:property name="imu_v3" value="${(imu_v2[0] * cos(ty) - imu_v2[1] * sin(ty),                            imu_v2[0] * sin(ty) + imu_v2[1] * cos(ty), imu_v2[2])}" />
 
   <!-- ==========================================================================
        【我们加的｜Phase 5（2026-10-07）】`<visual>` 用哪一档 mesh —— **只改渲染代价，不改几何**
@@ -718,9 +730,16 @@
              若改挂到 body 上保持水平，就必须给三份 LIO 配置补一条 30° 的 `extrinsic_R` —— 那是更大的改动面；
          (c) 后果（IMU 的 z 轴相对 base_link 斜 30°）由 `lio_tf_adapter` 的 `rpy` 精确补偿，
              已在本槽位的 launch 分支里显式写死并实测（见 docs/robot_models.md §10）。
-       绝对位置：body + (0.000562, 0.130916, 0.107028)（= 雷达原点沿**雷达自身的** −z 走 0.05 m）。 -->
+       ★★ 2026-10-21（**按实车改约定**）：`base_link→livox_frame` 现在 rpy=0（只有平移），
+       倾角搬到**这一条**（`livox_frame→imu_link`）⇒ IMU 物理上仍然斜 30°（加速度计真的感受到），
+       而点云在**水平**的 `livox_frame` 里（与实车驱动器把点云旋进机器人系的语义一致）。
+       为了"物理几何一个字节都不变"，偏移也要跟着倾角转：
+         xyz = Rx(r)·Ry(p)·Rz(y)·(0,0,-0.05)   （r,p,y = `livox_tilt_rpy`）
+       于是 `base_link→imu_link` 与改动前**逐位相同**（rpy = 倾角、位置 = 雷达原点沿雷达到 IMU
+       的 −z 走 0.05 m）；`h_imu` 不变、静态边 `odom→odom_level` 的值也不变。
+       三条一致性（driver/插件 = TF 的旋转 + LIO 外参）见 docs/frame_contract_v3.md §4.12。 -->
   <joint name="imu_joint" type="fixed">
-    <origin xyz="0 0 -0.05" rpy="0 0 0" />
+    <origin xyz="${imu_v3[0]} ${imu_v3[1]} ${imu_v3[2]}" rpy="${livox_tilt_rpy_p}" />
     <parent link="livox_frame" />
     <child link="imu_link" />
   </joint>
