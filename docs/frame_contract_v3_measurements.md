@@ -5131,3 +5131,348 @@ map/RMUL2026.yaml = fd23dd82c0aa63b6c2fdf3644c7c9253    map/RMUC2026.yaml = 683b
 > **RMUC2026** 的 in-band 也 100%，**local lethal=0 是窗口几何**（最近墙 2.65/2.69 m > 窗口半宽 2.50 m），
 > 不是回归。**旧数字**：§10.4 整表、§12 的 local 与"判不了"、§13.8 全部**作废**；
 > §15.9/§15.10/§17/§18 的结论**仍然有效并被复现**（`0/774→774/774`、3727、43%、776/776）。
+
+## §26 第十七轮（**本机 date=2026-10-20T19:46–20:07**）：给**局部 2D scan 高度带**加 **5 cm 负下界余量**（缺陷 "b"）—— `scan_band_min` 默认 −0.05、回滚 `0.0` **逐字节**、STVL/全局 `−1.0` 一个字节没动
+
+> **本节只新增**（append-only）：§1–§25 一个字都没改。写入时并行的 §27 已在工作树里（未提交）⇒
+> 按父任务裁定本节占用 **§26**，放在 §27 **之前**（保持编号顺序），**§27 的正文一个字没动**。
+>
+> **对象**：§25.11 第 10 条登记的**缺陷 "b"** —— hybrid 默认档的 local `/scan` 是 **771/771（100%）**
+> 在带内，但**最低波束端点只有 +0.007 m**（`e25_hyb_r3`），而同一批跑的 LIO z 漂移是
+> **−0.065…−0.077 m**。⇒ 距下界 **7 mm**；LIO 再多漂 ~1 cm，波束就整批掉到 0.0 以下，nav2
+> **静默**丢点（§9.7/§15.6：无日志、无 WARN、无 dropped 计数），默认档悄悄退回 `off` 那种
+> **kept-y 单侧条带**的"半盲"状态。本轮把这个余量从 **7 mm 拉到 ~57 mm**（下界 −0.05）。
+>
+> **代码（3 处，全部 opt-in/带文档）**：
+> ① 新文件 `src/rm_nav_bringup/config/nav2_params_sim_local_scan_band.yaml`（只含 **2 个叶子键**）；
+> ② `_Nav2ParamsForSlot` 支持 4 元组 `(tag, path, predicate, bindings)`：覆盖层的叶子键值可以由
+> launch 参数**绑定**，`0.0` 时由 predicate 整层跳过；
+> ③ 新 launch 参数 `scan_band_min`（默认 `-0.05`，取值域 **[−1.0, 0.0] 只许下调**；回滚 `:=0.0`）。
+> **未改**：`src/rm_navigation/**`（公共段）、`src/rm_localization/**`、`src/rm_simulation/**`、
+> 地图/PCD 资产（**并行任务在 19:47–19:48 改了默认 RMUL 资产，不是本节**，见 26.2）、§25 正文。
+>
+> **7 跑**（3 默认 + 1 off + 1 干净默认 + 1 `global_obstacle:=scan` + 1 回滚），**0 次 RETRY**，
+> 每跑收尾 `残留 (空) / gz=0 / 全局 gzserver=0`。原始数据 `.tmp_ab/e26_*`（gitignored）。
+> 运行期证据：`meta_before/after`（资产/二进制 md5）、`roslog/nav2_params_sim_*_merged.yaml`（合并参数
+> 文件原件）、`params.txt`（`ros2 param get`）、`band_guard.txt`（live 带 + in-band）、`navband.json`、
+> `probe.json`、离线 `merge_probe.py` / `summary.py`。
+
+### 26.1 一句话结论
+
+> **局部 2D scan 的下界从 0.0 降到 −0.05 m 之后，`hybrid` 默认档仍然 771/771（100%）在带内**
+> （`band_guard` 按 live 带 `[−0.05, 2.0]` 判 **100%**、`below=0`），最低端点 **+0.014…+0.021 m**
+> （200 帧绝对最小 **+0.0129 m**）⇒ **距新下界 62.9–70.8 mm**（§25 那个最坏跑只有 **7 mm**；
+> 即便按下界 0.0 的老口径，本轮也有 **12.9–20.3 mm**）。**`off` 控制臂没有被救**：navband 的
+> `[0,2]` in-band 仍是 **337/771 = 43.7%**（与 §25 **逐值相同**），live 带 `[−0.05,2]` 下也才
+> **44.8–45.4%**、kept-y 仍**单侧 +y**、`band_guard` 仍 **WARN** ⇒ 这 5 cm 是**鲁棒性余量，不是解药**。
+> **没有把地面/近地点放进局部图**：hybrid 的 200 帧里**最低波束端点也 > 0**（+0.0129…+0.0150）
+> ⇒ **落在 `[−0.05, 0)` 的波束 = 0 条** ⇒ 进 `ObservationBuffer` 的点集与老带**完全相同**；
+> local lethal/inscribed/free 与 §25 的差（**−52 / −109 / +282.5**，中位）在历史逐跑散布内，且
+> **回滚跑（0.0）的 lethal 反而更高（317）**。**合并 YAML**：`global_obstacle:=stvl` 档只多
+> **2 行**（local 的两个 `min_obstacle_height`），**`global_costmap` 子树 md5 逐字节相同**
+> （STVL 的 `livox_mark.min/max = 0.0/2.0` 原样）；**回滚 `scan_band_min:=0.0` 时整份合并文件
+> 逐字节等于改动前**（`e9b39f36…`）；`global_obstacle:=scan` 的 **§15 `−1.0` 仍在**
+> （live 回读 `−1.0/2.0`、global in-band **100%**）。
+
+### 26.2 协议、资产（**关键：并行任务改了默认 RMUL 资产**）与隔离
+
+协议与 §25.2 **逐字相同**（`settle 20 / window 20`；`gui:=False nav_rviz:=False lio_rviz:=False`；
+`world:=RMUL2026`；`robot:=robot11 robot11_mount:=sensor`；`lio:=small_point_lio`；`spin_speed:=0.0`；
+`gravity_align_mode` 不传 ⇒ `auto` ⇒ hybrid（off 臂显式 `:=off`）；`mode:=nav localization:=gicp
+nav:=mppi planner:=smac2d`；`band_guard:=True`）。7 跑全部由 `.tmp_ab/exp26/run_one.sh` **顺序**执行
+（`batch.sh` + `batch_clean.sh`，每跑 `timeout 900`、失败重试 1 次；实际 **0 次重试**）。
+
+```bash
+# 主批（19:46–19:58）：3 默认 + 1 off（= 任务书要求的 4 跑）
+.tmp_ab/exp26/run_one.sh e26_hyb_r1 world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp \
+    nav:=mppi planner:=smac2d robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 band_guard:=True
+#   … e26_hyb_r2 / e26_hyb_r3 同上
+.tmp_ab/exp26/run_one.sh e26_off_r1  …同上… gravity_align_mode:=off
+# 干净补充（19:58–20:04，等并行任务暂停后）：默认 1 跑 + global_obstacle:=scan 1 跑
+.tmp_ab/exp26/run_one.sh e26_hyb_g_r1    …同上…
+.tmp_ab/exp26/run_one.sh e26_gscan_hyb_r1 …同上… global_obstacle:=scan
+# 回滚对照（20:05–20:07）：一条参数把下界改回 0.0
+.tmp_ab/exp26/run_one.sh e26_rollback_r1 …同上… scan_band_min:=0.0
+```
+
+**资产事件（必须写清）**：并行任务（§27，父任务裁定为另一个 agent）在 **19:47:59–19:48:05**
+把默认 RMUL 资产换成了提升版：
+
+| 资产 | **旧**（§25 用的，= HEAD `dfd9810`） | **新**（19:48 之后，= §27 的提升版） |
+|---|---|---|
+| `map/RMUL2026.yaml` | `fd23dd82c0aa63b6c2fdf3644c7c9253` | **`bf3f37cb40a1b0535bc934d6c29186e2`** |
+| `map/RMUL2026.pgm` | `6e45a9327e99d57883881f7a7d10c3d0` | **`7ec12dc323ae18f92df765f288f8f0e1`** |
+| `PCD/RMUL2026.pcd` | `5d0d33eb5219d9416606a7b0f5e34028` | **`1d5ca30e9d0268d971306f4f497cfb4f`** |
+
+⇒ **`e26_hyb_r1`（19:46:17 起跑）跑前=旧资产**，其余 6 跑=新资产；`hyb_r1` 的
+`meta_md5_diff.txt` 只有 `map/RMUL2026.yaml` 1 行（**跑中**被换），其余 6 跑 **0 行**。
+**为什么主表仍可比 §25**：nav2 的**局部** costmap 是 `global_frame: odom` 的滚动窗，吃
+`/scan` 的 odom 坐标 ⇒ **与 2D 先验图/PCD 无关**（本轮 4 个 hybrid 跑的 local 数字同量级可证）；
+受资产影响的是**全局**列（map 帧 + 先验图 + STVL/static）⇒ 26.8 单列干净资产上的全局数。
+**全局列在 §25 与本轮之间不可直比**（图从 43077 格变 39446 格）。
+
+**隔离**（与 §12/§15/§17/§25 同口径）：私有 `HOME=.tmp_ab/home-<tag>`、按 tag 散列
+`ROS_DOMAIN_ID=100…159`、先探空端口再占 `GAZEBO_MASTER_URI`（11700–11899）、`unset DISPLAY`、
+`setsid` 起栈（进程组=本 run）、硬超时、收尾**只用** `tools/scripts/lib/scoped_cleanup.sh`
+按进程组/master URI 清（**无全机 pkill**）。每跑起跑前 `pgrep -x gzserver` 自检，批次日志里
+`gz_left=0`（7/7）。**并发的第二套栈**：19:46 时 `ss -ltn` 除我的 master 外还看到 **11737**
+（并行任务的），`load` 一度 **10.4**；我**没有**杀它，只在自己的批次里串行。并行任务 19:48 之后
+暂停，干净补充跑的端口只剩我自己的（`ss` 记录在 `batch_clean.log`）。RTF **0.338–0.422**
+（§25 是 0.400–0.418；低值来自并发负载，不是本轮改动）。
+**一次被弃的冒烟跑**：19:43–19:45 的 `e26_hyb_r1` 在第 1 分钟被我 kill（改注释日期以保持冻结 md5
+一致），整目录留档 `.tmp_ab/e26_hyb_r1.killed-1944`，**不计入**任何数字。
+
+### 26.3 代码改动（file:line）与**一条参数回滚**
+
+| # | 文件:行 | 改动 |
+|---|---|---|
+| ① | `config/nav2_params_sim_local_scan_band.yaml:1–55`（键在 **`:52` / `:55`**） | 新覆盖层：`local_costmap.obstacle_layer.scan.min_obstacle_height = -0.05`（观测缓冲区闸）**与** `local_costmap.obstacle_layer.min_obstacle_height = -0.05`（`updateBounds` 第二道闸）。**只写 local**；文件头 1–46 行写清根因、2D 平盘语义、为什么不碰 STVL/全局 −1.0、回滚方式 |
+| ② | `launch/bringup_sim.launch.py:1092–1160` | `_Nav2ParamsForSlot`：3 元组仍兼容；4 元组多一个 `bindings`（点分叶子键 → `Substitution`），`perform` 里先 `yaml.safe_load(subst.perform(context))` 再深合并（**求值成 float，不是字符串**）；临时文件名按命中的 tag 连接 |
+| ③ | 同文件 `:1171–1208` | `_SCAN_BAND_MIN_DEFAULT='-0.05'`、合法域 `[-1.0, 0.0]`；`_scan_band_min_value()`（非数/越界**硬报错**，不静默夹紧）；`_scan_band_layer_active()`（命中条件 = **`scan_band_min != 0.0` 且 `local_obstacle ∈ {scan, both, stvl_both}`**） |
+| ④ | 同文件 `:1948–1972` | 把新层注册进 `layers`（tag=`local_scan_band`），两个键分别绑定 `LaunchConfiguration('scan_band_min')`（只作用于 `local_costmap`；全局 `−1.0` 层仍由 §15 的 `global_scan` 层管） |
+| ⑤ | 同文件 `:2390–2405` / `:3683–3684` | `DeclareLaunchArgument('scan_band_min', default='-0.05')` + 加进 `LaunchDescription`（在 `global_obstacle`/`local_obstacle` 之后、`band_guard` 之前） |
+
+**回滚（一条参数）**：`scan_band_min:=0.0` ⇒ predicate 直接跳过该层 ⇒ 合并文件**逐字节**等于改动前
+（26.4 实测 md5 `e9b39f36…`，`ros2 param get` 回到 `0.0/0.0`）。也可把 launch 的 `default_value` 改回
+`'0.0'`。**正数被拒绝**（`scan_band_min:=0.1` ⇒ t=0 硬报错）：抬高下界会让更多波束出带，正是本修法
+要防的静默失效；`[−1.0, 0.0]` 之外同理。`ros2 launch … --show-args` 多出且仅多出 `scan_band_min`
+一条参数（默认 `-0.05`）。
+
+### 26.4 合并 YAML 证据（hybrid 只多 2 行；回滚整文件逐字节；STVL 子树逐字节）
+
+用**两份真实代码**离线复算 `_Nav2ParamsForSlot`（`before` = `git show HEAD:…` 的 launch；
+`after`/`rollback` = 当前工作树；脚本 `.tmp_ab/exp26/merge_probe.py`，只读、不启栈），并与
+**实跑 launch 自己写出的** `roslog/nav2_params_sim_*_merged.yaml` 逐字节对照：
+
+| 档 | 改动前（before） | 改动后（after） | 回滚（`scan_band_min:=0.0`） | 实跑 merged == 复算? |
+|---|---|---|---|---|
+| `robot11`+`global_obstacle:=stvl`（默认/hybrid） | `e9b39f36…`（**9526 B**；= §15.10/§25 的冻结值） | `71e6b591…`（**9598 B**） | **`e9b39f36…`（逐字节）** | ✅ 3 跑都是 `71e6b591…`；回滚跑是 `e9b39f36…` |
+| `robot11`+`global_obstacle:=scan` | `e5179abd…`（**9596 B**；= §17/§25 的冻结值） | `1ef5a433…`（**9668 B**） | **`e5179abd…`（逐字节）** | ✅ `e26_gscan_hyb_r1` = `1ef5a433…` |
+| `robot11`+`local_obstacle:=cloud`（不用 2D scan） | `e9b39f36…` | **`e9b39f36…`（逐字节，predicate 不命中）** | 同左 | —（离线） |
+
+**`diff -u before_stvl.yaml after_stvl.yaml` 的全部内容**（`after_gscan` 与它**逐字相同**）：
+
+```diff
+@@ -126,6 +126,8 @@
+           marking: true
+           inf_is_valid: true
+           data_type: LaserScan
++          min_obstacle_height: -0.05     # ① scan 源闸（local_costmap）
++        min_obstacle_height: -0.05       # ② 图层闸（local_costmap）
+       obstacle_cloud_layer:
+```
+
+**逐键核对**（canonical YAML subtree md5）：
+
+| 量 | stvl 档 before → after | scan 档 before → after |
+|---|---|---|
+| **`global_costmap` 整段** | `91484dc4a0d0` → **同** | `e0cdc71c6cdc` → **同** |
+| `global` `stvl_layer.livox_mark.min/max` | `0.0 / 2.0` → **同** | `0.0 / 2.0` → **同** |
+| `global` `obstacle_layer.scan.min` / `layer.min` | 无（默认 0.0）→ 同 | **`−1.0 / −1.0` → 同**（§15 覆盖保留） |
+| `local` `obstacle_layer.scan.max` | `2.0` → **2.0** | `2.0` → **2.0** |
+| `local` `stvl_layer.livox_mark.min/max` | `0.0 / 2.0` → **同** | `0.0 / 2.0` → **同** |
+| `local` `obstacle_layer.scan.min` / `layer.min` | 无 → **`−0.05 / −0.05`** | 无 → **`−0.05 / −0.05`** |
+
+> **关于"`stvl` 合并 YAML 逐字节不变"的诚实口径**：按**整文件**字面，这一条**做不到**——本轮的
+> 改动按设计就落在**同一份**默认档合并文件的 `local_costmap` 段（这正是"默认档现在用 −0.05"的定义）。
+> 能交付且更强的三层证据是：① **`global_costmap` 子树（含 STVL 的 3D 带、§15 的 −1.0）逐字节相同**；
+> ② **STVL 的 `livox_mark.min/max` 运行期回读仍是 `0.0/2.0`**（26.7）；③ **回滚 `scan_band_min:=0.0`
+> 时整文件逐字节**等于改动前（`e9b39f36…`/`e5179abd…`）。除此之外，`local_obstacle:=cloud`（不用 2D
+> scan 源）也逐字节不变。
+
+### 26.5 主表：默认档 3 跑 + `off` 1 跑（任务书要求的 4 跑）
+
+`median[min–max]`；`z_min` 两口径：**窗口 median**（200 帧逐帧最小值的 median，= §25 表的口径）与
+**200 帧绝对最小**；"margin" = 该 z_min − 下界。`global` 列**只对 `hyb_r1`（旧图）与 `r2/r3`（新图）**
+分别有效，**跨资产不可比**（26.2/26.8）。
+
+| 指标 | **默认（`auto`⇒hybrid）n=3** | **`gravity_align_mode:=off` n=1** | **§25.4 的 hybrid（n=3，旧图）** |
+|---|---|---|---|
+| `/scan` 有限波束/帧 | 771 [771–771] | 771 | 771 |
+| 波束 z(odom) p50 | +0.0353 [+0.0351, +0.0364] | −0.0892 | +0.026 [+0.025,+0.037] |
+| **z_min（窗口 median）** | **+0.0199 [+0.0184, +0.0203]** | −0.4251 | **+0.011 [+0.007,+0.021]** |
+| **z_min（200 帧绝对）** | **+0.0144 [+0.0142, +0.0150]** | −0.6896 | +0.004…+0.014（由 §25 JSON 复算） |
+| 在带 `[0,2]` 内 | **771 [771–771]（100%）** | **337（43.71%）** | 771（100%） |
+| 带下 / 带上（`[0,2]`） | **0 / 0** | **432 / 3** | 0 / 0 |
+| **margin vs 旧下界 0.0** | **+19.9 mm [+18.4, +20.3]** | −425.1 mm | **+11 [+7,+21] mm**（最坏 **7 mm**） |
+| **margin vs 新下界 −0.05（窗口 median）** | **+69.9 mm [+68.4, +70.3]** | — | +61 [+57,+71] mm |
+| **margin vs 新下界 −0.05（绝对最小）** | **+64.4 mm [+64.2, +65.0]** | — | +54 mm（按 §25 绝对最小 +0.0042） |
+| `band_guard` local（live 带） | **OK 100.0%**，772/772（771–773），`below=0`，带 `[−0.05,2.0]` | **WARN 45.4%**，351.5/773.5，`below=420`，**kept-y 单侧 +y** | OK 100%，带 `[0,2]` |
+| `band_guard` kept-y | **[−0.763, +5.106] m（双侧、跨原点）** | **[+0.153, +3.272] m（单侧 +y）** | [−0.428, +5.270] |
+| local **lethal** | 277 [245.5–285] | 306.5 | **329 [264–373.5]** |
+| local **inscribed** | 10181 [9529–10306.5] | 10093.5 | 10290 [10265–10353.5] |
+| local **free** | 40389 [40274–42460] | 41570.5 | 40106.5 [40042.5–40154.5] |
+| **最近 lethal** | 0.713 [0.708–0.716] | 0.719 | 0.712 [0.709–0.717] |
+| **前方 2.0×1.2 m lethal** | 23 [22–23] | 22 | 22 [21–24] |
+| **地面残余倾角** | 0.466° [0.407–0.491] | **30.313°** | 0.464° [0.415–0.586] |
+| **`h_meas`** | **0.2616 [0.2616–0.2620] m / INFO**（\|Δ\| 2.1–2.5 mm） | —（off 无互检） | 0.2617 / INFO |
+| `odom→base_link` roll | −0.054° [−0.062, −0.001] | **30.200°** | +0.060° |
+| RTF | 0.393 [0.338–0.402] | 0.416 | 0.406 [0.400–0.415] |
+| **global lethal**（资产） | `r1` 3725（旧） / `r2` 2159·`r3` 2162（新） | 2163（新） | 3727 [3725–3729]（旧） |
+
+**逐跑明细（`scan` 与 local；资产列 = 跑前 `meta_before` 的 md5 前 8 位）**
+
+| run | 资产(map yaml/pgm/PCD) | finite | z_min 窗口 med / 绝对 | margin@0 / @−0.05（窗口 med） | in `[0,2]` | band_guard | local lethal/insc/free | `h_meas` | incl |
+|---|---|---|---|---|---|---|---|---|---|
+| `e26_hyb_r1` | `fd23dd82`/`6e45a932`/`5d0d33eb`（**旧**） | 771 | +0.0203 / +0.0142 | +20.3 / **+70.3** mm | 771 | OK 100% 772/772 | 285 / 10306.5 / 40274 | 0.2616 INFO | 0.407° |
+| `e26_hyb_r2` | `bf3f37cb`/`7ec12dc3`/`1d5ca30e`（新） | 771 | +0.0199 / +0.0150 | +19.9 / **+69.9** mm | 771 | OK 100% 773/773 | 277 / 10181 / 40389 | 0.2616 INFO | 0.466° |
+| `e26_hyb_r3` | 新 | 771 | +0.0184 / +0.0144 | +18.4 / **+68.4** mm | 771 | OK 100% 771/771 | **245.5 / 9529 / 42460** | 0.2620 INFO | 0.491° |
+| `e26_off_r1` | 新 | 771 | **−0.4251** / **−0.6896** | −425.1 / −375.1 mm | **337** | **WARN 45.4%**（kept-y 单侧） | 306.5 / 10093.5 / 41570.5 | — | **30.313°** |
+| `e26_hyb_g_r1`（干净补充） | 新，`meta` 0 行 | 771 | +0.0208 / +0.0149 | +20.8 / **+70.8** mm | 771 | OK 100% 772.5/772.5 | 272.5 / 10188.5 / 40370 | 0.2616 INFO | 0.469° |
+| `e26_gscan_hyb_r1`（干净补充） | 新，`meta` 0 行 | 771 | +0.0216 / +0.0142 | +21.6 / **+71.6** mm | 771 | local OK 100% 773/773；**global OK 100% 773/773，带 `[−1,2]`** | 262 / 10206.5 / 40372 | 0.2616 INFO | 0.469° |
+| `e26_rollback_r1`（`scan_band_min:=0.0`） | 新，`meta` 0 行 | 771 | +0.0199 / +0.0129 | +19.9 / +69.9 mm（带已回 0.0） | 771 | OK 100% 774/774，带 **`[0,2]`** | **317** / 10064 / 40530 | 0.2616 INFO | 0.366° |
+
+**与 §25 的差（hybrid n=3 中位，任务书要求的"same order"）**：lethal **277 vs 329 ⇒ −52（−15.8%）**、
+inscribed **10181 vs 10290 ⇒ −109（−1.1%）**、free **40389 vs 40106.5 ⇒ +282.5（+0.70%）**、
+nearest **0.713 vs 0.712**、ahead **23 vs 22**。n=4（含干净补充跑）时 **274.75 / 10184.75 / 40379.5**
+⇒ 差 **−54.25 / −105.25 / +273**。**没有"多出地面格"的方向性**（lethal 反而**降**、free 反而**升**，
+与"放宽下界放进更多 lethal"相反的符号）。
+
+### 26.6 余量：**7 mm → 57–71 mm**（本轮的核心交付）
+
+| 量 | 值 | 出处 |
+|---|---|---|
+| §25 最低波束端点（最坏跑 `e25_hyb_r3`） | **+0.007 m** | §25.5/§25.11#10 |
+| §25 LIO z 漂移（窗口末端 base_link z − 初值） | **−0.065…−0.077 m** | §25.11#10 |
+| §25 的余量（端点 − 下界 0.0） | **7 mm** ⇒ "一次小扰动就会静默掉带" | 缺陷 "b" 的描述 |
+| 本轮 hybrid 最低端点（窗口 median） | **+0.0184…+0.0216 m** | 3 跑 + 干净补充 |
+| 本轮 hybrid 最低端点（200 帧绝对） | **+0.0129…+0.0150 m**（含回滚跑） | 7 跑 JSON |
+| **本轮 margin vs 旧下界 0.0** | **+12.9…+21.6 mm** | 逐跑 |
+| **本轮 margin vs 新下界 −0.05** | **+62.9…+71.6 mm**（median 口径 **+68.4…+71.6**） | 逐跑 |
+| **若把 §25 那个 +0.007 的端点放到新带** | **+57 mm** | 0.007 − (−0.05) |
+| 相对§25余量的倍数 | **≈ 8×**（57 mm / 7 mm） | — |
+
+**读法**：这 5 cm 不是"标定到某个最优值"，而是给**LIO z 漂移**（§25 实测 65–77 mm 量级、且**没有
+归因/没有修**）留出与它同量级的余量；`scan_band_min` 的**默认值**就是这条余量，**回滚**是 0.0。
+
+### 26.7 "没有把地面/近地点加进 local costmap"的证明
+
+1. **语义**：`/scan` 是**二维平盘**（LaserScan 无高度），nav2 先 `projectLaser`（z 置 0）再
+   `transformLaserScanToPointCloud` 搬到代价图帧 ⇒ **同一帧里所有波束端点的 z 完全相同**（= 扫描面
+   在该帧的 z）。`min_obstacle_height` 只是这张平盘的**常量闸**；把下界从 0.0 降到 −0.05 不可能
+   引入"地面上不同高度的点"（地面点走 STVL / `obstacle_cloud_layer` 那条链，本轮**一个字节没动**）。
+2. **数据（决定性）**：hybrid 的 200 帧里**最低端点也 > 0**（本轮 4 个 hybrid 跑：绝对最小
+   **+0.0129…+0.0150**）⇒ **落在 `[−0.05, 0)` 的波束 = 0 条** ⇒ `ObservationBuffer` 收到的点集与
+   老带**完全一致**；`band_guard` 的 `below` 在 hybrid 里 **0**（7 跑里 5 个 hybrid 全 0）。
+3. **回滚 A/B（同资产）**：`e26_rollback_r1`（带 `[0,2]`）local = **317 / 10064 / 40530**；
+   同资产、带 `[−0.05,2]` 的 3 跑（`r2/r3/g_r1`）中位 = **272.5 / 10181 / 40389**。差异方向是
+   **回滚跑的 lethal 更高**（317 > 272.5），**没有**"宽带 ⇒ lethal/inscribed 增加、free 减少"的系统性
+   信号 ⇒ 观测到的差是**逐跑散布**（§25 的 lethal 本身就有 264–373.5 的 ±55），不是这 5 cm 造成的。
+4. **`off` 对照（宽带会多放几条近零波束，但救不了斜装）**：navband 的 `[0,2]` in-band 仍是
+   **337/771 = 43.71%**（与 §25 **逐值相同**，因为这个口径不看配置）；`band_guard` 按 live 带
+   `[−0.05,2]` 是 **44.8–45.4%**、`below` 从 §25 的 433 降到 **420–435**（≈ **4 条/帧**进了带），
+   但 **kept-y 仍是 `[+0.153,+3.272]` 单侧 +y**、`band_guard` 仍 **WARN**、倾角仍 **30.3°**
+   ⇒ **余量不是解药**（正如任务书要求）。
+5. **STVL/3D 源**：`stvl_layer.livox_mark.min/max` 在两张 costmap 的运行期回读都是 **0.0 / 2.0**
+   （26.8），本轮没有把任何 3D 近地点放进来。
+
+### 26.8 干净的补充 2 跑（**stable promoted assets**）+ §15 `−1.0` 复检
+
+并行任务 19:48 之后暂停，补齐两跑（`meta_md5_diff` 均为 **0 行**）：
+
+| 量 | `e26_hyb_g_r1`（默认 stvl） | `e26_gscan_hyb_r1`（`global_obstacle:=scan`） |
+|---|---|---|
+| local 带（live） | **`[−0.050, 2.000]`**，OK 100% | **`[−0.050, 2.000]`**，OK 100% |
+| **global 带（live）** | `obstacle_layer` disabled（stvl 档） | **`[−1.000, 2.000]`**（§15 的 −1.0 仍在），global in-band **773/773 = 100%**，z p50 **+0.119** |
+| local lethal / insc / free | 272.5 / 10188.5 / 40370 | 262 / 10206.5 / 40372 |
+| **global lethal / insc / free（39446 格）** | **2163 / 12260 / 12812** | **2275 / 12755 / 12154**（2D scan 层 +112 格） |
+| global nearest | 0.710 | 0.713 |
+| merged md5 | `71e6b591…`（= after_stvl） | **`1ef5a433…`（= after_gscan）** |
+| `h_meas` / incl / RTF | 0.2616 INFO / 0.469° / 0.416 | 0.2616 INFO / 0.469° / 0.401 |
+
+> **全局基线换代**：新图的 global cell 数是 **39446**（旧图 43077），所以 §25 的
+> `3727 / 16875 / 10176` **不能**与今天的 `2163 / 12260 / 12812` 直比（前者是旧图）。本轮只声明：
+> **默认档的全局图在新图上非空且 STVL 在工作**、**`global_obstacle:=scan` 的 −1.0 覆盖在新图上仍然
+> 必须/有效**（global in-band 100%，去掉它会不会仍 0 未重测——§15/§25 的机理未变，但**本轮没做
+> 去覆盖对照**）。
+
+### 26.9 运行期 `ros2 param get`（live costmap 节点；`params.txt` 原文）
+
+默认档（`e26_hyb_g_r1`；`e26_hyb_r1/r2/r3` 逐字相同）：
+
+```text
+/local_costmap/local_costmap obstacle_layer.scan.min_obstacle_height     = Double value is: -0.05
+/local_costmap/local_costmap obstacle_layer.scan.max_obstacle_height     = Double value is: 2.0
+/local_costmap/local_costmap obstacle_layer.min_obstacle_height          = Double value is: -0.05
+/local_costmap/local_costmap obstacle_layer.max_obstacle_height          = Double value is: 2.0
+/local_costmap/local_costmap obstacle_layer.enabled                      = Boolean value is: True
+/global_costmap/global_costmap obstacle_layer.scan.min_obstacle_height   = Double value is: 0.0
+/global_costmap/global_costmap obstacle_layer.min_obstacle_height        = Double value is: 0.0
+/global_costmap/global_costmap obstacle_layer.enabled                    = Boolean value is: False
+/global_costmap/global_costmap stvl_layer.enabled                        = Boolean value is: True
+/local_costmap/local_costmap stvl_layer.livox_mark.min_obstacle_height   = Double value is: 0.0
+/local_costmap/local_costmap stvl_layer.livox_mark.max_obstacle_height   = Double value is: 2.0
+/global_costmap/global_costmap stvl_layer.livox_mark.min_obstacle_height = Double value is: 0.0
+/global_costmap/global_costmap stvl_layer.livox_mark.max_obstacle_height = Double value is: 2.0
+```
+
+`global_obstacle:=scan` 档（`e26_gscan_hyb_r1`）**只把 global 的 obstacle 层翻过来，`−1.0` 原样**：
+
+```text
+/global_costmap/global_costmap obstacle_layer.scan.min_obstacle_height   = Double value is: -1.0
+/global_costmap/global_costmap obstacle_layer.min_obstacle_height        = Double value is: -1.0
+/global_costmap/global_costmap obstacle_layer.enabled                    = Boolean value is: True
+/global_costmap/global_costmap stvl_layer.enabled                        = Boolean value is: False
+（local 仍是 -0.05/2.0；stvl 的 0.0/2.0 两档都不变）
+```
+
+`band_guard` 的 live 回读（默认档）：
+
+```text
+[band_guard] 参数回读（live）/local_costmap/local_costmap: … obstacle_layer.band=[-0.050,2.000]
+             obstacle_layer.scan[LaserScan topic=/scan src.band=[-0.050,2.000]] …
+[band_guard] OK /local_costmap/local_costmap frame=odom layer=obstacle_layer source=scan |
+             in-band 772/772 (100.0%) below=0 above=0 … | band=[-0.050,2.000]
+             source=[-0.050,2.000] layer=[-0.050,2.000] | hint=none
+[band_guard] WARN /local_costmap/…（off 臂）| in-band 351/784 (44.8%) below=429 |
+             kept-y=[0.162,3.282] … | hint=kept-y is ONE-SIDED (+y) …
+```
+
+> 注：`band_guard` 的样本是**整跑级**（5 s × 11 样本，覆盖 launch 后约 55 仿真秒，**不是** 20 s
+> 窗口）；所以它的 in-band 计数（771–774）与 navband 的 771 有一两帧的口径差（与 §25 同）。
+
+### 26.10 本轮没能验证 / 诚实清单
+
+1. **默认 RMUL 资产在批次中途被并行任务换了**（19:47:59–19:48:05，见 26.2）。⇒ `hyb_r1` 的
+   **全局**列是旧图，`r2/r3/off/clean/rollback` 是新图；**跨资产不可比**。**局部**列与图无关；
+   干净的全局数只有 `e26_hyb_g_r1`（新图）与 `e26_gscan_hyb_r1`（新图）两跑。
+2. **§25 的全局数字（3727/16875/10176，43077 格）在提升版资产上作废**（新图 39446 格、
+   2163/12260/12812）。§25 的**局部**结论（771/771、0.464°、h 0.2617、43.7%）**仍然有效**并被复现。
+3. **`hyb_r3` 的 local lethal/free（245.5 / 42460）是个离群跑**：比 §25 中位低 83.5、free 高 2353。
+   **不是**这 5 cm 造成的（该跑 `band_guard below=0`、200 帧最低端点 +0.0144 > 0 ⇒ 宽带一条都没多放）；
+   最可能是 LIO odom 轨迹/姿态的逐跑差异 + 并发负载（RTF 0.40）。**没有**逐帧归因。n=3 太小，
+   不能把 lethal 的 ±50 级差当判据（§25.4 读法 2 同理）。
+4. **n 小**：hybrid n=3（+1 干净补充）、off n=1、gscan n=1、rollback n=1；没有录 bag/重放，
+   没算 ms/帧，没做多世界（RMUC2026 未测）。
+5. **只测一条组合**：`robot11 sensor` + `small_point_lio` + `gicp` + `mppi` + `smac2d` +
+   `spin_speed 0.0` + `world RMUL2026`。`hzmirm`/默认模型、`amcl`/`small_gicp`、`rpp/dwb/teb`、
+   `lio:=fastlio`、`RMUC2026`、`mode:=mapping`、`local_obstacle` 的 `cloud/stvl` 实跑**都没测**
+   （`cloud` 只做了离线合并证明逐字节不变）。
+6. **"`stvl` 合并 YAML 逐字节不变"按整文件做不到**（改动按设计落在同一份默认档文件的 local 段）；
+   已给的三层替代证据见 26.4。**没有**做"去掉 §15 −1.0 覆盖"的对照跑（§15/§25 已证，本轮未复测）。
+7. **`−0.05` 是余量，不是标定**：没有扫"最优下界"；安全性来自 2D 平盘语义 + 实测最低端点 > 0，
+   不是来自调参。取值域 [−1.0, 0.0] 是人为约束（正数硬报错），`−1.0` 之外不测。
+8. **正数/非数的硬报错只做了代码路径审查**（`_scan_band_min_value`），**没有**单独跑一次
+   `scan_band_min:=0.1` 的 launch 去截图报错。
+9. **并发**：19:46 时另一套栈的 11737 与我的栈并存（`load 10.4`、RTF 一度 0.338）；我**没有**杀它，
+   只保证自己批次内串行 + 每跑前后 `gz_left=0`。机器级"没有第二套栈"这条在本会话的 PID 命名空间里
+   **看不到**（同 §25.11#7 的限制）；19:48 之后并行任务暂停，干净补充跑的 `ss` 只剩我自己的 master。
+10. **`scan_band_min` 也作用于 `off` 臂**（同一份 local 配置）⇒ off 的 `below` 从 433 降到 420–435
+    （≈4 条/帧进带），但 in-band 仍 43.7–45.4%、kept-y 仍单侧、WARN 仍触发 ⇒ 不构成"救活"。
+11. **回滚只证明了参数路径**（`0.0` ⇒ 合并文件逐字节 = 改动前、live 回读 0.0），**没有**在回滚档
+    跑满 3 跑做 A/B；单跑对照见 26.7#3。
+12. **§27 的资产提升未提交**（工作树里是并行任务的未提交改动）。本节的提交**只含**本节代码/文档，
+    **不包含** map/PCD 资产，也不包含 §27 正文。
+
+### 26.11 一句话给用户
+
+> **局部 2D scan 的下界现在是 −0.05 m（`scan_band_min`，默认生效、一条参数回滚 0.0）**：
+> `hybrid` 默认档仍 **771/771（100%）在带内**，最低端点 **+0.014…+0.022 m** ⇒ 距新下界
+> **63–72 mm**（§25 的 7 mm 余量 ×8），`h_meas` **0.2616 INFO**、倾角 **0.466°**、
+> local lethal/free **277/40389**（§25 是 329/40106.5，差在逐跑散布内，且**宽带没有多放一条
+> 负 z 波束**）。**`off` 仍 43.7%（navband [0,2]）/ 45.4%（live 带）、kept-y 单侧 +y、WARN** ——
+> 5 cm 是鲁棒性余量，**救不了**斜装。**STVL 的 0.0/2.0、`global_obstacle:=scan` 的 §15 −1.0、
+> `max 2.0` 一个字节没动**；合并文件只在 local 段多 2 行，`global_costmap` 子树逐字节相同，
+> **回滚时整文件逐字节回到 `e9b39f36…`**。**诚实边界**：批次中途并行任务换了默认 RMUL 资产
+> （局部数字不受影响、全局列按资产分列，新图全局基线 2163/12260/12812），n 小，`off` 不是产品路径。
+

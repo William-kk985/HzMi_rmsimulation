@@ -1,0 +1,55 @@
+# =============================================================================
+# nav2_params_sim_local_scan_band.yaml —— **局部 2D scan 层高度带下界**的小负余量
+# （唯一改动 = 两个 min_obstacle_height；上界 2.0 一个字节都不动）
+#
+# 这是什么：一份**只含两个叶子键**的覆盖层。launch 在 `local_obstacle` 用到 2D `/scan`
+# 源（`scan` / `both` / `stvl_both`；默认 `scan`）时，把它**深合并**到公共段
+# `nav2_params_sim_base.yaml` 之上（`_Nav2ParamsForSlot`），生成临时参数文件再喂给 nav2。
+# 2D scan 源不参与（`local_obstacle:=cloud|stvl`）或显式回滚时不命中 ⇒ 参数文件逐字节不变。
+#
+# ★ 2026-10-20 为什么需要它（缺陷 "b"，实测见 docs/frame_contract_v3_measurements.md §26）：
+#   `hybrid` 默认档的 local `/scan` 在 §25 里是 **771/771（100%）在带内**，但**最低波束端点
+#   只有 +0.007 m**（`e25_hyb_r3`，odom 帧），而同一批跑的 LIO z 漂移是 **−0.065…−0.077 m**
+#   （窗口末端 `base_link` z = +0.025…+0.037，初值 +0.1025）。⇒ 距下界 **7 mm**，只要 LIO
+#   再多漂 ~1 cm、或姿态/地面估计有个小台阶，波束就会整批掉到 0.0 以下 ⇒ nav2 **静默**丢点
+#   （§9.7/§15.6：无日志、无 WARN、无 dropped 计数），默认档悄悄退化成 `off` 那种
+#   **kept-y 单侧条带**的"半盲"状态。这是一个**鲁棒性余量**，不是标定：下界放到 −0.05 m，
+#   给 §25 实测的漂移量级留 **57 mm**（= 0.007 − (−0.05)）的余量。
+#
+# ★ 为什么改两处（与 §15.7 同一源码链，少一处就还是不生效）：
+#     ① `obstacle_layer.scan.min_obstacle_height` = `ObservationBuffer` 的闸
+#        （observation_buffer.cpp:143-144；点在**搬到代价图帧之后**按 z 过滤）；
+#     ② `obstacle_layer.min_obstacle_height` = `ObstacleLayer::updateBounds` 的**第二道**闸
+#        （obstacle_layer.cpp:470 `if (pz < min_obstacle_height_) continue;`）。
+#   两处都只动 `min`；`max` 保持 2.0（公共段的 `scan.max_obstacle_height` / nav2 图层默认值）。
+#
+# ★ 为什么**不会**放进地面/近地噪声：`/scan` 是**二维平盘**（LaserScan 没有高度信息），
+#   nav2 先 `projectLaser`（z 置 0）再 `transformLaserScanToPointCloud` 搬到代价图帧 ⇒
+#   **每一帧里所有波束端点的 z 完全相同**（= 扫描面在该帧的 z，§25 实测跨度 ≈ 0.07 m，
+#   来自车体姿态）。放宽下界只能让"同一张平盘"整体进带，**不可能**把 3D 地面点混进来
+#   （地面点走的是 STVL / `obstacle_cloud_layer` 那条链，各有自己的高度带，本文件不碰）。
+#   ⇒ 验收口径：局部 lethal / inscribed / free 不应出现"多出地面格"的量级变化（§26.5）。
+#
+# ★ 范围（**有意不动**的两处）：
+#   · **STVL 的带**（`stvl_layer.livox_mark.min_obstacle_height: 0.0`）不动 —— STVL 吃真 3D 点，
+#     负下界会放近地点进来；本文件只写 `local_costmap.obstacle_layer`。
+#   · 全局 `obstacle_layer.scan.min_obstacle_height: -1.0`（`global_obstacle:=scan` 的 §15 覆盖）
+#     不动 —— 那是 **map 帧扫描面 z ≈ −0.18** 的另一个缺陷的修法，量级/根因都不同（§15.6/§25.6）。
+#
+# 校验/回退（**一条 launch 参数**）：
+#   `scan_band_min:=0.0` ⇒ 本覆盖层**不命中**（predicate 直接跳过）⇒ 合并文件与改动前**逐字节
+#   相同**（`min_obstacle_height` 回到公共段的 0.0）。也可把 launch 的 `default_value` 改回
+#   `'0.0'`。取值域 [−1.0, 0.0]：正数会把下界**抬高**（更危险，会让更多波束出带）⇒ launch
+#   直接硬报错，不静默接受。
+#
+# 实测（3 跑默认 hybrid + 1 跑 off 对照、合并 YAML 逐键 diff、运行期 `ros2 param get`）见 §26。
+# =============================================================================
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      obstacle_layer:
+        # ② 图层级的第二道 z 闸（ObstacleLayer::updateBounds, obstacle_layer.cpp:470）
+        min_obstacle_height: -0.05
+        scan:
+          # ① 观测缓冲区的 z 闸（ObservationBuffer::bufferCloud, observation_buffer.cpp:143）
+          min_obstacle_height: -0.05

@@ -1083,14 +1083,32 @@ class _Nav2ParamsForSlot(Substitution):
       · `global_obstacle:=scan` → config/nav2_params_sim_global_scan_obstacle.yaml
                                   （全局 2D scan 层的 min_obstacle_height；根因见
                                    docs/frame_contract_v3_measurements.md §15）
+      · `scan_band_min != 0.0` + local 2D scan 源
+                                → config/nav2_params_sim_local_scan_band.yaml
+                                  （**局部** 2D scan 层高度带下界的小负余量；§26。默认 −0.05，
+                                   回滚 = `scan_band_min:=0.0` ⇒ 本层不命中，逐字节回到改动前）
     合并是**深**的（只覆盖叶子键）⇒ 公共段里其它一切保持不变；临时文件落在 `$ROS_LOG_DIR`。
+
+    ★ 2026-10-20：覆盖层条目可以是 3 元组 `(tag, path, predicate)`，也可以是 4 元组
+      `(tag, path, predicate, bindings)`。`bindings` = `((点分叶子键, Substitution), ...)`：
+      在合并之前把该覆盖层里的这个叶子键的值**替换成 launch 参数求值后的数**（YAML 解析，
+      不是字符串）⇒ 同一份覆盖文件可以被一个 launch 参数驱动（`scan_band_min`），
+      且 `0.0` 时由 predicate 整个跳过（= 逐字节回滚，不留下显式的 0.0 键）。
     """
 
     def __init__(self, base_path, layers=()):
-        """@param layers ((tag, override_path, predicate(context)->bool), ...)；按顺序合并。"""
+        """@param layers ((tag, override_path, predicate(context)->bool[, bindings]), ...)；按顺序合并。"""
         super().__init__()
         self.__base = base_path
-        self.__layers = tuple(layers)
+        norm = []
+        for layer in layers:
+            if len(layer) == 4:
+                tag, path, pred, bindings = layer
+            else:
+                tag, path, pred = layer
+                bindings = ()
+            norm.append((tag, path, pred, tuple(bindings)))
+        self.__layers = tuple(norm)
 
     @staticmethod
     def _cfg(context, name, default=''):
@@ -1105,12 +1123,12 @@ class _Nav2ParamsForSlot(Substitution):
 
         import yaml as _yaml
         active = []
-        for tag, path, pred in self.__layers:
+        for tag, path, pred, bindings in self.__layers:
             if not pred(context):
                 continue
             if not os.path.isfile(path):
                 raise RuntimeError('[launch] %s 的 nav2 覆盖层不在：%s' % (tag, path))
-            active.append((tag, path))
+            active.append((tag, path, bindings))
         if not active:
             return self.__base
         with open(self.__base) as f:
@@ -1123,19 +1141,70 @@ class _Nav2ParamsForSlot(Substitution):
                 else:
                     dst[k] = v
 
-        for _tag, path in active:
+        def bind(overlay, dotted, value):
+            """把覆盖层里的点分叶子键设成 value（覆盖文件只提供**形状/默认值**的兜底）。"""
+            node = overlay
+            parts = dotted.split('.')
+            for p in parts[:-1]:
+                node = node.setdefault(p, {})
+            node[parts[-1]] = value
+
+        for _tag, path, bindings in active:
             with open(path) as f:
-                deep_merge(base, _yaml.safe_load(f))
+                overlay = _yaml.safe_load(f)
+            for dotted, subst in bindings:
+                # Substitution 求值后是**字符串**，safe_load 回数值（-0.05 ⇒ float，不是 str）
+                bind(overlay, dotted, _yaml.safe_load(subst.perform(context)))
+            deep_merge(base, overlay)
         out_dir = os.environ.get('ROS_LOG_DIR') or tempfile.gettempdir()
         out = os.path.join(out_dir, 'nav2_params_sim_%s_merged.yaml' %
-                           '_'.join(tag for tag, _p in active))
+                           '_'.join(tag for tag, _p, _b in active))
         with open(out, 'w') as f:
             _yaml.safe_dump(base, f, allow_unicode=True, sort_keys=False)
         return out
 
     def describe(self):
         return '%s(base=%s, layers=%s)' % (
-            type(self).__name__, self.__base, [t for t, _p, _f in self.__layers])
+            type(self).__name__, self.__base, [t for t, _p, _f, _b in self.__layers])
+
+
+# ★ 2026-10-20：局部 2D scan 高度带下界的默认余量 / 合法域（§26，缺陷 "b"）。
+#   默认 −0.05 m：§25 的 hybrid 最低波束端点 +0.007 m，距下界只有 7 mm，而 LIO 的 z 漂移是
+#   −0.065…−0.077 m ⇒ 余量放到 57 mm。**只允许下调**（[−1.0, 0.0]）：正数会把下界抬高，
+#   让更多波束被判出带（正是本修法要防的静默失效）⇒ 直接硬报错，不静默夹紧。
+_SCAN_BAND_MIN_DEFAULT = '-0.05'
+_SCAN_BAND_MIN_RANGE = (-1.0, 0.0)
+
+
+def _scan_band_min_value(context):
+    """求值 `scan_band_min`（float，米）；非法值**硬报错**（不静默回退）。"""
+    raw = _Nav2ParamsForSlot._cfg(context, 'scan_band_min', _SCAN_BAND_MIN_DEFAULT)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "[launch] scan_band_min:=%r 不是数（局部 2D scan 高度带下界，单位米；"
+            "默认 %s，回滚 scan_band_min:=0.0）" % (raw, _SCAN_BAND_MIN_DEFAULT))
+    if not (_SCAN_BAND_MIN_RANGE[0] <= value <= _SCAN_BAND_MIN_RANGE[1]):
+        raise RuntimeError(
+            "[launch] scan_band_min:=%r 越界：只允许 [%s, %s]（**只许下调**；正数会把下界抬高、"
+            "让更多波束出带 ⇒ 拒绝）。回滚 = scan_band_min:=0.0"
+            % (raw, _SCAN_BAND_MIN_RANGE[0], _SCAN_BAND_MIN_RANGE[1]))
+    return value
+
+
+def _scan_band_layer_active(context):
+    """覆盖层命中条件：**局部 2D scan 源在用** 且 `scan_band_min != 0.0`。
+
+    · `local_obstacle` 的取值表（navigation_launch.py 的 LOCAL_OBSTACLE_LAYER_TABLE）：
+      `scan` / `both` / `stvl_both` 才启用 `obstacle_layer`（2D `/scan`）⇒ 只有这三档命中；
+      `cloud` / `stvl` 不用 2D scan 源 ⇒ 不命中（合参文件与改动前逐字节相同）。
+    · `0.0` = 显式回滚 ⇒ 不命中 ⇒ 覆盖层根本不参与合并（不是"合并一个 0.0"，是**逐字节**回到
+      改动前：文件名/内容都与 §25 的 `nav2_params_sim_robot11_merged.yaml` 一致）。
+    """
+    if _scan_band_min_value(context) == 0.0:
+        return False
+    return _Nav2ParamsForSlot._cfg(context, 'local_obstacle') in ('scan', 'both', 'stvl_both')
 
 
 class _SlotSpinSpeedDefault(Substitution):
@@ -1876,6 +1945,12 @@ def generate_launch_description():
     #     为什么必须有这一层：扫描面在 map 帧里的 z ≈ −0.18 m，被 nav2 的 z 闸**静默**全丢
     #     ⇒ 全局图恒等于 static+inflation（根因/实测见 docs/frame_contract_v3_measurements.md §15）。
     #     默认 `global_obstacle:=stvl` 不命中 ⇒ 参数文件逐字节不变。
+    #   · scan_band_min != 0.0 + 局部 2D scan 源
+    #                               → 覆盖层只含**局部 2D scan 层的两个 min_obstacle_height**（默认
+    #     −0.05，值由 launch 参数绑定）—— rm_nav_bringup/config/nav2_params_sim_local_scan_band.yaml。
+    #     为什么必须有这一层：§25 的 hybrid 最低波束端点只有 +0.007 m（LIO z 漂移 −0.065…−0.077），
+    #     7 mm 余量太薄；−0.05 给 57 mm。回滚 `scan_band_min:=0.0` ⇒ 不命中、逐字节回到改动前。
+    #     **只写 local_costmap**：STVL 的 3D 带与全局 −1.0 覆盖一个字节都不动（§26）。
     nav2_base_params_for_slot = _Nav2ParamsForSlot(
         os.path.join(nav2_params_dir, 'nav2_params_sim_base.yaml'),
         layers=(
@@ -1886,6 +1961,15 @@ def generate_launch_description():
              os.path.join(rm_nav_bringup_dir, 'config',
                           'nav2_params_sim_global_scan_obstacle.yaml'),
              lambda ctx: _Nav2ParamsForSlot._cfg(ctx, 'global_obstacle') == 'scan'),
+            ('local_scan_band',
+             os.path.join(rm_nav_bringup_dir, 'config',
+                          'nav2_params_sim_local_scan_band.yaml'),
+             _scan_band_layer_active,
+             # 覆盖文件里的 −0.05 只是默认值/文档；真值来自 launch 参数（`0.0` 时整层不命中）。
+             (('local_costmap.local_costmap.ros__parameters.obstacle_layer.min_obstacle_height',
+               LaunchConfiguration('scan_band_min')),
+              ('local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.min_obstacle_height',
+               LaunchConfiguration('scan_band_min')))),
         ))
     nav2_params_launch_args = {
         'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）
@@ -2302,6 +2386,22 @@ def generate_launch_description():
                     'stvl_both = stvl + scan + cloud（冗余最多、CPU 最贵；未做 bench 实测）。'
                     '开关表 = rm_navigation/launch/navigation_launch.py 的 LOCAL_OBSTACLE_LAYER_TABLE；'
                     '实测见 docs/stvl_local_costmap.md')
+
+    # ★ 2026-10-20：局部 2D scan 高度带下界的**小负余量**（缺陷 "b"；§26）。
+    #   现状（§25）：hybrid 默认档 local `/scan` 771/771 在带内，但**最低端点只有 +0.007 m**，
+    #   而 LIO z 漂移 −0.065…−0.077 ⇒ 只剩 7 mm，一次小扰动就会让波束整批掉出 `[0,2)`、nav2
+    #   静默丢点、默认档退回 `off` 的 kept-y 单侧"半盲"状态。默认 −0.05 ⇒ 余量 57 mm。
+    #   只作用于**局部 2D scan**（`obstacle_layer` 的两道 min 闸）；STVL 的带、全局 `−1.0`
+    #   覆盖、`max 2.0` 都不动。回滚 = `scan_band_min:=0.0`（覆盖层不命中 ⇒ 参数文件逐字节回到
+    #   改动前）。取值域 [−1.0, 0.0]：正数会把下界抬高 ⇒ 硬报错。
+    declare_scan_band_min_cmd = DeclareLaunchArgument(
+        'scan_band_min',
+        default_value=_SCAN_BAND_MIN_DEFAULT,
+        description='局部 2D scan 高度带**下界**（米；默认 -0.05，回滚 0.0）。只改 '
+                    '`local_costmap.obstacle_layer[.scan].min_obstacle_height` 两处（nav2 两道 z 闸），'
+                    '`max_obstacle_height` 仍是 2.0；STVL 的 3D 带与全局 `global_obstacle:=scan` 的 '
+                    '−1.0 覆盖都不受影响。0.0 = 覆盖层不命中 ⇒ 与改动前逐字节相同。'
+                    '背景：§25 hybrid 最低波束端点 +0.007 m vs LIO z 漂移 −0.065…−0.077 m（余量 7 mm）')
 
     # ★ 2026-10-21：`band_guard` —— nav2 高度带**静默丢波束**的只读诊断（opt-in）。
     #   默认 False = **节点集/参数/时序与改造前完全一致**（这个 Node 的 condition 恒假，
@@ -3580,6 +3680,8 @@ def generate_launch_description():
         actions=[OpaqueFunction(function=_check_gravity_align_contract)]))
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
+    # ★ 2026-10-20：局部 2D scan 高度带下界（默认 −0.05；回滚 scan_band_min:=0.0，见 §26）
+    ld.add_action(declare_scan_band_min_cmd)
     # ★ 2026-10-21：高度带静默过滤守卫（opt-in；默认 False ⇒ 不起节点，见 §17）
     ld.add_action(declare_band_guard_cmd)
     # ★ 2026-10-06：「续建 + 场地隔离」相关（默认值下现有行为不变，详见各自的 description）
