@@ -6135,3 +6135,17 @@ LIO 初始化时车还在出生高度（spawn z=0.2）上，世界原点被锚�
 > 该轮用的是**旧**安装约定（`base_link→livox_frame` rpy=−30°、点云在传感器系、`extrinsic_R=I`），
 > 但 `odom_level` 的数值与 §29.3 **完全一致**（静态边的 R/t 由 IMU 链决定，与安装约定解耦）
 > —— 这正好是"§4.12 与 §4.11 正交"的证据。
+
+### 29.7 收尾补充（同一批跑，探针后到的数据）
+
+| 量 | 默认档（SPL） | fastlio 臂 | 回滚档 `level_frame:=odom` |
+|---|---|---|---|
+| `band_guard` local in-band（样本数） | **100% × 13 个样本**（末样本 768/768） | **100% × 4 个样本**（末样本 765/765） | **100%**（帧 = **`odom`**，末样本 785/785 —— E1 hybrid 把 odom 摆正，= 改动前行为） |
+| `band_guard` 帧 | `odom_level` | `odom_level` | **`odom`**（没有 odom_level 帧）✓ 回滚判据 |
+| 扫描面 z（在代价图帧里） | **+0.102**（= `base_link` 在 `odom_level` 里离地的高度，与 TF 的 +0.1017 一致） | — | （`odom` 里，E1 已对齐） |
+| `nav_band_probe` 的 `local`/`global` 格数块 | **空**（该探针本轮的图块没采到 ⇒ lethal/nearest/全局 stvl **没有**本轮数字） | 同 | 同 |
+
+⇒ 验收 (c)/(d) 的**功能判据**（局部 in-band 100%）在 SPL 与 **fastlio** 两臂上都是 100%；
+(e) `slam_nav` 与 pointlio 臂本轮未跑；(c) 的 `lethal≈270–340 / nearest≈0.70–0.77 / 全局 stvl≈3727`
+**本轮没有数字**（探针的图块为空，不是栈的问题），只保留了 §29.6 里旧约定 run A 的健康证据
+（gicp 采纳 349/349、拒绝 0；`band_guard` 100%）。
