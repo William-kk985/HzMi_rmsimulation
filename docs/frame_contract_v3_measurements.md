@@ -6888,3 +6888,207 @@ spawn 对它有没有副作用需要 3+3 跑（未做）。
 14. **没碰**地图资产（map/、PCD/、世界文件）、`src/rm_localization/**`、`get_world_config()`；
     `map_asset_guard.py spawn-table --check` 通过；`spawn_pose.z` 在既有 sidecar 里仍是 0.2
     （这是**有意的**：地图原点不含 z）。
+
+## §33 第二十三轮（**本机 date=2026-10-21，21:08–21:44**）：`gravity:=tf|base|lio|raw` 收口 —— 一个开关代替重力/水平帧参数组；4 臂各 1 跑
+
+> **本节只新增**（append-only）：§1–§32 一个字都没改。任务（用户批准）："123都可以感觉 raw 也可以留着
+> 可以学 cod 以 baselink 为基准"。交付 = **§4.14**（契约）＋本节（实测）。默认档 `gravity:=tf`
+> 的行为与改动前**逐字段相同**（除了下面**有意**删掉的 3 处参数/初始化行为）。
+>
+> **一句话结论**：`tf` = 局部 in-band **100%**、`odom_level→base_link` rpy **<0.5°**、
+> `odom→base_link` **+30°**；`base` = 没有 `odom_level` 帧、局部帧 `odom`、障碍层**强制 cloud**、
+> `band_guard` **IDLE**、`/scan` 在 `base_link`；`lio` = E1 hybrid、局部 in-band **100%**、
+> `odom→base_link ≈0°`；`raw` = **43.7%**、kept-y **单侧 +y**（§25 的 off 复现）。
+> 6 个旧参数 + 2 个非法组合全部 **t=0 exit 1**；`--show-args` **exit 0**、只多 1 个 `gravity`；
+> `robot_description` 9 个组合 **md5 逐字节相同**。
+
+### 33.1 改了什么（file:line，提交见文末）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `src/rm_nav_bringup/launch/bringup_sim.launch.py` | 854–979 | 新增 `_gravity` / `_Gravity` / `_level_frame`（派生：tf ⇒ odom_level，其余 ⇒ odom）/ `_launch_arg_was_given`；删掉 `_LEVEL_FRAMES` / `_LEVEL_FRAME_DEFAULT` 与旧 `level_frame` 的读取 |
+| 同上 | 914–973 | 新增 `_effective_local_obstacle` / `_EffectiveLocalObstacle`：`base` 档强制逐点层（显式 scan ⇒ 硬报错） |
+| 同上 | 1042–1065 | `_effective_gravity_align_mode` 重写：`lio ⇒ hybrid`（非 SPL 硬报错），其余 `off`；旧 `auto/urdf/imu` 不再存在 |
+| 同上 | 1107–1121 | 6 个旧参数 = `_LEGACY_GRAVITY_ALIASES`（非默认值 ⇒ t=0 报错，消息指向 `gravity`） |
+| 同上 | 1123–1190 | `_check_gravity_contract`：别名检查 + base 障碍层检查 + tf 回退 WARN + `[gravity]`/`[odom_level]`/`[gravity_align]` 收据 |
+| 同上 | 2556–2696 | 声明 `gravity`（choices 4 个）；6 个旧声明改成 `[已删除 / 硬报错别名]`（默认值保持旧值） |
+| 同上 | 3022–3038 | **第二份互斥 linefit**：`gravity:=base` ⇒ `gravity_aligned_frame: base_link`；默认档参数表逐字段不变 |
+| 同上 | ~3150–3300 | SPL 收口成**两份** Node：`eff==off`（tf/base/raw，`publish_tf=false + sensor`、`init_settle_hold=0.0`、`init_map_extrinsic=True`、`gravity_align_h` 诊断）与 `eff!=off`（lio，再加 E1/E1b，`z_origin` 固定 `ground`）。旧的"off+odom 由 LIO 自己发 TF"那份**删除** |
+| 同上 | 3649–3680 | `odom_level_tf` 只在 `gravity:=tf` 启动；`z_origin_source` 固定 `'urdf'` |
+| 同上 | ~3210 / 3260 / 3280 | 三处 SPL 参数表硬编码 `init_settle_hold: 0.0` / `init_map_extrinsic: True` /（E1 档）`gravity_align_z_origin: 'ground'` |
+| 同上 | 4076 | nav2 include 的 `local_obstacle` 改传**有效值**；`scan_band_min` 覆盖层同样读有效值 |
+| 同上 | 4088–4100 / 4209 | LD 声明顺序：`gravity` 在最前；旧的 `_GravityAlignResolution` 收据与 `_check_level_frame_contract` 删除；新增 `_check_gravity_contract`（在 `declare_local_obstacle` 之后） |
+| `src/rm_localization/small_point_lio/src/small_point_lio/small_point_lio.cpp` | 200 / 347 / 416 / 432–449 / 450–500 | 初始化互检用的 `R_ws_check`（E1 关时 = `R_IL^T`）；初始化地图 `init_map_extrinsic` 的 `R_IL=I` 快路径（`p + t_IL`，与一般式逐位相同）；**初始化地面互检**从 E1 的 z-origin 分支搬出来、与 E1 无关：`gravity_align_h>0` 就拟合第一帧地面，`|Δ|≥3 cm ⇒ 响亮 WARN（"出生未落定/地面不平/悬空"）`、`≥5 cm ⇒ ERROR`，**定基永远用 URDF 值** |
+
+### 33.2 协议、隔离与冻结证据
+
+* 命令（4 跑同口径，与 §25/§29/§32 逐字同）：`world:=RMUL2026 mode:=nav lio:=small_point_lio
+  localization:=gicp nav:=mppi planner:=smac2d robot:=robot11 robot11_mount:=sensor spin_speed:=0.0
+  band_guard:=True` + `gravity:=tf|base|lio|raw`；`SETTLE=20 WINDOW=20`（**仿真秒**）、`gui:=False`、
+  `nav_rviz:=False`、`lio_rviz:=False`。
+* 隔离：私有 `HOME` / `ROS_LOG_DIR` / `ROS_DOMAIN_ID` / 先探空端口再占 `GAZEBO_MASTER_URI`、
+  `unset DISPLAY`、`setsid` 起栈（进程组 = 本 run）、硬超时 900 s、收尾只用
+  `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）、**一栈一跑**（4 跑顺序，跑间 8 s）。
+* 冻结：4 跑 `meta_before/after` 的 launch md5 相同 = **`6ad0aaaedc18486dc8318ce235c7b738`**；
+  `meta_md5_diff.txt` **0 行**（4/4）；`git_head = 2022f0a`；`build/small_point_lio/libsmall_point_lio.so`
+  = `7a15156a960a406fe0acdd152544cc54`（本轮重建）。
+* 探针：`tools/scripts/tiltmount/nav_band_probe.py`（**本轮加了 `--scan-frame`**：tf 用 `odom_level`，
+  base/lio/raw 用 `odom` —— 它们的代价图帧就是 `odom`）、`.tmp_gravtest/grav_probe.py`、
+  `tools/scripts/tiltmount/uc_procstats.py`；运行期 `ros2 param get` 与 `tf2_echo` 在探针结束后回读。
+  原始数据：`.tmp_ab/g3_{tf,base,lio,raw}_r1/`（tf 的最终跑是 `.tmp_ab/g4_tf_r1/`，原因见 §33.8）。
+
+### 33.3 主表：4 臂各 1 跑（窗口 20 仿真秒；`median`）
+
+| 指标 | **`gravity:=tf`**（默认） | **`gravity:=base`** | **`gravity:=lio`** | **`gravity:=raw`** |
+|---|---|---|---|---|
+| 局部代价图帧（live） | **`odom_level`** | **`odom`** | `odom` | `odom` |
+| `odom_level` 帧/静态边 | **有**（`odom→odom_level` = rpy [30.000, 0, 0]°、xyz [0, 0.108, −0.187] m，两次采样逐位相同） | **没有**（`tf2_echo odom odom_level` 空） | **没有** | **没有** |
+| `odom_level_tf` 节点 | **在** | 不在 | 不在 | 不在 |
+| `odom→base_link` rpy | **[30.167, 0.863, −1.055]°** | **[30.144, 0.792, −1.024]°** | **[0.394, −0.183, −1.021]°** | **[30.168, 0.788, −1.040]°** |
+| `odom_level→base_link` rpy | **[0.169, 0.144, −1.379]°**（roll/pitch <0.5 ✓） | —（无此帧） | — | — |
+| 估计器 | E1 **off**；`publish_tf=false`、`odom_convention=sensor` | 同左 | **E1 hybrid**（Δ(URDF,IMU)=0.015° ⇒ 用 URDF）；`publish_tf=false`、`sensor`、`z_origin=ground` | E1 off；`publish_tf=false`、`sensor` |
+| 局部障碍层（live） | `obstacle_layer=true`（2D scan） | **`obstacle_cloud_layer=true`、`obstacle_layer=false`**（强制 cloud；launch t=0 WARN） | `obstacle_layer=true` | `obstacle_layer=true`、`obstacle_cloud_layer=false` |
+| `band_guard`（local） | **OK 769/769 = 100%** | **IDLE**（没有启用的 2D scan 高度带 ✓） | **OK 770/770 = 100%** | **WARN 43.7%**（335/767；另一采样 44.6%）；kept-y **单侧 +y** `[0.134, 2.865]`（all-y `[−0.871, 4.423]`） |
+| `/scan` 有限波束 | 773 | 773 | 774 | 773 |
+| 在带 `[0,2]`（探针口径） | **773/773（100%）** | 334/773（43.2%；**不是本档判据**） | **774/774（100%）** | **334/773（43.2%）** |
+| 带下 / 带上 | 0 / 0 | 437 / 3 | 0 / 0 | 436.5 / 3 |
+| 扫描面 z p50（代价图帧） | **+0.1032** | **−0.1008** | **+0.1016** | **−0.1014** |
+| z [min, max] | [+0.082, +0.120] | [−0.451, +2.440] | [+0.091, +0.142] | [−0.451, +2.440] |
+| local **lethal** | **301** | **434** | **291.5** | **312** |
+| local inscribed / free | 10161 / 40404 | 12868.5 / 38323.5 | 10253 / 40397.5 | 9994 / 41672.5 |
+| local **最近 lethal** | **0.704 m** | **0.697 m** | **0.706 m** | **0.745 m** |
+| local **前方 2.0×1.2 m lethal** | **24** | **61** | **23** | **21** |
+| global lethal / 最近 / ahead | 2164 / 0.728 / 43 | 2165 / 0.715 / 45 | 2165 / 0.701 / 56 | 2161 / 0.714 / 45 |
+| `h_meas`（SPL 初始化，判级） | **0.2597 m / Δ 0.0002 / INFO** | **0.2596 / Δ 0.0001 / INFO** | **0.2597 / Δ 0.0002 / INFO** | **0.2596 / Δ 0.0001 / INFO** |
+| `h_meas`（`odom_level_tf`，判级） | **0.2588 / Δ 0.0007 / INFO**（地面 z=+0.0006、tilt 0.30°） | — | — | — |
+
+**读法**
+
+1. **tf 与 raw 只差"水平帧"**：两者的 `odom` 是同一个原始 IMU 世界（`odom→base_link` 都 ≈30°），
+   唯一差异 = tf 的局部代价图在 `odom_level`（静态边把 30° 摆正）⇒ in-band 100%；raw 的代价图
+   在 `odom` ⇒ 斜盘面 ⇒ **43.2–44.6%** + kept-y 单侧（与 §25 的 off 43.1–43.4% /
+   `[+0.229,+3.281]` 同一现象、同一量级）。**raw 的 lethal 312 / 最近 0.745 / ahead 21**
+   也与 §25 off 的 **299.5 / 0.751 / 20** 对得上（跨轮 ±5%，不是同一次实验）。
+2. **base 与 raw 的"代价"不同**：base 的局部障碍层被强制成 **cloud**（逐点），所以尽管扫描面
+   仍在斜 `odom` 里只有 43.2% 在带，`band_guard` 对 local 是 **IDLE**（没有 2D scan 带可评）——
+   这正是设计要的"不静默半盲"。cloud 层看到的 lethal 比 2D scan 多（**434 vs 312**、
+   前方 **61 vs 21**、最近 **0.697 vs 0.745**），因为 3D 点云在斜 `odom` 里**有逐点高度**
+   （不会被平盘的单一 z 整批丢掉），代价是把同一面墙投成更多格。**base 不是 "tf 的等价物"**，
+   它是"以 base_link 为高度语义、逐点建图"的另一种合法形态。
+3. **lio 是唯一让估计器动 `odom` 的档**：`odom→base_link` rpy ≈ **[0.394, −0.183, −1.021]°**
+   （≈0 ✓），局部 in-band 100%，lethal/最近/ahead **291.5 / 0.706 / 23** 与 tf（301 / 0.704 / 24）
+   同量级 —— 与 §25 的 hybrid 臂（329/0.712/22）同源；区别只在"谁把 30° 吸收掉"
+   （估计器 vs 静态边），nav 观测量不可区分。
+
+### 33.4 默认档（`gravity:=tf`）的逐字节证据
+
+**(a) `--show-args`**：exit **0**；改动前/后 **425 / 429 行**、**106 / 107 个参数**；
+逐参数比对：**只多 `gravity`**，**没有任何默认值被改**；6 个旧名字仍在（description =
+`[已删除 / 硬报错别名]`，默认值 = 旧值）。⇒ 有效重力/水平帧面 = **−4/+1**（4 个旧参数收成
+1 个），初始化面 = **−2**（行为硬编码）；别名仍可被发现。
+
+**(b) `robot_description`（9 个 (robot, mount) 组合，与 launch 同一条 xacro command）**：
+
+| robot | mount | md5 / 字节（改动前 = 改动后） |
+|---|---|---|
+| `''` | plugin/urdf/sensor | `bc62af22f7be49395525978b1264750c` / 10353 |
+| `hzmirm` | plugin/urdf/sensor | `a13e053090bf1344a06d58241bf845f9` / 18630 |
+| `robot11` | plugin/urdf/sensor | `4f19a8b4faa3a7c659850d0064d3c5ca` / 47745 |
+
+9/9 **逐字节相同**（本节只改 launch substitution，未碰 URDF/xacro）。
+
+**(c) 执行集**：`launch_increment_diff.py`（同一组默认参数，OLD=HEAD/2022f0a、NEW=工作树）：
+Node 定义 **28 → 28**、Include **10 → 10**、ExecuteProcess **0 → 0**；`only_old` = 一份
+`small_point_lio`（删掉的"off+odom 由 LIO 自己发 TF"），`only_new` = `linefit_ground_segmentation_ros`
+（base 档互斥变体）。运行期（`ps_after.txt`）：**只有一个** `ground_segmentation`、**只有一个**
+`small_point_lio`、`lio_tf_adapter` 在、`odom_level_tf`（python3）在；`band_guard` 回读到
+`frame=odom_level`、`/local_costmap global_frame=odom_level`、`/behavior_server global_frame=odom_level`。
+
+**(d) 导航观测量**（g4_tf_r1）：见 §33.3 的 tf 列 —— in-band 100%、`h_meas` INFO（两处）、
+`odom_level→base_link` roll/pitch <0.5°、`odom→base_link` +30.167°。
+
+**(e) 3 个 tf 跑的姿态抖动（诚实）**：`odom_level→base_link` roll = **0.176°（g2）/ 1.038°（g3）/
+0.169°（g4）**，pitch = 0.221 / −0.012 / 0.144。g3 那次是 LIO 自己的 roll 估计漂了 ~0.9°
+（`odom→base_link` roll = 30.883°，静态边本身仍是 30.000°）⇒ **I11 的 0.5° 线不是每次都过**；
+3 次里 2 次过。静态边 `odom→odom_level` 三次都逐位相同。
+
+### 33.5 旧参数 / 非法组合：**t=0 硬报错**（exit code 1）
+
+| 传参 | 结果 | 逐字证据（`.tmp_gravity/final_*`） |
+|---|---|---|
+| `gravity_align_mode:=hybrid` | **exit 1** | `旧参数已删除（硬报错别名）—— 重力/水平帧只有一个用户开关：gravity:=tf\|base\|lio\|raw` + `· gravity_align_mode:=hybrid（旧默认值 = auto）⇒ 改用 gravity:=tf\|base\|lio\|raw` |
+| `level_frame:=odom` | **exit 1** | `· level_frame:=odom（旧默认值 = odom_level）⇒ 改用 gravity:=tf ⇒ odom_level；…` |
+| `gravity_align_z_origin:=sensor` | **exit 1** | `· gravity_align_z_origin:=sensor（旧默认值 = ground）⇒ …` |
+| `z_origin_source:=measured` | **exit 1** | `· z_origin_source:=measured（旧默认值 = urdf）⇒ …` |
+| `lio_init_settle_s:=0.0` | **exit 1** | `· lio_init_settle_s:=0.0（旧默认值 = 1.0）⇒ 改用 无参数：初始化不再等落定…` |
+| `lio_init_map_extrinsic:=False` | **exit 1** | `· lio_init_map_extrinsic:=False（旧默认值 = True）⇒ 改用 无参数：初始化地图一律用 R_IL·p + t_IL…` |
+| `gravity:=base local_obstacle:=scan` | **exit 1** | `gravity:=base 与 local_obstacle:=scan 不能组合：… 2D 平盘在斜 odom 里没有逐点高度 … ⇒ 用逐点层：local_obstacle:=cloud\|stvl；或换 gravity:=tf` |
+| `gravity:=lio lio:=fastlio` | **exit 1** | `gravity:=lio 只对 lio:=small_point_lio 生效 … 当前 lio:=fastlio：请改成 lio:=small_point_lio，或换 gravity:=tf\|base\|raw` |
+
+**base 的默认障碍层**（不传 `local_obstacle`）⇒ 不报错，而是 **强制 `cloud` + WARN**（t=0）：
+`[launch][WARN] gravity=base ⇒ 局部障碍层 local_obstacle:=scan 被强制成 cloud（2D /scan 在斜的 odom
+里没有逐点高度；§25 实测 in-band 43.7% = 半盲）`。
+
+### 33.6 base 档的 `base_link` 高度语义（live 参数）
+
+| 量 | 值 | 判 |
+|---|---|---|
+| `/local_costmap/local_costmap global_frame` | `odom` | ✓ 无 odom_level |
+| `/behavior_server global_frame` | `odom` | ✓ |
+| `obstacle_layer.enabled` / `obstacle_cloud_layer.enabled` / `stvl_layer.enabled` | `false / true / false` | ✓ 强制逐点 |
+| `/ground_segmentation gravity_aligned_frame` | **`base_link`** | ✓ linefit 在 base_link 里做高度语义 |
+| `/scan` 的 frame | `base_link`（`band_guard` 回读） | ✓ p2l `target_frame=base_link` |
+| `tf2_echo odom odom_level` | 空（边不存在） | ✓ 没有 `odom_level` 帧 |
+| `band_guard` local | **IDLE** | ✓ 没有启用的 2D scan 带 |
+
+### 33.7 初始化行为硬编码后的两条证据
+
+1. **不等落定**：init 收据 `落定门=off（hold=0.00 s，峰峰值=-1.0000 m，丢弃 0 帧）| 初始化地图 =
+   163830–163835 点`（4 臂一致）。SPL init 时刻仍在首帧后 2.0 s（200 帧 IMU 门），与 §32 的
+   1.990–1.992 s 同量级；**没有推迟任何一帧**。
+2. **初始化地图含 `t_IL`**：`R_IL=I` 快路径（`p + t_IL`）与一般式（`R_IL·p + t_IL`）逐位相同；
+   robot11 的 `R_IL≠I` 走一般式。4 臂的 `h_meas` 都 **INFO（Δ≤0.2 mm）**，说明地面在初始化地图
+   里没有被抬/压。
+3. **WARN 真的会响**（scratch：把 URDF 的 h 人为 +4 cm，只跑 mapping）：
+   `gravity_align_h_check: h_urdf=0.2995 h_meas=0.2600 |Δ|=0.0395 ∈ [0.03,0.05) ⇒ **WARN**
+   （**出生未落定/地面不平/悬空**？…）—— 仍用 URDF 值定基`；`odom_level_tf` 同时
+   `Δ=0.0406 ⇒ WARN`。**定基没有跟着实测走**。
+
+### 33.8 本轮踩到并修掉的一个真问题（raw/base 的 TF 所有权）
+
+第一次 4 臂批次（`g2_*`）里，base/raw 仍沿用 §4.11 的"回滚档" Node（LIO 自己发 `body` 档
+`odom→base_link`）。实测 `odom→base_link` rpy 只有 **[0.148, 0.804, −0.997]°**，raw 的 in-band
+= **753/774 (97.3%)** —— **半盲没复现**。根因：§4.12 把 30° 从 `base_link→livox_frame` 关节搬到
+`livox_frame→imu_link` + LIO 的 `extrinsic_R` 之后，LIO 的 `body` 档 TF（`T_ol·T_bl`，`T_bl` 的
+rpy=0）**不含 `extrinsic_R`** ⇒ 它发布一个"水平"的 base_link，把 30° 吞掉了。
+⇒ 修法（本轮的实现）：**所有 gravity 档的 SPL 都走统一输出契约**（`publish_tf=false` +
+`odom_convention=sensor`），`odom→base_link` 的唯一发布者 = `lio_tf_adapter`（父帧由 `_LevelFrame()`
+给：tf ⇒ `odom_level`，base|lio|raw ⇒ `odom`）。修后 base/raw 的 `odom→base_link` = **30.1°**，
+raw 的 in-band = **43.2%**、`band_guard` **43.7%/单侧** —— 与 §25 对齐。旧的"回滚档 Node"已删除；
+`g3_*` 是本轮最终数据，`g2_*` 只作"修前"对照保留。
+
+### 33.9 诚实清单
+
+1. **每臂 n=1**（任务要求 1 跑/臂）。tf 额外跑了 3 次（g2/g3/g4）用于姿态抖动；其余三臂没有重复。
+   所有跨臂比较都是**同机同时段**（21:23–21:44）但**不同 run**，不许逐格当同一次实验。
+2. **tf 的 I11（`odom_level→base_link` roll/pitch <0.5°）3 次里 1 次不过**（g3 roll 1.038°，
+   LIO 自身 roll 漂移）⇒ 契约写 "<0.5°" 时应理解为典型值，不是每次都保证。
+3. **base 的"高度语义在 base_link"是感知侧性质**：代价图帧仍是 `odom`；`cloud` 层吃的是
+   linefit 在 `base_link` 里分好类的 `/segmentation/obstacle`。**没有**在 `odom` 里再做一层
+   base_link z 闸（那需要换帧，不在本轮）。
+4. **base 的 cloud 层指标比 tf 的 2D scan 层大**（lethal 434 vs 301、ahead 61 vs 24）。
+   这不是"tf 更好"：两层吃的数据/几何不同（3D 点 vs 投影盘），只报告、不排序。
+5. **`gravity:=raw` 的 43.7% 与 §25 的 off 是跨轮比较**（§25 是 2026-10-20、旧安装约定、
+   旧 init 行为）；本轮 raw 的 43.2–44.6% 是同一现象的新值。
+6. **`lio:=fastlio|pointlio` 没有 base/raw 的初始化地面 WARN**（那条 WARN 只在 SPL 的初始化里做）；
+   它们的 `gravity:=base|raw` 只保证帧/障碍层配置，不保证 estimator 的 z 锚点。
+7. **`gravity:=base` 的显式 `local_obstacle:=both|stvl_both`** 被静默降级（+WARN），只有显式
+   `scan` 才硬报错（用户批准的设计如此）。
+8. **旧参数"显式传回旧默认值"不可检测**（launch 不保留来源）；非默认值 6/6 都能抓。
+9. **没有改**地图/PCD 资产、`src/rm_simulation/**`、docs §1–§32 的正文；`src/rm_localization/**`
+   只改了 `small_point_lio` 的初始化互检（+ 身份快路径），没有改算法本身。
+10. **`hzmirm` / 默认模型 / `world:=RMUC2026` 的 4 臂**没有实跑（本轮只测 robot11 + RMUL2026 +
+    SPL）；base 档的 `linefit gravity_aligned_frame=base_link` 在 `turret_pitch≠0` 时会退化
+    （§4.14.5#6）。
+11. **`spawn_entity.py` 的 "Entity pushed to spawn queue, but spawn service timed out"** 在
+    4 跑里都出现（§32.9#13 的既有良性消息）；`ps_after` 与 LIO/nav 数据证明实体真的生成。
