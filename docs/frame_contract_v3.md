@@ -1160,3 +1160,69 @@ $ ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav robot:=robot11 \
 robot11 `plugin`/`sensor`、hzmirm、`gravity_align_mode:=hybrid`）全部 **新增 0 / 消失 0 /
 共有 Action 相对顺序一致**；`robot_description` 的 xacro 命令字符串 6 组组合逐字节相同；
 `gravity_align_mode:=off` ⇒ 组合检查入口即返回、解析器 **0 次求值**。（M §11.5。）
+
+---
+
+## §4.13 `odom` 的 z 锚点：**初始化落定门 + 初始化地图口径**（2026-10-21，默认档）
+
+> **本节只新增**（append-only）：§4.1–§4.12 一个字都没改。它**不动** §4.11 的帧树/静态边/消费者
+> 三件事，只把 §4.11.1 里 "`odom_level` 的 z=0 ≈ 地面（`base_link z ≈ +0.1025`）" 那条**前提**
+> 变成**可复现的事实**（= §4.11.2 的 I10）。根因/实测/A-B 见
+> `docs/frame_contract_v3_measurements.md` §30。
+
+### 4.13.1 问题（一句话）
+
+`odom` 的 z 原点 = **LIO 初始化那一刻的 IMU 位姿**。§4.11 的静态边用 URDF 的 `h_imu` 把它换算成
+地面 —— 这只有在"① 初始化发生在车**落定之后**、② 初始化地图与逐点更新**同一口径**"时才成立。
+实测（修前）两条都不成立：
+
+* 初始化地图把 `point_deque` 里**整段出生下沉过程**的点云一起入图（26 帧 / 16 万点；`init_map_size`
+  是**点数**不是帧数，而 `point_deque` 从不清）⇒ 地面被"抹"成 ~9 cm 厚的带；
+* 初始化地图**少了 `t_IL` 平移** ⇒ robot11（`R_IL=Rx(30°)`）上再低 4.33 cm。
+
+⇒ 第一次点更新把状态**拽下 9.8 cm** ⇒ 静态边用 URDF 的 `h` 时地面落在 `odom_level` 的 **−0.13 m**，
+`h_meas` 必然 **ERROR**（§29.3 的 0.3912 就是这个）。§29 的 `measured` 挡板把地面按回 0，但
+`h_meas` 仍然 ERROR、且 z 原点变成一次启动测量。
+
+### 4.13.2 参数与默认值（都可单独回滚）
+
+| launch 参数 | 节点参数 | 默认 | 作用 |
+|---|---|---|---|
+| `lio_init_settle_s` | `small_point_lio.init_settle_hold` | **1.0 s**（`0` = 关 = 旧行为） | **落定门**：必须**连续** `hold` 秒"雷达看到的地面高度不动"（近场点云 z 的 10% 分位，峰峰值 ≤ `init_settle_tol` = 5 mm）才允许初始化；**落定前的点云全部丢弃** ⇒ 初始化地图 = 落定后的**一帧**；超过 `init_settle_timeout`（15 s）⇒ 响亮 WARN + 照旧初始化 |
+| `lio_init_map_extrinsic` | `small_point_lio.init_map_extrinsic` | **True** | 初始化地图用**与逐点更新同一个**出点公式（`R_IL·p + t_IL`）；`False` = §29 的旧式（只旋 `R_IL`） |
+| `z_origin_source` | `odom_level_tf.z_origin_source` | **`urdf`** | 静态边的 z 原点：`urdf` = `t_level = h_imu`（**确定性**，逐位可复算）；`measured` = 第一帧点云拟合地面（§29 的临时挡板，**只作诊断/A-B**） |
+
+**为什么不是"把 spawn z 调成落定高度"**：`spawn z` 在
+`src/rm_simulation/hzmi_rm_simulation/launch/rm_simulation.launch.py::get_world_config()` 里，
+被 4 个 world × 3 个机器人槽位共用（落定高度各不相同：robot11 0.1025 / hzmirm 0.08 / 默认 0.06），
+且 `spawn_entity.py` 的 `-z` 没有可透传的参数 ⇒ 一个常数不可能同时对，本轮也不许改那个包。
+**为什么不判"IMU 静止 ≥1 s"**：本仿真的 `gazebo_ros_planar_move` 每步清 vz ⇒ 匀速下沉期间
+加速度计仍读 ≈1 g，而静止时 `|a|` 在 7.8–11.8 m/s² 抖 ⇒ `|a|≈g` 既不能证明静止也不稳。
+判据因此换成**雷达自己的地面高度**（与"车动不动"同一件事，且不受 `planar_move` 骗）。
+
+### 4.13.3 不变量（新增/收紧）
+
+| # | 不变量 | 判据（可执行） |
+|---|---|---|
+| **I10′** | `odom_level` 的 z=0 = 地面，**用 URDF 值就该成立**（不需要实测挡板） | 静止窗口内点云在 `odom_level` 拟合：`floor_z ∈ 0 ± 0.01 m`、`base_link z = +0.1025 ± 0.01 m`、`h_meas` **INFO**（Δ<3 cm）；**同一命令 3 跑的 floor_z spread < 1 cm** |
+| **I14** | 静态边的 z 原点**不依赖启动测量**（默认档） | `z_origin_source=urdf` ⇒ 静态边 = URDF 几何（`t_level=(0,0,h_imu)`，逐位可复算）；`measured` 只出现在显式选择时，且那时 `h_meas` 必然 ERROR（有意的） |
+| **I15** | 初始化**不吞**出生过程的点云 | `small_point_lio` 的 init 收据里"丢弃 N 帧"+"初始化地图 = M 点"满足 M ≲ 一帧的量级（robot11 实测 8119–8120 点；修前 156266–164179） |
+
+**实测（3 跑默认档 + 1 跑对照，详见 M §30.3）**：`floor_z = +0.0053 / +0.0058 / +0.0056 m`
+（spread **0.5 mm**）、`base_link z = +0.1081 / +0.1080 / +0.1077`（spread 0.4 mm，判据 +0.1025，
+系统偏 +5.5 mm）、`h_meas = 0.2551 / 0.2536 / 0.2537`（Δ 4.4–5.9 mm，**INFO**）、
+扫描面 z（代价图帧）= +0.108（与 `base_link` z 一致）、局部 in-band **100%**。
+
+### 4.13.4 边界
+
+1. 门与初始化口径**只在默认档**（`level_frame=odom_level` 且 `gravity_align_mode` 有效值 `off`）
+   的 `small_point_lio` Node 上生效（launch 里只往那**一份**参数表加键）；回滚档
+   （`level_frame:=odom`）、E1 实验臂、`lio:=fastlio|pointlio|cartographer` **一个键都没多**
+   ⇒ 那些路径的行为/参数表逐字节不变。
+2. `lio:=pointlio` 的初始化在 `point_lio::ImuProcess::Set_init` 里，**不在本节范围**。实测它
+   在首帧后 **0.5 s** 初始化（车还在下沉）⇒ 它的 z 锚点仍低 **7.3 cm**（`base_link z=+0.0298`），
+   数字见 M §30.5.2。要修得动那个包（未做）。
+3. 门的判据是"雷达能看到地面"。悬空 / 楼梯 / 被抬起的出生点走 **15 s 超时兜底**（响亮 WARN，
+   z 锚点退回修前水平）——**不静默**。本机只在 RMUL2026 + robot11 上实测过。
+4. 残余 **+5.5 mm** 的 `base_link z` 来自 LIO 初始化后前 2 s 的暂态（state z +0.012），不是静态边；
+   要消掉得动估计器的初始速度/重力估计（未做）。

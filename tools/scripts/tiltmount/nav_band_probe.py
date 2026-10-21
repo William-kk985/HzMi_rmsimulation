@@ -79,7 +79,8 @@ class Grid:
 
 
 class Band(Node):
-    def __init__(self, settle, window, frames, costmap_topic, class_topic, global_topic=''):
+    def __init__(self, settle, window, frames, costmap_topic, class_topic, global_topic='',
+                 scan_frame='odom_level'):
         super().__init__('nav_band_probe')
         # ★ 必须开 use_sim_time：TF 查询用的是 msg 里的**仿真**时间戳，节点若用系统时钟，
         #   每一次 lookup 都会 "extrapolation into the past"（第一版就踩了：124/124 全失败）。
@@ -90,6 +91,10 @@ class Band(Node):
         self.costmap_topic = costmap_topic
         self.class_topic = class_topic
         self.global_topic = global_topic
+        # ★ 2026-10-21（契约 §4.11）：扫描面 z / 在带必须量在**代价图自己的帧**里。
+        #   改动前这里硬编码 `odom`；默认档局部代价图已经是 `odom_level` ⇒ 传 `--scan-frame odom`
+        #   才是改动前的口径（回滚档 / 历史 A/B 复现用）。
+        self.scan_frame = scan_frame
         self.sim = None
         self.t_first_cloud = None
         self.t_first_scan = None
@@ -162,7 +167,7 @@ class Band(Node):
             return
         ok = np.isfinite(r) & (r >= m.range_min) & (r <= m.range_max)
         n_finite = int(ok.sum())
-        tf = self._lookup('odom', m.header.frame_id, m.header.stamp)
+        tf = self._lookup(self.scan_frame, m.header.frame_id, m.header.stamp)
         rec = {'n_beams': int(r.size), 'n_finite': n_finite,
                'range_min': float(m.range_min), 'range_max': float(m.range_max)}
         if tf is None:
@@ -196,7 +201,7 @@ class Band(Node):
         self.scans.append(rec)
 
     def _grid_stats(self, g, stamp):
-        tf = self._lookup('odom', self.base_frame)   # 最新一帧：车静止，与 msg 戳差 <1 mm
+        tf = self._lookup(self.scan_frame, self.base_frame)   # 最新一帧：车静止，与 msg 戳差 <1 mm
         rec = {'frame': g.frame, 'res': g.res, 'sx': g.sx, 'sy': g.sy,
                'n_cells': g.n_cells, 'n_lethal': g.n_lethal,
                'n_inscribed': g.n_inscribed, 'n_free': g.n_free,
@@ -305,6 +310,9 @@ def main():
     ap.add_argument('--window', type=float, default=20.0)
     ap.add_argument('--wall-timeout', type=float, default=400.0)
     ap.add_argument('--base-frame', default='base_link_fake')
+    # ★ 2026-10-21（契约 §4.11）：量扫描面 z 的帧 = **局部代价图的 global_frame**。
+    #   默认档 odom_level；回滚档 `--scan-frame odom`（= 本工具改动前的硬编码行为）。
+    ap.add_argument('--scan-frame', default='odom_level')
     ap.add_argument('--costmap-topic', default='/local_costmap/costmap_raw')
     ap.add_argument('--class-topic', default='/local_costmap/costmap')
     ap.add_argument('--global-topic', default='/global_costmap/costmap_raw',
@@ -312,7 +320,8 @@ def main():
     args = ap.parse_args()
     rclpy.init()
     node = Band(args.settle, args.window, args.base_frame,
-                args.costmap_topic, args.class_topic, args.global_topic)
+                args.costmap_topic, args.class_topic, args.global_topic,
+                scan_frame=args.scan_frame)
     t0 = time.time()
     done = False
     try:
@@ -327,6 +336,7 @@ def main():
                'phase_at_end': node.phase,
                'costmap_topic': args.costmap_topic,
                'base_frame': args.base_frame,
+               'scan_frame': args.scan_frame,
                'band': [Z_LO, Z_HI], 'ahead_window': [0.0, AHEAD_X, AHEAD_Y],
                'n_scan_rx': node.n_scan_rx, 'n_grid_rx': node.n_grid_rx,
                'n_class_rx': node.n_class_rx, 'tf_fail_scan': node.tf_fail,
