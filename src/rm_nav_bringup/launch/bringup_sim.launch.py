@@ -211,60 +211,6 @@ def _check_robot11_mount_combination(context):
     return []
 
 
-def _check_gravity_align_contract(context):
-    """★ 2026-10-20：`gravity_align_mode` 的**组合检查**（launch 期，t=0，Action ⇒ 报错就停）。
-
-    为什么要有（每条都是"静默变坏"的真实路径，宁可在 t=0 报错也不要在 RViz 里猜）：
-      1. `gravity_align_mode != off` 但 `lio` 不是 `small_point_lio` ⇒ **那个包根本没有这三个参数**
-         （E1 补丁只打在 vendored 的 small_point_lio 里）；fastlio/pointlio 收到未知参数要么被忽略、
-         要么按 ROS 2 的"未声明参数"规则无声丢掉 ⇒ 你以为对齐了，其实 odom 还是斜 30°。
-      2. `robot` 是 launch 不认识的模型 ⇒ 推不出 `base_link→livox_frame` 的 rpy ⇒ 先验无从谈起
-         （**不许**手填一个数兜底，那是第二个所有者，见契约 §4.1）。
-      3. `robot11_mount` 取值非法 ⇒ 让 `_urdf_livox_mount_rpy_deg` 在这里就抛。
-    ⚠️ 必须作为 **Action**（OpaqueFunction）放在 `declare_LIO_cmd` / `declare_gravity_align_mode_cmd` /
-    `declare_robot11_mount_cmd` **之后**：`LaunchConfiguration(...).perform()` 读的是"已经声明过"的值，
-    声明顺序反了会直接抛 "does not exist"（与 `_check_robot11_mount_combination` 同一个坑）。
-    ★ 2026-10-20（决策 A / 契约 §4.10）：这里读的是**有效档**（`_effective_gravity_align_mode`）——
-      `gravity_align_mode:=auto` 在 lio 不是 small_point_lio 时**解析成 off** ⇒ 本检查直接返回，
-      **不会**因为默认值变成 auto 而误报；而**显式** `urdf|imu|hybrid` + 非 SPL 仍然逐字硬报错
-      （用户的明确请求错了就必须停，`auto` 不替它兜底）。
-    """
-    mode = _effective_gravity_align_mode(context)      # auto ⇒ hybrid|off；显式值原样
-    if mode == 'off':
-        return []
-    lio = (LaunchConfiguration('lio').perform(context) or '').strip()
-    if lio != 'small_point_lio':
-        raise RuntimeError(
-            "[launch] gravity_align_mode:=%s 只对 lio:=small_point_lio 生效（E1 初始化对齐的补丁在 "
-            "small_point_lio 包里；fastlio/pointlio/cartographer 没有 gravity_align_mode / "
-            "gravity_align_rpy 这些参数，传了也不会生效）⇒ 当前 lio:=%s：请改成 "
-            "lio:=small_point_lio，或把 gravity_align_mode 设回 off" % (mode, lio or '(空)'))
-    # 先验必须真的能从 URDF 推出来（robot 未知 / mount 写错 ⇒ 在这里报，而不是到节点里才发现）
-    rpy = _urdf_livox_mount_rpy_deg(context)
-    # ★ 2026-10-21（E1b + URDF 解析）：z 原点。`sensor` = 旧行为；`ground` = odom 的 z=0 放在
-    #   初始化时刻的地面，高度 `_gravity_align_h()` = **解析出的 livox_z + 地面偏移表**。
-    #   这里只做取值检查 + 把 h（以及它到底来自解析还是回退表）打进日志；节点初始化时还会用
-    #   第一帧点云拟合地面互检（LIO 侧 gravity_align_ground.cpp，本 launch 不重复那段逻辑）。
-    z_origin = (LaunchConfiguration('gravity_align_z_origin').perform(context) or '').strip() or 'sensor'
-    if z_origin not in ('sensor', 'ground'):
-        raise RuntimeError(
-            "[launch] gravity_align_z_origin:=%r 不是可用取值（sensor | ground）" % z_origin)
-    h = _gravity_align_h(context)
-    mount_src = _mount_source_label(context)
-    return [LogInfo(msg=(
-        '[gravity_align] mode=%s ⇒ 统一输出契约启用：LIO publish_tf:=false + odom_convention:=sensor、'
-        'lio_tf_adapter 成为 odom→base_link 的唯一发布者；gravity_align_rpy（来源=%s）= '
-        '[%.6f, %.6f, %.6f]°（robot=%r mount=%r）；'
-        'z_origin=%s gravity_align_h=%s → %.6f m（%s）'
-        % (mode, mount_src, rpy[0], rpy[1], rpy[2],
-           LaunchConfiguration('robot').perform(context),
-           (LaunchConfiguration('robot11_mount').perform(context) or ''),
-           z_origin, mount_src, h,
-           ('odom 的 z=0 = 初始化时刻的地面；h = base_link 离地（表） + livox z（解析）'
-            if z_origin == 'ground' else
-            'odom 原点 = 初始化时刻的传感器原点（旧行为；地面不在 z=0）'))))]
-
-
 def _rpy_deg_to_R(rpy_rad):
     """固定关节 rpy（弧度，URDF 的 Rz·Ry·Rx 约定）→ 旋转矩阵（行主序 3x3）。"""
     import math as _m
@@ -875,51 +821,131 @@ def _parsed_livox_mount(context, urdf_path=None, mappings=None, robot=None, moun
 
 
 # =============================================================================
-# ★ 2026-10-21（契约 v3 §4.11）：`level_frame` —— 重力对齐做成**帧图**的事，而不是估计器补丁
+# ★ 2026-10-21（契约 v3 §4.14）：`gravity` —— 重力/水平帧参数组的**唯一用户开关**
 # -----------------------------------------------------------------------------
-# 用户决定（原话）："不要 e1 吧，加个 tf"。两档：
+# 用户决定（原话）："123都可以感觉raw也可以留着可以学cod以baselink为基准"。
+# 四个取值 = 旧 4 个参数（level_frame × gravity_align_mode × gravity_align_z_origin ×
+# z_origin_source）的**组合**，一次选完：
 #
-#   `level_frame:=odom_level`（**默认**）
-#       map ──(重定位: gicp/amcl/slam_toolbox…, 可跳)──► odom ──(静态边)──► odom_level ──(adapter)──► base_link
-#       · `odom` = LIO 的**原始**世界系（IMU 斜装 ⇒ 斜 30°；E1 默认关闭）；
-#       · `odom_level` = 重力对齐 + 原点在地面；唯一发布者 = `odom_level_tf`（**一条 latched 静态边**，
-#         值从 URDF 的安装 rpy + h 算出，与 E1 同一套数学）；
-#       · `gravity_align_mode:=auto` 在这档**解析成 off**（E1 不参与）；
-#       · 局部代价图 / rviz 固定帧 / adapter 父帧 = `odom_level`；全局代价图仍是 `map`、`/scan` 仍是 `base_link`。
+#   gravity:=tf（默认）
+#       odom = **原始**（IMU）世界（E1 off）；局部代价图/静态边帧 = `odom_level`
+#       （唯一发布者 odom_level_tf、latched；z=0 = 地面，值从 URDF 的 h 算）；
+#       E1 关；z 原点 = ground/urdf；障碍层 = 今天（local_obstacle 的 2D scan / stvl）。
+#   gravity:=base
+#       odom = **原始**（IMU）世界（E1 off）；**没有** odom_level 边、局部代价图 = odom；
+#       高度语义放在 **base_link**（p2l target_frame=base_link、linefit gravity_aligned_frame=
+#       base_link）；局部障碍层强制**逐点**（cloud | stvl）—— 2D scan 平盘在斜 odom 里没有
+#       逐点高度可言（§25 的 43.7% 半盲）。显式 local_obstacle:=scan ⇒ **硬报错**。
+#   gravity:=lio
+#       odom = **水平**（E1 hybrid；只对 lio:=small_point_lio，其它 LIO 硬报错）；
+#       局部代价图 = odom；z 原点 = ground（E1b）；障碍层 = 今天。
+#   gravity:=raw
+#       odom = **原始**（IMU）世界（E1 off）；局部代价图 = odom；障碍层 = 今天的 off 档
+#       （2D scan 允许 = 复现 §25 的"半盲"臂）。
 #
-#   `level_frame:=odom`（**回滚档**）
-#       就是今天的样子：`map → odom → base_link`，重力对齐由 E1（`auto ⇒ hybrid`）在估计器里做；
-#       不发布静态边、adapter 父帧 = `odom`、局部代价图 = `odom`。
-#
-# 两档共用 E1 的**实验臂**：显式 `gravity_align_mode:=urdf|imu|hybrid` 仍然打 E1 补丁（A/B 用）。
-# 那三档下 `odom` 已经重力对齐 ⇒ 静态边（若 level_frame 仍是 odom_level）退化成**恒等**，
-# 绝不能再转一次（`_level_tf_geometry()` 里 `input_world=level`）。
+# 旧参数（gravity_align_mode / gravity_align_z_origin / level_frame / z_origin_source /
+# lio_init_settle_s / lio_init_map_extrinsic）**只作为硬报错别名保留**：传非默认值 ⇒ t=0 停，
+# 消息指向 gravity（见 `_check_gravity_contract` / `_LEGACY_GRAVITY_ALIASES`）。
 # =============================================================================
-_LEVEL_FRAMES = ('odom_level', 'odom')
-_LEVEL_FRAME_DEFAULT = 'odom_level'
+_GRAVITY_MODES = ('tf', 'base', 'lio', 'raw')
+_GRAVITY_DEFAULT = 'tf'
 
 
-def _level_frame(context):
-    """`level_frame` 的取值（`odom_level` | `odom`）—— 容错读（未声明/取不到 ⇒ 默认档）。"""
+def _gravity(context):
+    """`gravity` 的取值（tf | base | lio | raw）—— 容错读（未声明/取不到 ⇒ 默认档）。"""
     try:
-        raw = str(context.launch_configurations.get('level_frame', _LEVEL_FRAME_DEFAULT)).strip()
+        raw = str(context.launch_configurations.get('gravity', _GRAVITY_DEFAULT)).strip()
     except Exception:                                              # noqa: BLE001
-        raw = _LEVEL_FRAME_DEFAULT
-    raw = raw or _LEVEL_FRAME_DEFAULT
-    if raw not in _LEVEL_FRAMES:
-        raise RuntimeError("[launch] level_frame:=%r 不是可用取值（%s）—— 选错不静默回退"
-                           % (raw, ' | '.join(_LEVEL_FRAMES)))
+        raw = _GRAVITY_DEFAULT
+    raw = raw or _GRAVITY_DEFAULT
+    if raw not in _GRAVITY_MODES:
+        raise RuntimeError("[launch] gravity:=%r 不是可用取值（%s）—— 选错不静默回退"
+                           % (raw, ' | '.join(_GRAVITY_MODES)))
     return raw
 
 
-class _LevelFrame(Substitution):
-    """把 `level_frame` 喂给下游（node 参数 / condition / 合并层）。
+class _Gravity(Substitution):
+    """把 `gravity` 喂给下游（node 参数 / condition / 合并层）。惰性求值。"""
 
-    惰性求值（同 `_GravityAlignEffectiveMode` 的原则：不读这个槽位的 launch 组合零成本）。
+    def perform(self, context):
+        return _gravity(context)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
+
+
+def _level_frame(context):
+    """派生：水平帧（局部代价图 / 静态边 / rviz）—— 只有 `gravity:=tf` 才有 `odom_level`。"""
+    return 'odom_level' if _gravity(context) == 'tf' else 'odom'
+
+
+class _LevelFrame(Substitution):
+    """把派生的水平帧喂给下游（node 参数 / condition / 合并层）。
+
+    惰性求值（同 `_Gravity` 的原则：不读这个槽位的 launch 组合零成本）。
     """
 
     def perform(self, context):
         return _level_frame(context)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
+
+
+def _launch_arg_was_given(context, name):
+    """用户是否**显式**给了这个 launch 参数（只在命令行 argv 里找）。
+
+    Humble 的 `ros2 launch` 把 `name:=value` 原样放进 `LaunchContext.argv`；而 launch 的
+    默认值与显式值在 `launch_configurations` 里**无法区分**。父 include 给的 launch_arguments
+    不可见 ⇒ 按默认处理（这是本仓"尽力而为"的边界，已写进 §4.14 的诚实清单）。
+    """
+    try:
+        argv = context.argv or []
+    except Exception:                                              # noqa: BLE001
+        return False
+    prefix = name + ':='
+    return any(str(a).startswith(prefix) for a in argv)
+
+
+#: `gravity:=base` 允许的局部障碍层 = **逐点**层（带逐点高度语义）。
+_PER_POINT_LOCAL_OBSTACLE = ('cloud', 'stvl')
+
+
+def _effective_local_obstacle(context):
+    """局部障碍层的**有效值**（`gravity:=base` 时强制逐点层）。
+
+    为什么 base 档不能留 2D scan：局部代价图帧 = `odom`（LIO 的**原始**世界，IMU 斜装就斜 30°），
+    而 `/scan` 是 2D 平盘 —— nav2 的 `obstacle_layer` 先 `projectLaser`（z 置 0）再搬到代价图帧
+    ⇒ 每条波束的 z 恒等于那一帧传感器原点的 z，**没有逐点高度**可判（§25 实测 in-band 43.7%、
+    kept-y 单侧 = 半盲）。逐点云（cloud / stvl）才有"离 base_link 多高"的语义。
+    """
+    raw = (context.launch_configurations.get('local_obstacle', 'scan') or 'scan').strip() or 'scan'
+    if _gravity(context) != 'base':
+        return raw
+    if raw in _PER_POINT_LOCAL_OBSTACLE:
+        return raw
+    if raw == 'scan' and _launch_arg_was_given(context, 'local_obstacle'):
+        raise RuntimeError(
+            "[launch] gravity:=base 与 local_obstacle:=scan **不能组合**：\n"
+            "  gravity:=base 的局部代价图帧是 `odom`（LIO 的**原始**世界，IMU 斜装就斜 30°），"
+            "而 `/scan` 是 2D 平盘 —— nav2 的 obstacle_layer 先 projectLaser（z 置 0）再搬到"
+            "代价图帧 ⇒ 每条波束的 z 恒等于那一帧传感器原点的 z，**没有逐点高度**可判。\n"
+            "  实测代价（measurements §25 的 off 档）：in-band 只有 43.7%、kept-y 单侧 = 半盲。\n"
+            "  ⇒ 用逐点层：local_obstacle:=cloud|stvl；或换 gravity:=tf（odom_level 水平帧）")
+    if raw == 'scan':
+        return 'cloud'
+    if raw == 'both':
+        return 'cloud'
+    if raw == 'stvl_both':
+        return 'stvl'
+    return raw
+
+
+class _EffectiveLocalObstacle(Substitution):
+    """把局部障碍层的有效值喂给 nav2 include / scan 高度带覆盖层。"""
+
+    def perform(self, context):
+        return _effective_local_obstacle(context)
 
     def describe(self):
         return '%s()' % type(self).__name__
@@ -937,33 +963,32 @@ _LEVEL_EXTRINSIC_T = (0.0, 0.0, 0.05)
 def _level_tf_geometry(context):
     """静态边 `odom → odom_level` 的三个**输入事实**：(input_world, input_z, output_z)。
 
+    只在 `gravity:=tf` 时被使用（`odom_level_tf` 的 condition）。`gravity:=tf` ⇒ E1 关、
+    z 原点固定 = ground/urdf（§4.14）：
+
     · `input_world`：喂进来的 odom 是否**已经**重力对齐？
         `tilted` = 原始 body 世界（E1 关：SPL-off / fastlio）⇒ 旋转部分 = `R_mount`；
-        `level`  = 已经对齐（pointlio 的 Set_init / E1 实验臂 / none / cartographer）⇒ 旋转 = I；
+        `level`  = 已经对齐（pointlio 的 Set_init / none / cartographer）⇒ 旋转 = I；
     · `input_z`：喂进来的 odom 的 z=0 在哪？（`sensor` = 状态原点=IMU 原点；`ground` = 地面）；
-    · `output_z`：`odom_level` 的 z=0 要放在哪（`gravity_align_z_origin`，默认 `ground`）。
+    · `output_z`：`odom_level` 的 z=0 要放在哪（`gravity` 的 z 原点约定，tf ⇒ `ground`）。
 
     ⇒ `t_level = (0, 0, h_imu)` 当 `input_z=sensor` 且 `output_z=ground`，否则 `(0,0,0)`
       （`h_imu = h − (R_mount·t_IL)_z`，见 `odom_level_tf.py`）。
     """
     lio = _Nav2ParamsForSlot._cfg(context, 'lio') or 'fastlio'
-    z_origin = _Nav2ParamsForSlot._cfg(context, 'gravity_align_z_origin') or 'sensor'
-    eff = _effective_gravity_align_mode(context)
     if lio in ('none', 'cartographer'):
         # 这两个槽位不接管 odom→base_link：静态边做成**恒等别名**（odom_level ≡ odom）
         # ⇒ 局部代价图/consumer 只换帧名、**零行为变化**，也不对它们的世界系做任何重力假设。
         return ('level', 'ground', 'ground')
-    if lio == 'small_point_lio':
-        if eff != 'off':
-            # E1 实验臂：odom 已被 E1 摆正；z 原点由 E1b 决定（ground ⇒ 地面已在 0 ⇒ 恒等）
-            return ('level', 'ground' if z_origin == 'ground' else 'sensor',
-                    'ground' if z_origin == 'ground' else 'sensor')
-        return ('tilted', 'sensor', 'ground' if z_origin == 'ground' else 'sensor')
     if lio == 'pointlio':
         # Point-LIO 的 `Set_init` 已经把世界摆正（ImuProcess::Set_init），但 z 原点在 IMU
-        return ('level', 'sensor', 'ground' if z_origin == 'ground' else 'sensor')
-    # fastlio（以及未来"原始 body 世界"的 LIO）：世界 = 初始 body 系（IMU 斜装就斜）
-    return ('tilted', 'sensor', 'ground' if z_origin == 'ground' else 'sensor')
+        return ('level', 'sensor', 'ground')
+    if lio == 'small_point_lio' and _effective_gravity_align_mode(context) != 'off':
+        # 只有 gravity:=lio 会到这里（那时 level_frame=odom、本节点根本不启动）；保留成恒等，
+        # 防止以后有人把 E1 臂接回静态边时"再转一次"。
+        return ('level', 'ground', 'ground')
+    # SPL-off / fastlio（以及未来"原始 body 世界"的 LIO）：世界 = 初始 body 系（IMU 斜装就斜）
+    return ('tilted', 'sensor', 'ground')
 
 
 class _LevelTfParam(Substitution):
@@ -988,16 +1013,15 @@ class _LevelTfParam(Substitution):
 
 
 def _level_tf_receipt(context):
-    """`level_frame:=odom_level` 的 t=0 收据（一行，把"谁发哪条边、各帧是哪来的"写死）。"""
+    """`gravity:=tf` 的 t=0 收据（一行，把"谁发哪条边、各帧是哪来的"写死）。"""
     lio = _Nav2ParamsForSlot._cfg(context, 'lio') or 'fastlio'
-    eff = _effective_gravity_align_mode(context)
     iw, iz, oz = _level_tf_geometry(context)
-    return ('[odom_level] level_frame=odom_level ⇒ 帧树 = map→odom→odom_level→base_link；'
+    return ('[odom_level] gravity=tf ⇒ 帧树 = map→odom→odom_level→base_link；'
             '静态边 odom→odom_level 的**唯一发布者** = odom_level_tf（latched，值由 URDF 的 '
-            'gravity_align_rpy + gravity_align_h 算出）；lio=%s gravity_align_mode 有效值=%s；'
+            'gravity_align_rpy + gravity_align_h 算出）；lio=%s；'
             'input_world=%s input_z=%s output_z=%s；adapter 父帧=odom_level、'
-            'local_costmap.global_frame=odom_level；回滚 = level_frame:=odom'
-            % (lio, eff, iw, iz, oz))
+            'local_costmap.global_frame=odom_level；换档 = gravity:=base|lio|raw'
+            % (lio, iw, iz, oz))
 
 
 class _LevelTfReceipt(Substitution):
@@ -1010,75 +1034,38 @@ class _LevelTfReceipt(Substitution):
         return '%s()' % type(self).__name__
 
 
-def _check_level_frame_contract(context):
-    """★ 2026-10-21（§4.11）：`level_frame` 与"LIO 当绝对定位"回退档的**组合告警**（t=0）。
-
-    为什么要有：`localization:=''`（回退用法）会由静态桥把 `map ≡ odom` 钉成**恒等**。
-    `odom` 现在是 LIO 的**原始**世界（斜装就斜 30°）⇒ 全局代价图（`map`）会跟着斜，
-    而局部代价图（`odom_level`）是正的 ⇒ 两半不一致。这不是本改动的回归（改动前
-    fastlio 的这条回退路径也是"斜 odom + 正 map 资产"），但也**不该静默**。
-    正式用法是给一个重定位槽（`localization:=gicp|amcl|slam_toolbox|…`）让 `map→odom`
-    主动吸收这个倾角；或者显式回滚 `level_frame:=odom`。
-    """
-    if _level_frame(context) != 'odom_level':
-        return []
-    mode = _Nav2ParamsForSlot._cfg(context, 'mode') or 'mapping'
-    loc = _Nav2ParamsForSlot._cfg(context, 'localization')
-    lio = _Nav2ParamsForSlot._cfg(context, 'lio') or 'fastlio'
-    if mode in ('nav', 'slam_nav') and loc == '' and lio in ('fastlio', 'pointlio',
-                                                             'small_point_lio'):
-        msg = ('[launch][WARN] level_frame=odom_level + localization=\'\'（LIO 当绝对定位）：'
-               '静态桥把 map≡odom 钉成恒等，而 odom 是 %s 的**原始**世界（可能斜装）⇒ '
-               '全局代价图（map）不会跟着摆正，只有局部（odom_level）是正的。'
-               '正式用法：给一个重定位槽（localization:=gicp|amcl|slam_toolbox|…）；'
-               '或回滚 level_frame:=odom' % lio)
-        print(msg, flush=True)
-        return [LogInfo(msg=msg)]
-    return []
-
-
-#: ★ 2026-10-20：E1 重力对齐（docs/frame_contract_v3.md §4）的四档来源。
-#: ★ 2026-10-20（决策 A / 契约 §4.10）：**默认值 `off` → `auto`**。`auto` **本身不是一档算法**，
-#:   只是一条解析规则。
-#: ★ 2026-10-21（契约 §4.11）：**默认档的解析结果改成 `off`**（重力对齐搬到静态边
-#:   `odom→odom_level`）；只有回滚档 `level_frame:=odom` 才保留 §4.10 的
-#:   `auto = hybrid 当 lio==small_point_lio，否则 off` 规则（逐字节回到今天）。
-#:   显式 `off|urdf|imu|hybrid` 的语义**一个字节都没改**（含"显式 hybrid + fastlio 仍硬报错"）。
+#: ★ 2026-10-20：E1 重力对齐的档位（**实验臂已收口**：只有 `gravity:=lio` 会用 hybrid）。
+#: 这些值只作为旧参数 `gravity_align_mode` 的 choices（硬报错别名）保留。
 _GRAVITY_ALIGN_MODES = ('off', 'urdf', 'imu', 'hybrid', 'auto')
 
 
 def _effective_gravity_align_mode(context):
-    """`gravity_align_mode` 的**有效档**（`off | urdf | imu | hybrid`）—— **唯一的解析点**。
+    """`gravity` ⇒ E1 的**有效档**（`off | hybrid`）—— **唯一的解析点**。
 
-    · 显式 `off|urdf|imu|hybrid` ⇒ **原样返回**（不替用户擦屁股：显式 `hybrid` + `lio:=fastlio`
-      仍然由 `_check_gravity_align_contract` 硬报错，见那里的注释）；
-    · `auto` ⇒ **默认档（`level_frame:=odom_level`）解析成 `off`** —— 重力对齐已经由
-      静态边 `odom→odom_level` 承担（契约 §4.11），E1 不在默认路径上；
-      回滚档（`level_frame:=odom`）保留 §4.10 的规则：`hybrid` 当 `lio == small_point_lio`，
-      否则 `off`（= 逐字节回到今天）。
+    · `tf | base | raw` ⇒ `off`（tf 的重力对齐由静态边 `odom→odom_level` 承担；base/raw 不做）；
+    · `lio` ⇒ `hybrid` —— **只对 `lio:=small_point_lio`**（E1 补丁只存在于那个包；其它 LIO
+      硬报错，与旧 §4.10 的"显式 hybrid + 非 SPL ⇒ t=0 停"同一语义）。
 
-    ⚠️ `auto` **绝不下传**：节点 condition、节点参数、组合检查看到的都只有有效档 ——
-    这就是"解析一次、到处使用"的那一次。
+    ⚠️ 有效档只给**下游**（condition / 节点参数 / 收据）用；旧 `gravity_align_mode` 参数
+    不再参与任何解析（传非默认值 ⇒ 硬报错，见 `_check_gravity_contract`）。
     """
-    raw = (LaunchConfiguration('gravity_align_mode').perform(context) or '').strip() or 'off'
-    if raw not in _GRAVITY_ALIGN_MODES:
-        raise RuntimeError(
-            "[launch] gravity_align_mode:=%r 不是可用取值（%s）—— 选错不会静默回退，这里直接停"
-            % (raw, ' | '.join(_GRAVITY_ALIGN_MODES)))
-    if raw != 'auto':
-        return raw
-    if _level_frame(context) == 'odom_level':
-        return 'off'                       # §4.11：重力对齐归静态边，E1 关
+    if _gravity(context) != 'lio':
+        return 'off'
     lio = (LaunchConfiguration('lio').perform(context) or '').strip()
-    return 'hybrid' if lio == 'small_point_lio' else 'off'      # §4.10：回滚档逐字节不变
+    if lio != 'small_point_lio':
+        raise RuntimeError(
+            "[launch] gravity:=lio 只对 lio:=small_point_lio 生效（E1 初始化对齐的补丁在 "
+            "small_point_lio 包里；fastlio/pointlio/cartographer 没有 gravity_align_mode / "
+            "gravity_align_rpy 这些参数，传了也不会生效）⇒ 当前 lio:=%s：请改成 "
+            "lio:=small_point_lio，或换 gravity:=tf|base|raw" % (lio or '(空)'))
+    return 'hybrid'
 
 
 class _GravityAlignEffectiveMode(Substitution):
-    """把 `gravity_align_mode` 的**有效档**喂给下游（condition / 节点参数）。
+    """把 E1 的有效档喂给下游（condition / 节点参数）。
 
     惰性求值（照抄 `_GravityAlignRpy` / `_PackageShareFile` 的原则：不读这个槽位的 launch 组合
-    零成本）。返回值永远是 `off|urdf|imu|hybrid` —— `auto` 在这一层就被消费掉，不会出现在
-    任何节点的参数表里。
+    零成本）。返回值永远是 `off|hybrid` —— 旧 `auto/urdf/imu` 不再存在。
     """
 
     def perform(self, context):
@@ -1088,34 +1075,117 @@ class _GravityAlignEffectiveMode(Substitution):
         return '%s()' % type(self).__name__
 
 
-def _gravity_align_resolution_msg(context):
-    """`gravity_align_mode:=auto` 的**解析收据**（t=0 打一次；默认 launch 也会打）。
-
-    形如 `[gravity_align] gravity_align_mode=auto ⇒ 有效值=off（…）`（默认档，§4.11）/
-    `… ⇒ 有效值=hybrid（level_frame=odom（回滚档）…）`（回滚档，§4.10）。
-    """
-    raw = (LaunchConfiguration('gravity_align_mode').perform(context) or '').strip() or 'off'
-    eff = _effective_gravity_align_mode(context)
+def _gravity_receipt(context):
+    """`gravity` 的 t=0 收据（一行；把 4 个值各自的 odom/帧/E1/z/障碍层写死）。"""
+    g = _gravity(context)
     lio = (LaunchConfiguration('lio').perform(context) or '').strip() or '(空)'
+    eff = _effective_gravity_align_mode(context)
     level = _level_frame(context)
-    if level == 'odom_level':
-        why = ('level_frame=odom_level ⇒ 重力对齐走静态边 odom→odom_level（§4.11），E1 关闭'
-               '（要 A/B 请显式 urdf|imu|hybrid）')
-    elif eff == 'hybrid':
-        why = 'level_frame=odom（回滚档）+ lio=small_point_lio ⇒ E1 在估计器里对齐（§4.10）'
-    else:
-        why = 'level_frame=odom（回滚档）+ lio=%s；E1 补丁只存在于 small_point_lio' % lio
-    return '[gravity_align] gravity_align_mode=%s ⇒ 有效值=%s（%s）' % (raw, eff, why)
+    obstacle = _effective_local_obstacle(context)
+    z_origin = {'tf': 'ground(urdf)', 'base': 'n/a', 'lio': 'ground', 'raw': 'ground'}[g]
+    odom = 'level(E1 hybrid)' if g == 'lio' else 'raw(IMU)'
+    return ('[gravity] gravity=%s ⇒ odom=%s、局部代价图/静态边帧=%s、E1=%s、z 原点=%s、'
+            '局部障碍层=%s（lio=%s）%s'
+            % (g, odom, level, eff, z_origin, obstacle, lio,
+               '' if level == 'odom_level' else
+               '；**没有 odom_level 这个帧**（odom_level_tf 不启动）'))
 
 
-class _GravityAlignResolution(Substitution):
-    """`LogInfo` 的消息体：auto 的解析收据（惰性求值 ⇒ `--show-args` 不执行、不读参数）。"""
+class _GravityReceipt(Substitution):
+    """`LogInfo` 的消息体（惰性求值 ⇒ `--show-args` 不执行、不读参数）。"""
 
     def perform(self, context):
-        return _gravity_align_resolution_msg(context)
+        return _gravity_receipt(context)
 
     def describe(self):
         return '%s()' % type(self).__name__
+
+
+#: 旧参数 = **硬报错别名**：`(name, 旧默认值, 替代说明)`。
+#: 传的值 != 旧默认值 ⇒ t=0 停（消息指向 gravity）。显式传回旧默认值无法与"没传"区分
+#: （launch 不保留来源），按默认处理 —— 这是本条规则的已知边界（§4.14 诚实清单）。
+_LEGACY_GRAVITY_ALIASES = (
+    ('gravity_align_mode', 'auto',
+     'gravity:=tf|base|lio|raw（lio ⇒ E1 hybrid；tf/base/raw ⇒ E1 off）'),
+    ('gravity_align_z_origin', 'ground',
+     'gravity:=tf（ground/urdf 固定）；gravity:=lio（E1b ground 固定）'),
+    ('level_frame', 'odom_level',
+     'gravity:=tf ⇒ odom_level；gravity:=base|lio|raw ⇒ odom'),
+    ('z_origin_source', 'urdf',
+     'gravity:=tf（z 原点来源固定 = URDF 的 h，确定、可跨跑比较）'),
+    ('lio_init_settle_s', '1.0',
+     '无参数：初始化**不再等落定**（17e468d 起出生即落定；门已删除）'),
+    ('lio_init_map_extrinsic', 'True',
+     '无参数：初始化地图**一律**用 R_IL·p + t_IL（与逐点更新同口径）'),
+)
+
+
+def _check_gravity_contract(context):
+    """★ 2026-10-21（§4.14）：`gravity` 的**组合检查 + t=0 收据**（OpaqueFunction）。
+
+    1. 旧参数硬报错别名（传非默认值 ⇒ 停，消息指向 gravity）；
+    2. `gravity:=lio` 只对 `lio:=small_point_lio`（在 `_effective_gravity_align_mode` 里抛）；
+    3. `gravity:=base` 的局部障碍层强制逐点（显式 `local_obstacle:=scan` ⇒ 停）；
+    4. `gravity:=tf` + `localization:=''` 的全局/局部帧不一致 WARN（§4.11 的既有告警）。
+    """
+    bad = []
+    for name, default, hint in _LEGACY_GRAVITY_ALIASES:
+        raw = context.launch_configurations.get(name)
+        if raw is None:
+            continue
+        if str(raw).strip() != default:
+            bad.append('  · %s:=%s（旧默认值 = %s）⇒ 改用 %s'
+                       % (name, str(raw).strip(), default, hint))
+    if bad:
+        raise RuntimeError(
+            "[launch] 旧参数已删除（硬报错别名）—— 重力/水平帧只有**一个**用户开关："
+            "gravity:=tf|base|lio|raw\n%s\n"
+            "  契约 §4.14 / measurements §33；`ros2 launch … --show-args` 可看 gravity 的完整语义"
+            % '\n'.join(bad))
+
+    actions = []
+    # 3) base 档的障碍层：先求值（非法组合在这里就抛），再打 WARN（静默降级不允许）
+    eff_obstacle = _effective_local_obstacle(context)
+    if _gravity(context) == 'base':
+        raw_obstacle = (context.launch_configurations.get('local_obstacle', 'scan')
+                        or 'scan').strip() or 'scan'
+        if eff_obstacle != raw_obstacle:
+            msg = ('[launch][WARN] gravity=base ⇒ 局部障碍层 local_obstacle:=%s 被强制成 %s'
+                   '（2D /scan 在斜的 odom 里没有逐点高度；§25 实测 in-band 43.7%% = 半盲）'
+                   % (raw_obstacle, eff_obstacle))
+            print(msg, flush=True)
+            actions.append(LogInfo(msg=msg))
+
+    # 4) tf 档 + LIO 当绝对定位（localization:=''）的回退告警（§4.11 的既有语义）
+    if _level_frame(context) == 'odom_level':
+        mode = _Nav2ParamsForSlot._cfg(context, 'mode') or 'mapping'
+        loc = _Nav2ParamsForSlot._cfg(context, 'localization')
+        lio = _Nav2ParamsForSlot._cfg(context, 'lio') or 'fastlio'
+        if mode in ('nav', 'slam_nav') and loc == '' and lio in (
+                'fastlio', 'pointlio', 'small_point_lio'):
+            msg = ('[launch][WARN] gravity=tf + localization=\'\'（LIO 当绝对定位）：'
+                   '静态桥把 map≡odom 钉成恒等，而 odom 是 %s 的**原始**世界（可能斜装）⇒ '
+                   '全局代价图（map）不会跟着摆正，只有局部（odom_level）是正的。'
+                   '正式用法：给一个重定位槽（localization:=gicp|amcl|slam_toolbox|…）；'
+                   '或换 gravity:=base|lio|raw' % lio)
+            print(msg, flush=True)
+            actions.append(LogInfo(msg=msg))
+
+    # 1/2 的 t=0 收据（也负责触发 lio 组合的硬报错：_gravity_receipt 里会解析有效档）
+    actions.insert(0, LogInfo(msg=[_GravityReceipt()]))
+    if _level_frame(context) == 'odom_level':
+        actions.append(LogInfo(msg=[_LevelTfReceipt()]))
+    elif _effective_gravity_align_mode(context) != 'off':
+        # gravity:=lio 的 E1 收据：把"用哪个先验、h 多少、谁发 TF"写死（与旧 §4.10 的收据同义）
+        rpy = _urdf_livox_mount_rpy_deg(context)
+        h = _gravity_align_h(context)
+        actions.append(LogInfo(msg=(
+            '[gravity_align] gravity=lio ⇒ E1 hybrid（统一输出契约）：LIO publish_tf:=false + '
+            'odom_convention:=sensor、lio_tf_adapter 成为 odom→base_link 的唯一发布者；'
+            'gravity_align_rpy（来源=%s）=[%.6f, %.6f, %.6f]°；z_origin=ground gravity_align_h='
+            '%.6f m（odom 的 z=0 = 初始化时刻的地面）'
+            % (_mount_source_label(context), rpy[0], rpy[1], rpy[2], h))))
+    return actions
 
 
 def _urdf_livox_mount_rpy_deg(context):
@@ -1151,31 +1221,6 @@ def _mount_source_label(context):
     if parsed is not None:
         return 'URDF-%s' % parsed['source']
     return 'table-fallback'
-
-
-class _LioFloatParam(Substitution):
-    """把 launch 参数（字符串）转成**浮点**再喂给节点参数（`repr(float(...))`）。
-
-    ⚠️ 为什么不直接 `LaunchConfiguration(...)`：那样传下去的是**字符串**，rcl 按 YAML 解释
-    `-p k:=0` 会得到 **int** ⇒ C++ 侧 `declare_parameter<double>` 拿到 int 覆盖值的类型行为
-    依赖 rclcpp 的强转规则（`0` 与 `0.0` 不是同一件事）。`repr(float('0'))` = `'0.0'` ⇒ 永远是 double。
-    """
-
-    def __init__(self, name, default):
-        super().__init__()
-        self.__name = name
-        self.__default = default
-
-    def perform(self, context):
-        raw = LaunchConfiguration(self.__name).perform(context)
-        try:
-            v = float(raw)
-        except (TypeError, ValueError):
-            raise RuntimeError('[launch] %s:=%r 不是浮点数' % (self.__name, raw))
-        return repr(v)
-
-    def describe(self):
-        return '%s(%s)' % (type(self).__name__, self.__name)
 
 
 class _GravityAlignRpy(Substitution):
@@ -1537,7 +1582,7 @@ def _scan_band_layer_active(context):
     """
     if _scan_band_min_value(context) == 0.0:
         return False
-    return _Nav2ParamsForSlot._cfg(context, 'local_obstacle') in ('scan', 'both', 'stvl_both')
+    return _effective_local_obstacle(context) in ('scan', 'both', 'stvl_both')
 
 
 class _SlotSpinSpeedDefault(Substitution):
@@ -2284,18 +2329,16 @@ def generate_launch_description():
                LaunchConfiguration('scan_band_min')),
               ('local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.min_obstacle_height',
                LaunchConfiguration('scan_band_min')))),
-            # ★ 2026-10-21（契约 §4.11）：局部帧跟着 `level_frame` 走（默认 odom_level）。
-            #   只改**两个叶子键**：local_costmap.global_frame 与 behavior_server.global_frame
-            #   （后者吃的就是这张局部代价图）。全局仍是 map、stvl 的全局 profile 与
-            #   global_obstacle:=scan 的 −1.0 覆盖层**一个字节都不动**。
-            #   回滚 `level_frame:=odom` ⇒ 本层 predicate 为假 ⇒ 合并文件与改动前逐字节相同。
+            # ★ 2026-10-21（契约 §4.11/§4.14）：局部帧由 `gravity` 派生（tf ⇒ odom_level；
+            #   base|lio|raw ⇒ odom）。只改**两个叶子键**：local_costmap.global_frame 与
+            #   behavior_server.global_frame（后者吃的就是这张局部代价图）。全局仍是 map、
+            #   stvl 的全局 profile 与 global_obstacle:=scan 的 −1.0 覆盖层**一个字节都不动**。
+            #   非 tf 档 ⇒ 本层 predicate 为假 ⇒ 合并文件与改动前逐字节相同。
             ('level_frame',
              os.path.join(rm_nav_bringup_dir, 'config', 'nav2_params_sim_level_frame.yaml'),
              lambda ctx: _level_frame(ctx) == 'odom_level',
-             (('local_costmap.local_costmap.ros__parameters.global_frame',
-               LaunchConfiguration('level_frame')),
-              ('behavior_server.ros__parameters.global_frame',
-               LaunchConfiguration('level_frame')))),
+             (('local_costmap.local_costmap.ros__parameters.global_frame', _LevelFrame()),
+              ('behavior_server.ros__parameters.global_frame', _LevelFrame()))),
         ))
     nav2_params_launch_args = {
         'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）
@@ -2505,131 +2548,76 @@ def generate_launch_description():
                     '传这两个值会**硬报错**。取证/历史见 docs/tilted_lidar_fidelity.md §J。',
         choices=list(_LIVOX_MOUNTS))
 
-    # ★ 2026-10-20：**E1 重力对齐**（docs/frame_contract_v3.md §4 / §13）+ 统一输出契约（选项 U）。
-    # ★ 2026-10-20（决策 A / 契约 §4.10）：默认值 `off` → **`auto`**。
-    #   `auto` 不是算法档，是**解析规则**：`auto = hybrid 当 lio==small_point_lio，否则 off`。
-    #   为什么不能把默认直接写成 hybrid：launch 的默认 `lio` 是 `fastlio`，而显式非 off + 非 SPL
-    #   是**硬报错**（E1 补丁只在 small_point_lio 里）⇒ 默认 hybrid 会让每个默认 launch 在 t=0 停。
-    #   `auto` 让两个默认同时成立：`lio:=fastlio`（默认）⇒ 有效值 off = **逐字节现状**；
-    #   `lio:=small_point_lio` ⇒ 有效值 hybrid = **该槽位默认就重力对齐**（用户签字的决策 A）。
-    #   显式 `off` ⇒ 现状：不给任何节点多加一个参数、不加任何节点、Action 顺序不变。
-    #   显式有效值非 off ⇒ 三件事**成组**发生（这是"选项 U"的定义，别只开一半）：
-    #     ① 本 launch 把 `gravity_align_rpy` **从 URDF 自动算**出来（`_GravityAlignRpy`）传给 LIO，
-    #        并把 mode 一起传下去 ⇒ 估计器初始化时把那 30° 吸收进 `odom`（`odom` 真的重力对齐）；
-    #     ② 给 LIO 传 `publish_tf:=false` + `odom_convention:=sensor` ⇒ 它只发 `T_ol`、不发 TF；
-    #     ③ **给 lio:=small_point_lio 也起 `lio_tf_adapter`**（此前这个槽位被显式排除）⇒
-    #        `odom→base_link` 全栈**唯一发布者** = adapter（契约 I2），外参与 ① 同一个 URDF 来源。
-    # ★ 2026-10-21（契约 §4.11）：**重力对齐做成帧图的事**。`level_frame` 是这一层的总开关：
-    #   odom_level（默认）= 发一条静态边 odom→odom_level（唯一发布者 odom_level_tf），
-    #                       `odom` = LIO 原始世界（斜装就斜）、局部代价图/adapter 父帧 = odom_level；
-    #   odom（回滚）= 逐字节回到今天（E1 auto⇒hybrid 在估计器里对齐、没有 odom_level 这个帧）。
-    #   声明位置必须在 `gravity_align_mode` **之前**：后者默认值 `auto` 的解析（auto⇒off）
-    #   要读 `level_frame`（launch 的声明动作是**按顺序**生效的）。
+    # ★★ 2026-10-21（契约 v3 §4.14）：**重力/水平帧的唯一用户开关** `gravity`。
+    #   旧参数组（level_frame / gravity_align_mode / gravity_align_z_origin / z_origin_source）
+    #   与两个初始化参数（lio_init_settle_s / lio_init_map_extrinsic）**只作为硬报错别名保留**：
+    #   传非默认值 ⇒ t=0 停（`_check_gravity_contract`），消息指向 gravity。
+    #   声明顺序：gravity 必须最先（`_level_frame` / `_effective_gravity_align_mode` 都读它）。
+    declare_gravity_cmd = DeclareLaunchArgument(
+        'gravity',
+        default_value=_GRAVITY_DEFAULT,
+        choices=list(_GRAVITY_MODES),
+        description='重力/水平帧的唯一开关（契约 v3 §4.14）。'
+                    'tf（默认）= odom 保持**原始**（IMU）世界、E1 关；局部代价图/静态边帧 = '
+                    'odom_level（唯一发布者 odom_level_tf，latched；值从 URDF 的安装 rpy + 离地'
+                    '高度 h 算，z=0 = 地面）；障碍层按 local_obstacle（默认 2D scan / stvl）。'
+                    'base = odom 保持原始、**没有 odom_level 帧**、局部代价图 = odom；高度语义放在 '
+                    '**base_link**（p2l target_frame=base_link、linefit gravity_aligned_frame='
+                    'base_link）；局部障碍层强制**逐点**（cloud|stvl；显式 local_obstacle:=scan ⇒ '
+                    '硬报错，因为 2D scan 平盘在斜 odom 里没有逐点高度 = §25 的 43.7% 半盲）。'
+                    'lio = E1 hybrid 把 odom 摆正（**只对 lio:=small_point_lio**，其它 LIO 硬报错）；'
+                    '局部代价图 = odom；z 原点 = 地面；障碍层按 local_obstacle。'
+                    'raw = E1 关、局部代价图 = odom、障碍层照旧（2D scan 允许 = 复现 §25 的 off 半盲臂）。'
+                    '旧名字（gravity_align_mode / gravity_align_z_origin / level_frame / '
+                    'z_origin_source / lio_init_settle_s / lio_init_map_extrinsic）传非默认值 ⇒ '
+                    't=0 硬报错。')
+
+    # ---- 旧参数：硬报错别名（保留声明只为让 --show-args 还能看到"它被 gravity 取代"）----
     declare_level_frame_cmd = DeclareLaunchArgument(
         'level_frame',
-        default_value=_LEVEL_FRAME_DEFAULT,
-        choices=list(_LEVEL_FRAMES),
-        description='重力对齐帧的**归属**（契约 v3 §4.11）：'
-                    'odom_level（默认）= 帧图负责 —— LIO 的 odom 保持**原始**世界系，'
-                    '由静态边 odom→odom_level（latched，唯一发布者 = odom_level_tf，值从 URDF 的'
-                    '安装 rpy + 离地高度 h 算出）给出重力对齐 + 地面 z 原点；'
-                    '`gravity_align_mode:=auto` 在这档**解析成 off**（E1 不参与），'
-                    '局部代价图/rviz/adapter 父帧都用 odom_level。'
-                    'odom = 回滚：逐字节回到改动前（E1 auto⇒hybrid 在估计器里对齐、没有 odom_level 帧、'
-                    'adapter 父帧 = odom、局部代价图 = odom）。'
-                    '两档共用 E1 实验臂：显式 gravity_align_mode:=urdf|imu|hybrid 仍然打 E1 补丁'
-                    '（此时静态边退化成恒等，绝不重复转）')
+        default_value='odom_level',
+        choices=['odom_level', 'odom'],
+        description='[已删除 / 硬报错别名] 由 gravity 一次性决定：'
+                    'tf ⇒ odom_level；base|lio|raw ⇒ odom。传非默认值（odom）⇒ t=0 停。'
+                    '见 gravity 的 description / 契约 §4.14')
 
     declare_gravity_align_mode_cmd = DeclareLaunchArgument(
         'gravity_align_mode',
         default_value='auto',
         choices=list(_GRAVITY_ALIGN_MODES),
-        description='E1 重力对齐（只对 lio:=small_point_lio 生效；★ 默认档已由静态边接管，见 level_frame）。'
-                    'auto（默认）= **level_frame:=odom_level 时解析成 off**（重力对齐归静态边 '
-                    'odom→odom_level，E1 不在默认路径上）；level_frame:=odom（回滚档）时仍是 '
-                    'hybrid 当 lio==small_point_lio、否则 off（= 决策 A，逐字节回到今天）。'
-                    'off = 不初始化对齐（odom = 初始化时刻的传感器壳体系 ⇒ 斜装就斜 30°）；'
-                    'urdf = 用 **URDF 推出**的先验 rpy（不需要 IMU、不需要静止，瞬时；先验错时**无告警**）；'
-                    'imu = 用 200 帧 IMU 均值实测的重力方向（需要静止；不需要任何安装参数）；'
-                    'hybrid = 两者都算 + Δ 互检（<2° 用 URDF / 2~5° WARN 改用 IMU / ≥5° ERROR 改用 IMU）'
-                    '—— **推荐档**（= auto 在 small_point_lio 上的有效值）。'
-                    '⚠️ 显式 urdf|imu|hybrid + 非 small_point_lio 是**硬报错**（t=0 停），只有 auto 会自动降级。'
-                    '★ 有效值非 off 时同时启用**统一输出契约**：LIO 的 publish_tf:=false、'
-                    'odom_convention:=sensor，并由 lio_tf_adapter 成为 odom→base_link 的唯一发布者；'
-                    'gravity_align_rpy 由本 launch 从 URDF 自动算（**不手填**）。'
-                    '验收线：残余地面倾角 <0.7°（实测 urdf 0.474° / hybrid 0.581° / off 30.110°，'
-                    '见 docs/frame_contract_v3_measurements.md）。'
-                    '⚠️ 200 帧初始化门（fix_gravity_direction）**必须保留**：关掉它 8 个变体里 '
-                    '5 个发散（docs/odom_base_link_practice_survey.md §9.4(6)）')
+        description='[已删除 / 硬报错别名] E1 由 gravity 一次性决定：'
+                    'lio ⇒ hybrid（只对 lio:=small_point_lio）；tf|base|raw ⇒ off。'
+                    '传非默认值（off|urdf|imu|hybrid）⇒ t=0 停。见 gravity / 契约 §4.14')
 
-    # ★ 2026-10-21：E1b —— **odom 的 z 原点**（契约 v3 §4.3）。
-    #   默认 `ground`（**只在有效值 != off 时生效** —— `gravity_align_mode:=auto` 也会先解析；
-    #   off 档根本不给节点传这两个键）：
-    # ★ 2026-10-21（§4.11）：`level_frame:=odom_level` 时这个参数**也**决定静态边
-    #   `odom→odom_level` 的 z 原点（`odom_level_tf` 的 `output_z`）：
-    #   `ground`（默认）⇒ odom_level 的 z=0 = 初始化时刻的地面；`sensor` ⇒ odom_level 原点留在
-    #   状态原点（IMU）上（**A/B 复现旧行为用**，地面不在 z=0 ⇒ nav2 局部高度带会掉出去）。
-    #   odom 的 z=0 = 初始化时刻的地面 ⇒ base_link 起始 z = +0.102499、livox_frame = +0.2595（robot11）。
-    #   为什么必须修：E1 只设了初始**旋转**，odom 原点还在传感器壳上 ⇒ nav2 local costmap 的
-    #   `min_obstacle_height: 0.0` 把 scan 盘面（z=−0.159）整盘丢掉（193→0 lethal，实测见
-    #   docs/frame_contract_v3_measurements.md §9.7）。`sensor` 保留 = 旧行为（回退/复现 A/B 用）。
     declare_gravity_align_z_origin_cmd = DeclareLaunchArgument(
         'gravity_align_z_origin',
         default_value='ground',
         choices=['sensor', 'ground'],
-        description='E1b：odom 的 z 原点（只在 gravity_align_mode 的**有效值** != off 时生效；'
-                    'auto 会先解析成 hybrid/off）。'
-                    'ground（默认）= odom 的 z=0 = **初始化时刻的地面**，高度 `gravity_align_h` '
-                    '由本 launch 从 URDF 算（base_link 离地 + livox z 偏置：robot11 0.259527 / '
-                    'hzmirm 0.800000 / 默认模型 0.235000 m）；节点初始化时还会用第一帧点云'
-                    '拟合地面互检（|Δ|≥0.05 m ⇒ ERROR，仍用 URDF 值定基）。'
-                    'sensor = 旧行为（odom 原点 = 初始化时刻的传感器/IMU 原点，地面不在 z=0；'
-                    'hybrid 档会把 nav2 局部代价图打空，仅用于复现 A/B / 回退）')
+        description='[已删除 / 硬报错别名] z 原点由 gravity 一次性决定：'
+                    'tf ⇒ ground + URDF 的 h；lio ⇒ E1b ground；base/raw ⇒ n/a。'
+                    '传非默认值（sensor）⇒ t=0 停。见 gravity / 契约 §4.14')
 
-    # ★★ 2026-10-21（Part 1 / z 锚点的**根因**）：`small_point_lio` 的**初始化落定门**。
-    #   实测（docs §30）：出生时车在**匀速下沉**（`gazebo_ros_planar_move` 每个物理步清 vz ⇒
-    #   5.4 cm/s、9.75 cm 落差 ~1.8 s 沉完），而旧初始化门只看"点云 >= init_map_size 点 +
-    #   200 帧 IMU"（≈2 s）⇒ 初始化地图是**整段下沉过程**的点云（`point_deque` 从不清）且
-    #   **不带状态**入图 ⇒ 地面被抹成 ~9 cm 的带 ⇒ 第一次点更新把状态拽下去 9 cm 量级
-    #   ⇒ `odom` 的 z 原点比 URDF 的 h_imu 高 ~0.13 m（静态边用 URDF 值时地面落在 −0.13 m）。
-    #   修法（两件事，都可**单独回滚**）：
-    #     ① `lio_init_settle_s` = 落定门（>0 才开）：必须**连续**这么久"雷达看到的地面高度不动"
-    #        （峰峰值 <= init_settle_tol=5 mm）才允许初始化；落定前的点云全部丢弃
-    #        ⇒ 初始化地图 = **落定后的一帧**。
-    #        ⚠️ 判据不能用加速度计：`planar_move` 反复重置速度 ⇒ 匀速下沉期间 |a| 仍≈1 g，
-    #        而静止时 |a| 在 7.8–11.8 m/s² 抖（实测）⇒ |a|≈g 既不能证明静止、也不稳。
-    #     ② `lio_init_map_extrinsic` = 初始化地图用与逐点更新**同一个**出点公式（含 `t_IL`）。
-    #   默认 1.0 / True ⇒ **默认档（level_frame:=odom_level + gravity_align_mode=off）修好**；
-    #   回滚档（level_frame:=odom）与 E1 臂的 Node **不传这两个键** ⇒ 逐字节不变。
     declare_lio_init_settle_cmd = DeclareLaunchArgument(
         'lio_init_settle_s',
         default_value='1.0',
-        description='`lio:=small_point_lio` 的初始化落定门：要求"雷达地面高度代理"**连续稳定**'
-                    '这么久（仿真秒，峰峰值 <= 5 mm）才初始化；0 = 关（旧行为）。'
-                    '只在默认档（level_frame:=odom_level + gravity_align_mode 有效值=off）传入。'
-                    '背景：出生下沉期间做的初始化会把 odom 的 z 原点抬高 ~0.13 m（docs §30）')
+        description='[已删除 / 硬报错别名] 初始化**不再等落定**（17e468d 起出生即落定；'
+                    '落定门行为已硬编码为"不等"）。传非默认值 ⇒ t=0 停。见 gravity / 契约 §4.14')
 
     declare_lio_init_map_extrinsic_cmd = DeclareLaunchArgument(
         'lio_init_map_extrinsic',
         default_value='True',
         choices=['True', 'False'],
-        description='初始化地图是否用与逐点更新**同一个**出点公式（`R_IL·p + t_IL`）。'
-                    'True（默认）= 修掉 robot11 上那 4.33 cm 的 z 偏差（t_IL 在 odom 里的 z 分量）；'
-                    'False = 旧行为（只旋 R_IL，§29.2 登记过的既有偏差），A/B 用。'
-                    '只在默认档传入；回滚档/E1 臂不受影响')
+        description='[已删除 / 硬报错别名] 初始化地图**一律**用 R_IL·p + t_IL'
+                    '（与逐点更新同口径；R_IL=I 的快路径与一般式逐位相同）。'
+                    '传非默认值（False）⇒ t=0 停。见 gravity / 契约 §4.14')
 
-    # ★★ 2026-10-21（Part 1）：`odom→odom_level` 静态边的 z 原点来源。
-    #   `urdf`（**默认，确定性**）= t_level = h_imu（URDF 几何）；`measured` = 第一帧点云拟合的地面
-    #   （§29 的临时挡板：odom 的 z 原点被出生下落抬高 ⇒ 用它把地面按回 0，代价是跑间抖动 + h_meas ERROR）。
-    #   落定门修好后 `urdf` 就是对的 ⇒ 默认回到 `urdf`；`measured` 保留为诊断/A-B。
     declare_z_origin_source_cmd = DeclareLaunchArgument(
         'z_origin_source',
         default_value='urdf',
         choices=['urdf', 'measured'],
-        description='`odom_level` 的 z 原点来源（**只影响静态边**，不改估计器）：'
-                    'urdf（默认）= 用 URDF 的 h_imu ⇒ 确定性、可跨跑比较；'
-                    'measured = 用第一帧点云拟合的地面 ⇒ 只在"odom 的 z 原点不可信"时当临时挡板'
-                    '（§29 的用法；代价 = 跑间抖动 + h_meas 必然 ERROR）')
+        description='[已删除 / 硬报错别名] 静态边的 z 原点来源固定 = URDF 的 h_imu'
+                    '（确定性、可跨跑比较）。传非默认值（measured）⇒ t=0 停。'
+                    '见 gravity / 契约 §4.14')
 
     # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
     #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
@@ -3019,10 +3007,23 @@ def generate_launch_description():
     #   各有两个发布者（实测过：契约检查里 publishers=2 ⇒ 本条件的回归判据）。
     #   非 sensor 档（默认 'plugin'、'urdf'、以及所有其它模型）走的就是这一份，参数列表与
     #   2026-10-07 起**逐个文件相同**。
+    # ★★ 2026-10-21（契约 §4.14）：`gravity:=base` 的**第二份互斥 linefit**（同一个节点名/可执行
+    #   文件，只多一个 `gravity_aligned_frame: base_link` 覆盖键）。
+    #   为什么 base 档要它：base 档把"高度语义"放在 base_link —— linefit 的 sensor_height 是
+    #   "雷达在传感器系下离地高度"，只有先把点旋进 base_link（= 重力对齐的车体系）这个数才成立；
+    #   默认档（tf）点云本来水平 ⇒ 保持 `gravity_aligned_frame: ""`（参数表与今天逐字段相同）。
+    _linefit_common_params = [segmentation_params, *traversability_params_list, self_mask_params,
+                              near_ground_params, {'use_sim_time': use_sim_time}]
     bringup_linefit_ground_segmentation_node = _linefit_node(
-        [segmentation_params, *traversability_params_list, self_mask_params,
-         near_ground_params, {'use_sim_time': use_sim_time}],
-        LaunchConfigurationEquals('ground', 'linefit'))
+        list(_linefit_common_params),
+        IfCondition(PythonExpression([
+            "'", LaunchConfiguration('ground'), "' == 'linefit' and '",
+            _Gravity(), "' != 'base'"])))
+    bringup_linefit_ground_segmentation_node_base = _linefit_node(
+        [*_linefit_common_params, {'gravity_aligned_frame': 'base_link'}],
+        IfCondition(PythonExpression([
+            "'", LaunchConfiguration('ground'), "' == 'linefit' and '",
+            _Gravity(), "' == 'base'"])))
 
     # ★ 2026-10-06：ground:=patchwork —— 与上面 linefit 节点**同契约**的替代分割器。
     #   参数文件用惰性 substitution 解析（_PackageShareFile）：这样"没构建过
@@ -3172,13 +3173,14 @@ def generate_launch_description():
         #   给默认路径的节点参数表里多一个键都会让"默认路径逐字节不变"不再可证
         #   （见 tools/scripts/gzsim/launch_increment_diff.py 的 --strip-conditions 口径）。
         #
-        # ★★ 2026-10-21（契约 §4.11）：**三份互斥的 Node**（同一个可执行文件/节点名）：
-        #   ① off + level_frame=odom（回滚档）= 改动前的 off 档，参数表与 2026-10-19 之前逐字节相同；
-        #   ② off + level_frame=odom_level（**默认档**）= 统一输出契约**减去 E1 参数**：
+        # ★★ 2026-10-21（契约 §4.14）：**两份互斥的 Node**（同一个可执行文件/节点名）：
+        #   ① **E1 关档**（gravity:=tf|base|raw）= 统一输出契约**减去 E1 参数**：
         #      publish_tf:=false + odom_convention:=sensor ⇒ `odom→base_link` 归 adapter
-        #      （它的父帧 = odom_level），本节点一个 gravity_align_* 键都不多；
-        #   ③ E1 实验臂（有效值 ∈ urdf|imu|hybrid，**任何** level_frame）= ①+②③ + E1/E1b 参数。
-        #   ⇒ "E1 在默认路径上不存在"是**可证**的：②的参数表里根本没有那 4 个键。
+        #      （父帧 = odom_level（tf）/ odom（base|raw）），本节点一个 gravity_align_* 键都不多；
+        #   ② **E1 档**（gravity:=lio）= ① + E1/E1b 参数（publish_tf/sensor 同左）。
+        #   ⇒ "E1 在 tf/base/raw 上不存在"是**可证**的：①的参数表里根本没有那 3 个键。
+        #   ★ 旧的三份（rollback=off+odom、默认=off+odom_level、E1 臂）已收口：raw/base 不再让
+        #     LIO 自己发 `body` 档 TF（那会乘掉 §4.12 的 extrinsic_R，把 30° 倾角吞掉）。
         GroupAction(
             condition = LaunchConfigurationEquals('lio', 'small_point_lio'),
             actions=[
@@ -3186,35 +3188,21 @@ def generate_launch_description():
             # 用户不必去猜"launch 到底给我读了 mid360_sim.yaml 还是 tuned 版"，日志里直接有。
             LogInfo(msg=['lio:=small_point_lio 使用的参数文件 = ', small_point_lio_params]),
             Node(
-                # ① 回滚档：off + level_frame=odom。
-                # **与 2026-10-19 之前逐字节相同**的参数表（LIO 自己发 odom→base_link）。
-                condition = IfCondition(PythonExpression([
-                    "'", _GravityAlignEffectiveMode(), "' == 'off' and '",
-                    _LevelFrame(), "' == 'odom'"])),
-                package='small_point_lio',
-                executable='small_point_lio_node',
-                name='small_point_lio',
-                output='screen',
-                parameters=[
-                    small_point_lio_params,
-                    # 装配级：use_sim_time（算法参数都在 mid360_sim.yaml 里）
-                    # ★ 2026-10-21（契约 §4.12）：LIO 外参从 URDF 解析（同 fastlio 那条注释）
-                    {'use_sim_time': use_sim_time,
-                     'extrinsic_T': [_MountExtrinsic('xyz')],
-                     'extrinsic_R': [_MountExtrinsic('rot')]}
-                ],
-                # T2：统一里程计话题为 /odom（源话题硬编码为 /Odometry，见 small_point_lio_node.cpp:26）
-                remappings=[('/Odometry', '/odom')],
-            ),
-            Node(
-                # ② **默认档**（§4.11）：off + level_frame=odom_level。E1 不参与，只改**输出**：
+                # ② **E1 关档**（gravity:=tf|base|raw）：off + 任意 level_frame。E1 不参与，只改**输出**：
                 #   publish_tf:=false      ⇒ 本节点不发 odom→base_link（唯一发布者 = adapter）
                 #   odom_convention:=sensor⇒ /Odometry = LIO 原始状态 T_ol（表达在 `odom` = 原始世界）
-                # ⇒ 配合 `odom_level_tf`（静态边）+ `lio_tf_adapter_spl_node`（父帧 = odom_level）
-                #   构成 map→odom→odom_level→base_link。**没有任何 gravity_align_* 键**。
+                #   gravity_align_h        ⇒ **只作诊断**（初始化地面 vs URDF h ⇒ 响亮 WARN）
+                #   init_settle_hold / init_map_extrinsic ⇒ 硬编码（不等落定 + 初始化地图含 t_IL）
+                # ⇒ 配合 `lio_tf_adapter_spl_node`（父帧 = _LevelFrame()：tf ⇒ odom_level，
+                #   base|raw ⇒ odom）+（tf 时）`odom_level_tf` 静态边。
+                #   ★ 为什么 base/raw 也必须走 adapter：§4.12 之后点云在水平的 livox_frame、
+                #   倾角在 extrinsic_R；LIO 自己的 `body` 档 TF 不乘 extrinsic_R ⇒ 它会发布
+                #   一个**水平**的 base_link（= 把 30° 倾角吞掉，raw 就不"raw"了，§25 的
+                #   43.7% 半盲也复现不出来）。adapter 用同一份 URDF 外参合成 ⇒ base_link
+                #   在 odom 里真的斜 30°（raw）或由 odom_level 摆正（tf）。
+                #   **没有任何 gravity_align_* 键**（E1 关）。
                 condition = IfCondition(PythonExpression([
-                    "'", _GravityAlignEffectiveMode(), "' == 'off' and '",
-                    _LevelFrame(), "' == 'odom_level'"])),
+                    "'", _GravityAlignEffectiveMode(), "' == 'off'"])),
                 package='small_point_lio',
                 executable='small_point_lio_node',
                 name='small_point_lio',
@@ -3227,14 +3215,13 @@ def generate_launch_description():
                      # ★ 2026-10-21（契约 §4.12）：外参从 URDF 解析（点云水平、IMU 斜装）
                      'extrinsic_T': [_MountExtrinsic('xyz')],
                      'extrinsic_R': [_MountExtrinsic('rot')],
-                     # ★★ 2026-10-21（Part 1 / z 锚点根因）：**落定门** + 初始化地图口径。
-                     #   为什么在**这一档**：z 锚点的问题只出现在"LIO 自己决定世界原点"这条
-                     #   默认路径上（回滚档与 E1 臂的语义各自冻结，不传这两个键 ⇒ 逐字节不变）。
-                     #   实测因果：出生下沉 1.8 s、初始化在 2.0 s、初始化地图攒了整段下沉的点云
-                     #   ⇒ 状态被拽下 9 cm 量级（docs §30.3 的 trace）。
-                     'init_settle_hold': _LioFloatParam('lio_init_settle_s', 1.0),
-                     'init_map_extrinsic': PythonExpression(
-                         ["'", LaunchConfiguration('lio_init_map_extrinsic'), "' == 'True'"])},
+                     # ★★ 2026-10-21（契约 §4.14）：初始化行为**硬编码**（删除了两个 launch 参数）：
+                     #   · 不等落定（出生即落定；§32.8 证明门本来就不推迟任何一帧）；
+                     #   · 初始化地图一律 `R_IL·p + t_IL`（§30 的根因之一；R_IL=I 时等价于 p+t_IL）；
+                     #   · gravity_align_h 只作诊断（第一帧地面 vs URDF h >3 cm ⇒ 响亮 WARN）。
+                     'init_settle_hold': 0.0,
+                     'init_map_extrinsic': True,
+                     'gravity_align_h': [_GravityAlignH()]},
                 ],
                 remappings=[('/Odometry', '/odom')],
             ),
@@ -3265,9 +3252,12 @@ def generate_launch_description():
                      'gravity_align_rpy': [_GravityAlignRpy()],
                      # ④ E1b：z 原点（契约 v3 §4.3）。`ground` ⇒ odom 的 z=0 = 初始化时刻的地面，
                      #   h 由 _gravity_align_h() 从 URDF 算（不手填）；`sensor` = 旧行为（回退用）。
-                     #   ⚠️ off 档的 Node（上面那个）**没有**这两个键 ⇒ 默认路径的参数表逐字节不变。
-                     'gravity_align_z_origin': LaunchConfiguration('gravity_align_z_origin'),
-                     'gravity_align_h': [_GravityAlignH()]},
+                     #   ★ 2026-10-21（§4.14）：z 原点固定 `ground`（旧参数已删除）。
+                     'gravity_align_z_origin': 'ground',
+                     'gravity_align_h': [_GravityAlignH()],
+                     # 初始化行为同样硬编码（不等落定 + 初始化地图含 t_IL）
+                     'init_settle_hold': 0.0,
+                     'init_map_extrinsic': True},
                 ],
                 remappings=[('/Odometry', '/odom')],
             ),
@@ -3567,10 +3557,12 @@ def generate_launch_description():
                      'odom_frame': _LevelFrame()}]
     )
 
-    # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：`lio:=small_point_lio` **也**起 lio_tf_adapter ——
-    #    但**只在有效值 != off 时**（= 统一输出契约档；默认 `auto` + `lio:=small_point_lio`
-    #    也解析成 hybrid，于是这个槽位默认就对齐）。默认档（有效值 off）保持原样：
-    #    那个槽位的 `odom→base_link` 仍由 LIO 自己发、**不启动**本节点（否则两个发布者）。
+    # ★★ 2026-10-20（契约 v3 §13 / 选项 U）：`lio:=small_point_lio` **也**起 lio_tf_adapter。
+    # ★★ 2026-10-21（契约 §4.14）：**所有 gravity 档都起它** —— SPL 节点统一走
+    #    `publish_tf:=false + odom_convention:=sensor`（只发 T_ol），`odom→base_link` 的唯一
+    #    发布者 = 本 adapter；父帧由 `_LevelFrame()` 给（tf ⇒ odom_level，base|lio|raw ⇒ odom）。
+    #    为什么 raw/base 不能留给 LIO 自己发：§4.12 之后 LIO 的 `body` 档 TF 不含 extrinsic_R，
+    #    会把 30° 安装倾角吞掉（raw 就不是 raw、base 的"斜 odom 里 2D scan 无逐点高度"也不成立）。
     #
     # ==================== 三方 `T_bl` 记账（写死在这里，改之前先读）====================
     # 记法（与 docs/frame_contract_v3.md §2.2 一致）：
@@ -3600,9 +3592,7 @@ def generate_launch_description():
         #      且它的**父帧 = odom_level**（左乘静态边）。
         #   只有回滚档（off + level_frame=odom）不起它：那时 odom→base_link 由 LIO 自己发。
         condition = IfCondition(PythonExpression([
-            "'", LaunchConfiguration('lio'), "' == 'small_point_lio' and ('",
-            _GravityAlignEffectiveMode(), "' != 'off' or '",
-            _LevelFrame(), "' == 'odom_level')"])),
+            "'", LaunchConfiguration('lio'), "' == 'small_point_lio'"])),
         package='lio_tf_adapter',
         executable='lio_tf_adapter_node',
         name='lio_tf_adapter',
@@ -3662,7 +3652,8 @@ def generate_launch_description():
             #   （`init_settle_hold` / `init_map_extrinsic`，见 docs §30）⇒ 静态边可以直接用
             #   URDF 的 h_imu（= 0.216226 m），地面 z 应落在 0 ± 1 cm，**跑间可比较**。
             #   `measured` 保留：第一帧点云拟合地面（§29 的临时挡板；跑间抖 + h_meas 必然 ERROR）。
-            'z_origin_source': LaunchConfiguration('z_origin_source'),
+            # ★ 2026-10-21（§4.14）：z 原点来源固定 = URDF（确定性；旧参数已删除）
+            'z_origin_source': 'urdf',
             'ground_check_delay_s': 0.5,
             'ground_check_timeout_s': 90.0,
             'check_imu': True,
@@ -4060,7 +4051,7 @@ def generate_launch_description():
             'map': empty_map_dir,
             **nav2_params_launch_args,
             'global_obstacle': LaunchConfiguration('global_obstacle'),
-            'local_obstacle': LaunchConfiguration('local_obstacle'),
+            'local_obstacle': _EffectiveLocalObstacle(),
             'nav_rviz': use_nav_rviz}.items()
     )
 
@@ -4087,15 +4078,12 @@ def generate_launch_description():
     ld.add_action(declare_turret_pitch_deg_cmd)
     # ★ 2026-10-08：robot:=robot11 的雷达**安装方式**（倾角记在插件 vs 记在 URDF 关节）
     ld.add_action(declare_robot11_mount_cmd)
-    # ★ 2026-10-21（契约 §4.11）：重力对齐帧的归属（默认 odom_level = 静态边负责）。
-    #   **必须声明在 gravity_align_mode 之前**（后者默认值 auto 的解析要读它）。
+    # ★★ 2026-10-21（契约 §4.14）：重力/水平帧的**唯一用户开关**。必须最先声明（下游派生都读它）。
+    ld.add_action(declare_gravity_cmd)
+    # ---- 以下 6 个 = **硬报错别名**（只为让 --show-args 还能看到"它们被 gravity 取代"）----
     ld.add_action(declare_level_frame_cmd)
-    # ★ 2026-10-20：E1 重力对齐 + 统一输出契约（默认 auto ⇒ 默认档解析成 off，见契约 §4.11；
-    #   回滚档 level_frame:=odom 下仍是 hybrid ⇒ §4.10 逐字节）
     ld.add_action(declare_gravity_align_mode_cmd)
-    # ★ 2026-10-21：E1b 的 z 原点（ground 默认；有效值 off 的档不读这个值 ⇒ 默认路径零改动）
     ld.add_action(declare_gravity_align_z_origin_cmd)
-    # ★ 2026-10-21（Part 1 / z 锚点根因）：SPL 的初始化落定门 + 初始化地图口径 + 静态边的 z 原点来源
     ld.add_action(declare_lio_init_settle_cmd)
     ld.add_action(declare_lio_init_map_extrinsic_cmd)
     ld.add_action(declare_z_origin_source_cmd)
@@ -4139,45 +4127,30 @@ def generate_launch_description():
              _SelfMaskReadout(self_mask_params),
              '  · lio_tf_adapter：lio:=small_point_lio/cartographer/none 时**不启动**该节点',
              '（它由 LIO 自己用 TF 做 odom→base_link 的相似变换）。',
-             '  · gravity_align_mode=', LaunchConfiguration('gravity_align_mode'),
-             '（off = 现状：LIO 自己发 odom→base_link；urdf|imu|hybrid = **统一输出契约**：',
-             'LIO 只发 T_ol、odom→base_link 归 lio_tf_adapter，E1 把 URDF 的安装倾角吸收进 odom。',
-             '对齐后 odom 的残余地面倾角验收线 <0.7°，见 docs/frame_contract_v3_measurements.md）',
+             '  · gravity=', _Gravity(),
+             '（tf = odom 保持原始世界、静态边 odom→odom_level 负责重力对齐；',
+             'base = 高度语义在 base_link、局部障碍层强制逐点；lio = E1 hybrid 把 odom 摆正；',
+             'raw = off 档复现半盲。语义/实测见契约 §4.14 + measurements §33）',
              _MountReadout()]))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
     ld.add_action(declare_LIO_cmd)
-    # ★ 2026-10-20（决策 A / 契约 §4.10）：**auto 的解析收据**，t=0 打一次。
-    #   条件只看**用户写的值是否 auto**（显式 off|urdf|imu|hybrid 不打这一行 ⇒ 显式路径的
-    #   Action 集不变）；位置必须在 declare_LIO_cmd **之后**（要读 lio），且在节点之前（t=0）。
-    #   例：`[gravity_align] gravity_align_mode=auto ⇒ 有效值=off（lio=fastlio；E1 补丁只存在于
-    #   small_point_lio）` / `… ⇒ 有效值=hybrid（lio=small_point_lio）`。
-    ld.add_action(LogInfo(
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('gravity_align_mode'), "' == 'auto'"])),
-        msg=[_GravityAlignResolution()]))
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
     ld.add_action(declare_ground_cmd)
     # ★ 2026-10-09：robot11_mount:=sensor 的组合检查（必须在 ground 声明**之后**，见该函数注释）
     ld.add_action(OpaqueFunction(function=_check_robot11_mount_combination))
-    # ★ 2026-10-20：gravity_align_mode 的组合检查（只在**有效值**!=off 时才执行 ⇒ 默认路径**零动作**；
-    #   2026-10-20：条件改用 _GravityAlignEffectiveMode ⇒ `auto` + 非 SPL 不再误触发；
-    #   位置必须在 declare_LIO_cmd 之后：它要读 lio / robot / robot11_mount，
-    #   而 launch 的 DeclareLaunchArgument 是**按顺序**生效的）。
-    ld.add_action(GroupAction(
-        condition=IfCondition(PythonExpression([
-            "'", _GravityAlignEffectiveMode(), "' != 'off'"])),
-        actions=[OpaqueFunction(function=_check_gravity_align_contract)]))
-    # ★ 2026-10-21（契约 §4.11）：静态边的 t=0 收据（只在默认档打；回滚档 Action 存在但 condition 假
-    #   ⇒ 显式回滚路径的日志/节点集与改动前一致），以及"LIO 当绝对定位"回退档的组合告警。
-    ld.add_action(GroupAction(
-        condition=IfCondition(PythonExpression(["'", _LevelFrame(), "' == 'odom_level'"])),
-        actions=[LogInfo(msg=[_LevelTfReceipt()])]))
-    ld.add_action(OpaqueFunction(function=_check_level_frame_contract))
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
+    # ★★ 2026-10-21（契约 §4.14）：`gravity` 的组合检查 + t=0 收据。
+    #   · 6 个旧参数（硬报错别名）在这里**统一**校验：传非默认值 ⇒ t=0 停，消息指向 gravity；
+    #   · gravity:=lio 只对 lio:=small_point_lio（有效档解析时抛）；
+    #   · gravity:=base 的局部障碍层强制逐点（显式 scan ⇒ 停；默认/混合档 ⇒ 强制 + WARN）；
+    #   · gravity:=tf + localization:='' 的既有告警（§4.11）。
+    #   位置：必须在 declare_LIO_cmd / declare_local_obstacle_cmd / 6 个别名声明**之后**
+    #   （launch 的 DeclareLaunchArgument 按顺序生效），且在所有节点之前（t=0）。
+    ld.add_action(OpaqueFunction(function=_check_gravity_contract))
     # ★ 2026-10-20：局部 2D scan 高度带下界（默认 −0.05；回滚 scan_band_min:=0.0，见 §26）
     ld.add_action(declare_scan_band_min_cmd)
     # ★ 2026-10-21：高度带静默过滤守卫（opt-in；默认 False ⇒ 不起节点，见 §17）
@@ -4210,6 +4183,8 @@ def generate_launch_description():
     # 地面分割槽位：两个节点都进 LaunchDescription，但各自的 condition 保证**只有一个**真的被启动
     #（⇒ /segmentation/obstacle 与 /segmentation/ground 恒定只有一个发布者）。
     ld.add_action(bringup_linefit_ground_segmentation_node)
+    # ★ 2026-10-21（§4.14）：gravity:=base 的 linefit（gravity_aligned_frame=base_link）；与上面互斥
+    ld.add_action(bringup_linefit_ground_segmentation_node_base)
     ld.add_action(bringup_patchwork_ground_segmentation_node)
     ld.add_action(bringup_pointcloud_to_laserscan_node)
     # ★ 2026-10-09：robot11_mount:=sensor 的 p2l（多一份 target_frame 覆盖文件；与上面互斥）
