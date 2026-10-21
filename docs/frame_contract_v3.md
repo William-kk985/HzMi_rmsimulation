@@ -743,6 +743,32 @@ roll/pitch 是 **<0.5°**）。⇒ 全局层的"水平"只能和 `map` 一样好
 rpy = −30°；原始云（`livox_frame`）里地面法向 vs +z ≈ 0°；`odom→base_link`（`gravity_align_mode:=off`）
 仍 ≈ +30°（odom = IMU 原始世界）；nav 局部 in-band 100%（叠加 §4.11 的 `odom_level` 之后）。
 
+### 4.12.4 安装角的单一来源（2026-10-21 收口）：上游 URDF → 生成器 → 生成物 xacro
+
+> 用户决定："那就是我们自己生成的xacro改呗，然后收口"。本节把"倾角到底写在哪"收成**一条链**，
+> 不再有第二份冻结常数。
+
+| 环节 | 位置 | 角色 |
+|---|---|---|
+| 物理事实 | `src/rm_nav_bringup/urdf/upstream/robot11.urdf` 的 `joint name="body_to_livox"` → `<origin rpy>` | **唯一来源**（只读、不参与运行） |
+| 生成 | `tools/scripts/regress/robot11_make_sim_xacro.py`（`--livox-tilt-rpy` 仅 scratch 覆盖） | 读上游 rpy，烘进生成物 |
+| 生成物 | `src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro` 第 12 行的 `<xacro:arg name="livox_tilt_rpy" default="..."/>` | 默认值 = 上游值；插件 `<tilt_rpy>` 与 `imu_joint` 的 rpy/xyz 都由它算 |
+| 运行期 | `bringup_sim.launch.py` 的 `_parsed_livox_mount()`（launch 第 285 行的 `_robot11_tilt_rpy_from_xacro()` 只服务旧表回退） | 展开**这次真的要 spawn 的** xacro → `gravity_align_rpy` / `h` / `extrinsic_R` / adapter / `odom_level` 静态边 |
+
+- **删除了什么**：`bringup_sim.launch.py` 的 `_LIVOX_TILT_RPY_ROLL`，以及 `_robot_xacro_args()`
+  里 `('livox_tilt_rpy', ...)` 那一条。现在 launch **不传**这个 xacro arg（xacro 用自己的默认值）。
+- **默认路径逐字节不变**：生成物 xacro 的 md5 不变（`c5e12d36…` / 56140 B），9 个
+  (robot, mount) 组合的 `robot_description` 输出 md5 不变，`h` 不变（robot11 = 0.25952717）；
+  `--show-args` 421 行逐字相同（105 个参数）。实测表见 measurements §31.2。
+- **覆盖方式（只用于 scratch，别提交到默认路径）**：
+  1. `python3 tools/scripts/regress/robot11_make_sim_xacro.py --livox-tilt-rpy "r p y" --out /tmp/x.xacro`
+     （弧度，与 xacro 同格式；`r p y` = URDF 的 `Rz·Ry·Rx` 约定）；
+  2. 或直接 `xacro ... livox_tilt_rpy:="r p y"`（生成物的 arg 仍可被 xacro 覆盖；launch 不再传）。
+  **不要**再往 launch 里加一个常数/开关：那会让"改上游 URDF"不再自动生效。
+- **验证方式（一次性、可复算）**：改 scratch 上游副本的 `body_to_livox.rpy`（如 30°→20°、
+  roll→pitch）→ 重跑生成器 → `_parsed_livox_mount()` 的 `gravity_rpy_deg`、`h`、`extrinsic_R`、
+  `odom_level_tf` 的静态边全部跟着变；仓库里的上游文件 md5 不变。实测见 measurements §31.3。
+
 ---
 
 ## §5 重定位契约

@@ -143,12 +143,14 @@ _ROBOT_SLOTS = {
                 '雷达在底盘上、斜 30° 下俯、离地 0.2595 m）'),
 }
 
-#: robot:=robot11 的雷达 30° 安装：**冻结为 roll**（2026-10-21 删除 `livox_tilt_axis` 开关）。
-#: 值 = SolidWorks CSV 的 Joint Origin Roll = -0.523598775598293（用户 2026-10-07 按实物确认
-#: "30° 是绕 roll 轴"）；上游 URDF 原文写的 pitch 只是台架对照（几何等价，只差绕 z 一转）⇒ 随
-#: 开关一起删除。⚠️ 这是**传给 xacro 的输入**（`livox_tilt_rpy`），不是运行时真值：安装 rpy
-#: 由 `_parsed_livox_mount()` 从这次真要 spawn 的 URDF 解析；这里冻结的只是生成模型时的取值。
-_LIVOX_TILT_RPY_ROLL = '-0.523598775598293 0 0'
+#: robot:=robot11 的雷达安装倾角 **不再有 launch 常数**（2026-10-21 收口，契约 §4.12）。
+#: 唯一来源 = 上游 URDF 的 `body_to_livox` joint 的 `<origin rpy>` → 生成器
+#: `tools/scripts/regress/robot11_make_sim_xacro.py` 把它烘进生成物
+#: `urdf/sentry_robot_robot11_sim.xacro` 的 `<xacro:arg name="livox_tilt_rpy" default="..."/>`
+#: （以及插件 `<tilt_rpy>` / `imu_joint` 的 rpy/xyz）。本 launch 只从**这次真要 spawn 的
+#: xacro** 里读回它（`_robot11_tilt_rpy_from_xacro()`，只服务旧表回退/交叉校验）；
+#: 运行期真值仍然由 `_parsed_livox_mount()` 展开关节链得到。要换倾角 ⇒ 改上游 URDF + 重跑
+#: 生成器（scratch：`robot11_make_sim_xacro.py --livox-tilt-rpy "r p y"`），**不是**改这里。
 
 #: ★ 2026-10-08：robot:=robot11 的**雷达安装方式**（30° 倾角记在哪个坐标系上）。
 #:   · 'plugin'（**默认 = 2026-10-07 起的行为，逐字节不变**）：`body_to_livox` 关节 rpy = 0
@@ -277,23 +279,61 @@ def _rpy_deg_to_R(rpy_rad):
                  for k in range(3)) for m in range(3)] for i in range(3)]
 
 
-def _lio_adapter_robot11(mount='plugin'):
+_ROBOT11_TILT_CACHE = {}
+
+
+def _robot11_tilt_rpy_from_xacro():
+    """robot11 的安装倾角（弧度字符串）—— 从**生成物** xacro 的 `livox_tilt_rpy` arg 默认值读回。
+
+    这是 2026-10-21 收口后的**唯一** launch 侧来源（契约 §4.12）：倾角从上游 URDF 的
+    `body_to_livox.rpy` 出发，由 `tools/scripts/regress/robot11_make_sim_xacro.py` 烘进
+    `urdf/sentry_robot_robot11_sim.xacro` 的 `<xacro:arg .../>`，本函数只是把那个默认值读回来。
+    **正常路径永远走 `_parsed_livox_mount()`**（展开这次真要 spawn 的 xacro、沿 fixed 关节链
+    合成）；这里只给旧表回退/交叉校验（`_adapter_table()` / `_warn_adapter_drift()`）用，
+    解析失败时表格也得有一个**独立于解析器**的倾角值，否则"回退"就没有意义。
+
+    读不到 ⇒ 硬报错（不猜、不回退到某个字面值）。
+    """
+    if _ROBOT11_TILT_CACHE.get('v') is not None:
+        return _ROBOT11_TILT_CACHE['v']
+    import xml.etree.ElementTree as _et
+    path = os.path.join(get_package_share_directory('rm_nav_bringup'), 'urdf',
+                        _ROBOT_SLOTS['robot11'][0])
+    try:
+        doc = _et.parse(path).getroot()
+    except Exception as e:                                   # noqa: BLE001
+        raise RuntimeError(
+            "[launch] 读不了 robot11 的生成物 %s 里的 `livox_tilt_rpy` arg：%s: %s。"
+            "该文件由 tools/scripts/regress/robot11_make_sim_xacro.py 生成（倾角从上游 URDF 的 "
+            "body_to_livox.rpy 烘进来）⇒ 请重新生成，**不要**在 launch 里手填角度。" % (path, type(e).__name__, e))
+    for el in doc.iter('{http://ros.org/wiki/xacro}arg'):
+        if el.get('name') == 'livox_tilt_rpy':
+            v = (el.get('default') or '').strip()
+            if len(v.split()) == 3:
+                _ROBOT11_TILT_CACHE['v'] = v
+                return v
+            raise RuntimeError(
+                "[launch] %s 的 `livox_tilt_rpy` 默认值不是 3 个数：%r（生成器坏了？）" % (path, v))
+    raise RuntimeError(
+        "[launch] %s 里没有 `livox_tilt_rpy` arg ⇒ 安装倾角没有单一来源（生成器/生成物不一致）"
+        % path)
+
+
+def _lio_adapter_robot11(mount='sensor'):
     """robot:=robot11 的 lio_tf_adapter 补偿量（xyz = base_link 原点在 imu 系下的坐标，rpy = 其姿态）。
 
     纯几何、无魔法：imu_link 的位姿 = body_to_livox(rpy) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
     固定关节 ⇒ **IMU 跟着雷达一起动**，这正是让三份 LIO 配置的 extrinsic_T=[0,0,0.05]
     一个字节都不用改的原因）。T_imu←base_link 就是它的逆。
 
-    ★ 2026-10-08：`mount` 决定 `body_to_livox` 的 rpy 取哪个值（与 xacro 里的同一个规则）：
-      · `plugin`（默认）：rpy = 0 ⇒ 与 Phase 3 的返回值**逐位相同**（旋转为单位阵、xyz = −p_imu）；
-      · `urdf`          ：rpy = 倾角（roll 30°，轴已冻结）⇒ **旋转不再是单位阵**，xyz 也要用 Rᵀ 转一次。
-    两种挂法下 imu 的**离地高度**都还是 0.216226 m（30° 只改朝向、不改高度？—— 不：见 §C 实测，
-    `urdf` 档 imu 随雷达一起斜 ⇒ 离地高度由 R 决定；本函数按几何**算**出来，不写死）。
+    ★ 2026-10-21（契约 §4.12 收口）：倾角**不再从 launch 常数读**，而是从生成物 xacro 的
+    `livox_tilt_rpy` 默认值读（`_robot11_tilt_rpy_from_xacro()`）—— 那个值的源头是上游 URDF。
+    `base_link→livox_frame` 现在 rpy=0、倾角只在 `livox_frame→imu_link`，所以这里**总是**用
+    倾角构旋转（`mount` 参数只为兼容 `_adapter_table()` 的签名；2026-10-21 起只有 `sensor`
+    一个有效值，且它不再改变几何）。
     """
-    import math as _m
-    tilt = [float(v) for v in _LIVOX_TILT_RPY_ROLL.split()]
-    mount = (mount or 'plugin').strip() or 'plugin'
-    rpy = [0.0, 0.0, 0.0] if mount == 'plugin' else tilt
+    tilt = [float(v) for v in _robot11_tilt_rpy_from_xacro().split()]
+    rpy = tilt
     p_livox = (0.000561701465058485, 0.130915824456595, 0.15702816968305)
     R = _rpy_deg_to_R(rpy)                      # R_body←livox
     # imu 原点在 body 系 = p_livox + R·(0,0,−0.05)；姿态 = R
@@ -408,11 +448,11 @@ def _robot_xacro_args(context, xyz, rpy):
         args += [('turret_yaw_deg', LaunchConfiguration('turret_yaw_deg').perform(context), False),
                  ('turret_pitch_deg', LaunchConfiguration('turret_pitch_deg').perform(context), False)]
     elif robot == 'robot11':
-        # ★ 2026-10-21：倾角轴已冻结为 roll（= 2026-10-07 起的默认值），不再有 launch 开关；
-        #   `livox_raise_m` 也不再从 launch 传（xacro 的默认值就是 0 = 与上游几何逐字相同）。
-        # 值里带空格 ⇒ 必须加引号，否则 xacro 会把它当成多个输入文件。
-        args += [('livox_tilt_rpy', _LIVOX_TILT_RPY_ROLL, True),
-                 ('livox_mount', _validate_livox_mount(
+        # ★ 2026-10-21（契约 §4.12 收口）：**不再传 `livox_tilt_rpy`** —— 安装倾角的唯一来源是
+        #   上游 URDF，生成器把它烘进生成物 xacro 的 `<xacro:arg name="livox_tilt_rpy" .../>`
+        #   默认值；这里再传一份就等于第二个所有者（已删除 `_LIVOX_TILT_RPY_ROLL`）。
+        #   `livox_raise_m` 同样不再从 launch 传（xacro 默认 0 = 与上游几何逐字相同）。
+        args += [('livox_mount', _validate_livox_mount(
                      LaunchConfiguration('robot11_mount').perform(context)), False),
                  ('visual_decimated',
                   'true' if (LaunchConfiguration('robot11_visual').perform(context) or '').strip()
@@ -425,6 +465,9 @@ def _render_robot_xacro_command(context, urdf_path, xyz, rpy):
 
     ★ 2026-10-21：robot11 的 `livox_raise_m:=0.0` 已删除（冻结 0），command 字符串因此比 1b5db4b
     少这一个参数；xacro 同默认值 ⇒ **生成的 robot_description 仍逐字节相同**（见 measurements §28）。
+    ★ 2026-10-21（契约 §4.12 收口）：`livox_tilt_rpy:=...` 也已删除（倾角烘在生成物 xacro 的
+    arg 默认值里）⇒ command 再少一个参数；xacro 取默认值 = 同一个字符串 ⇒ 输出仍逐字节相同
+    （见 measurements §31）。
     """
     parts = ['xacro ', urdf_path]
     for name, value, needs_quote in _robot_xacro_args(context, xyz, rpy):
@@ -1294,7 +1337,8 @@ class _LioAdapterRobot11(Substitution):
     做 yaml.safe_load ⇒ 正好还原成 double 数组；见 launch_ros/utilities/evaluate_parameters.py）。
 
     ★ 2026-10-21：数值来自 `_parsed_livox_mount()`（展开这次真 spawn 的 xacro → fixed 关节链），
-    不再来自倾角轴规则表（轴已冻结为 roll）；旧表（`_adapter_table`）只在解析失败时回退 + WARN。
+    不再来自倾斜轴规则表（倾角 = 上游 URDF 烘进生成物 xacro 的值）；旧表（`_adapter_table`）
+    只在解析失败时回退 + WARN。
 
     惰性：只有 `robot:=robot11` 且 LIO 不是 none/cartographer/small_point_lio 时才会被求值。
     """
@@ -2393,12 +2437,13 @@ def generate_launch_description():
                     "范围/数值对照见 docs/robot_models.md",
         choices=['', 'hzmirm', 'robot11'])
 
-    # ★ 2026-10-21：robot:=robot11 的 30° 安装轴**已冻结为 roll**，`livox_tilt_axis` 与
-    #   `livox_raise_m` 两个 launch 参数已删除（详见 docs/frame_contract_v3_measurements.md §28）：
-    #     · 轴：值 = SolidWorks CSV 的 roll 形式 `-0.523598775598293 0 0`（用户按实物确认）；
-    #       pitch 只是台架对照，已在 `_LIVOX_TILT_RPY_ROLL` 的注释里留档，要复现只能改 scratch 生成器。
-    #     · 抬高：冻结 0（上游几何）；xacro 仍保留 `livox_raise_m` arg 且默认 0 ⇒ 生成物逐字节不变。
-    #   ⚠️ 这两个值原来都是"生成模型的输入"，不是运行时真值：安装 rpy/xyz 由 URDF 解析
+    # ★ 2026-10-21：robot:=robot11 的安装倾角与抬高都不再有 launch 开关：
+    #   `livox_tilt_axis` / `livox_raise_m` 已删除（§28），`livox_tilt_rpy` 也不再由本 launch 传
+    #   （§31 收口）：倾角的**唯一来源 = 上游 URDF 的 `body_to_livox.rpy`** → 生成器烘进生成物
+    #   xacro 的 arg 默认值。要换倾角只能改上游 URDF + 重跑生成器；scratch 实验用
+    #   `robot11_make_sim_xacro.py --livox-tilt-rpy "r p y"`（弧度，见契约 §4.12）。
+    #   抬高冻结 0（上游几何）；xacro 仍保留 `livox_raise_m` arg 且默认 0 ⇒ 生成物逐字节不变。
+    #   ⚠️ 这两个值都是"生成模型的输入"，不是运行时真值：安装 rpy/xyz 由 URDF 解析
     #   （`_parsed_livox_mount()`）唯一定义，所以删除开关不会改变默认路径。
 
     # ★ 2026-10-08：robot:=robot11 的**雷达安装方式**开关（opt-in；默认 = 2026-10-07 起的行为）。
@@ -4033,7 +4078,7 @@ def generate_launch_description():
         msg=['[robot] 模型槽位 = robot11（urdf/sentry_robot_robot11_sim.xacro）：用户的哨兵，'
              '真 mesh 视觉 + 真 inertial；雷达在**底盘**上（不在云台）斜 30° 下俯，离地 0.2595 m；'
              '足印内切 0.300 / 外接 0.3565 m；质量 9.5521 kg。',
-             '  · 雷达倾斜轴 = roll（冻结值 = SolidWorks CSV 的字面值；livox_tilt_axis 开关已删除）',
+             '  · 雷达安装倾角 = 上游 URDF 的 body_to_livox.rpy（生成器烘进 xacro；launch 无冻结常数）',
              '  · 视觉 mesh：robot11_visual=', LaunchConfiguration('robot11_visual'),
              '（decimated = **专用视觉 LOD** meshes/decimated/*.stl：整车 2,821,320 → 163,995 面、'
              '141.07 → 8.20 MB，逐 mesh 的包围盒差/表面误差/剪影 IoU 量化在 '

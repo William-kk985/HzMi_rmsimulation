@@ -36,15 +36,16 @@
      `base_link` ⇒ 改名不是我们编的，是回到上游两份材料里与本栈一致的那一份。
      传 `--root-link ''` 可保留 `body`（只用于对照实验）。
   4. 三处参数化（都不改变默认几何）：
-       · `body_to_livox` 的 `rpy` → 由 `livox_mount` 决定（**默认 plugin ⇒ 渲染成 `0 0 0`**）：
-         `plugin` 档 = 帧重力对齐、倾角在插件 `<tilt_rpy>` 里；`urdf` 档 = 关节 rpy 取
-         `$(arg livox_tilt_rpy)`（= 上游/CSV 的 roll 形式，**实物的物理安装姿态，mesh 一起斜**）、
-         插件 `<tilt_rpy>` = 单位阵。见 docs/tilted_lidar_fidelity.md。
-       · `livox_tilt_rpy`（**默认 = 上游/CSV 的 roll 形式**；用户 2026-10-07 已按实物确认
-         "是绕 roll"，`livox_tilt_axis:=pitch` 只作对照开关）—— 它现在只是"倾角是多少"，
-         不再是"倾角记在关节还是插件上"
-       · `body_to_livox` 的 `origin` z → `${0.15702816968305 + livox_raise_m}`（**默认 raise=0**，
-         即与上游逐字相同；B 方案"把雷达抬到顶板上方"用它实测，见 docs/robot_models.md §11）
+       · `body_to_livox` 的 `rpy` → **永远是 `0 0 0`**（2026-10-21 实车约定，契约 §4.12）：
+         `base_link→livox_frame` 只有平移；倾角只存在于 `livox_frame→imu_link` 与插件 `<tilt_rpy>`。
+       · `livox_tilt_rpy`（**默认 = 从上游 URDF 的 `body_to_livox` joint 的 `<origin rpy>` 读出**，
+         见 `--livox-tilt-rpy`）—— 它是"雷达的物理安装倾角"，也是本生成器里**唯一**的倾角来源：
+         `<xacro:arg name="livox_tilt_rpy" default="<上游值>"/>` + 插件 `<tilt_rpy>` +
+         `imu_joint` 的 rpy/xyz 全从这一个值算。上游 URDF 改了（换支架/换轴）⇒ 重跑生成器即可，
+         **launch 不再持有第二份冻结常数**。`--livox-tilt-rpy "r p y"`（弧度）只用于 scratch 实验。
+       · `body_to_livox` 的 `origin` xyz → **逐字照抄上游**（x/y/z 全部），z 再叠加
+         `${livox_raise_m}`（**默认 raise=0** ⇒ 与上游逐字相同；B 方案"把雷达抬到顶板上方"
+         用它实测，见 docs/robot_models.md §11）
 
 然后追加**本栈需要、而上游没有**的东西（全部带 `【我们加的】` 标记）：
   imu_link + imu_joint、MID-360 射线传感器（挂在**上游自己的** livox_frame 上）、
@@ -231,7 +232,7 @@ HEADER = '''<?xml version="1.0"?>
   <!-- 【我们加的】雷达 30° 安装的旋转；默认 = SolidWorks CSV 的 roll 形式
        （用户 2026-10-07 **按实物确认：是绕 roll**；pitch 只作对照开关）。
        pitch 形式 = "0 -0.523598775598293 0"。两者对 360° 雷达几何等价（差一个绕 z 的旋转）。 -->
-  <xacro:arg name="livox_tilt_rpy" default="-0.523598775598293 0 0"/>
+  <xacro:arg name="livox_tilt_rpy" default="{tilt_rpy}"/>
   <!-- 【我们加的｜B 方案，默认 0 = 与上游逐字相同】把雷达（连同 IMU）整体抬高的米数。
        用途：实测"不做碰撞开口、直接把雷达抬到顶板上方"这条仿真适配路（docs/robot_models.md §11）。
        ⚠️ 抬高会改变雷达离地高度 ⇒ linefit 的 sensor_height 必须同步 = 0.2595 + livox_raise_m
@@ -651,6 +652,30 @@ def _sanitize_comments(txt):
     return ''.join(p if p in ('<!--', '-->') else p.replace('--', '\u2014') for p in parts)
 
 
+def _norm_rpy(raw, where):
+    """校验 "r p y"（弧度，3 个数），并返回**逐字保留数值写法**的规范串。
+
+    为什么保留字面 token（不 `%g` 重排）：生成物要与历史版本**逐字节相同** —— 上游
+    `body_to_livox` 的 rpy 是 `-0.523598775598293 0 0`，重排成 `-0.523598775598293 0.0 0.0`
+    会让 `<xacro:arg default>`、`<tilt_rpy>`、`imu_joint` 全变。
+    """
+    toks = (raw or '').strip().split()
+    if len(toks) != 3:
+        raise SystemExit('[xacro] %s 的 rpy 必须是 3 个数（弧度，"r p y"），读到 %r'
+                         % (where, raw))
+    try:
+        vals = [float(v) for v in toks]
+    except ValueError:
+        raise SystemExit('[xacro] %s 的 rpy 里不是合法的浮点数：%r' % (where, raw))
+    if not all(math.isfinite(v) for v in vals):
+        raise SystemExit('[xacro] %s 的 rpy 里有非有限值：%r' % (where, raw))
+    # 与 launch 的 `_assert_radians` 同一条守卫：±π 之外几乎一定是度/弧度混用
+    if any(abs(v) > math.pi + 1e-6 for v in vals):
+        raise SystemExit('[xacro] %s 的 rpy 超出 ±π：%r（URDF rpy 是**弧度**；30° 应写 '
+                         '0.523598775598293）' % (where, raw))
+    return ' '.join(toks)
+
+
 def fmt_origin(el, indent='      '):
     if el is None:
         return ''
@@ -679,6 +704,12 @@ def main():
                          '都发不出来、p2l 也把整条点云丢光。传空串 = 保持上游 body（只用于对照）。')
     ap.add_argument('--livox-raise-m', type=float, default=0.0,
                     help='B 方案：把 body_to_livox 的 origin z 抬高这么多（默认 0 = 上游几何）')
+    ap.add_argument('--livox-tilt-rpy', default=None, metavar='"r p y"',
+                    help='★ 2026-10-21：雷达安装倾角（弧度，三个数，与生成物里 `livox_tilt_rpy` 的格式相同）。'
+                         '**缺省 = 从 --upstream 的 `body_to_livox` joint 的 <origin rpy> 读**（上游 URDF 是'
+                         '唯一真源）；本开关只用于 scratch 实验（例如换轴/换 20°），生成到默认路径前不会用它。'
+                         '值会被写进生成物：`<xacro:arg name="livox_tilt_rpy" default="..."/>`、插件'
+                         ' `<tilt_rpy>`、`imu_joint` 的 rpy 与 xyz（= R(rpy)·(0,0,-0.05)）。')
     ap.add_argument('--inventory',
                     default='src/rm_simulation/robot11_description/inventory/mesh_inventory.json')
     ap.add_argument('--turret-boxes',
@@ -733,11 +764,36 @@ def main():
     up_root = root.find('link').get('name')
     root_name = (a.root_link or up_root)
 
+    # ★ 2026-10-21（契约 §4.12 收口）：**安装倾角的唯一来源 = 上游 URDF 的 body_to_livox.rpy**。
+    #   本生成器把它烘进生成物的 `<xacro:arg name="livox_tilt_rpy" default="..."/>`（以及插件
+    #   `<tilt_rpy>`、`imu_joint` 的 rpy/xyz）。launch 不再持有 `_LIVOX_TILT_RPY_ROLL` 这类第二份
+    #   常数 —— 换支架/换轴只需要改上游 URDF 再重跑本脚本。
+    up_mount = None
+    for _j in root.findall('joint'):
+        if _j.get('name') == 'body_to_livox':
+            up_mount = _j.find('origin')
+            break
+    if up_mount is None or (up_mount.get('rpy') or '').strip() == '':
+        raise SystemExit('[xacro] 上游 URDF %s 里没有 `body_to_livox` joint 的 <origin rpy> ⇒ '
+                         '无法确定雷达安装倾角（拒绝拿一个猜的值生成）' % a.upstream)
+    _tilt_source = 'upstream'
+    _tilt_raw = up_mount.get('rpy')
+    if a.livox_tilt_rpy is not None:
+        _tilt_source = '--livox-tilt-rpy'
+        _tilt_raw = a.livox_tilt_rpy
+    tilt_rpy = _norm_rpy(_tilt_raw, '雷达安装倾角（%s）' % _tilt_source)
+    if a.livox_tilt_rpy is not None:
+        sys.stderr.write('[tilt] ⚠️ 用 --livox-tilt-rpy 覆盖上游值：%s（上游=%s）—— '
+                         '仅用于 scratch 实验；默认生成必须不带本开关\n'
+                         % (tilt_rpy, _norm_rpy(up_mount.get('rpy'), 'upstream')))
+    else:
+        sys.stderr.write('[tilt] 从上游 URDF 读 body_to_livox.rpy = %s（弧度）\n' % tilt_rpy)
+
     def rn(name):
         """把上游根 link 名换成 root_name（其它名字原样）。"""
         return root_name if name == up_root else name
 
-    L = [HEADER.format(sha=sha, raise_m='%g' % a.livox_raise_m)]
+    L = [HEADER.format(sha=sha, raise_m='%g' % a.livox_raise_m, tilt_rpy=tilt_rpy)]
     # ★ Phase 5：`<visual>` 的档位开关（**生成器发这段，不再由人手改生成物**）。
     #   `robot11_visual`=decimated(默认)/full 是主开关；`visual_decimated` 是 Phase 4 引入的
     #   布尔别名（true=decimated / false=full），**非空时它赢** ⇒ 命令行参数优先于默认值。
@@ -966,8 +1022,13 @@ def main():
                      '         （帧与数据自洽：`/livox/lidar/pointcloud` 的地面在**自己的帧**里斜 30°）。\n'
                      '         plugin/urdf 两档的渲染（去注释）逐字节不变。见 docs/tilted_lidar_fidelity.md §J。 -->\n')
             rpy = '${livox_joint_rpy}'
-            xyz_override = '%s %s ${%s + livox_raise_m_p}' % tuple(
-                o.get('xyz', '0 0 0').split()[:2] + ['0.15702816968305'])
+            # ★ 2026-10-21：xyz 的 **x/y/z 全部逐字照抄上游**（此前 z 硬编码同一个值；现在
+            #   上游若改雷达位置也能流进来），z 再叠加 `livox_raise_m`（默认 0 ⇒ 与上游相同）。
+            _xyz_toks = (o.get('xyz', '0 0 0') if o is not None else '0 0 0').split()
+            if len(_xyz_toks) != 3:
+                raise SystemExit('[xacro] 上游 body_to_livox origin xyz 不是 3 个数：%r'
+                                 % (o.get('xyz') if o is not None else None))
+            xyz_override = '%s %s ${%s + livox_raise_m_p}' % tuple(_xyz_toks)
         else:
             L.append('  <!-- 【上游原样】 -->\n')
             rpy = (o.get('rpy', '0 0 0') if o is not None else '0 0 0')

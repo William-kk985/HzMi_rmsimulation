@@ -6466,3 +6466,161 @@ in-band 100%；唯一的系统性变化是**扫描面整体上移 13 cm**（= �
 12. **pointlio 的落盘副作用**：它在子模块里写 `PCD/scans_*.pcd`（未跟踪）；本轮生成的那几个
     已删（`git status` 里只剩它原本就有的 `PCD/` 与 `laserMapping.cpp` 改动，**都不是本轮的**）。
 13. **没有重跑** §10/§13/§25 的完整矩阵，也没有碰地图/PCD/世界资产。
+
+---
+
+## §31 第二十一轮（**本机 date=2026-10-21，18:42–18:54**）：雷达安装角**收口** —— 上游 URDF 是唯一来源，删除 launch 冻结常数
+
+> **本节只新增**（append-only）：§1–§30 一个字都没改。任务（用户批准）："那就是我们自己生成的
+> xacro 改呗，然后收口"。目标 = 让安装倾角只存在于**一条链**：
+> `urdf/upstream/robot11.urdf` 的 `body_to_livox.rpy` → 生成器 → 生成物 xacro → 运行期解析；
+> 删掉 `bringup_sim.launch.py` 里的 `_LIVOX_TILT_RPY_ROLL` 与 `('livox_tilt_rpy', ...)` 映射。
+
+### 31.1 改了什么（file:line）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `tools/scripts/regress/robot11_make_sim_xacro.py` | `HEADER` 第 235 行 | `<xacro:arg name="livox_tilt_rpy" default="{tilt_rpy}"/>`（值由 `main()` 注入） |
+| 同上 | 第 767–790 行（`main()`） | 从上游 `body_to_livox` 的 `<origin rpy>` 读倾角；`--livox-tilt-rpy`（第 707 行）只做 scratch 覆盖；`_norm_rpy()` 校验 ±π 且**逐字保留**数值写法 |
+| 同上 | 第 1027–1031 行 | `body_to_livox` 的 xyz **x/y/z 全部逐字照抄上游**（z 再叠 `livox_raise_m`，默认 0） |
+| `src/rm_nav_bringup/launch/bringup_sim.launch.py` | 第 146–153 行 | **删除** `_LIVOX_TILT_RPY_ROLL`；改成"单一来源"说明 |
+| 同上 | 第 285–321 行 | 新增 `_robot11_tilt_rpy_from_xacro()`：从**生成物** xacro 的 arg 默认值读回倾角（只服务旧表回退/交叉校验） |
+| 同上 | 第 451–455 行 | `_robot_xacro_args()` **删除** `('livox_tilt_rpy', ...)`；robot11 只传 `livox_mount` / `visual_decimated` |
+| 同上 | 第 335 行 | `_lio_adapter_robot11()` 的旧表倾角改从 `_robot11_tilt_rpy_from_xacro()` 读，不再有第二份常数 |
+| `src/rm_simulation/rm_livox_gz_sim/launch/gz_sim.launch.py` | 第 218–232 行 | 单独跑（`robot_description` 为空）时**不再**传 `livox_tilt_rpy:=...` 字面值，只传 `livox_mount`，让生成物的默认值生效（否则这里是第二个所有者） |
+| `src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro` | 第 12 行 | **生成物逐字节未变**（重新生成后 md5 仍是 `c5e12d36be2c6dac2d7968c3cecb930f` / 56140 B）—— 值本来就已经烘在里面，本轮只是把**来源**从硬编码改成上游 URDF |
+
+**生成器自证**（每次写文件前，不通过就不写）：`[weld] 11 link -> 1 刚体 … AABB 逐条相等=True、最低点在轮上=True`、
+`[wheel-mu] μ=0.02 真的进了 SDF：1 link / 113 条 collision … 几何 AABB 逐条相等=True、M=9.5621 kg / Izz=0.12912`。
+默认/20°/pitch 三次生成都通过。
+
+### 31.2 默认路径逐字节证据（主验收）
+
+**(a) 生成物 xacro / 上游 URDF**
+
+| 文件 | 改动前 md5 / 字节 | 改动后 md5 / 字节 | 判 |
+|---|---|---|---|
+| `src/rm_nav_bringup/urdf/upstream/robot11.urdf` | `36761d0c3315441ead01ff9d9d857cba` | 同左（**一个字节没动**；本任务只读） | ✅ |
+| `src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro` | `c5e12d36be2c6dac2d7968c3cecb930f` / 56140 | **同左** | ✅ 重新生成后逐字节相同 |
+
+**(b) `robot_description`（= launch 同一条 xacro command 的 stdout；9 个 (robot, mount) 组合）**
+
+| robot | mount | 改动前 md5 / 字节 | 改动后 md5 / 字节 | `h`（m） | 判 |
+|---|---|---|---|---|---|
+| `''`（默认） | plugin | `bc62af22f7be49395525978b1264750c` / 10353 | 同左 | 0.235000 | ✅ |
+| `''`（默认） | urdf | 同上（mount 不参与默认模型） | 同左 | 0.235000 | ✅ |
+| `''`（默认） | sensor | 同上 | 同左 | 0.235000 | ✅ |
+| `hzmirm` | plugin | `a13e053090bf1344a06d58241bf845f9` / 18630 | 同左 | 0.800000 | ✅ |
+| `hzmirm` | urdf | 同上（mount 不参与 hzmirm） | 同左 | 0.800000 | ✅ |
+| `hzmirm` | sensor | 同上 | 同左 | 0.800000 | ✅ |
+| `robot11` | plugin | `4f19a8b4faa3a7c659850d0064d3c5ca` / 47745 | 同左 | **0.25952717** | ✅ |
+| `robot11` | urdf | 同上（xacro 的 `livox_mount` 自 461eab8 起不再改几何） | 同左 | **0.25952717** | ✅ |
+| `robot11` | sensor | 同上（= launch 当前唯一合法值） | 同左 | **0.25952717** | ✅ |
+
+> 口径：`robot11` 的 `plugin|urdf` 自 2026-10-21 起**不再是 launch 合法值**（`_validate_livox_mount`
+> 硬报错）；为了与 §28 的 9 行表逐行可比，这两行在探针里**绕过 launch 校验、直接按同一 command 格式**
+> 把 `livox_mount:=plugin|urdf` 传给 xacro（该 arg 现在是惰性的）⇒ 输出与 `sensor` 相同。
+> 真 launch 的 `robot11 + sensor` 路径另有活栈复核（§31.4）。
+
+**command 字符串的变化**（robot11，唯一变化 = 少一个参数）：
+
+```text
+- xacro …/sentry_robot_robot11_sim.xacro xyz:="0.12 0.0 0.175" rpy:="0.0  0.0  0.0" livox_tilt_rpy:="-0.523598775598293 0 0" livox_mount:=sensor visual_decimated:=true
++ xacro …/sentry_robot_robot11_sim.xacro xyz:="0.12 0.0 0.175" rpy:="0.0  0.0  0.0"                                  livox_mount:=sensor visual_decimated:=true
+```
+
+**(c) `--show-args`（Humble，私有 HOME / ROS_LOG_DIR）**：改动前/后都是 **421 行、105 个参数**，
+`cmp` **逐字节相同**、exit 0。⇒ 没有删任何 `DeclareLaunchArgument`（本任务只删了一个**传给 xacro 的
+mapping**，不是 launch 参数），所以是"不变"而不是"−1"。
+
+### 31.3 ⭐ 决定性测试：改 scratch 上游的 `body_to_livox.rpy`，全部消费者跟着走
+
+**做法**：把仓库的上游文件**复制**到 `.tmp_mountone/upstream_20deg.urdf` / `upstream_pitch.urdf`
+（只改 `body_to_livox` 的 `<origin rpy>`），用本生成器重新生成 scratch xacro，再用**与 launch 同一套**
+`_parsed_livox_mount()` / `_GravityAlignRpy` / `_GravityAlignH` / `_MountExtrinsic` / `_level_tf_geometry`
+读取；静态边另用**真的 `odom_level_tf.py` 节点**（`ros2 run`，参数 = 下面这些值）发一次 latched TF 取证。
+仓库里的上游文件**一个字节没改**（见 31.2(a) 的 md5）。
+
+| 量 | 默认（roll 30°） | scratch：roll 30°→**20°** | scratch：roll→**pitch** |
+|---|---|---|---|
+| 上游 `body_to_livox.rpy` | `-0.523598775598293 0 0` | `-0.349065850398866 0 0` | `0 -0.523598775598293 0` |
+| 生成物 `<xacro:arg default>` | `-0.523598775598293 0 0` | `-0.349065850398866 0 0` | `0 -0.523598775598293 0` |
+| `body_to_livox`（展开后） | xyz `0.000561701 0.130915824 0.15702817`、**rpy 0** | xyz **逐位相同**、rpy 0 | xyz **逐位相同**、rpy 0 |
+| 插件 `<tilt_rpy>` | `-0.523598775598293 0 0` | `-0.349065850398866 0 0` | `0 -0.523598775598293 0` |
+| `imu_joint` rpy | `-0.523598775598293 0 0` | `-0.349065850398866 0 0` | `0 -0.523598775598293 0` |
+| `imu_joint` xyz（= R(rpy)·(0,0,−0.05)） | `0 -0.025 -0.04330127` | `0 -0.01710101 -0.04698463` | `0.025 0 -0.04330127` |
+| 解析 `gravity_rpy_deg` | `[-30, 0, 0]` | **`[-20, 0, 0]`** | **`[0, -30, 0]`** |
+| `h`（livox 离地） | 0.25952717 | 0.25952717（平移没动） | 0.25952717 |
+| LIO `extrinsic_R`（行主序） | `[1,0,0, 0,0.866025,-0.5, 0,0.5,0.866025]` | **`[1,0,0, 0,0.939693,-0.342020, 0,0.342020,0.939693]`** | **`[0.866025,0,0.5, 0,1,0, -0.5,0,0.866025]`** |
+| LIO `extrinsic_T` | `[0, 0, 0.05]` | `[0, 0, 0.05]`（不变） | `[0, 0, 0.05]`（不变） |
+| adapter `rpy` / `xyz` | `[0.523599,0,0]` / `[-0.000561701,-0.034862345,-0.151448296]` | `[0.349066,0,0]` / `[-0.000561701,-0.069313837,-0.142334061]` | `[0,0.523599,0]` / `[-0.079000533,-0.130915824,-0.085709533]` |
+| `odom_level` 静态边 `T_odom←odom_level` | xyz `[0,0.108112950,-0.187257122]` rpy `[30,0,0]`° | **xyz `[0,0.072693830,-0.199724655]` rpy `[20,0,0]`°** | **xyz `[-0.108112950,0,-0.187257122]` rpy `[0,30,0]`°** |
+| `h_imu = h − (R_mount·t_IL).z` | 0.216225900 | **0.212542539** | 0.216225900 |
+
+**真节点取证**（`ros2 run rm_nav_bringup odom_level_tf.py --ros-args -p gravity_rpy_deg:=… -p sensor_height:=0.25952717
+-p extrinsic_t:="[0,0,0.05]" -p input_world:=tilted -p input_z:=sensor -p output_z:=ground -p z_origin_source:=urdf
+-p check_ground:=false -p check_imu:=false`，私有 `ROS_DOMAIN_ID`/`HOME`，`timeout 12`）：
+
+```text
+默认:   R_mount=[-30,0,0]° ⇒ 发布值 T_odom←odom_level xyz=[0.000000000, 0.108112950, -0.187257122] rpy=[30.000000, -0.000000, 0.000000]°
+20°:    R_mount=[-20,0,0]° ⇒ 发布值 T_odom←odom_level xyz=[0.000000000, 0.072693830, -0.199724655] rpy=[20.000000, -0.000000, 0.000000]°
+pitch:  R_mount=[0,-30,0]° ⇒ 发布值 T_odom←odom_level xyz=[-0.108112950, 0.000000000, -0.187257122] rpy=[0.000000, 30.000000, 0.000000]°
+```
+
+⇒ **上游 rpy 一改，生成物、TF、插件、IMU 位姿、LIO 外参、静态边全跟着变**；仓库的上游/生成物
+没有被 scratch 实验碰过（31.2(a)）。
+
+### 31.4 nav 冒烟（默认 SPL 档：`lio:=small_point_lio` + `level_frame:=odom_level`）
+
+**命令**（一次 bash 调用里起栈 + 采证 + 收尾；与 §28/§30 同口径）：
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  nav_rviz:=False lio_rviz:=False gui:=False \
+  world:=RMUL2026 mode:=nav localization:=gicp lio:=small_point_lio nav:=mppi planner:=smac2d \
+  robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 band_guard:=True
+```
+
+隔离：私有 `HOME=.tmp_mountone/home-single-source/`、`ROS_DOMAIN_ID=129`、
+`GAZEBO_MASTER_URI=http://127.0.0.1:12229`、`gui:=False`、`world:=RMUL2026` **不带前导 `--`**、
+`setsid` + `tools/scripts/lib/scoped_cleanup.sh` + 硬超时（600 s），**无全机 pkill**；
+一次只起一栈，收尾 `leftovers` 空；`free` 可用约 18 GiB。
+
+| 判据 | 实测 | 判 |
+|---|---|---|
+| **局部 in-band** | `band_guard` **12 个样本全 100%**：772/772、782/782、783/783、773/773、765/765、770/770、773/773、778/778、772/772、778/778、780/780、766/766；`below=0 above=0`、`one-sided=no`、`band=[-0.050,2.000]`、`z p50≈0.108` | ✅ |
+| **`h_meas`** | `h_urdf=0.2595 m h_meas=0.2532 m / \|Δ\|=0.0063 m < 0.03 ⇒ INFO`（inliers 2722、tilt 0.10°、resid p50 0.9 mm） | ✅ |
+| **`odom_level→base_link` rpy** | 19 样本中位 **`[0.0116, 0.0449, -0.4133]°`**（roll −0.066…+0.043、pitch −0.021…+0.114、yaw −0.541…−0.294）⇒ 中位三轴均 <0.5°，roll/pitch 最大 <0.12° | ✅ |
+| **静态边 `odom→odom_level`** | 活栈 `odom_level_tf` 发布 xyz `[0.000000000, 0.108112950, -0.187257122]` m、rpy `[30,-0,0]°`；`lio_tf_adapter` 取到 `T_odom_level←odom` xyz `[0,-0,0.216226]` rpy `[-30,0,0]°`（与发布值逐位相同） | ✅ |
+| **LIO 外参** | `ros2 param get /small_point_lio extrinsic_R` = `[1.0, 0.0, 0.0, 0.0, 0.866025404, -0.5, 0.0, 0.5, 0.866025404]`；`extrinsic_T` = `[0,0,0.05]`；`publish_tf=False`、`odom_convention=sensor` | ✅ |
+| **静态边参数** | `/odom_level_tf gravity_rpy_deg=[-30,0,0]`、`sensor_height=0.25952717`、`extrinsic_t=[0,0,0.05]`、`input_world=tilted`、`input_z=sensor`、`output_z=ground`、`z_origin_source=urdf` | ✅ |
+| **几何帧** | `base_link→livox_frame` xyz `[0.000562,0.130916,0.157028]` rpy `[0,0,0]`；`base_link→imu_link` xyz `[0.000562,0.105916,0.113727]` rpy `[-30,0,0]`（= §4.12 约定） | ✅ |
+
+> ⚠️ 默认档（`level_frame=odom_level`）下 `gravity_align_mode` 有效值 = `off`，E1 不进估计器 ⇒
+> 活栈 `/small_point_lio gravity_align_rpy` 是**空数组**（节点默认），重力先验由 `odom_level_tf`
+> 的 `gravity_rpy_deg=[-30,0,0]` 承担。这不是回归；§28 里读到 `[-30,0,0]` 是因为那时默认是 `hybrid`。
+
+### 31.5 诚实清单
+
+1. **nav 只跑了 1 次**（上述 `single-source`），没有 3 跑中位，也没有重跑 §25/§30 的完整矩阵；
+   `odom_level→base_link` 的 yaw 中位 −0.41° 是单跑单窗，不能当长期漂移结论。
+2. **决定性测试不是"整栈跑 20°"**：scratch 20°/pitch 只验证到"生成器 → 生成物 → launch 解析器 /
+   `odom_level_tf` 节点"这一层；**没有**用 20° 的 xacro 起 Gazebo 跑 nav（那需要另一次全栈 + 世界）。
+   静态边是**真的 `odom_level_tf` 节点**发的，但它的输入参数是探针按解析值喂的。
+3. **`robot11 + plugin|urdf` 的 9 行表是"render 口径"**：launch 现在只接受 `sensor`（硬报错），
+   这两行是绕过校验、直接给 xacro 的惰性 arg（见 §31.2(b) 注）。真 launch 只验证了 `sensor`。
+4. **生成物 xacro 文件头的两句历史注释没改**（"默认 = SolidWorks CSV 的 roll 形式" /
+   "plugin 档…"）：改注释会让 xacro 输出（含注释）md5 变化，与"逐字节不变"冲突。**值与来源以
+   `<xacro:arg default>` 为准**（第 12 行）；要清理注释请另开一轮，并接受 `robot_description` md5 变化。
+5. **没有在真机/非 Humble 上验证**；`--show-args` 与未知 launch arg 的行为只覆盖本机 Humble。
+6. **没有重跑** GUI / `robot11_visual:=full` / `hzmirm` / 默认模型的 nav；本任务只动 robot11 的
+   倾角来源，默认模型与 hzmirm 的 9 行 md5 已证明不变。
+7. **`_robot11_tilt_rpy_from_xacro()` 读的是 install share 里的生成物**（本机为 symlink 到 src）：
+   若只改了 src 没 `colcon build`/symlink-install，launch 会读到旧值；这是 install 语义，不是本改。
+8. **nav 的活栈 `robot_description` 没有 dump**：§31.2 的 md5 是"与 launch 同一条 command"的
+   xacro stdout；没有像 §28 那样在跑完后 `ros2 param dump /robot_state_publisher` 再比一次。
+9. **离线工具 `tools/scripts/regress/robot11_self_mask.py` 仍带 30° 字面值**（`TILT_RPY` +
+   `MIN_ELEV_DEG = 30 + 7.22`）：它用几何盲区公式算自击掩膜，**不在运行链上**（不喂
+   `robot_description`/TF/LIO），本轮没改；若以后要在非 30° 安装上跑它，必须先改它的几何假设。
+10. **`gz_sim.launch.py` 的独立路径没有实跑**：只删了它传的字面值（xacro 默认值 = 同一个字符串），
+    没有用 `sim_backend:=gz` + `robot_description` 为空的方式起一次台架验证。

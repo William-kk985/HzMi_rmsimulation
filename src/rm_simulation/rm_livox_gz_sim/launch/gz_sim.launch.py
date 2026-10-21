@@ -216,8 +216,10 @@ def _materialize(context, *args, **kwargs):
     if robot not in ('', 'none'):
         if not robot_desc.strip():
             # 单独跑本 launch（不经 bringup）时自己跑一次 xacro：robot11 只有这一个模型文件，
-            # 参数与 bringup 的 robot11 分支保持一致（livox_mount 决定关节 rpy，
-            # livox_tilt_rpy 是 30° 的字面值）。bringup 会直接传 robot_description，不走这里。
+            # 参数与 bringup 的 robot11 分支保持一致（**只传 livox_mount**）。
+            # ⚠️ 安装倾角**不在这里传**：它是生成物 xacro 的 `livox_tilt_rpy` 默认值，源头 =
+            #   上游 URDF 的 body_to_livox.rpy（契约 §4.12；measurements §31）。这里再写一个字面值
+            #   就是第二个所有者，上游换支架后这条独立路径会偷偷用旧角度。
             import subprocess
             try:
                 urdf_dir = os.path.join(get_package_share_directory('rm_nav_bringup'), 'urdf')
@@ -227,8 +229,7 @@ def _materialize(context, *args, **kwargs):
                     'rm_nav_bringup ⇒ 无法自己跑 xacro。\n'
                     '  单独跑本 launch 时：加 robot:=none（只起台架世界）。')
             xacro_file = os.path.join(urdf_dir, 'sentry_robot_robot11_sim.xacro')
-            cmd = ['xacro', xacro_file, 'livox_mount:=' + mount,
-                   'livox_tilt_rpy:=-0.523598775598293 0 0']
+            cmd = ['xacro', xacro_file, 'livox_mount:=' + mount]
             log('robot_description 为空 ⇒ 自己跑：%s' % ' '.join(cmd))
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
