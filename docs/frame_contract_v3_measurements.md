@@ -6662,7 +6662,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 | `bringup_sim.launch.py --show-args`（HEAD vs 改后，私有 HOME） | **425 行 / 逐字节相同**（`diff` 空） | ✅ 没有新增/改动的 bringup 参数 |
 | `rm_simulation.launch.py --show-args` | 只多 4 行 = **1 个参数** `spawn_z`（`default: ''`） | ✅ |
 | `map_asset_guard.py spawn-table --check` | `✅ 出生点表与 rm_simulation.launch.py 一致（4 个 world）` | ✅ 既有存档的 spawn 比对基准没变 |
-| 活栈 spawn 命令行（`spawn_cmd.txt`，8/8 跑） | `spawn_entity.py -entity robot -topic robot_description -x 4.3 -y 3.35 **-z 0.103499** -Y 0.0 -timeout 60.0` | ✅ |
+| 活栈 spawn 命令行（`spawn_cmd.txt`，7/8 跑；第 8 跑 = 旧 spawn 对照 f0，`-z 0.2`） | `spawn_entity.py -entity robot -topic robot_description -x 4.3 -y 3.35 **-z 0.103499** -Y 0.0 -timeout 60.0` | ✅ |
 
 **`_SpawnZForRobot` 的取值**（in-process 单测，`LaunchContext` 直接 perform）：
 
@@ -6679,7 +6679,7 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 GT = `/odom_ground_truth`（`gazebo_ros_planar_move` 把**模型世界位姿**原样发出来，100 Hz；
 探针 `trace_probe.py` 只订阅）。时间轴 = 首帧原始云的仿真戳（t=0）。
 
-| run | LIO | spawn `-z` | GT z 首帧(t=+0.1 s) | GT max | GT min | GT 稳态 | 原始云 d 首帧 | d 稳态 | **d 落差** | LIO 首个 `/odom` |
+| run | LIO | spawn `-z` | GT z 首帧(t≈+0.1 s) | GT max | GT min | GT 稳态 | 原始云 d 首帧 | d 稳态 | **d 落差** | LIO 首个 `/odom` |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `n1_spl_spawnz` | SPL | 0.103499 | **0.102499** | **0.102499** | **0.102490** | 0.102498 | 0.258868 | 0.259573 | **−0.71 mm** | 2.00 s |
 | `n2_spl_spawnz` | SPL | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258860 | 0.259550 | −0.69 mm | 2.00 s |
@@ -6799,7 +6799,7 @@ nav2 一条 `Message Filter dropping` 都没有）。本轮 3 跑**都没有复�
 | local nearest lethal | 0.7127 / 0.7124 / 0.7133 | **0.7059 / 0.7090 / 0.7064** | 近 4–7 mm（扫描面低 5 mm，见下） |
 | local ahead（2.0×0.6 m） | 22 / 24 / 22 | **22 / 23 / 22** | 同档 ✅ |
 | local inscribed / free | 10159–10510 / 40361–40509 | **10260–10294 / 40263–40398** | 同档（±0.5%）✅ |
-| in-band（`band_guard`，读**生效**带 [−0.05,2.0]） | 100%（766–772 帧） | **100%**（767–783 帧，全 below=0 above=0） | ✅ |
+| in-band（`band_guard`，读**生效**带 [−0.05,2.0]） | 100%（766–772 帧） | **100%**（每样本 766–785 帧，全 below=0 above=0） | ✅ |
 | 扫描面 z（代价图帧） | +0.1077…+0.1081 | **+0.1033 / +0.1024 / +0.1032** | = `base_link` z，比 §30 低 5 mm（§30 那 5 mm 是残余偏置） |
 | global lethal（map 帧，stvl） | 2160 / 2160 / 2160 | **2164 / 2163 / 2164** | +3–4 格（0.15%，位姿差；不是 z 锚点） |
 | global nearest | 0.7354–0.7368 | **0.7336 / 0.7340 / 0.7336** | −2 mm |
