@@ -1110,6 +1110,31 @@ def _mount_source_label(context):
     return 'table-fallback'
 
 
+class _LioFloatParam(Substitution):
+    """把 launch 参数（字符串）转成**浮点**再喂给节点参数（`repr(float(...))`）。
+
+    ⚠️ 为什么不直接 `LaunchConfiguration(...)`：那样传下去的是**字符串**，rcl 按 YAML 解释
+    `-p k:=0` 会得到 **int** ⇒ C++ 侧 `declare_parameter<double>` 拿到 int 覆盖值的类型行为
+    依赖 rclcpp 的强转规则（`0` 与 `0.0` 不是同一件事）。`repr(float('0'))` = `'0.0'` ⇒ 永远是 double。
+    """
+
+    def __init__(self, name, default):
+        super().__init__()
+        self.__name = name
+        self.__default = default
+
+    def perform(self, context):
+        raw = LaunchConfiguration(self.__name).perform(context)
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            raise RuntimeError('[launch] %s:=%r 不是浮点数' % (self.__name, raw))
+        return repr(v)
+
+    def describe(self):
+        return '%s(%s)' % (type(self).__name__, self.__name)
+
+
 class _GravityAlignRpy(Substitution):
     """`gravity_align_rpy` 参数：**YAML 列表字符串**（launch_ros 会 yaml.safe_load 成 double 数组）。
 
@@ -2476,6 +2501,51 @@ def generate_launch_description():
                     'sensor = 旧行为（odom 原点 = 初始化时刻的传感器/IMU 原点，地面不在 z=0；'
                     'hybrid 档会把 nav2 局部代价图打空，仅用于复现 A/B / 回退）')
 
+    # ★★ 2026-10-21（Part 1 / z 锚点的**根因**）：`small_point_lio` 的**初始化落定门**。
+    #   实测（docs §30）：出生时车在**匀速下沉**（`gazebo_ros_planar_move` 每个物理步清 vz ⇒
+    #   5.4 cm/s、9.75 cm 落差 ~1.8 s 沉完），而旧初始化门只看"点云 >= init_map_size 点 +
+    #   200 帧 IMU"（≈2 s）⇒ 初始化地图是**整段下沉过程**的点云（`point_deque` 从不清）且
+    #   **不带状态**入图 ⇒ 地面被抹成 ~9 cm 的带 ⇒ 第一次点更新把状态拽下去 9 cm 量级
+    #   ⇒ `odom` 的 z 原点比 URDF 的 h_imu 高 ~0.13 m（静态边用 URDF 值时地面落在 −0.13 m）。
+    #   修法（两件事，都可**单独回滚**）：
+    #     ① `lio_init_settle_s` = 落定门（>0 才开）：必须**连续**这么久"雷达看到的地面高度不动"
+    #        （峰峰值 <= init_settle_tol=5 mm）才允许初始化；落定前的点云全部丢弃
+    #        ⇒ 初始化地图 = **落定后的一帧**。
+    #        ⚠️ 判据不能用加速度计：`planar_move` 反复重置速度 ⇒ 匀速下沉期间 |a| 仍≈1 g，
+    #        而静止时 |a| 在 7.8–11.8 m/s² 抖（实测）⇒ |a|≈g 既不能证明静止、也不稳。
+    #     ② `lio_init_map_extrinsic` = 初始化地图用与逐点更新**同一个**出点公式（含 `t_IL`）。
+    #   默认 1.0 / True ⇒ **默认档（level_frame:=odom_level + gravity_align_mode=off）修好**；
+    #   回滚档（level_frame:=odom）与 E1 臂的 Node **不传这两个键** ⇒ 逐字节不变。
+    declare_lio_init_settle_cmd = DeclareLaunchArgument(
+        'lio_init_settle_s',
+        default_value='1.0',
+        description='`lio:=small_point_lio` 的初始化落定门：要求"雷达地面高度代理"**连续稳定**'
+                    '这么久（仿真秒，峰峰值 <= 5 mm）才初始化；0 = 关（旧行为）。'
+                    '只在默认档（level_frame:=odom_level + gravity_align_mode 有效值=off）传入。'
+                    '背景：出生下沉期间做的初始化会把 odom 的 z 原点抬高 ~0.13 m（docs §30）')
+
+    declare_lio_init_map_extrinsic_cmd = DeclareLaunchArgument(
+        'lio_init_map_extrinsic',
+        default_value='True',
+        choices=['True', 'False'],
+        description='初始化地图是否用与逐点更新**同一个**出点公式（`R_IL·p + t_IL`）。'
+                    'True（默认）= 修掉 robot11 上那 4.33 cm 的 z 偏差（t_IL 在 odom 里的 z 分量）；'
+                    'False = 旧行为（只旋 R_IL，§29.2 登记过的既有偏差），A/B 用。'
+                    '只在默认档传入；回滚档/E1 臂不受影响')
+
+    # ★★ 2026-10-21（Part 1）：`odom→odom_level` 静态边的 z 原点来源。
+    #   `urdf`（**默认，确定性**）= t_level = h_imu（URDF 几何）；`measured` = 第一帧点云拟合的地面
+    #   （§29 的临时挡板：odom 的 z 原点被出生下落抬高 ⇒ 用它把地面按回 0，代价是跑间抖动 + h_meas ERROR）。
+    #   落定门修好后 `urdf` 就是对的 ⇒ 默认回到 `urdf`；`measured` 保留为诊断/A-B。
+    declare_z_origin_source_cmd = DeclareLaunchArgument(
+        'z_origin_source',
+        default_value='urdf',
+        choices=['urdf', 'measured'],
+        description='`odom_level` 的 z 原点来源（**只影响静态边**，不改估计器）：'
+                    'urdf（默认）= 用 URDF 的 h_imu ⇒ 确定性、可跨跑比较；'
+                    'measured = 用第一帧点云拟合的地面 ⇒ 只在"odom 的 z 原点不可信"时当临时挡板'
+                    '（§29 的用法；代价 = 跑间抖动 + h_meas 必然 ERROR）')
+
     # ★ 2026-10-07 Phase 4：robot:=robot11 的**视觉 mesh 档位**。
     #   为什么需要（用户的 GUI 实测，见 docs/robot_models.md §12）：这台车的视觉是上游原始 STL，
     #   其中 `base_link.STL` 一项就是 **99 MiB / 2,078,226 三角形**（+ 云台 l11 8.8 MB / 17.6 万面）
@@ -3067,7 +3137,15 @@ def generate_launch_description():
                      'odom_convention': 'sensor',
                      # ★ 2026-10-21（契约 §4.12）：外参从 URDF 解析（点云水平、IMU 斜装）
                      'extrinsic_T': [_MountExtrinsic('xyz')],
-                     'extrinsic_R': [_MountExtrinsic('rot')]},
+                     'extrinsic_R': [_MountExtrinsic('rot')],
+                     # ★★ 2026-10-21（Part 1 / z 锚点根因）：**落定门** + 初始化地图口径。
+                     #   为什么在**这一档**：z 锚点的问题只出现在"LIO 自己决定世界原点"这条
+                     #   默认路径上（回滚档与 E1 臂的语义各自冻结，不传这两个键 ⇒ 逐字节不变）。
+                     #   实测因果：出生下沉 1.8 s、初始化在 2.0 s、初始化地图攒了整段下沉的点云
+                     #   ⇒ 状态被拽下 9 cm 量级（docs §30.3 的 trace）。
+                     'init_settle_hold': _LioFloatParam('lio_init_settle_s', 1.0),
+                     'init_map_extrinsic': PythonExpression(
+                         ["'", LaunchConfiguration('lio_init_map_extrinsic'), "' == 'True'"])},
                 ],
                 remappings=[('/Odometry', '/odom')],
             ),
@@ -3489,10 +3567,13 @@ def generate_launch_description():
             # 诊断（只读；`check_*=False` 只关日志，不改发布值）
             'check_ground': True,
             'cloud_topic': '/cloud_registered',
-            # ★ 2026-10-21：z 原点用**实测地面**（第一帧点云；见 odom_level_tf.py 的
-            #   `z_origin_source`）。URDF 的 h 只作对照/回退 —— `odom` 的原点由估计器的
-            #   起始位姿决定，URDF 不可能知道它（实测低 ~0.13 m）。
-            'z_origin_source': 'measured',
+            # ★★ 2026-10-21（Part 1）：z 原点来源 = **`urdf`（默认，确定性）**。
+            #   为什么能回到 urdf：`odom` 的 z 原点原本被"出生下沉期间的初始化"抬高 ~0.13 m
+            #   （根因 = 初始化地图攒了整段下沉的点云 + 少 t_IL），那件事已经在估计器侧修掉
+            #   （`init_settle_hold` / `init_map_extrinsic`，见 docs §30）⇒ 静态边可以直接用
+            #   URDF 的 h_imu（= 0.216226 m），地面 z 应落在 0 ± 1 cm，**跑间可比较**。
+            #   `measured` 保留：第一帧点云拟合地面（§29 的临时挡板；跑间抖 + h_meas 必然 ERROR）。
+            'z_origin_source': LaunchConfiguration('z_origin_source'),
             'ground_check_delay_s': 0.5,
             'ground_check_timeout_s': 90.0,
             'check_imu': True,
@@ -3925,6 +4006,10 @@ def generate_launch_description():
     ld.add_action(declare_gravity_align_mode_cmd)
     # ★ 2026-10-21：E1b 的 z 原点（ground 默认；有效值 off 的档不读这个值 ⇒ 默认路径零改动）
     ld.add_action(declare_gravity_align_z_origin_cmd)
+    # ★ 2026-10-21（Part 1 / z 锚点根因）：SPL 的初始化落定门 + 初始化地图口径 + 静态边的 z 原点来源
+    ld.add_action(declare_lio_init_settle_cmd)
+    ld.add_action(declare_lio_init_map_extrinsic_cmd)
+    ld.add_action(declare_z_origin_source_cmd)
     # ★ Phase 4：robot:=robot11 的视觉 mesh 档位（decimated | full）
     ld.add_action(declare_robot11_visual_cmd)
     # 选了哪个模型，日志里给一句收据（两条互斥；默认那条不改变任何行为）

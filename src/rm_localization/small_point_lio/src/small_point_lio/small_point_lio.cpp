@@ -34,6 +34,11 @@ namespace small_point_lio {
     }
 
     void SmallPointLio::on_point_cloud_callback(const std::vector<common::Point> &pointcloud) {
+        // ★ 2026-10-21（Part 1）：落定门开启时，每帧先更新"地面高度代理"（只读、O(N) 一次分位）。
+        //   门关（init_settle_hold <= 0，**默认**）⇒ 这一行不执行 ⇒ 与改动前逐字节相同。
+        if (parameters.init_settle_hold > 0.0 && !is_init) {
+            update_ground_proxy(pointcloud);
+        }
         preprocess.on_point_cloud_callback(pointcloud);
     }
 
@@ -41,9 +46,125 @@ namespace small_point_lio {
         preprocess.on_imu_callback(imu_msg);
     }
 
+    // ===================== 本仓新增（2026-10-21，Part 1）：落定门的两个函数 =====================
+    // 地面高度代理 = 近场点云 z 的 **10% 分位**（车体/传感器系；只用来判"还动不动"，不用来定基）。
+    //   · 为什么用分位而不是拟合平面：这里每帧都要算（10 Hz），RANSAC 太贵；而"整片点云的下沿"
+    //     在车下沉时**整体**平移 ⇒ 分位数对下沉是**一阶敏感**的，对单点噪声不敏感（10% 分位 = 第
+    //     N/10 个点，不是某个极值点）。
+    //   · 半径窗 [1, 6] m：排除自击近场（<0.24 m）与远处稀疏点；保留地面环形回波。
+    void SmallPointLio::update_ground_proxy(const std::vector<common::Point> &pointcloud) {
+        if (pointcloud.empty()) {
+            return;
+        }
+        std::vector<float> zs;
+        zs.reserve(pointcloud.size());
+        for (const auto &p: pointcloud) {
+            const float r2 = p.position.x() * p.position.x() + p.position.y() * p.position.y();
+            if (r2 < 1.0f || r2 > 36.0f) {
+                continue;
+            }
+            zs.push_back(p.position.z());
+        }
+        if (zs.size() < 100) {
+            return;
+        }
+        const size_t k = zs.size() / 10;
+        std::nth_element(zs.begin(), zs.begin() + static_cast<std::ptrdiff_t>(k), zs.end());
+        const double stamp = pointcloud.back().timestamp;
+        ground_proxy_hist.emplace_back(stamp, static_cast<double>(zs[k]));
+        // 只保留最近 ~5 s（够 `init_settle_hold` 的最大合理取值，也不会无限长）
+        while (!ground_proxy_hist.empty() && stamp - ground_proxy_hist.front().first > 5.0) {
+            ground_proxy_hist.pop_front();
+        }
+    }
+
+    // 返回 true = 可以初始化；false = 还**没落定**（调用方必须丢掉这帧点云，别让它进初始化地图）。
+    bool SmallPointLio::init_settle_gate(double t_now) {
+        if (init_settle_done) {
+            return true;
+        }
+        if (parameters.init_settle_hold <= 0.0) {
+            // 门关（默认）⇒ 立刻放行，且**不做任何清缓冲**（旧行为逐字节不变）
+            init_settle_done = true;
+            return true;
+        }
+        // ⚠️ 首帧 IMU / 点云的戳可能是 **0**（`/clock` 还没到时驱动先发的那一帧，实测）：
+        //   拿它当"出生时刻"会把 elapsed 算成几百秒 ⇒ 立刻撞超时兜底（第一版就这么失败了）。
+        //   ⇒ t<=0 一律不认（既不记 t0、也不判落定），等第一帧**有真戳**的数据。
+        if (!(t_now > 0.0)) {
+            return false;
+        }
+        if (!init_gate_t0_set) {
+            init_gate_t0_set = true;
+            init_gate_t0 = t_now;
+            RCLCPP_INFO(rclcpp::get_logger("small_point_lio"),
+                        "初始化落定门：起点 t=%.6f s（hold=%.2f s，tol=%.4f m，超时兜底 %.1f s）",
+                        t_now, parameters.init_settle_hold, parameters.init_settle_tol,
+                        parameters.init_settle_timeout);
+        }
+        const double elapsed = t_now - init_gate_t0;
+        const double hold = parameters.init_settle_hold;
+        // 静止判据：最近 hold 秒内所有代理值的**峰峰值** <= tol；且窗口本身覆盖 >= 0.8*hold
+        double lo = std::numeric_limits<double>::infinity();
+        double hi = -std::numeric_limits<double>::infinity();
+        double t_oldest = std::numeric_limits<double>::infinity();
+        size_t n = 0;
+        for (const auto &kv: ground_proxy_hist) {
+            if (t_now - kv.first > hold) {
+                continue;
+            }
+            lo = std::min(lo, kv.second);
+            hi = std::max(hi, kv.second);
+            t_oldest = std::min(t_oldest, kv.first);
+            ++n;
+        }
+        const bool enough_frames = (n >= 5);
+        const bool window_full = enough_frames && (t_now - t_oldest) >= 0.8 * hold;
+        const double pp = enough_frames ? (hi - lo) : -1.0;
+        if (window_full && pp <= parameters.init_settle_tol) {
+            init_settle_done = true;
+            init_settle_pp = pp;
+            RCLCPP_INFO(rclcpp::get_logger("small_point_lio"),
+                        "初始化落定门：**已落定**（首帧后 %.2f s；最近 %.2f s 内地面高度代理峰峰值 "
+                        "%.4f m <= tol %.4f m，%zu 帧）⇒ 放行初始化；落定前丢弃的 %zu 帧点云不进初始化地图",
+                        elapsed, hold, pp, parameters.init_settle_tol, n,
+                        init_settle_dropped_frames);
+            return true;
+        }
+        if (parameters.init_settle_timeout > 0.0 && elapsed > parameters.init_settle_timeout) {
+            init_settle_done = true;
+            init_settle_timeout_hit = true;
+            init_settle_pp = pp;
+            RCLCPP_WARN(rclcpp::get_logger("small_point_lio"),
+                        "初始化落定门：**超时 %.1f s 仍未判到静止**（最近窗口峰峰值 %.4f m > tol %.4f m）"
+                        "⇒ 照旧初始化（响亮失败，不静默卡死）；`odom` 的 z 原点可能偏高，"
+                        "静态边请核对 h_meas / 地面 z",
+                        parameters.init_settle_timeout, pp, parameters.init_settle_tol);
+            return true;
+        }
+        // 还没落定 ⇒ 丢掉这帧点云（初始化地图只允许取**落定之后**的帧）
+        if (!preprocess.point_deque.empty() || !preprocess.dense_point_deque.empty()) {
+            ++init_settle_dropped_frames;
+        }
+        preprocess.point_deque.clear();
+        preprocess.dense_point_deque.clear();
+        return false;
+    }
+
     void SmallPointLio::handle_once() {
         // we need to init small point lio
         if (!is_init) {
+            // ★ 2026-10-21（Part 1）：**先过落定门**再谈初始化。
+            const double t_gate = !preprocess.imu_deque.empty()
+                                  ? preprocess.imu_deque.back().timestamp
+                                  : (!preprocess.point_deque.empty()
+                                     ? preprocess.point_deque.back().timestamp : -1.0);
+            if (t_gate < 0.0) {
+                return;
+            }
+            if (!init_settle_gate(t_gate)) {
+                return;
+            }
             if ((!preprocess.point_deque.empty() || !preprocess.imu_deque.empty()) &&
                 preprocess.point_deque.size() >= parameters.init_map_size &&
                 (!parameters.fix_gravity_direction || preprocess.imu_deque.size() >= 200)) {
@@ -324,8 +445,16 @@ namespace small_point_lio {
                 //       · `R_IL != I`（robot11 新约定）⇒ 先旋进 IMU 系再入图。
                 const Eigen::Matrix<state::value_type, 3, 3> R_IL_init =
                         parameters.extrinsic_est_en ? estimator.kf.x.offset_R_L_I : estimator.Lidar_R_wrt_IMU;
+                const Eigen::Matrix<state::value_type, 3, 1> T_IL_init =
+                        parameters.extrinsic_est_en ? estimator.kf.x.offset_T_L_I : estimator.Lidar_T_wrt_IMU;
                 const bool R_IL_is_identity =
                         (R_IL_init - Eigen::Matrix<state::value_type, 3, 3>::Identity()).norm() < static_cast<state::value_type>(1e-12);
+                // ★★ 2026-10-21（Part 1 / z 锚点的**根因之一**）：`init_map_extrinsic=true` 时，初始化地图
+                //   用**与逐点更新完全相同**的公式（`R_IL·p + t_IL`）。旧写法少了 `t_IL` 的平移
+                //   （§29.2 的注释里登记过"只差那 5 cm 平移"），但 robot11 的 `R_IL=Rx(30°)` 把 t_IL=(0,0,0.05)
+                //   变成 odom 系里的 (0, +0.025, **+0.0433**) ⇒ 初始化地图整体低 4.33 cm ⇒ 第一次点更新
+                //   把状态**往下拽 4.3 cm**（实测：只加落定门、不加这个 ⇒ 地面 z 仍差 −0.043 m，见 §30.4 的 A/B）。
+                //   默认 false ⇒ 旧表达式逐字节不变（回滚档/E1 臂/其它模型不受影响）。
                 for (const auto &point: preprocess.point_deque) {
                     if (gravity_aligned) {
                         Eigen::Matrix<state::value_type, 3, 1> point_imu_frame;
@@ -335,6 +464,9 @@ namespace small_point_lio {
                             point_imu_frame = estimator.Lidar_R_wrt_IMU * point.position.cast<state::value_type>() + estimator.Lidar_T_wrt_IMU;
                         }
                         estimator.ivox->add_point((estimator.kf.x.rotation * point_imu_frame + estimator.kf.x.position).cast<float>());
+                    } else if (parameters.init_map_extrinsic) {
+                        // 初始化那一刻状态 = (R=I, position=0) ⇒ 出点公式退化成 `R_IL·p + t_IL`
+                        estimator.ivox->add_point((R_IL_init * point.position.cast<state::value_type>() + T_IL_init).cast<float>());
                     } else if (R_IL_is_identity) {
                         estimator.ivox->add_point(point.position);
                     } else {
@@ -355,6 +487,17 @@ namespace small_point_lio {
                     time_current = std::max(preprocess.point_deque.back().timestamp, preprocess.imu_deque.back().timestamp);
                 }
                 estimator.kf.init_timestamp(time_current);
+                // ★ 2026-10-21（Part 1）：初始化收据（**一行**，把"什么时候初始化、z 原点在哪、
+                //   初始化地图是哪几帧建的"写死；默认档与实验档都会打，属于可观测性，不改行为）。
+                RCLCPP_INFO(rclcpp::get_logger("small_point_lio"),
+                            "初始化（init）：t=%.6f s（首帧后 %.3f s）| 落定门=%s（hold=%.2f s，峰峰值=%.4f m，"
+                            "丢弃 %zu 帧）| 初始化地图 = %zu 点 | z 原点 = **初始化时刻的 IMU 位姿**"
+                            "（`odom` 的 z=0 在这里；地面在哪由静态边 `odom→odom_level` 用 URDF 的 h_imu 给）",
+                            time_current, init_gate_t0_set ? (time_current - init_gate_t0) : -1.0,
+                            parameters.init_settle_hold > 0.0
+                            ? (init_settle_timeout_hit ? "超时兜底" : "on") : "off",
+                            parameters.init_settle_hold, init_settle_pp,
+                            init_settle_dropped_frames, preprocess.point_deque.size());
                 // clear data
                 preprocess.point_deque.clear();
                 preprocess.dense_point_deque.clear();

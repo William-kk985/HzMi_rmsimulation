@@ -257,14 +257,15 @@ class OdomLevelTf(Node):
         self.input_world = str(self.declare_parameter('input_world', 'tilted').value).strip()
         self.input_z = str(self.declare_parameter('input_z', 'sensor').value).strip()
         self.output_z = str(self.declare_parameter('output_z', 'ground').value).strip()
-        # ★ 2026-10-21：z 原点的**来源**。
-        #   `measured`（默认）= 从**第一帧点云**拟合地面，把"地面相对 LIO 世界原点的位置"量出来
-        #       ⇒ odom_level 的 z=0 真的落在地面上。为什么必须能这么选：`odom` 的原点是
-        #       **估计器自己的起始位姿**（`gravity_align_mode:=off` 时它由 LIO 内部决定，
-        #       实测比 URDF 预测低 ~0.13 m —— 出生下落/初始地图窗口的暂态），URDF 不可能知道它。
-        #   `urdf` = 只用 URDF 的 h（确定性优先，但地面会偏 ~0.13 m；A/B/复现用）。
+        # ★ 2026-10-21（Part 1 之后）：z 原点的**来源**。
+        #   `urdf`（**默认，确定性**）= 只用 URDF 的 h（t_level = h_imu）。前提 = `odom` 的
+        #       原点**就是**初始化时刻的 IMU 位姿、且初始化发生在车落定之后 —— 那件事由
+        #       估计器侧的"落定门 + 初始化地图口径"保证（docs §30 的根因与修复）。
+        #   `measured` = 从**第一帧点云**拟合地面（§29 的临时挡板：那时 `odom` 的原点被出生
+        #       下沉抬高 ~0.13 m）。代价 = 静态边的 z 变成一次启动测量（跑间抖）+ `h_meas`
+        #       互检必然 ERROR（它量的就是那个偏移）。保留 = 诊断 / A-B 复现；**默认不再用它**。
         self.z_origin_source = str(
-            self.declare_parameter('z_origin_source', 'measured').value).strip()
+            self.declare_parameter('z_origin_source', 'urdf').value).strip()
         # 诊断（只读；关掉只影响日志）
         self.check_ground = bool(self.declare_parameter('check_ground', True).value)
         self.cloud_topic = str(self.declare_parameter('cloud_topic', '/cloud_registered').value)

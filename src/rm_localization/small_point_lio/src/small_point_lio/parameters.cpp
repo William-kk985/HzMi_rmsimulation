@@ -77,6 +77,13 @@ namespace small_point_lio {
         // 默认 sensor = 原行为（position 保持 0，逐位不变）。
         gravity_align_z_origin = node.declare_parameter<std::string>("gravity_align_z_origin", "sensor");
         gravity_align_h = node.declare_parameter<double>("gravity_align_h", 0.0);
+        // ===== 本仓新增（2026-10-21，Part 1）：初始化"落定门"+ 初始化地图口径 =====
+        // 四个键**都带默认值** ⇒ 现有三份 config 一个字节都不用改；默认 = 旧行为。
+        // 只由 launch 的**默认档** Node（level_frame=odom_level 且 gravity_align_mode=off）传进来。
+        init_settle_hold = node.declare_parameter<double>("init_settle_hold", 0.0);
+        init_settle_tol = node.declare_parameter<double>("init_settle_tol", 0.005);
+        init_settle_timeout = node.declare_parameter<double>("init_settle_timeout", 15.0);
+        init_map_extrinsic = node.declare_parameter<bool>("init_map_extrinsic", false);
         {
             auto rpy_temp = node.declare_parameter<std::vector<double>>("gravity_align_rpy", std::vector<double>{});
             if (rpy_temp.size() == 3) {
