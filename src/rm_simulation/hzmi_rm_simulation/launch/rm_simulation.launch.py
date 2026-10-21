@@ -175,6 +175,42 @@ class _RobotSlotXacro(Substitution):
         return '%s(slots=%s)' % (type(self).__name__, ','.join(sorted(self._SLOTS)))
 
 
+class _SpawnZ(Substitution):
+    """`spawn_entity.py -z` 的取值：`spawn_z` 非空就用它，空 ⇒ 回落到 world 配置的 z。
+
+    ★ 2026-10-21 新增（契约 §4.13.5 / measurements §32）：出生高度**按模型**给。
+    背景：`get_world_config()` 的 `z=0.2` 是"轮半径余量"口径的**名义**出生高度，对
+    robot11（落定 `base_link` = 0.102499）意味着自由落体 **9.75 cm**；LIO 若在落定过程里
+    初始化（pointlio 0.5 s），z 锚点就会低 6–7 cm，SPL 的初始化地图也会吞进下沉点云。
+    修法 = 调用方（`rm_nav_bringup/launch/bringup_sim.launch.py`，它已经有"各模型
+    base_link 离地高度"表）把**落定高度 + 1 mm** 透传进来 ⇒ 车从第一帧起就是静止的。
+
+    ⚠️ 只改真正 spawn 用的 `-z`：`get_world_config()` 里的 `z` **不动**。那张表同时被
+    `rm_nav_bringup/scripts/map_asset_guard.py::WORLD_SPAWN` 镜像、并被存档 sidecar 的
+    `spawn_pose` 比对（`spawn-table --check`）⇒ 改它会让既有 RMUL2026/RMUC2026 存档
+    全部判成 `refused_spawn`。地图原点只取决于 x/y/yaw，z 只是出生高度。
+    """
+
+    def __init__(self, fallback):
+        super().__init__()
+        self.__fallback = str(fallback)
+
+    def perform(self, context):
+        v = (LaunchConfiguration('spawn_z').perform(context) or '').strip()
+        if not v:
+            return self.__fallback
+        try:
+            float(v)
+        except ValueError:
+            raise RuntimeError(
+                "[launch] spawn_z:=%r 不是浮点数（米）。用法：spawn_z:=0.1035 或留空"
+                "（留空 = 用 world 配置的 z = %s，即改造前的行为）" % (v, self.__fallback))
+        return v
+
+    def describe(self):
+        return '%s(fallback=%s)' % (type(self).__name__, self.__fallback)
+
+
 def generate_launch_description():
     # Get the launch directory
     bringup_dir = get_package_share_directory('hzmi_rm_simulation')
@@ -232,6 +268,23 @@ def generate_launch_description():
                     'lio_tf_adapter 杆臂；要完整链路请用 bringup_sim.launch.py robot:=hzmirm。'
                     '详见 docs/robot_models.md',
         choices=['', 'hzmirm', 'robot11']
+    )
+
+    # ★ 2026-10-21：**出生高度**（米）—— opt-in 覆盖 world 配置里的 z。
+    #   为什么要它：`get_world_config()` 的 z=0.2 是"轮半径余量"口径的名义值，对
+    #   robot11（落定 base_link=0.102499）就是 9.75 cm 的自由落体；LIO 在落定过程中初始化
+    #   ⇒ `odom` 的 z 锚点被抬高一截（pointlio 低 6.5 cm、SPL 靠落定门兜住）。
+    #   默认 '' = 逐字节回到改造前（用 world 配置的 z）⇒ 单跑本文件、RMUC/RMUL 2024 都不变。
+    #   调用方 `rm_nav_bringup/launch/bringup_sim.launch.py` 传 `_HZMI_BASE_LINK_HEIGHT_M[robot]+0.001`
+    #   （表 = 各模型 base_link 离地高度，同一份来源也用于 gravity_align 的 h）。
+    declare_spawn_z_cmd = DeclareLaunchArgument(
+        'spawn_z',
+        default_value='',
+        description='spawn_entity.py 的 -z（米）。留空（默认）= 用 world 配置里的 z（= 改造前行为）；'
+                    '非空 = 用这个高度出生。正常链路由 bringup_sim 传"该模型落定时的 base_link 高度'
+                    '+ 1 mm"（robot11 0.103499 / hzmirm 0.001 / 默认模型 0.061）⇒ 车不自由落体，'
+                    'LIO 在静止的车上初始化。⚠️ get_world_config() 的 z 不变（它同时是地图存档'
+                    'spawn_pose 的比对基准，见 map_asset_guard.py）。'
     )
 
     # ★ 2026-10-07：Gazebo GUI / 在线模型库开关（**都是 opt-in，默认 = 改造前行为**）。
@@ -339,7 +392,8 @@ def generate_launch_description():
                         '-topic', 'robot_description',
                         '-x', world_config['x'],
                         '-y', world_config['y'],
-                        '-z', world_config['z'],
+                        # ★ 2026-10-21：出生高度按模型给（`spawn_z` 非空时），空 ⇒ world 配置的 z
+                        '-z', _SpawnZ(world_config['z']),
                         '-Y', world_config['yaw'],
                         # RMUL2026 世界加载较慢，默认超时会导致 spawn 提前放弃（实体其实已生成）
                         '-timeout', '60.0',
@@ -368,6 +422,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_file_cmd)
     ld.add_action(declare_robot_description_cmd)
     ld.add_action(declare_robot_cmd)      # ★ 2026-10-07 模型槽位（默认 '' ⇒ 行为不变）
+    ld.add_action(declare_spawn_z_cmd)    # ★ 2026-10-21 出生高度（默认 '' ⇒ 行为不变）
     ld.add_action(declare_gui_cmd)               # ★ 2026-10-07 gui（默认 True ⇒ 行为不变）
     ld.add_action(declare_gazebo_offline_cmd)    # ★ 2026-10-07 gazebo_offline（默认 False ⇒ 不变）
     # ⚠️ 环境变量必须在 gazebo_client_launch / gzserver 之前生效

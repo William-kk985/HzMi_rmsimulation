@@ -1209,6 +1209,46 @@ class _GravityAlignRpy(Substitution):
 #:    `small_point_lio/src/gravity_align_ground.cpp`）；本 launch 只提供先验，不重复那段逻辑。
 _HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06}
 
+#: 出生高度在"落定高度"之上再加的余量（m）。为什么不是 0：`spawn_entity.py` 把模型按**几何**
+#: 摆到 `base_link_height + margin`，留 1 mm 让接触在第一个物理步里就解出来，而不是一出生就
+#: 穿透地面（穿透会弹一下，等于又制造了一个小下落）。为什么不是 0.2（原值）：见 `_SpawnZForRobot`。
+_HZMI_SPAWN_Z_MARGIN_M = 0.001
+
+#: `floor z == 0` 的标定世界（`docs/worlds.md` §3：底板顶面 z=-1.6413436 m == world z 0）。
+#: 只有这些 world 才把 spawn_z 改成"落定高度"；别处（RMUC/RMUL 2024 等）保持 world 配置的 z。
+#: ⚠️ `get_world_config()` 的 z **不动**：它是 `map_asset_guard.WORLD_SPAWN` 的镜像源，也是既有
+#: 存档 sidecar 的 `spawn_pose.z` 比对基准 ⇒ 改它会让既有 RMUL2026/RMUC2026 存档全部 `refused_spawn`。
+_HZMI_SPAWN_AT_SETTLED_WORLDS = ('RMUC2026', 'RMUL2026')
+
+
+class _SpawnZForRobot(Substitution):
+    """`rm_simulation.launch.py` 的 `spawn_z`：**该模型落定时的 base_link 高度 + 1 mm**。
+
+    ★ 2026-10-21 新增（契约 §4.13.5 / measurements §32）。动机：
+      `rm_simulation.launch.py::get_world_config()` 的 `z=0.2` 对所有模型/所有 world 都是同一个
+      常数，而三个模型的落定高度各不相同（robot11 0.1025 / hzmirm 0.0 / 默认 0.06）⇒ 车一出生
+      就自由落体（robot11 9.75 cm，约 1.8 s），而 LIO 的初始化**不看车停没停**：
+        · `pointlio` 在首帧后 **0.5 s** 就 `Set_init`（车还在下沉）⇒ odom 的 z 锚点低 6.5 cm；
+        · `small_point_lio` 的 200 帧 IMU 门在 2.0 s（车 1.7 s 落定），但它的初始化地图会吞进
+          整段下沉过程的点云 ⇒ 靠 §30 的落定门 + 初始化地图口径才兜住。
+      直接从**出生高度**上消掉这个下落 ⇒ 两个 LIO 都在静止的车上初始化，锚点确定性 = URDF。
+    ⚠️ 未知 robot / 未标定 world ⇒ 返回 ''（= 回落到 world 配置的 z，逐字节回到改造前）。
+    """
+
+    def perform(self, context):
+        world = (LaunchConfiguration('world').perform(context) or '').strip()
+        if world not in _HZMI_SPAWN_AT_SETTLED_WORLDS:
+            return ''
+        robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+        off = _HZMI_BASE_LINK_HEIGHT_M.get(robot)
+        if off is None:
+            return ''
+        return '%.6f' % (off + _HZMI_SPAWN_Z_MARGIN_M)
+
+    def describe(self):
+        return '%s(settled_worlds=%s, margin=%.3f)' % (
+            type(self).__name__, ','.join(_HZMI_SPAWN_AT_SETTLED_WORLDS), _HZMI_SPAWN_Z_MARGIN_M)
+
 
 def _gravity_align_h_table(context):
     """**旧表**推出的 h（解析失败时的回退；数值与 1b5db4b 的 `_gravity_align_h` 逐位相同）。"""
@@ -2900,6 +2940,10 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'world': world,
             'robot_description': robot_description,
+            # ★ 2026-10-21（契约 §4.13.5）：出生高度 = 该模型落定时的 base_link 高度 + 1 mm
+            #   （robot11 0.103499 / hzmirm 0.001 / 默认 0.061；只有 floor z=0 的 RMUC2026/RMUL2026
+            #   才传，别处返回 '' = 用 world 配置的 z，逐字节回到改造前）。动机见 `_SpawnZForRobot`。
+            'spawn_z': _SpawnZForRobot(),
             # ★ 2026-09-24：nav2 不共用组合容器（use_composition=False）。
             #   当时的假设：两张 costmap 同处一个 component_container_mt 会互相拖死（摄入静默冻死）。
             #   ⚠️ **该假设已被后续实测否定**：拆成独立进程后同样复现；真因是 livox 插件的 sensor 回调被
