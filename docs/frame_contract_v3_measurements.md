@@ -6343,6 +6343,22 @@ robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 band_guard:=True
 > 初始化的是 **pointlio**（0.5 s）。本轮只修 SPL（默认档），pointlio 的初始化门在
 > `point_lio/ImuProcess::Set_init` 里、契约 §4.11.6 明确不在范围内 ⇒ 只记录，不修。
 
+**同一个 arm 跑了 3 次**（也是被上面那个探针 bug 逼出来的：第一跑误报、修好后复跑两次）：
+
+| 跑 | 静态边 | 局部 in-band | local lethal / nearest / ahead | `base_link` z | 扫描面 z |
+|---|---|---|---|---|---|
+| `p1_pointlio` | I / (0,0,−0.216226) | 772/772 + 探针 771/771 | **238 / 0.7286 / 21** | **+0.0298** | +0.028 |
+| `p2_pointlio` | 同（逐位） | 780/780 + 探针 771/771 | **0 / — / 0** ← **局部图整张空** | **+0.0362** | +0.033 |
+| `p3_pointlio` | 同（逐位） | 探针 771/771 | **317 / 0.7068 / 34** | **+0.0356** | +0.037 |
+
+⚠️ **`p2` 的局部代价图是空的**（62500 格里 lethal 0 / free 62500），而**同一跑**的 `/scan` 在带
+100%、`band_guard` 也 100%、nav2 **一条** `Message Filter dropping` 都没有 ⇒ 是**静默丢**（与
+§9.7/§15.6 同一类：nav2 的 scan MessageFilter 在 TF 戳边界上丢消息、没有 WARN）。三条
+"Timed out waiting for transform ... base_link_fake → odom_level" 只在启动段出现（所有 arm 都有）。
+⇒ **pointlio 臂的局部数字 1/3 跑不可用**（p1/p3 有效，238–317 格），这是**该 arm 既有的
+时序脆弱性**，与本轮改动无关（这个 arm 里根本没有 SPL 节点，参数表/静态边也没变），但**要修**得
+单独查 `lio_tf_adapter` 在 pointlio 下的 TF 戳延迟（**未做**）。
+
 #### 30.5.3 `mode:=slam_nav`（1 跑，默认 SPL）
 
 命令：`world:=RMUL2026 mode:=slam_nav lio:=small_point_lio nav:=mppi planner:=smac2d
@@ -6443,9 +6459,10 @@ in-band 100%；唯一的系统性变化是**扫描面整体上移 13 cm**（= �
 10. **`n1` 的收尾取证文件丢了**（`band_guard.txt`/`tf.json`/`params.txt`；harness 侧，不是栈侧）：
     它的 `level.json`/`navband.json`/`trace.json` 完好 ⇒ 表里 `n1` 的 in-band 用**探针**的
     772/772、静态边/adapter 用 `n2`/`n3`（同一棵树、md5 相同）。
-11. **`lio:=pointlio` 跑了 2 次**（第一跑 `p1` 的 `level_probe` 因为点云门槛误报"odom_level 不可用"）；
-    两跑的 z 锚点 0.0298 / 0.0362 差 6.4 mm ⇒ 那一臂的 z 读数**只到厘米级**（它自己的初始化
-    在 0.5 s，见 §30.5.2）。
+11. **`lio:=pointlio` 跑了 3 次**（第一跑 `p1` 的 `level_probe` 因为点云门槛误报"odom_level 不可用"）；
+    z 锚点 0.0298 / 0.0362 / 0.0356 ⇒ 跑间 6.4 mm，那一臂的 z 读数**只到厘米级**（它自己的初始化
+    在 0.5 s，见 §30.5.2）；**局部代价图 1/3 跑整张空**（`p2`，静默丢 scan）⇒ 那一臂的
+    lethal/nearest 只有 2 个有效样本（238 / 317）。
 12. **pointlio 的落盘副作用**：它在子模块里写 `PCD/scans_*.pcd`（未跟踪）；本轮生成的那几个
     已删（`git status` 里只剩它原本就有的 `PCD/` 与 `laserMapping.cpp` 改动，**都不是本轮的**）。
 13. **没有重跑** §10/§13/§25 的完整矩阵，也没有碰地图/PCD/世界资产。
