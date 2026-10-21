@@ -6624,3 +6624,267 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
    `robot_description`/TF/LIO），本轮没改；若以后要在非 30° 安装上跑它，必须先改它的几何假设。
 10. **`gz_sim.launch.py` 的独立路径没有实跑**：只删了它传的字面值（xacro 默认值 = 同一个字符串），
     没有用 `sim_backend:=gz` + `robot_description` 为空的方式起一次台架验证。
+
+---
+
+## §32 第二十二轮（**本机 date=2026-10-21，19:09–19:40**）：**出生即落定** —— 按模型给 spawn z，LIO 在静止的车上初始化（SPL 3 跑 + pointlio 3 跑 + fastlio 1+1 A/B）
+
+> **本节只新增**（append-only）：§1–§31 一个字都没改。任务（用户批准）："能不能直接改机器人位置让
+> 他直接在地面上" → 是。根因在 §30 已经量清：`get_world_config()` 的 `z=0.2` 对所有模型/world
+> 共用一个常数 ⇒ robot11 出生自由落体 **9.75 cm**（~1.8 s），而 `pointlio` 0.5 s 就 `Set_init`
+> （z 锚点低 6.5 cm，§30.5.2）、SPL 靠 §30 的落定门 + 初始化地图口径才兜住。本轮把"下落"从**出生
+> 高度**上消掉（§4.13.5），门保留为兜底。
+>
+> 两个提交：**① 代码**（`feat(spawn): …` = 17e468d）、**② 文档**（本节 + 契约 §4.13.5）。
+
+### 32.1 改了什么（file:line，提交 17e468d / 相对 HEAD 36ea60f）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `src/rm_simulation/hzmi_rm_simulation/launch/rm_simulation.launch.py` | **178** | 新增 `_SpawnZ(Substitution)`：`spawn_z` 非空就用它、空 ⇒ 回落到 world 配置的 z；非浮点 ⇒ t=0 硬报错 |
+| 同上 | **280** | 新增 `DeclareLaunchArgument('spawn_z', default_value='')`（**唯一新增的用户可见参数**） |
+| 同上 | **396** | `spawn_entity.py` 的 `-z` 从 `world_config['z']` 改成 `_SpawnZ(world_config['z'])` |
+| 同上 | **425** | `ld.add_action(declare_spawn_z_cmd)` |
+| `src/rm_nav_bringup/launch/bringup_sim.launch.py` | **1215** | `_HZMI_SPAWN_Z_MARGIN_M = 0.001`（1 mm 接触余量） |
+| 同上 | **1221** | `_HZMI_SPAWN_AT_SETTLED_WORLDS = ('RMUC2026', 'RMUL2026')`（floor z=0 的标定世界） |
+| 同上 | **1224** | `_SpawnZForRobot(Substitution)`：`_HZMI_BASE_LINK_HEIGHT_M[robot] + 0.001`；未知 robot/world ⇒ `''` |
+| 同上 | **2946** | `start_rm_simulation` 的 `launch_arguments` 加 `'spawn_z': _SpawnZForRobot()` |
+
+**`get_world_config()` 的 `z` 一个字节没动**（仍是 0.2）。理由（写进代码注释）：它同时是
+`rm_nav_bringup/scripts/map_asset_guard.py::WORLD_SPAWN` 的镜像源、以及既有存档 sidecar
+`spawn_pose.z` 的比对基准 ⇒ 改它会让 `map/RMUL2026_v6.meta.yaml` 这类既有存档全部判成
+`refused_spawn`。地图原点只取决于 x/y/yaw，z 只是出生高度。
+
+### 32.2 默认路径证据（没有新增用户可见参数）
+
+| 检查 | 结果 | 判 |
+|---|---|---|
+| `bringup_sim.launch.py --show-args`（HEAD vs 改后，私有 HOME） | **425 行 / 逐字节相同**（`diff` 空） | ✅ 没有新增/改动的 bringup 参数 |
+| `rm_simulation.launch.py --show-args` | 只多 4 行 = **1 个参数** `spawn_z`（`default: ''`） | ✅ |
+| `map_asset_guard.py spawn-table --check` | `✅ 出生点表与 rm_simulation.launch.py 一致（4 个 world）` | ✅ 既有存档的 spawn 比对基准没变 |
+| 活栈 spawn 命令行（`spawn_cmd.txt`，8/8 跑） | `spawn_entity.py -entity robot -topic robot_description -x 4.3 -y 3.35 **-z 0.103499** -Y 0.0 -timeout 60.0` | ✅ |
+
+**`_SpawnZForRobot` 的取值**（in-process 单测，`LaunchContext` 直接 perform）：
+
+| world \ robot | `robot11` | `hzmirm` | `''`（默认模型） |
+|---|---|---|---|
+| `RMUL2026` / `RMUC2026` | **0.103499** | **0.001000** | **0.061000** |
+| `RMUC` / `RMUL`（2024） | `''`（= world 配置的 0.2） | `''` | `''` |
+
+`_SpawnZ` 的回退/校验：`spawn_z=''` ⇒ 原值（0.2/0.061 都试过）；`'0.103499'` ⇒ 原样；
+`'abc'` ⇒ `RuntimeError("[launch] spawn_z:='abc' 不是浮点数（米）…")`。
+
+### 32.3 出生/落定 trace（GT + 原始云，7 跑同口径）
+
+GT = `/odom_ground_truth`（`gazebo_ros_planar_move` 把**模型世界位姿**原样发出来，100 Hz；
+探针 `trace_probe.py` 只订阅）。时间轴 = 首帧原始云的仿真戳（t=0）。
+
+| run | LIO | spawn `-z` | GT z 首帧(t=+0.1 s) | GT max | GT min | GT 稳态 | 原始云 d 首帧 | d 稳态 | **d 落差** | LIO 首个 `/odom` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `n1_spl_spawnz` | SPL | 0.103499 | **0.102499** | **0.102499** | **0.102490** | 0.102498 | 0.258868 | 0.259573 | **−0.71 mm** | 2.00 s |
+| `n2_spl_spawnz` | SPL | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258860 | 0.259550 | −0.69 mm | 2.00 s |
+| `n3_spl_spawnz` | SPL | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258857 | 0.259545 | −0.69 mm | 2.00 s |
+| `p1_pointlio_spawnz` | pointlio | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258859 | 0.259552 | −0.69 mm | **0.50 s** |
+| `p2_pointlio_spawnz` | pointlio | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258871 | 0.259552 | −0.68 mm | 0.50 s |
+| `p3_pointlio_spawnz` | pointlio | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258871 | 0.259523 | −0.65 mm | 0.50 s |
+| `f1_fastlio_spawnz` | fastlio | 0.103499 | 0.102499 | 0.102499 | 0.102490 | 0.102498 | 0.258870 | 0.259544 | −0.67 mm | **0.30 s** |
+| `f0_fastlio_oldspawn`（**对照：旧 spawn**） | fastlio | **0.200000** | **0.194708** | 0.194708 | 0.102489 | 0.102499 | 0.351498 | 0.259530 | **−91.97 mm** | 0.30 s |
+
+**读法（三条独立证据一致）**
+
+1. **drop = 1.000 mm 名义**：`spawn -z − GT = 0.103499 − 0.102499 = 1.000 mm`——正好是那 1 mm
+   余量；GT 的**第一帧**（首帧云后 0.1 s）已经在 0.102499，之后整跑 max−min = **9 µm**。
+   ⇒ **落定时间 ≈ 0**（在 GT 开始发布之前就落完了）。对照 f0：GT 从 0.194708 掉到 0.102489
+   = **92.2 mm**（≈ 0.2 − 0.1025 − 首帧已掉 5 mm）。
+2. **原始云的地面垂距 d**（物理量，与 LIO 无关，§30 同一口径）：新 spawn 的 7 跑都是
+   首帧 **比稳态低 0.65–0.71 mm**（接触解算的瞬时过冲，随后弹回），**不是**从高处落下；
+   f0 是首帧 0.351498 → 稳态 0.259530（**91.97 mm**）。
+3. **GT xy/yaw 与旧 spawn 逐位一致**（物理落定到同一个姿态）：`gz model -m robot -p` 在收尾
+   采样 = `4.30716 3.34599 0.102498 0.000296 5e-06 -0.015567`（n1–n3 逐位相同）、
+   pointlio `4.30687 3.34615 0.1024xx`、fastlio `4.30681 3.34617`；f0（旧 spawn）也是
+   `4.30618 3.34619 0.102498` ⇒ 换 spawn 高度**没有**改变落定姿态（差异 ≤1 mm），只是**跳过**
+   了下落过程。⚠️ 落定后的 xy/yaw 相对名义 spawn 偏了 (7 mm, −4 mm, −0.89°)——这是接触收敛
+   的既有行为（f0 同值），与本轮改动无关。
+
+**SPL 落定门收据**（3 跑逐字）：
+
+```text
+初始化落定门：**已落定**（首帧后 0.84–0.89 s；最近 1.00 s 内地面高度代理峰峰值 0.0000 m <= tol 0.0050 m，8 帧）
+           ⇒ 放行初始化；落定前丢弃的 9 帧点云不进初始化地图
+初始化（init）：t=…（首帧后 1.990–1.992 s）| 落定门=on（hold=1.00 s，峰峰值=0.0000 m，丢弃 9 帧）
+           | 初始化地图 = 90212 / 90209 / 90212 点 | z 原点 = **初始化时刻的 IMU 位姿**
+```
+
+⇒ **门在 0.84–0.89 s 就放行，而 SPL 的 200 帧 IMU 初始化门在 2.0 s ⇒ 门不推迟任何一帧**
+（3 跑 init 都是 1.990–1.992 s，与 §30 的 2.0 s 相同）。代价：初始化地图从 §30 的 **1 帧**
+（8120 点，因为那时门 2.6 s 才放行、正好等于 init 时刻）变成 **~11 帧**（90209–90212 点，
+0.89→2.0 s）——**全部是落定后的静止帧**，不再含下沉段（I15′）。
+
+### 32.4 z 锚点：SPL 3 跑 + pointlio 3 跑
+
+**SPL（`lio:=small_point_lio`，默认档；`level_probe.py`，settle 20 / window 20）**
+
+| run | `floor_z`（`odom_level`） | `base_link` z | `h_meas`（`gravity_align_h_check`） | Δ vs `h_urdf`=0.259527 | tilt | `odom_level→base_link` rpy（中位） | 静态边 `odom→odom_level` | `z_origin_source` |
+|---|---|---|---|---|---|---|---|---|
+| `n1_spl_spawnz` | **+0.0023** | **+0.1032** | **0.2596** | **0.1 mm（INFO）** | 0.204° | `[0.184, 0.153, −0.301]°` | `xyz=[0,0,0.216226] rpy=[−30,0,0]°` | `urdf` |
+| `n2_spl_spawnz` | **+0.0021** | **+0.1020** | **0.2600** | **0.5 mm（INFO）** | 0.224° | `[0.215, 0.105, −0.389]°` | 逐位相同 | `urdf` |
+| `n3_spl_spawnz` | **+0.0007** | **+0.1031** | **0.2587** | **0.8 mm（INFO）** | 0.268° | `[0.167, 0.181, −0.308]°` | 逐位相同 | `urdf` |
+| **3 跑 spread** | **1.6 mm** | **1.2 mm** | **1.3 mm** | — | — | roll/pitch ≤ **0.21°**（<0.5°） | **0** | — |
+
+* 判据（契约 I10′/I10″）：`floor_z ∈ 0 ± 0.01` ✅、`base_link z = +0.1025 ± 0.01` ✅
+  （+0.7/−0.5/+0.6 mm）、`h_meas` **INFO** ✅（Δ ≤0.8 mm；§30 是 4.4–5.9 mm INFO）、
+  3 跑 spread < 1 cm ✅（1.2–1.6 mm）。
+* 与 §30 修后对比：`floor_z` 0.0053/0.0058/0.0056 → **0.0023/0.0021/0.0007**；`base_link z`
+  0.1081/0.1080/0.1077（+5.5 mm 系统偏置）→ **0.1032/0.1020/0.1031（≤0.7 mm）**；
+  `h_meas` 0.2536–0.2551 → **0.2587–0.2600**。⇒ 出生下落就是 §30 那条 "+5.5 mm 残余"的
+  主要来源，去掉下落之后它基本归零。
+
+**pointlio（`lio:=pointlio`；`input_world=level`，静态边 = I/(0,0,0.216226)）**
+
+⚠️ pointlio 的 `/cloud_registered` 只有 **139–147 点/帧**（§30.5.2 同款）⇒ `level_probe` 的
+≥500 点平面拟合与 `odom_level_tf` 的 `gravity_align_h_check` **都拿不到 h_meas**。地面 z 用
+**换算值**：`floor_z = base_link z(TF) − GT z`（GT = 0.102499 = 物理 base_link 高；原始云 d
+的稳态值 0.25952–0.25955 与 h_urdf 0.259527 差 ≤0.03 mm，证明车确实停在几何落定高度）。
+
+| run | `base_link` z（TF 中位） | **换算 `floor_z`** | rpy（`odom_level→base_link`） | 静态边 | `z_origin_source` | 局部 lethal / nearest / ahead |
+|---|---|---|---|---|---|---|
+| `p1_pointlio_spawnz` | **+0.0961** | **−6.4 mm** | `[−0.013, +0.096, −0.301]°` | `xyz=[0,0,0.216226] rpy=[0,0,0]°` | `urdf` | 227 / 0.7035 / 18 |
+| `p2_pointlio_spawnz` | **+0.0964** | **−6.1 mm** | `[−0.019, −0.063, −0.309]°` | 逐位相同 | `urdf` | 332 / 0.7091 / 20 |
+| `p3_pointlio_spawnz` | **+0.0974** | **−5.1 mm** | `[+0.004, +0.019, −0.270]°` | 逐位相同 | `urdf` | 213 / 0.7051 / 18 |
+| **3 跑 spread** | **1.3 mm** | **1.3 mm** | roll/pitch ≤ **0.10°** | 0 | — | — |
+
+* **§30 的 6.5 cm 偏差消失**：§30.5.2 的 `base_link z = +0.0298/+0.0362/+0.0356`（换算地面
+  −7.3/−6.6/−6.7 cm）→ 本轮 **+0.0961/+0.0964/+0.0974（地面 −6.4/−6.1/−5.1 mm）**，
+  全部落在判据 `0 ± 1 cm` 内 ✅。跑间 spread 1.3 mm（§30 是 6.4 mm）。
+* 系统性差：pointlio 比 URDF 值**低 5–6 mm**（SPL 是 ±0.7 mm）——它自己的 `Set_init` 之后
+  state z 稳定在 −3.8/−9.6/−6.1 mm（trace），这一段属于它自己的估计器，不是静态边。
+* ⚠️ `odom_level_tf` 在这 3 跑都打了一条 **WARN**：`gravity_align_h_check: 91 s 内没拿到
+  /cloud_registered 的可用点云 ⇒ 跳过互检；静态边改用 URDF 值发布`（loud，不静默）。
+  对 `z_origin_source=urdf` 而言这正是要的行为（定基永远用 URDF）。
+
+### 32.5 pointlio 的 **1/3 静默空局部图**：本轮 0/3，未复现；TF 时序脆弱性有量化
+
+§30.5.2 的 `p2_pointlio` 整张局部图空（lethal 0 / free 62500，`/scan` 与 `band_guard` 都 100%、
+nav2 一条 `Message Filter dropping` 都没有）。本轮 3 跑**都没有复现**：
+
+| run | local lethal | inscribed | free | n_cells | 局部图判 |
+|---|---|---|---|---|---|
+| `p1_pointlio_spawnz` | **227** | 8940 | 43231 | 62500 | 非空 ✅ |
+| `p2_pointlio_spawnz` | **332** | 9680 | 40654 | 62500 | 非空 ✅ |
+| `p3_pointlio_spawnz` | **213** | 8920 | 43283 | 62500 | 非空 ✅ |
+
+**TF 时序取证**（新探针 `.tmp_spawnz/tf_lag_probe.py`，只订阅 `/tf` + `/scan`；p1–p3 都开了）：
+
+| run | adapter TF 帧数 | `/scan` 帧数 | 到达时 TF **已覆盖**扫描戳 | 需要 ≤1.5 s 追帧 | 窗口内没追上 | `scan 戳 − 最新 TF 戳` |
+|---|---|---|---|---|---|---|
+| `p1` | 154 | 160 | **51** | 108 | 1 | p50 **0.0 s**、max **0.1 s** |
+| `p2` | 162 | 168 | **57** | 109 | 2 | p50 0.0 s、max 0.1 s |
+| `p3` | 163 | 169 | **59** | 108 | 2 | p50 0.0 s、max 0.1 s |
+
+⇒ adapter 的 TF 与 `/scan` 同频（~10 Hz 仿真），但**只有约 1/3 的扫描在到达时 TF 已覆盖它的
+戳**；其余 2/3 要靠 nav2 MessageFilter 的队列等 **≤0.1 s**（在 1 s 容忍内，所以通常不丢）。
+"没追上"的 1–2 帧都在**探针窗口末尾**（后面的 TF 还没到），不是真丢。
+`tf_timing.txt` 里 3 条 `Timed out waiting for transform … base_link_fake → map` 全在启动段
+（`map→odom` 还没发），与本轮无关；**没有** `Message Filter dropping` / `extrapolation`。
+
+**结论**：① 本轮 3/3 正常，§30 的 1/3 静默空**没有复现**（它本来就与出生下落无关——那个 arm
+里没有 SPL 节点）；② 但"TF 只覆盖 1/3 扫描、其余要追 0.1 s"的时序脆弱性**仍在**，
+按任务要求**只诊断、不修**。要修得单独查 `lio_tf_adapter` 的发布时机（是否等点云处理完才发）。
+
+### 32.6 nav 回归：SPL 3 跑 vs §30 修后（同机同时段）
+
+| 指标 | §30 修后（n1–n3，出生仍下落） | **本轮（n1–n3，出生即落定）** | 判读 |
+|---|---|---|---|
+| local lethal（中位） | 275 / 249 / 255 | **250 / 250 / 247** | 低 0–2%，仍在 §25/§26 的 250–330 档 ✅ |
+| local nearest lethal | 0.7127 / 0.7124 / 0.7133 | **0.7059 / 0.7090 / 0.7064** | 近 4–7 mm（扫描面低 5 mm，见下） |
+| local ahead（2.0×0.6 m） | 22 / 24 / 22 | **22 / 23 / 22** | 同档 ✅ |
+| local inscribed / free | 10159–10510 / 40361–40509 | **10260–10294 / 40263–40398** | 同档（±0.5%）✅ |
+| in-band（`band_guard`，读**生效**带 [−0.05,2.0]） | 100%（766–772 帧） | **100%**（767–783 帧，全 below=0 above=0） | ✅ |
+| 扫描面 z（代价图帧） | +0.1077…+0.1081 | **+0.1033 / +0.1024 / +0.1032** | = `base_link` z，比 §30 低 5 mm（§30 那 5 mm 是残余偏置） |
+| global lethal（map 帧，stvl） | 2160 / 2160 / 2160 | **2164 / 2163 / 2164** | +3–4 格（0.15%，位姿差；不是 z 锚点） |
+| global nearest | 0.7354–0.7368 | **0.7336 / 0.7340 / 0.7336** | −2 mm |
+| `h_meas` | 0.2536–0.2551 INFO | **0.2587–0.2600 INFO** | **变好**（Δ 4–6 mm → 0.1–0.8 mm）✅ |
+
+⇒ **没有功能退化**：三个"非空/最近/前方"判据同档、in-band 100%、全局图逐格同档。唯一的系统性
+变化是扫描面从 +0.108 下移到 +0.103（= 修掉 §30 那 5.5 mm 残差）；local nearest 因此近了
+4–7 mm——仍在任务给的 "~0.71" 口径内。
+
+### 32.7 fastlio 回归（1+1 A/B：旧 spawn vs 新 spawn）
+
+fastlio **没有** z 锚点逻辑（`input_world=tilted`，静态边照旧），但出生高度会影响它的初始状态。
+
+| 量 | `f0_fastlio_oldspawn`（`-z 0.2`） | `f1_fastlio_spawnz`（`-z 0.103499`） |
+|---|---|---|
+| GT z 首帧 / 稳态 | **0.194708** / 0.102499 | **0.102499** / 0.102498 |
+| 原始云 d 落定落差 | **91.97 mm** | **0.67 mm** |
+| LIO 首个 `/odom` | 0.30 s | 0.30 s |
+| state z（稳定） | −0.0761 | −0.0593 |
+| `base_link z`（`odom_level`） | 0.0599 | **0.0409** |
+| 扫描面 z | 0.0541 | 0.0517 |
+| `odom_level→base_link` rpy | `[0.60, 0.77, −0.72]°` | `[1.86, −1.63, −0.15]°` |
+| **in-band（生效带 [−0.05,2.0]）** | **100%（780/780；1 个样本 770/771=99.9%）** | **100%（772/772…）** |
+| in-band（`nav_band_probe` 自己的 [0,2] 带） | 752/771（below=20） | 706/773（below=65）← **口径不是生效带，别用** |
+| local lethal / nearest / ahead | 328.5 / 0.7011 / 24 | 404 / 0.7089 / 35 |
+| global lethal / nearest | 2141 / 0.7457 | 1970 / 0.7696 |
+| `gravity_align_h_check`（h_meas） | 不可用（`/cloud_registered` ~145 点/帧 < 门槛） | 不可用（同） |
+
+**判读（诚实）**：① 出生下落被消掉（GT/原始云两条证据）；② 但 fastlio 自己的 z 锚点**不在契约
+范围**（没有 E1、没有 z 原点逻辑，静态边用 `tilted` 输入）——它落定后的 state z 从 −0.076 抬到
+−0.059，`base_link z` 反而低 1.9 cm、local lethal 328.5→404；**1+1 跑分不出**是 spawn 改动还是
+fastlio 自己的姿态漂移（两跑的 rpy 0.6°/0.8° vs 1.9°/−1.6° 差得多，而它本来就没有重力对齐）。
+③ 生效带的 in-band 两跑都是 100%——探针的 65/20 个 "below" 是它自己的 [0,2] 带造成的假象
+（见 §32.9#9）。⇒ 结论：fastlio 臂**仍可用**，但它的姿态/局部数字不是本轮的验收面；要判断
+spawn 对它有没有副作用需要 3+3 跑（未做）。
+
+### 32.8 落定门为什么保留 1.0 s（不改成 0）
+
+| 选项 | 实测 | 判 |
+|---|---|---|
+| `lio_init_settle_s=1.0`（默认，**保留**） | 门在首帧后 **0.84–0.89 s** 放行（峰峰值 0.0000 m）；SPL init 仍在 **1.990–1.992 s**（200 帧 IMU 门）⇒ **不推迟任何一帧** | ✅ 保留 |
+| `=0`（关） | 本轮场景下 init 时刻不变（2.0 s 由 IMU 门决定），但失去"出生高度不对/地面不平/车被抬起"时的兜底（15 s 超时 + 响亮 WARN） | ✗ 不采纳 |
+
+⇒ 门从"修 z 锚点的主力"降为**兜底**（契约 §4.13.5）。它的存在**不延迟**正常跑：放行时刻
+（0.89 s）早于 IMU 初始化门（2.0 s）；这一点 3 跑 SPL 的 init 时刻（1.990/1.991/1.992 s）与
+§30（2.0 s）逐位一致。
+
+### 32.9 诚实清单
+
+1. **只在 `robot:=robot11` + `world:=RMUL2026` + `mode:=nav` 上跑了全栈**（SPL 3 / pointlio 3 /
+   fastlio 1+1）。`hzmirm`（0.001）与默认模型（0.061）的 spawn_z 只有 **in-process 单测**，
+   没有起 Gazebo；`world:=RMUC2026` 的 spawn_z 走同一段代码（0.103499），本轮**没实跑**。
+2. **默认模型的轮胎下沉 ~9 mm 不在表里**（表是 URDF 几何：`radius_wheel=0.06`）⇒ 它实际仍会
+   落 ~10 mm。这是"表 = `h` 的来源"这一约束的代价；要修得给 spawn 单独一张"含下沉"的表（未做）。
+3. **1 mm 余量在第一个物理步就被吃掉**：GT 的第一帧（首帧云后 0.1 s）已经在 0.102499，
+   整跑 max−min = **9 µm**；原始云首帧反而比稳态**低** 0.65–0.71 mm（接触解算的瞬时过冲）。
+   所以"drop < 1 mm"里的 1 mm 是**名义**余量，观测到的位移是 9 µm。
+4. **初始化地图从 1 帧（8120 点）涨到 ~11 帧（90209–90212 点）**：门 0.89 s 放行、init 仍等
+   200 帧 IMU（2.0 s）。全部是**落定后的静止帧**（丢弃的 9 帧也是落定前的静止帧，不是下沉帧），
+   所以 z 锚点更好（h_meas Δ 0.1 mm），但 I15 的"M ≲ 一帧"数值口径要按 I15′ 重新读。
+   **没有**去改 `small_point_lio` 让门放行后立刻 init（那属于 `src/rm_localization/**`，本轮禁改）。
+5. **pointlio/fastlio 的 `h_meas` 不可用**：两者的 `/cloud_registered` 只有 ~140 点/帧，
+   `odom_level_tf` 的 ≥500 点地面拟合跳检（WARN，loud）。替代证据 = 原始云 d（与 h_urdf 差
+   ≤0.03 mm）+ GT 0.102499 的换算地面。**没有**放宽那个门槛（会改 `rm_nav_bringup/scripts`）。
+6. **pointlio 的 1/3 静默空局部图本轮 0/3**：没有复现 ≠ 已修。TF 时序量化见 §32.5（TF 只覆盖
+   1/3 扫描、其余追 ≤0.1 s）。**只诊断、没修**（任务要求）。
+7. **fastlio 只有 1+1 跑**，且两跑姿态差得多（它没有重力对齐）⇒ §32.7 的 base_z/local lethal
+   差异**不能**归因于 spawn 改动；它的 in-band（生效带）两跑都是 100%。
+8. **`sim_backend:=gz` 没测**：Fortress 的 spawn 路径在 `gz_sim.launch.py`（模型 pose 在世界
+   SDF 里），本轮没改也没跑。
+9. **`nav_band_probe.py` 仍用自己的 band `[0.0, 2.0]`**（不是代价图的生效带 `[-0.05, 2.0]`）：
+   对 SPL（扫描面 +0.103）两档同值，对 fastlio（扫描面 +0.052、z 摆到 −0.03）会误报
+   "below=65"。**in-band 的权威口径 = `band_guard`**（读活栈参数服务）。这条是既有工具的
+   口径问题，本轮**没改**它（避免动 §17/§26/§30 的对比基线），只在表里注明。
+10. **跑间噪声**：同机同时段、RTF ≈0.37（点云/导航叠满），local lethal 的 ±10% 级差异分不出
+    位姿差与机器噪声（§22.8 / §30.8#7）。
+11. **`p1_pointlio_spawnz` 重跑过一次**：第一次跑（19:21–19:27）本身是好的，但我在它运行中
+    改了 harness 脚本（加 TF lag 探针）⇒ bash 读到半截文件、收尾几步没执行（缺 params/tf/
+    log_grep）。表里的 p1 是 19:33 的**干净重跑**（launch/探针参数逐字相同）。
+12. **第一条 `s1_spl_spawnz` 作废**：启动段用 `gz model -m robot -p` 高频轮询把 gzserver 打崩
+    （`boost::shared_ptr<Connection>` assertion，exit −6；§30 的 14 个旧 run 都是 assert=0）。
+    这是**测量装置**的锅，不是 spawn 改动的锅：改成"只在收尾取一次"后，本轮 8/8 跑
+    assert=0、`sc_own_leftovers_desc` 全空。记在这里，避免以后再用启动段 `gz model` 轮询。
+13. **`spawn_entity.py` 的 "Entity pushed to spawn queue, but spawn service timed out"**
+    在 14/14 旧 run 与 8/8 新 run 都出现（实体其实都生成成功）——**既有良性消息**，与本轮无关。
+14. **没碰**地图资产（map/、PCD/、世界文件）、`src/rm_localization/**`、`get_world_config()`；
+    `map_asset_guard.py spawn-table --check` 通过；`spawn_pose.z` 在既有 sidecar 里仍是 0.2
+    （这是**有意的**：地图原点不含 z）。

@@ -1218,10 +1218,11 @@ robot11 `plugin`/`sensor`、hzmirm、`gravity_align_mode:=hybrid`）全部 **新
 | `lio_init_map_extrinsic` | `small_point_lio.init_map_extrinsic` | **True** | 初始化地图用**与逐点更新同一个**出点公式（`R_IL·p + t_IL`）；`False` = §29 的旧式（只旋 `R_IL`） |
 | `z_origin_source` | `odom_level_tf.z_origin_source` | **`urdf`** | 静态边的 z 原点：`urdf` = `t_level = h_imu`（**确定性**，逐位可复算）；`measured` = 第一帧点云拟合地面（§29 的临时挡板，**只作诊断/A-B**） |
 
-**为什么不是"把 spawn z 调成落定高度"**：`spawn z` 在
-`src/rm_simulation/hzmi_rm_simulation/launch/rm_simulation.launch.py::get_world_config()` 里，
-被 4 个 world × 3 个机器人槽位共用（落定高度各不相同：robot11 0.1025 / hzmirm 0.08 / 默认 0.06），
-且 `spawn_entity.py` 的 `-z` 没有可透传的参数 ⇒ 一个常数不可能同时对，本轮也不许改那个包。
+**为什么当轮不是"把 spawn z 调成落定高度"**（★ 已被 **§4.13.5 取代**）：当轮的前提是"不许改
+`src/rm_simulation/**`"，且 `get_world_config()` 的 `z` 被 4 个 world × 3 个机器人槽位共用
+（落定高度各不相同）、`spawn_entity.py` 的 `-z` 没有可透传的参数 ⇒ 一个常数不可能同时对。
+**第二十二轮**用户批准后改走"新增 `spawn_z` 参数 + 调用方按模型传值"（§4.13.5）；本节的门与
+初始化地图口径**保留**，但角色从"修 z 锚点的主力"降为**兜底**。
 **为什么不判"IMU 静止 ≥1 s"**：本仿真的 `gazebo_ros_planar_move` 每步清 vz ⇒ 匀速下沉期间
 加速度计仍读 ≈1 g，而静止时 `|a|` 在 7.8–11.8 m/s² 抖 ⇒ `|a|≈g` 既不能证明静止也不稳。
 判据因此换成**雷达自己的地面高度**（与"车动不动"同一件事，且不受 `planar_move` 骗）。
@@ -1252,3 +1253,52 @@ robot11 `plugin`/`sensor`、hzmirm、`gravity_align_mode:=hybrid`）全部 **新
    z 锚点退回修前水平）——**不静默**。本机只在 RMUL2026 + robot11 上实测过。
 4. 残余 **+5.5 mm** 的 `base_link z` 来自 LIO 初始化后前 2 s 的暂态（state z +0.012），不是静态边；
    要消掉得动估计器的初始速度/重力估计（未做）。
+
+### 4.13.5 出生高度 = 落定高度（2026-10-21 第二十二轮，**默认路径**）
+
+> ★ 本节**取代** §4.13.2 里"为什么当轮不是把 spawn z 调成落定高度"那一段（前提已变：用户批准
+> "直接改机器人位置让他直接在地面上"；改动面 = `src/rm_simulation/**` + `bringup_sim.launch.py`，
+> **不碰**地图资产 / `src/rm_localization/**`）。§4.13.2 的**落定门**与**初始化地图口径**保留。
+
+**做法**：`rm_simulation.launch.py` 新增 launch 参数 `spawn_z`（默认 `''` = 回落 world 配置的 z，
+= 改造前行为；非空必须是浮点数，否则 t=0 硬报错），只改 `spawn_entity.py` 的 `-z`；
+`bringup_sim.launch.py` 对 `world ∈ {RMUC2026, RMUL2026}`（floor z=0 的标定世界）传
+`_HZMI_BASE_LINK_HEIGHT_M[robot] + 1 mm`（**同一张表**也是 `gravity_align_h` 的来源）：
+
+| robot | 落定 `base_link` z（表，URDF 几何） | 传下去的 `spawn_z` |
+|---|---|---|
+| `robot11` | 0.102499 | **0.103499** |
+| `hzmirm` | 0.0 | **0.001000** |
+| `''`（默认模型） | 0.06 | **0.061000** |
+
+1 mm 余量 = 让接触在第一个物理步里解出来，避免一出生就穿透地面（穿透会弹一下，等于又制造一个
+小下落）。**`get_world_config()` 的 `z` 一个字节没动**（仍是 0.2）：它是
+`map_asset_guard.py::WORLD_SPAWN` 的镜像源、也是既有存档 sidecar `spawn_pose.z` 的比对基准
+（改它会让既有 RMUL2026/RMUC2026 存档全部 `refused_spawn`）；地图原点只取决于 x/y/yaw。
+
+**不变量（新增/修订）**
+
+| # | 不变量 | 判据（可执行） |
+|---|---|---|
+| **I16** | 出生**不发生有意义的自由落体**，LIO 初始化时车已静止 | GT（`/odom_ground_truth`，planar_move 报的模型世界位姿）在整跑内 z 的 **max−min < 1 mm**；`spawn -z − GT(z) ≤ 1 mm`（= 那 1 mm 余量）；SPL 初始化在首帧后 2.0 s / pointlio 0.5 s / fastlio 0.3 s，都在 GT 已稳定之后 |
+| **I10″** | `odom_level` 的 z 锚点**只由 URDF 决定**（不依赖出生轨迹、不需要实测挡板） | 同 I10′，但 `base_link z` 判据收紧到 **+0.1025 ± 0.01 m**；SPL 实测 +0.1032/+0.1020/+0.1031（spread 1.2 mm）、`floor_z` +0.0023/+0.0021/+0.0007（spread 1.6 mm）、`h_meas` 0.2587–0.2600（Δ 0.1–0.8 mm，**INFO**） |
+| **I15′** | 初始化**不吞出生下沉段的点云**（I15 的数值口径修订） | 丢弃帧数 = 落定前帧（SPL 实测 9 帧，修前 26 帧）；**初始化地图可以 >1 帧**，但必须全部是落定后的静止帧（实测 90209–90212 点 ≈ 11 帧；§30 是 8120 点 = 1 帧，因为那时门在 2.6 s 才放行）。"吞下沉段"这一点仍成立 |
+
+**落定门（§4.13.2）的角色：兜底，默认值保持 1.0 s**。实测它在**首帧后 0.84–0.89 s** 放行
+（峰峰值 0.0000 m，8 帧），而 SPL 的 200 帧 IMU 初始化门在 **2.0 s** ⇒ 门**不推迟**任何一帧
+（3 跑 init 都在首帧后 1.990–1.992 s）。它现在的价值只在"出生高度不对 / 地面不平 / 车被抬起"
+时兜底（15 s 超时 + 响亮 WARN）；关掉（`lio_init_settle_s:=0`）在本轮场景下结果相同，但会失去
+这层兜底 ⇒ **保留 1.0**。
+
+**实测**（`docs/frame_contract_v3_measurements.md` §32.3–§32.5）：GT z 整跑 max−min = **9 µm**、
+`spawn -z − GT = 1.000 mm`；SPL 3 跑 z 锚点见 I10″；**pointlio 的 6.5 cm 锚点偏差消失**
+（`base_link z = +0.0961/+0.0964/+0.0974`，换算 `floor ≈ −6.4/−6.1/−5.1 mm`；§30 是
++0.0298/+0.0362/+0.0356）；SPL/pointlio 局部 in-band **100%**、`odom_level→base_link`
+roll/pitch ≤ 0.21°、静态边逐位不变、`z_origin_source` 仍为 `urdf`。
+
+**边界**：① `spawn_z` 只对 `world∈{RMUC2026,RMUL2026}` 生效；RMUC/RMUL 2024、单跑
+`rm_simulation.launch.py` 的默认 `''`、以及 `robot` 不在表里时**逐字节回到改造前**。
+② `sim_backend:=gz` 有自己的 spawn 路径（模型 pose 在世界 SDF 里），本轮**没改**。
+③ 默认模型（`robot:=''`）的轮胎下沉 ~9 mm 不在表里（表是 URDF 几何）⇒ 它实际仍会落 ~10 mm；
+本轮没在 nav 里实测默认模型。④ fastlio 臂**没有** z 锚点逻辑（不在本节范围），只回归到
+"出生/落定 + 局部 in-band（生效带）100%"（§32.7）。
