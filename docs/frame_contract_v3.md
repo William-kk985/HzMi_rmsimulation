@@ -886,6 +886,9 @@ description 以 `[已删除 / 硬报错别名]` 开头），但**不参与任何
    base_link` 仍假设 `base_link` 水平；云台一动这条语义就退化（与 §4.11.6#4 同一局限）。
 7. **本节没有改任何地图/PCD 资产、`src/rm_simulation/**`、`docs` §10–§32 的正文**（只追加本节
    与 measurements §33）。
+8. **实测（2026-10-27，第二十四轮）**：`gravity:=tf|base` 各 3 跑的正式 A/B、已知障碍物落点、
+   以及 point_lio「初始化图 vs 逐帧图」一致性核验见 `docs/frame_contract_v3_measurements.md` §34；
+   数值支持**默认档保持 `tf`**（§34.2.4）。
 
 ## §5 重定位契约
 

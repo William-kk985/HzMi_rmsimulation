@@ -7092,3 +7092,341 @@ raw 的 in-band = **43.2%**、`band_guard` **43.7%/单侧** —— 与 §25 对�
     （§4.14.5#6）。
 11. **`spawn_entity.py` 的 "Entity pushed to spawn queue, but spawn service timed out"** 在
     4 跑里都出现（§32.9#13 的既有良性消息）；`ps_after` 与 LIO/nav 数据证明实体真的生成。
+
+## §34 第二十四轮（**本机 date=2026-10-27，06:22–07:05**）：point_lio 的「初始化图 vs 逐帧图」一致性**核验**（不改代码）+ `gravity:=tf|base` 正式 A/B（3+3）+ 已知障碍物落点
+
+> **本节只新增**（append-only）：§1–§33 一个字没改。任务（用户批准 "1,2"）：① 只**核验** point_lio
+> 是否也像 SPL 那样在初始化地图里漏掉 `t_IL`（SPL 的同类缺陷在 `461eab8` 修掉）——**不许打补丁**，
+> 除非找到确认缺陷且字节安全；② `gravity:=tf` vs `gravity:=base` 各 **3 跑**，外加每臂 1 次
+> **已知障碍物**（0.3×0.3×0.5 m 箱子，初始朝向前方 ~2 m）落点测试。
+>
+> **一句话结论**：
+> ① **pointlio 一致** —— 初始化图与逐帧图调的是**同一个函数** `pointBodyToWorld`，两者都是
+> `x_.rot·(R_IL·p + t_IL) + x_.pos`；初始化时 `rot = rot_init`、`pos = 0`（MTK `vect` 默认零，
+> 且 `Set_init` 之后没有别的赋值）⇒ 用真帧 + 真外参回放两条路径 **逐位相同、max|Δ| = 0.000000 m**。
+> **不是缺陷，没有打补丁**。
+> ② **`gravity:=tf` 应继续做默认档**：3/3 跑局部 in-band **100%**（773/773）、`band_guard` **OK 100%**
+> （11/11 条采样）、`odom_level→base_link` roll/pitch **≤0.198°/0.190°**、已知障碍物标记格 y 向偏差
+> **+0.012 m**；`base` 3/3 `band_guard` **IDLE**（没有 2D 高度带可评）、探针 in-band **43.4%**
+> （336/774）、已知障碍物在 30° 斜的 `odom` 里被**沿 −y 抹开 0.134 m**——0.5 m 高箱子的竖直边在
+> 斜帧里投影成 `0.5·sin30° = 0.25 m` 的 y 长度，质心因此偏 −0.125 m（实测 −0.134 m）。
+
+### 34.1 point_lio 初始化图 / 逐帧图用的是不是同一条 LiDAR→IMU→世界变换
+
+#### 34.1.1 代码事实：**同一个函数**，世界变换在函数**内部**，不在调用方
+
+被问的「~:98–112 的 helper 只做 `R_IL·p + t_IL`」是 `pointBodyLidarToIMU`
+（`src/rm_localization/point_lio/src/laserMapping.cpp:96`），它**只**被 `publish_frame_body`
+（`:200`，发布 `cloud_registered_body`、`frame_id="body"`）调用一次（`:207`）：
+
+```cpp
+void pointBodyLidarToIMU(PointType const * const pi, PointType * const po)   // :96
+{ ...
+  } else {
+    p_body_imu = Lidar_R_wrt_IMU * p_body_lidar + Lidar_T_wrt_IMU;          // :107 只到 IMU 系
+  }
+```
+
+**地图插入用的不是它**，而是 `pointBodyToWorld`（`src/Estimator.cpp:364`）——它自己就把世界旋转与
+平移乘上了，**没有**第二个重载，也没有调用方再补一次：
+
+```cpp
+void pointBodyToWorld(PointType const * const pi, PointType * const po)     // Estimator.cpp:364
+{ V3D p_body(pi->x, pi->y, pi->z);
+  V3D p_global;
+  if (extrinsic_est_en) { ...
+  } else {
+    if (!use_imu_as_input) {
+      p_global = kf_output.x_.rot * (Lidar_R_wrt_IMU * p_body + Lidar_T_wrt_IMU) +
+                 kf_output.x_.pos;                                          // :381–382
+    } else { ... kf_input.x_.rot * (...) + kf_input.x_.pos; ... } }         // :384–385
+```
+
+① **初始化图**（`laserMapping.cpp:485–503`）——注意 `pointBodyToWorld` 在**整个初始化块里**被调用，
+结果既进 `init_feats_world` 又进 `feats_down_world`：
+
+```cpp
+      /*** initialize the map ***/
+      if (!init_map) {                                                      // :486
+        feats_down_world->resize(feats_undistort->size());
+        for (int i = 0; i < feats_undistort->size(); i++) {
+          {
+            pointBodyToWorld(&(feats_undistort->points[i]), &(feats_down_world->points[i]));  // :490
+          }
+        }
+        for (size_t i = 0; i < feats_down_world->size(); i++) {
+          init_feats_world->points.emplace_back(feats_down_world->points[i]);
+        }
+        ...
+          ivox_->AddPoints(init_feats_world->points);                       // :499
+          publish_init_map(pub_laser_cloud_map);                            // :500 → /Laser_map
+```
+
+② **逐帧插入**（`laserMapping.cpp:670–674` 与 `:852–856`，输出/输入两个 EKF 分支各一份，正文**逐字相同**）：
+
+```cpp
+            for (int j = 0; j < time_seq[k]; j++) {
+              PointType & point_body_j = feats_down_body->points[idx + j + 1];
+              PointType & point_world_j = feats_down_world->points[idx + j + 1];
+              pointBodyToWorld(&point_body_j, &point_world_j);              // :673 / :855
+            }
+```
+之后 `MapIncremental()`（`:944`）把**已经算好世界坐标**的 `feats_down_world` 里满足体素条件的点
+`ivox_->AddPoints(points_to_add)`（`:144`）。
+
+③ **两条路径在 t0 的状态是同一组数**：
+
+```cpp
+          M3D rot_init;                                                     // :474
+          p_imu->Set_init(tmp_gravity, rot_init);
+          kf_input.x_.rot  = rot_init;                                      // :476
+          kf_output.x_.rot = rot_init;                                      // :477
+```
+`x_.pos` 在初始化块里**没有任何赋值**；`MTK::vect` 的构造函数默认值是 `base::Zero()`
+（`include/IKFoM/IKFoM_toolkit/mtk/types/vect.hpp:110`
+`vect(const base & src = base::Zero())`）⇒ **初始化图里 `pos ≡ 0`**。实测也证实：本轮回放抓到的
+**第一帧 `/odom`** 的 `xyz = [-7.4e-06, -1.2e-07, 1.9e-06] m`（§34.1.2）。
+
+④ **两侧的输入点在同一坐标系**：`Preprocess::avia_handler`（`src/preprocess.cpp:320–362`）把
+`msg->points[i].x/y/z` **原样**塞进 `pl_surf`（`:344–347`，没有任何外参旋转）；
+`ImuProcess::Process`（`src/IMU_Processing.cpp:87–105`）在这一版里只是 `*cur_pcl_un_ = *(meas.lidar)`
+（`:104`）⇒ `feats_undistort` 与 `feats_down_body` **都是 LiDAR 系**（变量名叫 body，但内容是
+lidar 系），所以 `pointBodyToWorld` 里那**一次** `R_IL` 正好是唯一一次。
+
+⇒ **结论（by construction identical）**：初始化图与逐帧图
+- 调**同一个** `pointBodyToWorld`；
+- 吃**同一系**的点（LiDAR 系）；
+- t0 时状态相同（`rot = rot_init, pos = 0`）；
+- **ivox/地图在 `camera_init`（世界）系**，不是 IMU 系；世界变换由 `pointBodyToWorld` **自己**施加。
+
+#### 34.1.2 回放（真帧 + **运行期生效**外参 + 真 `rot_init`）
+
+取数：`mode:=mapping lio:=pointlio robot:=robot11 robot11_mount:=sensor world:=RMUL2026` 一个 stack
+（`.tmp_g34/g34_pointlio2/`），只订阅、不发布、不改点云：`/livox/lidar` 一帧（**11852 点，
+`frame_id=livox_frame`**）、`/Laser_map`（初始化图，**2701 点**，`camera_init`）、
+`/cloud_registered` 前 3 帧（**138 / 142 / 149 点**）、第一帧 `/odom`（`q = [-0.25878, -0.00017,
+8.66e-06, 0.96594]` ⇒ `rot_init` rpy = **[-29.996, -0.019, 0.006]°**）。
+
+运行期**真正生效**的外参（`ros2 param get /laserMapping mapping.extrinsic_*`）：
+`R_IL = I`、`t_IL = [0, 0, 0.05] m`（`|t_IL| = 0.0500 m`）。
+⚠️ 见 §34.3#4：launch 传的 **URDF 派生的** `extrinsic_T`/`extrinsic_R` 对 `lio:=pointlio`
+**是死键**（`Parameter not set`），point_lio 只读 `mapping.extrinsic_*`。
+
+把这一帧按两条路径各算一遍（`M3D` 行主序、`%point_filter_num==0`、`blind=0.5`、`det_range=100`、
+相邻点去重，全部照 `preprocess.cpp` / `avia_handler` 复刻）：
+
+| 量 | 结果 |
+|---|---|
+| **(a) 初始化图路径** `rot_init·(R_IL·p + t_IL) + 0` vs **(b) 逐帧路径**（状态取 t0） | — |
+| **max\|Δ\|（x, y, z）** | **0.000000, 0.000000, 0.000000 m** |
+| **median\|Δ\|（x, y, z）** | **0.000000, 0.000000, 0.000000 m** |
+| `np.array_equal(A, B)` | **True（逐位相同）** |
+| 隐含偏置方向 | **无**（两条路径的输出逐点相同） |
+
+**这个检查的灵敏度**（把「如果犯 SPL 那种错」的量级算出来，证明上面的 0 不是"检验太钝"）：
+
+| 反事实 | median Δ（x, y, z） | median \|Δ\| |
+|---|---|---|
+| 初始化图**漏掉 `t_IL`**（只做 `rot_init·R_IL·p`） | `[+0.000017, −0.02500, −0.04330] m` | **0.0500 m** (= `|t_IL|`) |
+| 初始化图**完全没上世界变换**（留在 IMU 系） | — | **0.3371 m** |
+| 逐帧路径改用**第一帧实测 odom 状态**（不是 t0 的 `rot_init/0`） | — | 7.7e-06 m（`pos0≈0`、`rot` 未变） |
+
+最后一行同时证明「t0 的 pos 真的是 0」：第一帧 `/odom` 的位置是 1.9e-06 m 量级。
+
+#### 34.1.3 经验核对（不靠代码、只看包真正发出来的点云）
+
+| 核对 | 数 |
+|---|---|
+| **用代码式子**从真 LiDAR 帧算出的初始化图（2723 点）vs 包**真正发布的** `/Laser_map`（2701 点）：最近邻距离 median / p90 | **18.1 mm / 78.1 mm** |
+| 同上，最近邻位移向量的 median（x, y, z） | **(+0.0003, +0.0011, +0.0007) m** ⇒ **无系统偏置** |
+| 反事实：把 `t_IL` 拿掉再和 `/Laser_map` 比，最近邻中位数 | **52.0 mm**（≈2.9×；漏 5 cm 会被这条检验抓出来） |
+| `/Laser_map` vs 紧随其后的 `/cloud_registered`（138 点）：最近邻 median / 位移 median | 64.7 mm / `(+0.0001, −0.0018, −0.0047) m` |
+| 同上的 caveat | `filter_size_map = 0.5 m`、`filter_size_surf = 0.5 m` ⇒ 这条只能排除 ≳0.5 m 的系统偏移；**2 帧不是同一帧**（Livox 非重复扫描）＋静止，表面同、采样不同 ⇒ mm~cm 残差正常 |
+
+#### 34.1.4 判定
+
+**pointlio 一致（by construction identical），偏 0.000 m。** 它不是 SPL 那种缺陷：
+- SPL 的 bug 是「初始化地图**另写了一条**只做 `p + t_IL` 的快路径，漏了 `R_IL`/或漏了 `t_IL`」；
+- point_lio **没有第二条路径**可漏——初始化与逐帧都只走 `pointBodyToWorld`，世界变换 `rot/pos`
+  在那个函数**内部**。所谓「~:98–112 的 helper 只到 IMU 系」的那个函数
+  （`pointBodyLidarToIMU`）**只用于发布 body 系点云**，与地图无关。
+- 因此 **不打补丁**（任务要求：除非确认缺陷且字节安全）。
+
+#### 34.1.5 point_lio 的 `h_meas` 局限（为什么本节的核对不靠它）
+
+`gravity_align_h_check`（`small_point_lio` 的初始化地面互检）要求首帧地面有足够 inliers；point_lio
+的 `/cloud_registered` **每帧只有 138 / 142 / 149 点**（`filter_size_surf=0.5` 体素降采样之后），
+比任何 "≥500" 的门槛都低 ⇒ 那条检查在 pointlio 上**要么根本不跑**（它只存在于 SPL，§33.9#6），
+要么会 **WARN 跳过**。所以本节用**原始 LiDAR 帧 + 真值式子 + 发布出来的地图**三条独立证据，
+不用 `h_meas`。
+
+### 34.2 `gravity:=tf` vs `gravity:=base` 正式 A/B（各 3 跑）
+
+#### 34.2.1 协议、隔离与冻结
+
+* 命令（6 跑逐字同口径）：`world:=RMUL2026 mode:=nav lio:=small_point_lio localization:=gicp
+  nav:=mppi planner:=smac2d robot:=robot11 robot11_mount:=sensor spin_speed:=0.0 band_guard:=True`
+  + `gravity:=tf|base`；`SETTLE=20 WINDOW=20`（**仿真秒**）、`gui:=False`、`nav_rviz:=False`、
+  `lio_rviz:=False`。
+* 隔离：私有 `HOME` / `ROS_LOG_DIR` / `ROS_DOMAIN_ID` / 先探空端口再占 `GAZEBO_MASTER_URI`、
+  `unset DISPLAY`、`setsid` 起栈（进程组 = 本 run）、每跑硬超时 1100 s、收尾只用
+  `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）、**一栈一跑**（6 跑顺序，跑间 8 s）。
+* 冻结：6 跑的 `git_head = 5a19a9c`（= `origin/master`）；`bringup_sim.launch.py`
+  md5 = **`6ad0aaaedc18486dc8318ce235c7b738`**（与 §33 逐位相同）；没有换任何二进制。
+* 探针：`tools/scripts/tiltmount/nav_band_probe.py`（tf ⇒ `--scan-frame odom_level`；base ⇒
+  `--scan-frame odom`）+ `tools/scripts/tiltmount/uc_procstats.py` + `band_guard` 收据 + 运行期
+  `ros2 param get` 回读。原始数据：`.tmp_g34/g34_{pilot_tf,tf_r2,tf_r3,base_r1..r3}/`
+  （pilot 就是 tf 的第 1 跑；tag 名沿用起跑时的临时命名）。
+
+#### 34.2.2 每臂 3 跑
+
+**`gravity:=tf`（3 跑，逐跑 + median / range）**
+
+| 指标 | r1 | r2 | r3 | median | range |
+|---|---|---|---|---|---|
+| 局部代价图帧（live） | `odom_level` | `odom_level` | `odom_level` | — | — |
+| 局部障碍层 `obstacle_layer` / `obstacle_cloud_layer` | true / false | 同 | 同 | — | — |
+| `band_guard`（local） | **OK** 11/11 = 100% | **OK** 11/11 | **OK** 11/11 | **100%** | 100–100 |
+| kept-y（`band_guard`） | [-0.688, 5.042] | [-0.688, 5.042] | [-0.613, 5.055] | 双侧 | 双侧 3/3 |
+| 探针 in-band `[0,2]` | **773/773** | **773/773** | **773.5/773.5** | **100%** | 100–100 |
+| 扫描面 z p50（代价图帧） | +0.1031 | +0.1032 | +0.1033 | **+0.1032** | 0.1031–0.1033 |
+| local **lethal** | 302.5 | 308 | 314 | **308** | 302.5–314 |
+| local inscribed | 10181.5 | 10193 | 10346 | **10193** | 10181.5–10346 |
+| local free | 40445.5 | 40430.5 | 39893 | **40430.5** | 39893–40445.5 |
+| local **最近 lethal** | 0.7042 | 0.7045 | 0.7044 | **0.7044 m** | 0.7042–0.7045 |
+| local **前方 2.0×1.2 m lethal** | 23 | 23 | 24 | **23** | 23–24 |
+| local **1 m 内 lethal** | 31 | 31 | 31 | **31** | 31–31 |
+| global lethal | 2167 | 2166 | 2164.5 | **2166** | 2164.5–2167 |
+| `h_meas` / \|Δ\| | 0.2600 / 0.5 mm | 0.2596 / 0.2 mm | 0.2597 / 0.1 mm | 0.2597 / **0.2 mm** | 0.1–0.5 mm |
+| `odom_level→base_link` rpy（deg） | [0.174, 0.190, -1.308] | [0.166, 0.175, -1.284] | [0.198, 0.185, -1.266] | — | roll/pitch **≤0.198/0.190** |
+| `odom→base_link` rpy（deg） | [30.175, 0.823, -1.041] | [30.165, 0.802, -1.079] | [30.172, 0.800, -1.008] | — | roll 30.165–30.175 |
+| 静态边 `odom→odom_level` | xyz [0.000, 0.108, −0.187]、rpy [30.000, −0.000, 0.000] | 逐位同 | 逐位同 | — | 3/3 逐位相同 |
+
+**`gravity:=base`（3 跑）**
+
+| 指标 | r1 | r2 | r3 | median | range |
+|---|---|---|---|---|---|
+| 局部代价图帧（live） | `odom` | `odom` | `odom` | — | — |
+| 局部障碍层 `obstacle_layer` / `obstacle_cloud_layer` / `stvl` | **false / true / false** | 同 | 同 | — | — |
+| `ground_segmentation gravity_aligned_frame` | **`base_link`** | 同 | 同 | — | — |
+| `band_guard`（local） | **IDLE** | **IDLE** | **IDLE** | **IDLE 3/3** | — |
+| kept-y（`band_guard`） | —（没有 2D 带） | — | — | — | — |
+| 探针 in-band `[0,2]`（**不是本档判据**） | 336/774 (43.4%) | 336/774 (43.4%) | 334/773 (43.2%) | **43.4%** | 43.2–43.4% |
+| 扫描面 z p50（代价图帧） | −0.0946 | −0.0938 | −0.1012 | **−0.0946** | −0.1012…−0.0938 |
+| local **lethal** | 385 | 390 | 438.5 | **390** | 385–438.5 |
+| local inscribed | 12645 | 12392 | 12626.5 | **12626.5** | 12392–12645 |
+| local free | 38340 | 38787.5 | 38732.5 | **38732.5** | 38340–38787.5 |
+| local **最近 lethal** | 0.7010 | 0.7017 | 0.6964 | **0.7010 m** | 0.6964–0.7017 |
+| local **前方 2.0×1.2 m lethal** | 59 | 59 | 61 | **59** | 59–61 |
+| local **1 m 内 lethal** | 67 | 68 | 70 | **68** | 67–70 |
+| global lethal | 2166 | 2166.5 | 2166 | **2166** | 2166–2166.5 |
+| `h_meas` / \|Δ\| | 0.2597 / 0.1 mm | 0.2597 / 0.2 mm | 0.2598 / 0.2 mm | 0.2597 / **0.2 mm** | 0.1–0.2 mm |
+| `odom_level→base_link` rpy | **没有这个帧** | — | — | — | — |
+| `odom→base_link` rpy（deg） | [30.130, 0.766, −0.880] | [30.178, 0.712, −1.071] | [30.160, 0.810, −1.021] | — | roll 30.130–30.178 |
+
+**读法**
+
+1. **tf 的 3 跑几乎同一次实验**：lethal 302.5–314（极差 11.5）、最近 lethal 0.7042–0.7045（极差
+   0.3 mm）、ahead 23–24、1 m 内 31–31、`h_meas` Δ 0.1–0.5 mm；静态边三次**逐位相同**。
+   `odom_level→base_link` roll/pitch **3/3 都 <0.5°**（§33 的 g3 那次 1.038° 没复现，n=3）。
+2. **base 的重复性明显更差**：lethal 385–438.5（极差 53.5 ≈ tf 的 4.7 倍）、最近 lethal
+   0.6964–0.7017（5.3 mm）。逐点层吃的是 3D 点，受 LIO 姿态抖动/地面分割边界的影响比 2D 平盘大。
+3. **base 的 cloud 指标更大 ≠ 更好**（§33.9#4 同口径）：lethal 390 vs 308、ahead 59 vs 23、
+   1 m 内 68 vs 31。两层吃的数据/几何不同（3D 点 vs 投影盘），且 base 的代价图帧是**斜 30° 的
+   `odom`**（见 §34.2.3 的已知障碍物测试，那里把"斜"的代价量出来了）。只报告、不排序。
+4. **`band_guard` 是本轮唯一"判据级"的差异**：tf 有 2D 高度带可评且 **100% OK / kept-y 双侧**；
+   base 没有启用的 2D 带 ⇒ **IDLE**（设计如此：§4.14.5#1）。**IDLE 不是"通过"**，是"这条诊断
+   在本档不存在"。
+
+#### 34.2.3 ⭐ 已知障碍物落点（每臂 1 跑）
+
+做法（同一次 run 内**差集**，不做跨 run 比较；`.tmp_g34/g34_box2_{tf,base}/box.json`）：
+起栈 → 局部代价图稳定后取 4 帧基线 lethal 集合 → 调 gazebo_ros 的 `/spawn_entity`
+（`gazebo_msgs/srv/SpawnEntity`，**service 名不是 `/world/<name>/create`**：本仓默认
+`sim_backend:=classic`）生成 **0.3×0.3×0.5 m 静态箱子**在世界系 **(6.3, 3.35, 0.25)**（= 出生点
+`(4.3, 3.35)` 的 +x 2.0 m，yaw=0 ⇒ **初始朝向前方 2 m**；RMUL2026 该处在静态图里是 free，
+已核对 pgm）→ 等 8 仿真秒 → 取 6 帧 lethal 集合 → `post \ pre` = 这个箱子贡献的标记格 →
+按「机器人位姿在**代价图帧**里的坐标 + 前方 2.0 m」换算真值中心 → 量质心偏差。
+
+| 量 | **`gravity:=tf`** | **`gravity:=base`** |
+|---|---|---|
+| 代价图帧 | `odom_level` | `odom` |
+| spawn 成功 / 服务 | ✓ `/spawn_entity` | ✓ `/spawn_entity` |
+| 基线 lethal → 之后 lethal | 318 → 336 | 370 → 390 |
+| 差集新 lethal 格数（全部） | 46 | 113 |
+| 其中落在真值 0.8 m 内 | **16** | **36** |
+| 真值箱子中心（代价图帧） | **(2.014, −0.112)** | **(2.009, −0.026)** |
+| **标记格质心**（代价图帧） | **(1.870, −0.100)** | **(1.859, −0.159)** |
+| **Δ（质心 − 真值）** | **(−0.144, +0.012) m** | **(−0.149, −0.134) m** |
+| **\|Δ\|** | **0.144 m** | **0.201 m** |
+| 标记格包围盒 | x **1.870 单列**、y [−0.250, +0.050]（宽 0.30） | x [1.850, 1.870]、y [−0.330, +0.030]（宽 **0.36**） |
+
+**读法（这才是这两个数真正的区别）**
+
+1. **两臂的 Δx ≈ −0.145 m 都不是误差**：2D 扫描/点云只能看到箱子的**近侧面**，箱子中心在
+   `x = 2.00`、近侧面在 `x = 2.00 − 0.15 = 1.85`；两臂都把 lethal 打在 x ≈ 1.85–1.87（**距近侧面
+   0–2 cm = 1 个 0.02 m 栅格**）。所以拿"中心"当参考，两臂都天然吃 −0.15 m。
+2. **真正的差异在 y**：tf 的标记格 y 质心 **−0.100** vs 真值 **−0.112** ⇒ **+0.012 m**（≈ 1 个栅格
+   以内，横向对得上）；base 的 **−0.159** vs 真值 **−0.026** ⇒ **−0.134 m**，包围盒宽度也从
+   0.30 m 涨到 **0.36 m**。
+3. 这个 −0.134 m **不是噪声，是几何**：`odom→base_link` roll ≈ **+30°**，箱子在 `base_link` 里
+   竖直跨 z∈[0, 0.5] ⇒ 投到 `odom` 后 y 跨 **`−0.5·sin30° = −0.25 m`**，均匀分布的质心就该在
+   **−0.125 m**；实测 **−0.134 m**。也就是说 **base 档在斜 `odom` 里，一个 0.5 m 高的障碍物
+   的 2D 位置会沿 −y 偏 0.13 m**（越高偏越多，`Δy ≈ −h/2·sin(30°)`）。
+4. tf 没有这个抹开：2D `/scan` 是在 `base_link` 里投影成平盘，再经静态边搬到 `odom_level`
+   （水平帧）⇒ 竖直结构不会变成 y 偏移。
+
+#### 34.2.4 判定：默认档应保持 `gravity:=tf`
+
+**数字理由（不是感觉）**
+
+1. **可诊断性**：tf 有 2D 高度带这条**会响的**判据，3/3 跑 **OK 100%**（11/11 条采样、kept-y 双侧）；
+   base 的 `band_guard` **3/3 IDLE** —— 同样的"半盲"如果发生，base 档**不会报警**（§33.3 已经
+   量过 raw 档 43.7% + 单侧 kept-y 是真能发生的）。
+2. **水平帧是真的水平**：tf 的 `odom_level→base_link` roll/pitch **≤0.198°/0.190°（3/3 <0.5°）**；
+   base 没有 `odom_level` 帧，`odom→base_link` roll **30.13–30.18°**。
+3. **已知障碍物的 2D 落点**：tf 横向偏差 **+0.012 m**；base **−0.134 m**（竖直结构在斜帧里的
+   几何投影，`−h/2·sin30°`），包围盒还胀 0.06 m。
+4. **重复性**：tf 的 lethal 极差 **11.5**、最近 lethal 极差 **0.3 mm**；base 是 **53.5 / 5.3 mm**。
+5. base 的 lethal/ahead/1 m 更大**不能**拿来当"更好"：数据源不同（3D 点 vs 投影盘），
+   而且它大的一部分正是上面第 3 条的"抹开"（同一面墙被投成更多格）。
+
+**base 仍然是一个合法档**：它把高度语义放在 `base_link`（`p2l target_frame=base_link` +
+`linefit gravity_aligned_frame=base_link`）、局部障碍层强制逐点，对"不想让 2D 平盘决定可见性"
+的场景是对的形态；但作为**默认**，它丢掉了（a）会响的高度带判据、（b）水平代价图帧、
+（c）已知障碍物的横向定位精度。
+
+### 34.3 诚实清单
+
+1. **pointlio 部分是"核验"，没有改一行代码**：`src/rm_localization/point_lio/**` 一个字节没动
+   （该子模块工作树里原有的 `child_frame_id: body→imu_link` 改动**不是本轮引入**，也不是我改的）。
+   回放脚本、抓帧脚本、A/B 驱动脚本都在 gitignore 的 `.tmp_g34/` 里，**没有进仓**。
+2. **回放的 (a)(b) 两条式子逐位相同是"代码恒等"的必然结果**（同一个函数、同一个状态），所以
+   `max|Δ| = 0.000000` 本身不是独立证据；独立证据是 §34.1.1 的代码行 + §34.1.3 的
+   "代码式子 vs 包发布的 `/Laser_map`"（18.1 mm、位移中位数 0.7 mm，而漏 `t_IL` 会变 52.0 mm）。
+3. **§34.1.3 的两帧不是同一帧**（Livox Mid-360 非重复扫描）：18.1 mm 的最近邻中位数里既有采样
+   差异也有静态残差，所以这条只能排除 ≳5 cm 的系统偏移；`filter_size_map=0.5 m` 让
+   "`/Laser_map` vs `/cloud_registered`"那条更钝（64.7 mm）。
+4. **point_lio 的外参来源和 launch 的注释不一致（本轮新发现，只记录、未修）**：
+   `bringup_sim.launch.py` 给 `lio:=pointlio` 传了 URDF 派生的
+   `{'extrinsic_T': [_MountExtrinsic('xyz')], 'extrinsic_R': [_MountExtrinsic('rot')]}`，但
+   point_lio 只读 **`mapping.extrinsic_T` / `mapping.extrinsic_R`**（`src/parameters.cpp:179–183`）。
+   运行期回读：`/laserMapping extrinsic_T = Parameter not set`、
+   `/laserMapping mapping.extrinsic_T = [0.0, 0.0, 0.05]`、`mapping.extrinsic_R = I`。
+   ⇒ **robot11 的 +30° 安装角没有通过这两个键进 point_lio**（它靠点云本身已被插件旋平）。
+   这不影响本节的结论（两条路径用的是**同一组**外参），但它是一条真实的不一致，
+   留给 §4.12/lio 槽位的下一轮处理。
+5. **A/B 每臂 n=3**，同机、同时段（06:22–06:39）、同一 launch md5，但**不同 run**；不许把
+   两臂逐格当同一次实验。极差已经给出，中位数只是 3 个点的中位数。
+6. **已知障碍物测试每臂 n=1**，且**差集包含非箱子的新 lethal 格**（tf 46 格里只有 16 格、
+   base 113 格里只有 36 格落在真值 0.8 m 内；其余是 LIO 抖动/扫描噪声造成的新标记）。两臂用的是
+   同一套流程、同一个 spawn 服务、同一个箱子尺寸与位置，可比性成立，但**没有重复**。
+7. **Δx 的 −0.145 m 是"只看得到近侧面"的几何后果，不是定位误差**：如果以后要拿这条当精度指标，
+   应改成"标记格 x 的 `max` 与箱子远侧面比"或直接把箱子换成圆柱。
+8. **base 的 y 抹开是"设计使然"不是 bug**：§4.14.5#1 已经写明 base 的代价图帧仍是斜 `odom`、
+   高度语义只在 `base_link`；本节第一次把它**量化**成 `−h/2·sin(30°)`。
+9. **本轮没有测** `gravity:=lio|raw`（§33 已各 1 跑）、没有测 `hzmirm`/默认模型/`world:=RMUC2026`、
+   没有测 `localization:=small_gicp|icp|none` 的组合；A/B 只覆盖
+   `robot11 + robot11_mount:=sensor + RMUL2026 + gicp`。
+10. **没有改**地图/PCD 资产、`src/rm_simulation/**`、`src/rm_localization/**`、`docs` §1–§33 正文；
+    本轮只追加本节 + 契约 §4.14.5 的第 8 条。
