@@ -16,3 +16,16 @@ mat_out.txt
 imu.txt
 dbg.txt
 pos_log.txt
+# 第三方参考代码（COD 战队 2026 导航成品，只读参考，不参与构建）
+third_party/cod_nav_2026/
+
+# 临时工作目录（评审遗留的 .tmp_*，包括 Livox 查看器的工作副本）
+.tmp_*/
+
+
+# 无先验全局重定位的离线评估（KISS-Matcher / Scan Context）——第三方源码、构建产物、
+# 评估数据（bag/帧/真值/结果）一律不入库，只把结论写进 docs。
+third_party/kiss_matcher/
+third_party/scan_context/
+third_party/eval/
+third_party/eval_data/
