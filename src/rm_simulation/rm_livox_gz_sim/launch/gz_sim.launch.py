@@ -20,7 +20,8 @@
 # 通过 bringup（推荐，整栈 + 端到端）：
 #   ros2 launch rm_nav_bringup bringup_sim.launch.py sim_backend:=gz \
 #       world:=RMUC2026 mode:=slam_nav lio:=small_point_lio robot:=robot11 \
-#       robot11_mount:=sensor gui:=False spin_speed:=0.0
+#       gui:=False spin_speed:=0.0
+#   （★ 2026-10-27：`robot11_mount` 已删除 —— 安装方式固定 = xacro 默认的 `sensor`。）
 # =============================================================================
 import os
 import sys
@@ -138,7 +139,6 @@ def _materialize(context, *args, **kwargs):
     gui = context.perform_substitution(LaunchConfiguration('gui'))
     robot = context.perform_substitution(LaunchConfiguration('robot'))
     robot_desc = context.perform_substitution(LaunchConfiguration('robot_description'))
-    mount = context.perform_substitution(LaunchConfiguration('robot11_mount'))
     qos = context.perform_substitution(LaunchConfiguration('gz_qos'))
     ignore_self = context.perform_substitution(LaunchConfiguration('gz_ignore_self'))
     verbose = context.perform_substitution(LaunchConfiguration('gz_verbose'))
@@ -155,15 +155,10 @@ def _materialize(context, *args, **kwargs):
         raise RuntimeError(
             'sim_backend:=gz 目前只支持 robot:=robot11（其余槽位在 gz 侧没有 Fortress 化的'
             '模型生成路径）。收到 robot=%r。' % robot)
-    if robot == 'robot11' and mount not in ('sensor', 'urdf'):
-        raise RuntimeError(
-            'robot11 在 sim_backend:=gz 下必须 robot11_mount:=sensor（>=urdf 亦可），'
-            '收到 robot11_mount=%r。\n'
-            '  原因：gz 侧的传感器 link pose 恒为 roll -0.5236（物理倾斜），点云数字因此'
-            '表达在**斜的传感器系**里；只有 URDF 的关节也斜了，robot_state_publisher 发的'
-            ' base_link→livox_frame 才与物理一致（= Classic 的 sensor 语义）。\n'
-            '  用 plugin 档会让"帧是平的、数据是斜的"，下游（linefit/p2l/LIO）全部错 30°。'
-            % mount)
+    # ★ 2026-10-27（契约 §4.15）：`robot11_mount` 已删除。安装方式只剩一种（= 原来的
+    #   `sensor` 语义）：URDF 关节 rpy=0 + 倾角在 `livox_frame→imu_link` + 插件把点旋进
+    #   水平的 `livox_frame`；gz 侧传感器 link pose 仍由下面的 `--tilt-rpy` 钉成 −0.5236。
+    #   ⇒ 这里不再校验 mount（它没有第二个取值可校验了）。
 
     # ── 世界文件 ─────────────────────────────────────────────────────────────
     if world_sel == 'bench' or world_arg not in WORLD_MAP:
@@ -215,8 +210,10 @@ def _materialize(context, *args, **kwargs):
     actions_extra_env = {}
     if robot not in ('', 'none'):
         if not robot_desc.strip():
-            # 单独跑本 launch（不经 bringup）时自己跑一次 xacro：robot11 只有这一个模型文件，
-            # 参数与 bringup 的 robot11 分支保持一致（**只传 livox_mount**）。
+            # 单独跑本 launch（不经 bringup）时自己跑一次 xacro：robot11 只有这一个模型文件。
+            # ★ 2026-10-27（契约 §4.15）：**不再传 `livox_mount`** —— 安装方式只剩一种，且已烘进
+            #   生成物 xacro（`<xacro:arg name="livox_mount" default="sensor"/>` + 常量 property）
+            #   ⇒ 取默认值 = 与原来传 `livox_mount:=sensor|urdf` 逐字节相同的生成物。
             # ⚠️ 安装倾角**不在这里传**：它是生成物 xacro 的 `livox_tilt_rpy` 默认值，源头 =
             #   上游 URDF 的 body_to_livox.rpy（契约 §4.12；measurements §31）。这里再写一个字面值
             #   就是第二个所有者，上游换支架后这条独立路径会偷偷用旧角度。
@@ -229,7 +226,7 @@ def _materialize(context, *args, **kwargs):
                     'rm_nav_bringup ⇒ 无法自己跑 xacro。\n'
                     '  单独跑本 launch 时：加 robot:=none（只起台架世界）。')
             xacro_file = os.path.join(urdf_dir, 'sentry_robot_robot11_sim.xacro')
-            cmd = ['xacro', xacro_file, 'livox_mount:=' + mount]
+            cmd = ['xacro', xacro_file]
             log('robot_description 为空 ⇒ 自己跑：%s' % ' '.join(cmd))
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
@@ -242,9 +239,9 @@ def _materialize(context, *args, **kwargs):
                '--model-name', model_name, '--csv', csv, '--qos', qos,
                '--imu-frame', 'imu_link', '--ignore-self', ignore_self,
                '--custom-msg-tag', custom_msg_tag, '--drive', drive]
-        # 30° 斜装：robot11 的 URDF 只要 livox_mount/robot11_mount:=sensor|urdf 就已经把
-        # roll 写进 body_to_livox 关节了。这里再显式钉一次，保证「不管 URDF 怎么写，
-        # gz 侧的传感器 link pose 一定是 -0.5236」（B① 决策）。
+        # 30° 斜装：robot11 的生成物 xacro 已把 roll 烘进 `livox_frame→imu_link` 与插件
+        # `<tilt_rpy>`（`base_link→livox_frame` rpy=0）。这里再显式钉一次，保证「不管 URDF
+        # 怎么写，gz 侧的传感器 link pose 一定是 -0.5236」（B① 决策）。
         if robot == 'robot11':
             cmd += ['--tilt-rpy', os.environ.get('GZ_TILT_RPY', '-0.523598775598293 0 0')]
         log('生成 %s 的 Fortress SDF：%s' % (robot, ' '.join(cmd)))
@@ -356,9 +353,8 @@ def generate_launch_description():
         DeclareLaunchArgument('robot', default_value='',
                               description="''/none = 不起机器人；robot11 = 从 robot_description "
                                           '派生 Fortress 的 SDF 模型'),
-        DeclareLaunchArgument('robot11_mount', default_value='sensor',
-                              description='与 Classic 同名（gz 后端要求 sensor|urdf：'
-                                          '倾角必须在 URDF 里，TF 才与物理一致）'),
+        # ★ 2026-10-27（契约 §4.15）：`robot11_mount` 已删除（安装方式固定 = xacro 默认的
+        #   `sensor`；本 launch 不再声明/读取它）。
         DeclareLaunchArgument('robot_description', default_value=''),
         DeclareLaunchArgument('gui', default_value='True'),
         DeclareLaunchArgument('use_sim_time', default_value='True'),

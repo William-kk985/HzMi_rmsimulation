@@ -152,63 +152,14 @@ _ROBOT_SLOTS = {
 #: 运行期真值仍然由 `_parsed_livox_mount()` 展开关节链得到。要换倾角 ⇒ 改上游 URDF + 重跑
 #: 生成器（scratch：`robot11_make_sim_xacro.py --livox-tilt-rpy "r p y"`），**不是**改这里。
 
-#: ★ 2026-10-08：robot:=robot11 的**雷达安装方式**（30° 倾角记在哪个坐标系上）。
-#:   · 'plugin'（**默认 = 2026-10-07 起的行为，逐字节不变**）：`body_to_livox` 关节 rpy = 0
-#:     （`livox_frame` 帧**重力对齐**），倾角由插件 `<tilt_rpy>` 承担 ⇒ **射线真的斜 30°**、
-#:     点云表达在水平的父 link 系、`/scan` 的高度带与 linefit 的 sensor_height 语义都对；
-#:     代价：TF 里帧是平的、**画出来的雷达 mesh 也是平的**（用户看到的"URDF/雷达图像是平放的"）。
-#:   · 'urdf'：倾角放回 URDF 关节（rpy = −0.5236 roll = 上游/CSV 的字面值 = **实物的物理安装
-#:     姿态**，连 mesh 一起斜），插件 `<tilt_rpy>` = 单位阵 ⇒ 世界里的射线方向与 plugin 档**逐条
-#:     相同**，但点云**仍表达在水平的父 link 系** ⇒ `frame_id`（`livox_frame`，它现在真的斜了
-#:     30°）与数据**不自洽**（**诊断档**：就是要看"物理保真、账不对"的原始后果；
-#:     见 docs/tilted_lidar_fidelity.md §C/§I）。
-#:   · ★ 2026-10-09 新增 'sensor'：**物理斜装 + 账也对**这一档 —— 关节 rpy / 插件 `<tilt_rpy>`
-#:     与 'urdf' 档**逐字节相同**，外加 `<cloud_frame>sensor</cloud_frame>` ⇒ 点云**真的表达
-#:     在传感器系里**（与 `frame_id = livox_frame` 指向的那个 TF 帧自洽）。代价：点云不再重力
-#:     对齐 ⇒ 本 launch 在**只在这一档**给 linefit 加 `gravity_aligned_frame: base_link`、
-#:     给 `pointcloud_to_laserscan` 加 `target_frame: base_link`（两份都是**增量覆盖**参数文件，
-#:     其它档一个参数都不加、节点集合不变）。
-#:     ⚠️ 只与 `ground:=linefit` 组合（patchwork 槽位没有这一档的覆盖文件；选了**直接报错**，
-#:     检查在 `_MountReadout.perform` 里）。
-#: ★ 2026-10-21（**按实车改约定**，契约 §4.12）：安装方式**只剩一个值** `sensor`。
-#: 旧的三档（plugin/urdf/sensor）是「30° 记在哪个坐标系上」的三个实验臂；现在
-#: `base_link→livox_frame` rpy=0（与实车 TF 一致）、倾角在 `livox_frame→imu_link`（IMU 真的斜）
-#: ⇒ 三档不再有任何差别（xacro 里那三条 property 已是常量）。保留**参数名**是为了让既有
-#: 命令 `robot11_mount:=sensor` 零改动；传 plugin/urdf 会**硬报错**（而不是静默等价）。
-_LIVOX_MOUNTS = ('sensor',)
-
-
-def _validate_livox_mount(value):
-    """把 `robot11_mount` 的取值验成 `sensor`（惰性；选错给可操作报错，不静默回退）。"""
-    v = (value or '').strip() or 'sensor'
-    if v not in _LIVOX_MOUNTS:
-        raise RuntimeError(
-            "[launch] robot11_mount:=%r 不再是可用取值（现在只有 %s）—— 2026-10-21 起安装方式按"
-            "**实车**改约定：base_link→livox_frame rpy=0、倾角在 livox_frame→imu_link（IMU 真的斜）、"
-            "点云在水平的 livox_frame 里（见契约 §4.12）。旧的 plugin/urdf 实验臂已删除"
-            % (value, ' | '.join(_LIVOX_MOUNTS)))
-    return v
-
-
-def _check_robot11_mount_combination(context):
-    """★ 2026-10-09：`robot11_mount:=sensor` 与其它槽位的**组合检查**（launch 期，t=0）。
-
-    为什么需要：`sensor` 档会给 linefit 加一份"重力对齐"的**覆盖参数文件**
-    （`segmentation_sim_robot11_sensor.yaml`，只含 `gravity_aligned_frame: base_link`）。
-    `ground:=patchwork` 走的是另一个节点（另一套参数），没有这份覆盖 ⇒ 那个组合会**静默**
-    退回"点云在斜系、分割器却以为它重力对齐"的状态。这里让它**直接报错**而不是静默变坏。
-
-    ⚠️ 必须作为 **Action**（OpaqueFunction）放在 `declare_ground_cmd` **之后**：launch 的
-    `DeclareLaunchArgument` 是按 LD 里的顺序生效的，横幅（LogInfo）在它之前 ⇒ 在
-    substitution 里读 `LaunchConfiguration('ground')` 会直接抛 "does not exist"。
-    """
-    mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-    ground = (LaunchConfiguration('ground').perform(context) or '').strip() or 'linefit'
-    if mount == 'sensor' and ground != 'linefit':
-        raise RuntimeError(
-            "[launch] robot11_mount:=sensor 目前只与 ground:=linefit 组合"
-            "（patchwork 槽位没有这一档的重力对齐覆盖参数文件）：当前 ground:=%r" % ground)
-    return []
+#: ★ 2026-10-27（契约 §4.15）：`robot11_mount` 已**删除**（不是"保留成硬报错别名"）。
+#:   安装方式只剩**一种**（= 2026-10-21 起 `sensor` 的唯一语义）：`base_link→livox_frame`
+#:   rpy=0（与实车 TF 一致、只有平移）、倾角在 `livox_frame→imu_link`（IMU 物理上真的斜）、
+#:   插件 `<tilt_rpy>` 把**射线**旋斜并把**点**旋进水平的 `livox_frame`。这套语义已经**烘进
+#:   生成物 xacro**（`<xacro:arg name="livox_mount" default="sensor"/>` + 三条常量 property）
+#:   ⇒ 本 launch 不再传 `livox_mount`，xacro 取默认值 = **生成物逐字节不变**（measurements §38）。
+#:   ⚠️ Humble 对未知的 `name:=value` **静默接受**（§28.4 实测）⇒ 传 `robot11_mount:=...`
+#:   会在 t=0 被 `_check_removed_launch_args()` **硬拦下**（不静默忽略、也不静默等价）。
 
 
 def _rpy_deg_to_R(rpy_rad):
@@ -265,7 +216,7 @@ def _robot11_tilt_rpy_from_xacro():
         % path)
 
 
-def _lio_adapter_robot11(mount='sensor'):
+def _lio_adapter_robot11():
     """robot:=robot11 的 lio_tf_adapter 补偿量（xyz = base_link 原点在 imu 系下的坐标，rpy = 其姿态）。
 
     纯几何、无魔法：imu_link 的位姿 = body_to_livox(rpy) ∘ (0,0,-0.05)（imu_joint 是 rpy=0 的
@@ -275,8 +226,7 @@ def _lio_adapter_robot11(mount='sensor'):
     ★ 2026-10-21（契约 §4.12 收口）：倾角**不再从 launch 常数读**，而是从生成物 xacro 的
     `livox_tilt_rpy` 默认值读（`_robot11_tilt_rpy_from_xacro()`）—— 那个值的源头是上游 URDF。
     `base_link→livox_frame` 现在 rpy=0、倾角只在 `livox_frame→imu_link`，所以这里**总是**用
-    倾角构旋转（`mount` 参数只为兼容 `_adapter_table()` 的签名；2026-10-21 起只有 `sensor`
-    一个有效值，且它不再改变几何）。
+    倾角构旋转。★ 2026-10-27（§4.15）：`mount` 参数已删除（安装方式不再是 launch 参数）。
     """
     tilt = [float(v) for v in _robot11_tilt_rpy_from_xacro().split()]
     rpy = tilt
@@ -389,18 +339,20 @@ def _robot_xacro_args(context, xyz, rpy):
     """
     args = [('xyz', _xacro_unquote(xyz), True), ('rpy', _xacro_unquote(rpy), True)]
     robot = (LaunchConfiguration('robot').perform(context) or '').strip()
-    if robot == 'hzmirm':
-        # 云台角：默认 0 = 与上游 URDF 数值等价；非 0 时解析器会跟着转（E1 的 rpy 也一直跟着）
-        args += [('turret_yaw_deg', LaunchConfiguration('turret_yaw_deg').perform(context), False),
-                 ('turret_pitch_deg', LaunchConfiguration('turret_pitch_deg').perform(context), False)]
-    elif robot == 'robot11':
+    # ★ 2026-10-27（契约 §4.15）：`robot:=hzmirm` 的 `turret_yaw_deg` / `turret_pitch_deg`
+    #   **已删除** —— 云台是**静态**的（上游 URDF 里两个云台关节都是 fixed，本仓**没有**
+    #   gimbal 控制器），这两个参数只改 spawn 时的静态姿态；默认 0/0 ⇒ 不再传，
+    #   xacro 用默认 0/0，生成物逐字节不变。要试别的姿态请用 scratch xacro
+    #   （见 docs/robot_models.md §3.3）。
+    if robot == 'robot11':
         # ★ 2026-10-21（契约 §4.12 收口）：**不再传 `livox_tilt_rpy`** —— 安装倾角的唯一来源是
         #   上游 URDF，生成器把它烘进生成物 xacro 的 `<xacro:arg name="livox_tilt_rpy" .../>`
         #   默认值；这里再传一份就等于第二个所有者（已删除 `_LIVOX_TILT_RPY_ROLL`）。
         #   `livox_raise_m` 同样不再从 launch 传（xacro 默认 0 = 与上游几何逐字相同）。
-        args += [('livox_mount', _validate_livox_mount(
-                     LaunchConfiguration('robot11_mount').perform(context)), False),
-                 ('visual_decimated',
+        # ★ 2026-10-27（契约 §4.15）：`livox_mount` 也已**不再传** —— 安装方式只剩 `sensor` 一种，
+        #   且已烘进 xacro（`<xacro:arg name="livox_mount" default="sensor"/>` + 常量 property）
+        #   ⇒ 取默认值 = 同一个字符串，生成的 `robot_description` 逐字节不变（measurements §38）。
+        args += [('visual_decimated',
                   'true' if (LaunchConfiguration('robot11_visual').perform(context) or '').strip()
                   == 'decimated' else 'false', False)]
     return args
@@ -610,18 +562,20 @@ def _urdf_livox_mount_table(context):
     """**旧规则表**（1b5db4b 及以前 launch 里那张）：只作交叉校验与解析失败时的回退。"""
     robot = _known_robot(context)
     if robot == 'robot11':
-        _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
         # ★ 2026-10-21（契约 §4.12）：`base_link→livox_frame` 现在**只有平移**（倾角搬到
         #   `livox_frame→imu_link`）⇒ 这张旧表的 rpy 变成 0（交叉校验用；倾角见 gravity_rpy_deg）。
+        # ★ 2026-10-27（§4.15）：`robot11_mount` 已删除 —— 安装方式只剩 `sensor` 一种，
+        #   这里不需要再校验什么（几何完全由 URDF 决定）。
         rpy = [0.0, 0.0, 0.0]
         xyz = [0.000561701465058485, 0.130915824456595, 0.15702816968305]
     elif robot == 'hzmirm':
-        yaw = float((LaunchConfiguration('turret_yaw_deg').perform(context) or '').strip() or '0.0')
-        pitch = float((LaunchConfiguration('turret_pitch_deg').perform(context) or '').strip() or '0.0')
-        R = _rpy_deg_to_R([0.0, _math.radians(pitch), _math.radians(yaw)])
-        z_off = 0.2
-        xyz = [R[0][2] * z_off, R[1][2] * z_off, 0.6 + R[2][2] * z_off]
-        rpy = _R_to_rpy_deg(R)
+        # ★ 2026-10-27（契约 §4.15）：`turret_yaw_deg` / `turret_pitch_deg` 已删除 ⇒ 云台
+        #   **固定**在默认姿态 yaw=0 / pitch=0（= 上游 URDF 的数值）。原来那三行按 yaw/pitch
+        #   构造 R 的代码在 0/0 时就是单位阵 ⇒ 这里直接写下等价常量：
+        #   R = I ⇒ xyz = [0, 0, 0.6 + 0.2] = [0, 0, 0.8]，rpy = [0, 0, 0]。
+        #   （云台是**静态**的：上游两个关节都是 fixed，本仓没有 gimbal 控制器。）
+        rpy = [0.0, 0.0, 0.0]
+        xyz = [0.0, 0.0, 0.8]
     else:                                   # 默认模型：平台外参 YAML = xacro 的 xyz/rpy 实参
         xyz_s, rpy_s = _platform_livox_origin()
         xyz = [float(v) for v in xyz_s.split()]
@@ -637,8 +591,7 @@ def _adapter_table(context):
     """旧表的 adapter 补偿量（T(imu←base)），解析失败时回退。"""
     robot = _known_robot(context)
     if robot == 'robot11':
-        mount = _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        return _lio_adapter_robot11(mount)
+        return _lio_adapter_robot11()
     if robot == 'hzmirm':
         return [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
     return [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
@@ -769,8 +722,9 @@ def _parsed_livox_mount(context, urdf_path=None, mappings=None, robot=None, moun
     if robot not in _ROBOT_SLOTS:
         raise RuntimeError("[launch] robot:=%r 不在 _ROBOT_SLOTS 里" % robot)
     if mount is None:
-        mount = (_validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-                 if robot == 'robot11' else '')
+        # ★ 2026-10-27（契约 §4.15）：`robot11_mount` 已删除 ⇒ `mount` 现在只是**日志/缓存标签**
+        #   （安装方式只剩 xacro 里烘死的一种）。不再读任何 launch 参数，也不会失败。
+        mount = 'sensor' if robot == 'robot11' else ''
     if mappings is None:
         mappings = _robot_xacro_mappings(context)          # 配置错误（轴/挂法非法）不吞、直接抛
     if urdf_path is None:
@@ -905,6 +859,63 @@ def _launch_arg_was_given(context, name):
         return False
     prefix = name + ':='
     return any(str(a).startswith(prefix) for a in argv)
+
+
+#: ★ 2026-10-27（契约 §4.15）：三个**已删除**的 launch 参数 → 给用户的替代说明。
+#: 为什么还要这张表：ROS 2 Humble 对**未知**的 `name:=value` 是**静默接受**的（§28.4 实测）——
+#: 删掉 `DeclareLaunchArgument` 只是让 `--show-args` 里不再出现，传了却**不会**报错。
+#: 本表 + `_check_removed_launch_args()` 把"静默忽略"变成 **t=0 硬报错**。
+_REMOVED_LAUNCH_ARGS = (
+    ('robot11_mount',
+     '`robot:=robot11` 的安装方式只剩**一种**（= 2026-10-21 起的 `sensor` 语义），已烘进生成物 '
+     'xacro 的 `<xacro:arg name="livox_mount" default="sensor"/>`；launch 不再需要也不再接受它。'),
+    ('turret_yaw_deg',
+     '`robot:=hzmirm` 的云台是**静态**的（上游两个关节都是 fixed、本仓**没有** gimbal 控制器），'
+     '现在固定 yaw=0° = 原来的默认值。'),
+    ('turret_pitch_deg',
+     '`robot:=hzmirm` 的云台是**静态**的（上游两个关节都是 fixed、本仓**没有** gimbal 控制器），'
+     '现在固定 pitch=0° = 原来的默认值；`h = 0.6 + 0.2·cos(0) = 0.8 m` 不变。'),
+)
+
+
+def _check_removed_launch_args(context):
+    """★ 2026-10-27（契约 §4.15）：三个**已删除** launch 参数的 t=0 硬报错守卫。
+
+    检测面（两条，任一命中就停）：
+      ① `context.launch_configurations`：这三个名字**没有** `DeclareLaunchArgument` ⇒ 没有默认值
+         ⇒ 它们出现在这里 = 有人显式设了（命令行、或父 include 的 `launch_arguments`；
+         launch 的 include 会把 `SetLaunchConfiguration` 先执行、再访问子 LD）；
+      ② `context.argv`（`_launch_arg_was_given()`，与 gravity 的旧别名同口径）：命令行原文。
+         ①已覆盖②；保留②是为了"即使将来有人给它们加回声明（带默认值），命令行显式传仍然会被抓"。
+
+    为什么不用"声明成硬报错别名"（像 §4.14 的 6 个 gravity 旧名）：本任务要求这三项从
+    `--show-args` 里**消失**（§4 的验收），而声明了就一定还在。
+
+    ⚠️ 边界（诚实清单）：若父 launch 自己在**它自己的作用域**里声明了同名参数、又不传给本
+    launch，本文件看不到"来源"——但那样它也不会进本 context 的 `launch_configurations`
+    （除非父 include 真的传了 `launch_arguments`，那正是我们要拦的）。
+    """
+    given = []
+    for name, hint in _REMOVED_LAUNCH_ARGS:
+        value = context.launch_configurations.get(name)
+        from_argv = _launch_arg_was_given(context, name)
+        if value is None and not from_argv:
+            continue
+        if value is None:                                  # 只在 argv 里出现（防御式，不猜值）
+            value = '<见命令行 argv>'
+        given.append('  · %s:=%s\n      %s' % (name, value, hint))
+    if given:
+        raise RuntimeError(
+            "[launch] 这三个 launch 参数**已删除**（契约 §4.15 / measurements §38），"
+            "但本命令仍然传了：\n%s\n"
+            "  ⇒ 直接去掉它们重跑即可（默认行为 = 唯一行为）：\n"
+            "     · `robot11_mount`：xacro 默认 `sensor`，生成物与传 `robot11_mount:=sensor` 逐字节相同；\n"
+            "     · `turret_yaw_deg` / `turret_pitch_deg`：hzmirm 云台固定 0/0（静态 spawn 姿态，"
+            "没有控制器），`h = 0.8 m` 不变。\n"
+            "  历史与证据：docs/frame_contract_v3.md §4.15 + "
+            "docs/frame_contract_v3_measurements.md §38"
+            % '\n'.join(given))
+    return []
 
 
 #: `gravity:=base` 允许的局部障碍层 = **逐点**层（带逐点高度语义）。
@@ -1739,14 +1750,15 @@ class _RobotSlot(Substitution):
 
 
 class _RobotXacroCommand(Substitution):
-    """拼出 `xacro <模型> xyz:=… rpy:=… [云台角]` 这条命令（惰性）。
+    """拼出 `xacro <模型> xyz:=… rpy:=… [visual_decimated:=…]` 这条命令（惰性）。
 
     ★ 2026-10-21：参数列表现由 `_robot_xacro_args()` **唯一真源**生成 —— 与 URDF 解析器
     （`_robot_xacro_mappings`）共用同一份 ⇒ "解析的模型" 与 "spawn 的模型" 在参数上不会分叉。
     对 1b5db4b 的所有槽位/挂法/轴，渲染出的字符串**逐字节不变**（含 robot11 的引号规则）。
 
-    默认槽位的输出与改造前逐字节相同；只有 hzmirm 槽位才追加 turret_yaw_deg / turret_pitch_deg
-    （默认 0 ⇒ 与上游 URDF 数值等价；非 0 用于试"雷达斜放/云台转动"假设，见 docs/robot_models.md §3）。
+    ★ 2026-10-27（契约 §4.15）：hzmirm 不再追加 `turret_yaw_deg` / `turret_pitch_deg`
+    （云台固定 0/0）、robot11 不再追加 `livox_mount`（只剩 xacro 默认的 `sensor`）⇒ 命令字符串
+    各少一个/两个 token，但 xacro 取默认值 = 同一份输出（measurements §38 的 md5 表）。
     """
 
     def __init__(self, urdf_dir, xyz, rpy):
@@ -1838,15 +1850,15 @@ class _YamlKeysReadout(Substitution):
 
 
 class _MountReadout(Substitution):
-    """robot:=robot11 的**安装方式**在横幅里的收据（运行时按 robot11_mount 给不同的话）。
+    """robot:=robot11 的**安装方式**在横幅里的收据（静态文本；参数已删除）。
 
-    ★ 2026-10-08：横幅不能写死"livox_frame 的 rpy=0" —— `robot11_mount:=urdf` 时它是斜的。
-    这里把"当前这一跑到底把倾角记在哪儿、哪些下游语义会跟着变"如实打出来。
+    ★ 2026-10-08：横幅不能写死"livox_frame 的 rpy=0" —— 当时 `robot11_mount:=urdf` 时它是斜的。
+    ★ 2026-10-27（契约 §4.15）：`robot11_mount` **已删除**，安装方式只剩一种（= 2026-10-21 起的
+    `sensor` 语义，已烘进 xacro 默认值）⇒ 这里不再按参数分支，只把**当前唯一**的语义如实打出来。
     """
 
     def perform(self, context):
-        _validate_livox_mount(LaunchConfiguration('robot11_mount').perform(context))
-        return ('  · 雷达安装方式 robot11_mount=sensor（★ 2026-10-21 **按实车改约定**，契约 §4.12）：'
+        return ('  · 雷达安装方式 = **实车约定**（契约 §4.12；2026-10-27 起没有 `robot11_mount` 参数）：'
                 '`base_link→livox_frame` **rpy=0**（与实车 TF 一致，只有平移 0.204443 m）+ 倾角在 '
                 '`livox_frame→imu_link`（IMU 物理上真的斜 30°，加速度计感受得到）+ 插件 '
                 '`<tilt_rpy>` 把**射线**旋斜、并把**点**旋进**水平**的 `livox_frame`（= 实车驱动器 '
@@ -2585,9 +2597,10 @@ def generate_launch_description():
     #     docs/fortress_sim_backend.md）。
     #   ⚠️ `gz` 档的两个硬要求（缺了**明确报错**，不静默跑错）：
     #     ① `robot:=robot11` —— 只有这个槽位在 gz 侧有 Fortress 化的模型生成路径；
-    #     ② `robot11_mount:=sensor` —— 倾角必须在 URDF 里（TF 才与物理一致）。gz 侧生成的
-    #        `<link><pose>` 也真的带 roll −0.5236 ⇒ 点云数字在**斜的传感器系**里，
-    #        与 Classic 的 `robot11_mount:=sensor` 语义一字不差。
+    #     ② 雷达安装方式 = 唯一的 `sensor` 语义（倾角必须在 URDF 里，TF 才与物理一致）。gz 侧
+    #        生成的 `<link><pose>` 也真的带 roll −0.5236 ⇒ 点云数字在**斜的传感器系**里。
+    #        ★ 2026-10-27（契约 §4.15）：`robot11_mount` 已删除，**不需要再传**；gz_sim.launch.py
+    #        自己的同名参数默认 `sensor`（本文件不再转发它）。
     declare_sim_backend_cmd = DeclareLaunchArgument(
         'sim_backend',
         default_value='classic',
@@ -2595,7 +2608,8 @@ def generate_launch_description():
         description='仿真后端：classic（默认；Gazebo Classic 11，本文件现行行为逐字节不变）'
                     '| gz（opt-in；Gazebo Fortress = ignition-gazebo6。需先跑 '
                     'tools/scripts/gzsim/fetch_and_patch_mid360.sh，且必须 '
-                    'robot:=robot11 robot11_mount:=sensor）')
+                    'robot:=robot11；雷达安装方式自 2026-10-27 起固定为 sensor，不再有 '
+                    'robot11_mount 参数）')
 
     # ★ 2026-10-07：机器人模型槽位（**opt-in**，默认值 = 本仓现行模型 ⇒ 现有行为不变）。
     declare_robot_cmd = DeclareLaunchArgument(
@@ -2631,24 +2645,12 @@ def generate_launch_description():
     #   ⚠️ 这两个值都是"生成模型的输入"，不是运行时真值：安装 rpy/xyz 由 URDF 解析
     #   （`_parsed_livox_mount()`）唯一定义，所以删除开关不会改变默认路径。
 
-    # ★ 2026-10-08：robot:=robot11 的**雷达安装方式**开关（opt-in；默认 = 2026-10-07 起的行为）。
-    #   用户诉求原话："我就是要学斜放置怎么处理…雷达给我按我给你的放好，算法不管后面再看怎么调试，
-    #   我要看到倾斜放置最原始的效果"。`plugin` 档把 30° 记在插件参数上（帧重力对齐 ⇒ 下游语义都对，
-    #   但 TF/画的 mesh 是平的）；`urdf` 档把 30° 记回 URDF 关节（**实物的物理安装姿态，mesh 一起斜**）
-    #   ⇒ 点云表达在斜的传感器系里、地面在点云里是 30° 斜面、`/scan` 高度带与 linefit 语义跟着变。
-    #   ⚠️ 本开关**不动任何感知参数** —— 就是要看原始后果。取证与实测见 docs/tilted_lidar_fidelity.md。
-    declare_robot11_mount_cmd = DeclareLaunchArgument(
-        'robot11_mount',
-        default_value='sensor',
-        description='仅 robot:=robot11：雷达安装约定。★ 2026-10-21 起**按实车**改成一种（契约 §4.12）：'
-                    '`sensor`（唯一取值）= `base_link→livox_frame` **rpy=0**（与实车 TF 一致，只有平移）'
-                    '+ 倾角在 `livox_frame→imu_link`（IMU 物理上真的斜 30°，加速度计感受得到）'
-                    '+ 插件 `<tilt_rpy>` 把**射线**旋斜、并把**点**旋进水平的 `livox_frame`'
-                    '（= 实车驱动器 `extrinsic_parameter` 只旋点云的语义）'
-                    '+ LIO 的 `extrinsic_R` 由本 launch 从 URDF 解析成 Rx(+30°)（点云→IMU）。'
-                    '旧的 plugin / urdf 两个实验臂（“倾角记在关节上/记在插件上”）**已删除**，'
-                    '传这两个值会**硬报错**。取证/历史见 docs/tilted_lidar_fidelity.md §J。',
-        choices=list(_LIVOX_MOUNTS))
+    # ★ 2026-10-27（契约 §4.15）：`robot11_mount` **已删除**（不再声明；`--show-args` 里没有它）。
+    #   它的唯一取值 `sensor` 的语义已烘进生成物 xacro 的 `<xacro:arg ... default="sensor"/>`，
+    #   所以默认路径的 `robot_description` 逐字节不变（measurements §38）。
+    #   ⚠️ 传这个参数**不会**被 ROS 2 当成错误（Humble 对未知 `name:=value` 静默接受，§28.4）；
+    #   本 launch 用 `_check_removed_launch_args()` 在 t=0 **硬报错**，消息指向本节。
+    #   历史三档（plugin/urdf/sensor）与取证见 docs/tilted_lidar_fidelity.md §J / 契约 §4.15。
 
     # ★★ 2026-10-21（契约 v3 §4.14）：**重力/水平帧的唯一用户开关** `gravity`。
     #   旧参数组（level_frame / gravity_align_mode / gravity_align_z_origin / z_origin_source）
@@ -2741,20 +2743,12 @@ def generate_launch_description():
                     '用户 2026-10-07 的 GUI 跑就是这一档被杀掉 gzclient 的（§12/§13 有实测对照）',
         choices=['decimated', 'full'])
 
-    # 云台角（度）：只对 robot:=hzmirm 生效，默认 0 = 与上游 URDF **数值等价**。    # 用途：试"雷达是不是斜放的/云台会不会动"这个假设（上游文件里两个云台关节都是 fixed、
-    # head_to_lidar 的 rpy 是 0，即**没有**斜装）。pitch≠0 会破坏"雷达重力对齐"，
-    # 这时 linefit 必须用 gravity_aligned_frame（该槽位的 YAML 已经配好 base_link）。
-    declare_turret_yaw_deg_cmd = DeclareLaunchArgument(
-        'turret_yaw_deg',
-        default_value='0',
-        description='仅 robot:=hzmirm：base_to_turret 的静态偏航角（度）。绕 z 转 ⇒ '
-                    '雷达 z 轴仍朝上，**不影响** linefit/p2l 的重力对齐假设（实测见 docs/robot_models.md §3.3）')
-    declare_turret_pitch_deg_cmd = DeclareLaunchArgument(
-        'turret_pitch_deg',
-        default_value='0',
-        description='仅 robot:=hzmirm：turret_to_head 的静态俯仰角（度）。会**破坏**雷达重力对齐 ⇒ '
-                    'linefit 必须配 gravity_aligned_frame=base_link（本槽位 YAML 已配）+ p2l 的高度带'
-                    '在传感器系里被"拧斜"（实测劣化见 docs/robot_models.md §3.3）')
+    # ★ 2026-10-27（契约 §4.15）：`turret_yaw_deg` / `turret_pitch_deg` **已删除**（不再声明；
+    #   `--show-args` 里没有它们）。为什么它们曾经存在：`robot:=hzmirm` 上游 URDF 里两个云台关节
+    #   都是 **fixed**，本仓**没有 gimbal 控制器** ⇒ 它们从来不是"控制量"，只是 spawn 时的**静态
+    #   姿态**（默认 0/0 = 与上游数值等价）；pitch≠0 还会破坏雷达重力对齐。现在云台**固定**
+    #   在 yaw=0 / pitch=0（生成物逐字节不变、`h = 0.8 m` 不变，measurements §38）。
+    #   ⚠️ 传这两个参数会在 t=0 被 `_check_removed_launch_args()` **硬报错**（不静默忽略）。
 
     declare_mode_cmd = DeclareLaunchArgument(
         'mode',
@@ -3066,7 +3060,9 @@ def generate_launch_description():
             'world': world,
             'robot': LaunchConfiguration('robot'),
             'robot_description': robot_description,
-            'robot11_mount': LaunchConfiguration('robot11_mount'),
+            # ★ 2026-10-27（契约 §4.15）：不再传 `robot11_mount` —— 本 launch 已没有这个参数，
+            #   gz_sim.launch.py 的**同名声明也已删除**（安装方式固定 = xacro 默认 `sensor`）
+            #   ⇒ 启动参数与删除前传 `sensor` 逐字节相同（gz 生成物 md5 见 measurements §38.2e）。
             'gui': gui,
             'use_sim_time': use_sim_time,
         }.items(),
@@ -3102,13 +3098,11 @@ def generate_launch_description():
             condition=condition,
         )
 
-    #   ↑ 与 2026-10-07 起的行为**逐个参数文件相同**（默认/plugin/urdf 档走的就是它）。
+    #   ↑ 与 2026-10-07 起的行为**逐个参数文件相同**。
     # ★ 2026-10-06：地面分割槽位 ground（默认 linefit ⇒ 本节点照旧启动，行为不变）。
-    #   ★ 2026-10-09：**必须**同时排除 `robot11_mount:=sensor`（那一档由下面那份**多一层重力对齐
-    #   覆盖文件**的节点承担）—— 否则两 个 linefit 会同时启动、`/segmentation/{ground,obstacle}`
-    #   各有两个发布者（实测过：契约检查里 publishers=2 ⇒ 本条件的回归判据）。
-    #   非 sensor 档（默认 'plugin'、'urdf'、以及所有其它模型）走的就是这一份，参数列表与
-    #   2026-10-07 起**逐个文件相同**。
+    #   ⚠️ 历史（2026-10-09→2026-10-21）：曾有一个"`robot11_mount:=sensor` 专属、多一层
+    #   `gravity_aligned_frame: base_link` 覆盖文件"的互斥 linefit；该覆盖文件已随 §4.12 删除，
+    #   本文件现在只有 `linefit` 与 `gravity:=base` 两份互斥节点（见下）。
     # ★★ 2026-10-21（契约 §4.14）：`gravity:=base` 的**第二份互斥 linefit**（同一个节点名/可执行
     #   文件，只多一个 `gravity_aligned_frame: base_link` 覆盖键）。
     #   为什么 base 档要它：base 档把"高度语义"放在 base_link —— linefit 的 sensor_height 是
@@ -3158,7 +3152,11 @@ def generate_launch_description():
     #   只有这一档递进 `laserscan_params_sensor_frame.yaml`（**只含 `target_frame: base_link`**），
     #   让 `/scan` 回到"重力对齐的水平面里的一圈"、`min/max_heights` 恢复"离地高度"语义。
     #   代价与本仓 2026-09-23 的取舍（TF/MessageFilter 故障面）登记在 docs/tilted_lidar_fidelity.md §J。
-    def _p2l_node(extra_params, condition):
+    # ★ 2026-10-27（契约 §4.15）：`robot11_mount` 已删除 ⇒ **只保留一份** p2l 节点。删除前
+    #   唯一合法值是 `sensor`，所以 `target_frame: base_link` 那份增量覆盖**一直是实际生效的**
+    #   （`!= 'sensor'` 的门在参数删除前就恒假）⇒ 现在去掉门，起进程的节点集合与删除前
+    #   逐字段相同（measurements §38 的 visited diff）。
+    def _p2l_node(extra_params):
         return Node(
             package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
             remappings=[('cloud_in',  ['/segmentation/obstacle']),
@@ -3172,19 +3170,12 @@ def generate_launch_description():
                                      'config', 'laserscan_params.yaml'),
                         *extra_params,
                         {'use_sim_time': use_sim_time}],
-            name='pointcloud_to_laserscan',
-            condition=condition)
+            name='pointcloud_to_laserscan')
 
+    # 「点云在斜系」的唯一安装约定：`target_frame: base_link`（只含这一个键的增量覆盖文件）。
     bringup_pointcloud_to_laserscan_node = _p2l_node(
-        [], IfCondition(PythonExpression(
-            ["'", LaunchConfiguration('robot11_mount'), "' != 'sensor'"])))
-    # ★ 2026-10-09：`robot11_mount:=sensor` 专用（多一份只含 target_frame: base_link 的覆盖文件）。
-    #   ⚠️ 与上面那份**互斥**（同一个节点名/同一个 /scan 契约 ⇒ 只会起一个）。
-    bringup_pointcloud_to_laserscan_node_sensor = _p2l_node(
         [_PackageShareFile('pointcloud_to_laserscan', 'config',
-                           'laserscan_params_sensor_frame.yaml')],
-        IfCondition(PythonExpression(
-            ["'", LaunchConfiguration('robot11_mount'), "' == 'sensor'"])))
+                           'laserscan_params_sensor_frame.yaml')])
 
     bringup_LIO_group = GroupAction([
         GroupAction(
@@ -4194,6 +4185,11 @@ def generate_launch_description():
 
     ld = LaunchDescription()
 
+    # ★ 2026-10-27（契约 §4.15）：已删除参数的 **t=0 守卫** —— 必须是**第一个** Action：
+    #   传了 `robot11_mount:=…` / `turret_yaw_deg:=…` / `turret_pitch_deg:=…` 就在这里停，
+    #   任何节点都不会被起（ROS 2 Humble 对未知 launch 参数本身是静默接受的，见 §28.4）。
+    ld.add_action(OpaqueFunction(function=_check_removed_launch_args))
+
     # Declare the launch options
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_lio_rviz_cmd)
@@ -4208,10 +4204,8 @@ def generate_launch_description():
     ld.add_action(declare_spin_speed_cmd)
     ld.add_action(declare_world_cmd)
     ld.add_action(declare_sim_backend_cmd)
-    ld.add_action(declare_turret_yaw_deg_cmd)
-    ld.add_action(declare_turret_pitch_deg_cmd)
-    # ★ 2026-10-08：robot:=robot11 的雷达**安装方式**（倾角记在插件 vs 记在 URDF 关节）
-    ld.add_action(declare_robot11_mount_cmd)
+    # ★ 2026-10-27（契约 §4.15）：`turret_yaw_deg` / `turret_pitch_deg` / `robot11_mount` 已删除
+    #   （云台固定 0/0；安装方式只剩 xacro 默认的 sensor）⇒ 这里不再有它们的声明。
     # ★★ 2026-10-21（契约 §4.14）：重力/水平帧的**唯一用户开关**。必须最先声明（下游派生都读它）。
     ld.add_action(declare_gravity_cmd)
     # ---- 以下 6 个 = **硬报错别名**（只为让 --show-args 还能看到"它们被 gravity 取代"）----
@@ -4236,9 +4230,9 @@ def generate_launch_description():
              '雷达在云台头上、离地 ~0.80 m（比默认模型高 0.57 m）⇒ '
              '本次 linefit 用 segmentation_sim_hzmirm.yaml（sensor_height 重新标定 + '
              'gravity_aligned_frame=base_link），lio_tf_adapter 杆臂改为 [0,0,-0.75]。'
-             '云台角 turret_yaw_deg=', LaunchConfiguration('turret_yaw_deg'),
-             ' turret_pitch_deg=', LaunchConfiguration('turret_pitch_deg'),
-             '（0 = 与上游 URDF 数值等价）。数值对照/回滚见 docs/robot_models.md']))
+             '云台**固定**在 yaw=0 / pitch=0（2026-10-27 起 `turret_yaw_deg`/`turret_pitch_deg` '
+             '已删除：云台没有控制器、上游两个关节都是 fixed，它们只是 spawn 时的静态姿态；'
+             '0/0 = 与上游 URDF 数值等价）。数值对照/回滚见 docs/robot_models.md']))
     ld.add_action(LogInfo(
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('robot'), "' == 'robot11'"])),
         msg=['[robot] 模型槽位 = robot11（urdf/sentry_robot_robot11_sim.xacro）：用户的哨兵，'
@@ -4273,8 +4267,8 @@ def generate_launch_description():
     ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
     ld.add_action(declare_ground_cmd)
-    # ★ 2026-10-09：robot11_mount:=sensor 的组合检查（必须在 ground 声明**之后**，见该函数注释）
-    ld.add_action(OpaqueFunction(function=_check_robot11_mount_combination))
+    # ★ 2026-10-27（契约 §4.15）：`_check_robot11_mount_combination` 已随 `robot11_mount` 删除
+    #   （它检查的 "sensor ⇔ ground:=linefit" 前提已不存在：sensor 语义现在是唯一且无覆盖文件）。
     ld.add_action(declare_global_obstacle_cmd)
     ld.add_action(declare_local_obstacle_cmd)
     # ★★ 2026-10-21（契约 §4.14）：`gravity` 的组合检查 + t=0 收据。
@@ -4321,8 +4315,6 @@ def generate_launch_description():
     ld.add_action(bringup_linefit_ground_segmentation_node_base)
     ld.add_action(bringup_patchwork_ground_segmentation_node)
     ld.add_action(bringup_pointcloud_to_laserscan_node)
-    # ★ 2026-10-09：robot11_mount:=sensor 的 p2l（多一份 target_frame 覆盖文件；与上面互斥）
-    ld.add_action(bringup_pointcloud_to_laserscan_node_sensor)
     ld.add_action(bringup_LIO_group)
     
     # T1：ICP 模式的帧桥（由条件控制，仅 nav+icp+LIO 时生效）

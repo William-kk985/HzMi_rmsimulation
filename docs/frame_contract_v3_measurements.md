@@ -8147,3 +8147,226 @@ GAZEBO_MASTER_URI、一栈一跑、收尾 `scoped_cleanup.sh`。冻结：`git_he
     假阴性一列已给出 x=4 掉出 `[−1,1]` 的直接证据）。
 13. **`p2l` 的实际带 `[−1,1]` 与 `[−0.05,2.0]` 的差别**容易被误读：37.5 的 B 列 3108–3154 格是
     "同一数值带在 base_link 里"的结果；**p2l 实际吃的是 linefit 之后的云**，所以现网并不靠它去地面。
+
+---
+
+## §38 第二十八轮（**本机 date=2026-10-27，11:27–11:45**）：删除三个冗余 launch 参数 `robot11_mount` / `turret_yaw_deg` / `turret_pitch_deg` —— 默认路径逐字节不变 + **t=0 硬报错守卫**（不再静默忽略）
+
+> **本节只新增**（append-only）：§1–§37 一个字没改。任务（用户批准，原话）：
+> "robot11_mount，turret_yaw_deg / turret_pitch_deg 删除吧"。
+> 契约条款见 **§4.15**；本节只放**实测/证据**。基线 = `c661c2c`（= origin/master）。
+>
+> 三条事实（删之前就成立，不是本轮引入）：
+> ① `robot11_mount` 的唯一合法值 = `sensor`（`_LIVOX_MOUNTS=('sensor',)`；plugin/urdf 已硬报错），
+> 它只喂 xacro 的 `livox_mount`，而生成物里 `<xacro:arg name="livox_mount" default="sensor"/>`
+> 且三条 property 全是常量 ⇒ 不传 = 传 `sensor`；
+> ② `turret_yaw_deg`/`turret_pitch_deg` 只对 `robot:=hzmirm` 生效、默认 **0/0**，改的只是
+> spawn 的**静态**云台姿态（上游两个关节都是 fixed，本仓**没有 gimbal 控制器**）；
+> ③ ROS 2 Humble 对**未知**的 `name:=value` **静默接受**（§28.4 实测）⇒ 只删声明 = 新造一个
+> 静默忽略面，必须自己加守卫。
+
+### 38.1 删了什么（file:line，均为**删除**）
+
+| 文件 | 位置 | 删除内容 |
+|---|---|---|
+| `src/rm_nav_bringup/launch/bringup_sim.launch.py` | 155–162 起 | `robot11_mount` 的 24 行历史注释（改成"已删除"说明） |
+| 同上 | 178–211 | `_LIVOX_MOUNTS` / `_validate_livox_mount()` / `_check_robot11_mount_combination()` |
+| 同上 | 219 | `_lio_adapter_robot11(mount='sensor')` 的 `mount` 参数 |
+| 同上 | 333–358 | `_robot_xacro_args()` 里 hzmirm 的 `turret_yaw_deg`/`turret_pitch_deg`、robot11 的 `livox_mount` |
+| 同上 | 561–584 | `_urdf_livox_mount_table()` 的 robot11 mount 校验 + hzmirm 的 R(yaw,pitch) 分支（改写成 0/0 常量） |
+| 同上 | 713–727 | `_parsed_livox_mount()` 读 `robot11_mount` |
+| 同上 | 1852–1870 | `_MountReadout.perform` 的 `_validate_livox_mount(...)`（改为静态收据） |
+| 同上 | 2589–2606 | `declare_robot11_mount_cmd = DeclareLaunchArgument('robot11_mount', …)` |
+| 同上 | 2699–2712 | `declare_turret_yaw_deg_cmd` / `declare_turret_pitch_deg_cmd` |
+| 同上 | 4191 附近 | `ld.add_action(declare_robot11_mount_cmd/declare_turret_*)` |
+| 同上 | 4229 附近 | `OpaqueFunction(function=_check_robot11_mount_combination)` |
+| 同上 | 3021–3024 | gz include 的 `'robot11_mount': LaunchConfiguration('robot11_mount')` |
+| 同上 | 3133–3142 | 两份互斥 p2l 节点 → **一份**（`laserscan_params_sensor_frame.yaml`，无条件） |
+| `src/rm_simulation/rm_livox_gz_sim/launch/gz_sim.launch.py` | 24 / 127–141 / 158–161 / 209–229 / 353–358 | 同名 `DeclareLaunchArgument`、`_materialize()` 的读点、`mount not in ('sensor','urdf')` 校验、单独跑时 `xacro … livox_mount:=$mount` |
+
+**新增**（唯一的新代码）：`_REMOVED_LAUNCH_ARGS` + `_check_removed_launch_args()`（`bringup_sim.launch.py`
+868–916），并作为 `ld` 的**第一个 Action**（4191）。它把"删了声明"补成**硬报错**（§38.5）。
+
+**`src/rm_simulation/**` 的越界说明**：只改了 `gz_sim.launch.py` 里 `robot11_mount` 这一个参数的
+声明/读取/校验，**其它一个字节没动**（父任务批准的 options B）。原因见 §38.3：不删它，
+`bringup_sim --show-args` 里 `robot11_mount` 会从 gz include 的递归里**露出来**，总数只能 −2。
+
+### 38.2 默认路径逐字节证据（主验收）
+
+**(a) 生成物 xacro 文件本身（一个字节没动；本任务只读）**
+
+| 文件 | md5 | 判 |
+|---|---|---|
+| `src/rm_nav_bringup/urdf/sentry_robot_sim_rigid.xacro`（默认） | `a41c283a6ec905e883a20fee0a820c29` | 同左 ✅ |
+| `src/rm_nav_bringup/urdf/sentry_robot_hzmirm_sim.xacro` | `2ce23d135a3d8f69d351ae0c854825ef` | 同左 ✅ |
+| `src/rm_nav_bringup/urdf/sentry_robot_robot11_sim.xacro` | `c5e12d36be2c6dac2d7968c3cecb930f` / 56140 B | 同左 ✅ |
+
+**(b) `robot_description`（= launch 同一条 xacro command 的 stdout；改动前 / 改动后）**
+
+| robot | 改动前 md5 / 字节 | 改动后 md5 / 字节 | `h`（m） | 判 |
+|---|---|---|---|---|
+| `''`（默认） | `bc62af22f7be49395525978b1264750c` / 10353 | **同左** | **0.235000** | ✅ 逐字节 |
+| `hzmirm` | `a13e053090bf1344a06d58241bf845f9` / 18630 | **同左** | **0.800000** | ✅ 逐字节 |
+| `robot11` | `4f19a8b4faa3a7c659850d0064d3c5ca` / 47745 | **同左** | **0.25952717** | ✅ 逐字节 |
+
+口径：`probe` 直接 import 两版 launch，用**同一个** `_robot_xacro_args()`/`_render_robot_xacro_command()`
+渲染 command 并跑 `xacro`（quota 规则与 launch 逐字相同）；`h` 用 `_gravity_align_h()`。
+**活栈复核**（§38.6 两跑，`ros2 param dump /robot_state_publisher` → 解析 YAML）：
+`hzmirm` = `a13e053090bf1344a06d58241bf845f9` / **18630 B**、`robot11` = `4f19a8b4faa3a7c659850d0064d3c5ca` /
+**47745 B** —— 与上表逐字节一致。
+
+**(c) command 字符串的**唯一**变化（输出相同）**
+
+```text
+hzmirm : xacro …/sentry_robot_hzmirm_sim.xacro xyz:="0.12 0.0 0.175" rpy:="0.0  0.0  0.0" turret_yaw_deg:=0 turret_pitch_deg:=0
+       → xacro …/sentry_robot_hzmirm_sim.xacro xyz:="0.12 0.0 0.175" rpy:="0.0  0.0  0.0"
+robot11: xacro …/sentry_robot_robot11_sim.xacro xyz:=… rpy:=… livox_mount:=sensor visual_decimated:=true
+       → xacro …/sentry_robot_robot11_sim.xacro xyz:=… rpy:=…                     visual_decimated:=true
+默认模型: 不变。
+```
+
+**(d) hzmirm 云台 = 0/0（活栈 `robot_description` 的 `<joint>` 解析）**
+
+`base_to_turret`（fixed）`rpy=[0, 0, 0.0]`、`turret_to_head`（fixed）`rpy=[0, 0.0, 0]`；
+`head_to_lidar` xyz `[0,0,0.2]`、`imu_joint` xyz `[0,0,-0.05]` —— 与改动前生成物一致。
+`/odom_level_tf sensor_height` = **0.8**、`h(URDF)` 日志 = `0.800000000`、`h_imu = 0.750000000`。
+
+**(e) gz 单独路径（standalone，`robot_description` 为空时自己跑 xacro）**
+
+`xacro <robot11.xacro> livox_mount:=sensor` 与 `xacro <robot11.xacro>` 的 stdout
+**都** = `4f19a8b4faa3a7c659850d0064d3c5ca` / **47745 B**（`cmp` 逐字节相同）⇒ 去掉那个 mapping
+不改变 gz 生成物。
+
+**(f) `robot_description` 变化的"零"**：三行上表的 md5 与 §31.2(b) 的 `robot11` sensor 行、
+§28.2(b) 的默认/hzmirm 行**逐字相同**（跨三轮稳定）。
+
+### 38.3 `--show-args`（Humble，私有 `HOME`/`ROS_LOG_DIR`）
+
+| 口径 | 改动前 | 改动后 | 判 |
+|---|---|---|---|
+| `bringup_sim` 顶层 `DeclareLaunchArgument` | **44** | **41** | −3 ✅ |
+| `bringup_sim --show-args` 总块数（含 include 递归） | **107** | **104** | −3 ✅ |
+| `gz_sim.launch.py --show-args` 总块数 | **17** | **16** | −1 ✅ |
+| 两边 `--show-args` exit code | 0 | **0** | ✅ |
+
+**逐块 diff（bringup）**：消失 = **`turret_yaw_deg`、`turret_pitch_deg`、`robot11_mount`**；
+新增 = **0**；**103 个块逐字相同**；另有 **1 个块文本变了** = `sim_backend` 的 description ——
+它原来教人传 `robot11_mount:=sensor`，现在改成"安装方式固定 sensor，不再有 robot11_mount 参数"。
+（这是**唯一**的文本改动；参数本身没有增减。若要求"除这三个块外全部逐字相同"，这一行是刻意
+的例外，理由 = 不给用户一条会 t=0 报错的命令。）
+
+**为什么必须动 `gz_sim.launch.py`**：`--show-args` 会递归进被 include 的 launch（`get_launch_arguments()`
+→ `try_get_launch_description_without_context()`）。删掉 bringup 的顶层声明后，`gz_sim.launch.py`
+自己的同名声明就**露出来了**（实测：总块数只从 107→105，`robot11_mount` 出现在 gz 的 16 个参数里）。
+删掉那个声明后：bringup **107→104**、gz **17→16**、两边的 `robot11_mount` 都**不再出现**。
+
+### 38.4 真正起进程的执行集（`launch_increment_diff` + `visited_diff` 口径）
+
+**静态 Action 树**（`tools/scripts/gzsim/launch_increment_diff.py --old old.py --new new.py`）：
+`OLD 75 / NEW 71`；变化全部是本任务显式要求的：3 个声明删除、`sim_backend` 描述文本、
+hzmirm 横幅文本、gz include 的 `robot11_mount` 参数、p2l 两份 Node → 一份、守卫 OpaqueFunction
+移到了第一个。**共有 Action 的相对顺序**：除"守卫从 ground 之后移到最前"外一致（工具把两个
+function 内容都序列化成 `{'__type__': 'function'}`，所以它看不到守卫**函数体**的变化）。
+
+**执行集（visited，按 condition 求值后真正会执行的 `Node`/`IncludeLaunchDescription`/`ExecuteProcess`）**：
+
+| 参数组 | process 数 OLD / NEW | 归一化 md5（忽略工具字段 `__condition_evaluated__`） | 0 removed / 0 added |
+|---|---|---|---|
+| 默认（`robot:=''`，不传 mode） | **9 / 9** | `0488f45c84b27b5b579a4c764b25757e` = 同左 | ✅ |
+| `robot:=hzmirm mode:=nav localization:=gicp` | **9 / 9** | `f74cb6db28b98ee60ddeeb638fdabf36` = 同左 | ✅ |
+| `robot:=robot11 mode:=nav localization:=gicp` | **9 / 9** | `39284f920ac810b8a404c6c682cf6c14` = 同左 | ✅ |
+
+**唯一"看起来变了"的一项**：p2l 的 `Node` 在 OLD 带 `IfCondition(robot11_mount == 'sensor')`（求值 True）、
+NEW 不带 condition；两者**参数字典逐字段相同**（工具 diff 只剩 `__condition_evaluated__: True → False`）。
+用户口径的"节点/参数/执行集"**没有变**（`/scan` 的节点集合仍是 1 个 p2l）。
+`robot_description` 子树 md5 `bb73e46a5573c5e98bf32dbc4b1c9e71` 两边相同。
+
+### 38.5 t=0 守卫的证据（no silent ignores）
+
+**命令**（每条都是 `HOME`/`ROS_LOG_DIR`/`ROS_DOMAIN_ID` 私有；`timeout 60`；**不**起 Gazebo）：
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py robot:=hzmirm robot11_mount:=sensor
+ros2 launch rm_nav_bringup bringup_sim.launch.py robot:=hzmirm turret_yaw_deg:=10
+ros2 launch rm_nav_bringup bringup_sim.launch.py robot:=hzmirm turret_pitch_deg:=-5
+ros2 launch rm_nav_bringup bringup_sim.launch.py robot:=hzmirm robot11_mount:=sensor turret_yaw_deg:=10 turret_pitch_deg:=-5
+ros2 launch .tmp_del3/include_probe.launch.py   # 父 include 用 launch_arguments={'robot11_mount':'sensor'} 传进来
+```
+
+**结果**（全部 `rc=1`，`grep -c "process started"` = **0**）：
+
+```text
+[ERROR] [launch]: Caught exception in launch (see debug for traceback): [launch] 这三个 launch 参数**已删除**
+（契约 §4.15 / measurements §38），但本命令仍然传了：
+  · robot11_mount:=sensor
+      `robot:=robot11` 的安装方式只剩**一种**（= 2026-10-21 起的 `sensor` 语义）…
+  ⇒ 直接去掉它们重跑即可（默认行为 = 唯一行为）：
+     · `robot11_mount`：xacro 默认 `sensor`，生成物与传 `robot11_mount:=sensor` 逐字节相同；
+     · `turret_yaw_deg` / `turret_pitch_deg`：hzmirm 云台固定 0/0（静态 spawn 姿态，没有控制器），`h = 0.8 m` 不变。
+  历史与证据：docs/frame_contract_v3.md §4.15 + docs/frame_contract_v3_measurements.md §38
+```
+
+组合传三个时三条都列出来（`robot11_mount:=sensor` / `turret_yaw_deg:=10` / `turret_pitch_deg:=-5`）。
+**父 include** 那条没有命令行 `name:=`，也照样被拦（检测面 ① `context.launch_configurations`）——
+证明它不是"只在 argv 里找"的脆弱实现。守卫是 `ld` 的**第一个 Action**，所以 0 个节点被启动。
+
+### 38.6 冒烟（各 1 跑；隔离与 §31/§37 同口径）
+
+隔离：私有 `HOME=.tmp_del3/home-<tag>`、私有 `ROS_DOMAIN_ID`（196 / 199）、
+先探空的 `GAZEBO_MASTER_URI`（`http://127.0.0.1:12756` / `12759`）、`unset DISPLAY`、`gui:=False`、
+`nav_rviz:=False`、`lio_rviz:=False`、`setsid` 起栈、收尾只用
+`tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）、硬超时；一栈一跑；收尾 `残留: ` 空。
+
+| 项 | `robot:=hzmirm` | `robot:=robot11` |
+|---|---|---|
+| 命令 | `world:=RMUL2026 mode:=nav localization:=gicp`（其余默认） | 同左 |
+| 栈存活 | 45 s settle 时 `launch_pid_alive=yes`；节点 **28** | 同左；节点 **28** |
+| nav2 | `/controller_server` **active [3]**、`/bt_navigator` **active [3]**、planner/behavior/velocity_smoother/waypoint_follower 全在 | 同左（全 active） |
+| `/scan` | **9.13 Hz**（publisher 1） | **4.14 Hz**（publisher 1；robot11 重、RTF 低） |
+| `/odom` | **9.13 Hz**（publisher 1） | **4.19 Hz**（publisher 1） |
+| `/livox/lidar` · `/livox/lidar/pointcloud` | 1 / 1 | 1 / 1 |
+| 局部/全局 costmap | `/local_costmap/costmap_raw` 1、`/global_costmap/costmap_raw` 1 | 同左 |
+| `h` | `/odom_level_tf sensor_height` = **0.8**；日志 `h(URDF)=0.800000000`、`h_imu=0.750000000` | **0.25952717**；`h_imu=0.216225900` |
+| 云台 | `base_to_turret`/`turret_to_head` rpy = **0/0**（§38.2d） | 无云台参数（robot11 本来就没有） |
+| `robot_description`（活栈） | **a13e0530… / 18630 B** | **4f19a8b4… / 47745 B** |
+| 静态边 | `gravity_rpy_deg=[0,0,0]`、`T_odom←odom_level` xyz `[0,0,−0.75]` | `gravity_rpy_deg=[−30,0,0]`、xyz `[0,0.108112950,−0.187257122]`、rpy `[30,0,0]` |
+| spawn | ⚠️ `spawn_entity: Entity pushed to spawn queue, but spawn service timed out…` —— **实体随后仍然生成**（插件 / TF / nav 全在；已知抖动，§5/§12/§27/§32#13/§33#11 多次记录） | ✅ `SpawnEntity: Successfully spawned entity [robot]` |
+| 已知噪声 | nav2 `Message Filter dropping message: frame 'livox_frame' … earlier than all the data in the transform cache`（INFO，两跑都有）；`odom_level_tf` 的 `gravity_align_h_check` 90 s 没拿到 `/cloud_registered` ⇒ 跳过互检（WARN） | 同左 |
+| 结论 | **healthy**：感知/LIO/gicp/nav2 全起、`/scan`+`/odom` 有、nav active、h=0.8、云台 0/0、生成物逐字节 | **healthy**：同上、h=0.25952717、spawn 成功 |
+
+**为什么说上面两条噪声与本次改动无关**：本次改动只删 launch 参数/声明；两跑的 `robot_description`
+与改动前**逐字节相同**（§38.2），TF/时间戳/参数文件一个字节没改。spawn 超时是已知抖动的原句复现
+（§5 的"已知无关噪声"、§12、§27 的"诚实注"、§32 第 13 条、§33 第 11 条都记过）；message-filter 是 nav2 对
+`livox_frame` 点云的常见 INFO（hzmirm 与 robot11 都出现，跟帧/时间戳无关本改动）。
+
+### 38.7 本轮没验证 / 诚实清单
+
+1. **各只跑 1 次**（hzmirm / robot11），没有 3 跑中位、没有重跑 §25/§33 的完整矩阵；
+   `/scan` 4.14 Hz 是单跑单窗（robot11 的 RTF 较低），不能当成稳态速率结论。
+2. **默认模型（`robot:=''`）没有起 nav 冒烟**：只做了 `robot_description` md5/h 的离线证明（§38.2）。
+3. **`--show-args` 有 1 个块的文本变了**（`sim_backend` 的 description，见 §38.3）——这是刻意的
+   文档修正（它原来教人传一个现在会 t=0 报错的参数）；若验收要求"除三个块外逐字相同"，这一行是
+   唯一例外。
+4. **`gz_sim.launch.py` 只做了静态验证**：`--show-args` exit 0 / 17→16、standalone xacro 输出
+   md5 逐字节相同、LaunchDescription 能构建。**没有**跑 `sim_backend:=gz` 的运行栈（本机没有
+   Fortress 后端：`~/gzsim_ws` 不存在，`_find_backend_prefix` 直接报缺后端；构建它不便宜）。
+5. **gz standalone 没有 t=0 守卫**：`ros2 launch rm_livox_gz_sim gz_sim.launch.py robot11_mount:=…`
+   现在会被 ROS 2 **静默忽略**（那个 launch 没有 `_check_removed_launch_args`；父任务只批准删
+   声明，没批准在 `src/rm_simulation/**` 再加代码）。走 bringup 的路径**一定**被 t=0 拦住。
+6. **`ground:=patchwork` 不再被误拦**：旧 `_check_robot11_mount_combination()` 会因默认
+   `robot11_mount=sensor` 把 patchwork 硬拦（该检查的前提 —— sensor 专属的 `gravity_aligned_frame`
+   覆盖文件 —— 已在 2026-10-21 删除）。删掉检查后 patchwork 可跑；本轮**没有**跑 patchwork 冒烟，
+   也没有把它当成本轮的目标。
+7. **两跑都是默认 `lio:=fastlio`**（不是 §31 的 `lio:=small_point_lio`）：`/Odometry` 的 publisher
+   count = **0**（fastlio 不发这个 topic），`odom_level_tf` 的 `gravity_align_h_check` 90 s 内
+   没拿到 `/cloud_registered`（WARN、跳过互检）。这两点都是既有行为，不是本轮引入；也没做
+   OLD 栈的 A/B（改动不影响它们）。
+8. **`robot:=hzmirm` 的 `spawn_entity` 超时抖动**：实体实际生成成功（插件/TF/nav 全在），
+   但 `spawn_entity.py` 以 exit 1 退出；`robot:=robot11` 同一轮 spawn 成功。若以后要把它变成
+   硬判据，应该看 `/gazebo/model_states`/TF 而不是这个进程的退出码。
+9. **`spawn_entity` 超时 + message-filter INFO 的历史出处**：`docs/issues_and_findings.md` 第 11 条、
+   `docs/frame_contract_v3_measurements.md` §5 的"已知无关噪声"、§12、§27 的"诚实注"、§32 第 13 条、§33 第 11 条。
+10. **没有在非 Humble / 真机上验证**；`context.argv` 与 `--show-args` 的行为只覆盖本机 Humble。
+11. **`_REMOVED_LAUNCH_ARGS` 的检测面 ① 理论边界**：若某个父 launch 在**它自己的作用域**里声明了
+    同名参数、又**不**通过 `launch_arguments` 传给本 launch，本文件看不到（也不会误报）；这正是
+    "只拦真正传给我们的东西"的语义。已实测父 include **传了**就一定会被拦（§38.5）。

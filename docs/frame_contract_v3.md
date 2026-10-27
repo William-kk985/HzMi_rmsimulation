@@ -1476,3 +1476,102 @@ roll/pitch ≤ 0.21°、静态边逐位不变、`z_origin_source` 仍为 `urdf`�
 ③ 默认模型（`robot:=''`）的轮胎下沉 ~9 mm 不在表里（表是 URDF 几何）⇒ 它实际仍会落 ~10 mm；
 本轮没在 nav 里实测默认模型。④ fastlio 臂**没有** z 锚点逻辑（不在本节范围），只回归到
 "出生/落定 + 局部 in-band（生效带）100%"（§32.7）。
+
+---
+
+## §4.15 删除三个冗余 launch 参数：`robot11_mount` / `turret_yaw_deg` / `turret_pitch_deg`（2026-10-27）
+
+> 用户批准（原话）："robot11_mount，turret_yaw_deg / turret_pitch_deg 删除吧"。
+> 目标：三个参数从 **launch 接口**里消失（`--show-args` 不再列出），但**默认路径逐字节不变**；
+> 仍传旧参数 ⇒ **t=0 硬报错**（不静默忽略、不静默等价）。
+> 本节只新增；§1–§4.14 的历史叙述一律不改（旧节里的 `robot11_mount:=sensor` 字样是**历史**，
+> 不再是可传参数）。实测表（md5 / show-args / 守卫 / 冒烟）见 measurements **§38**。
+
+### 4.15.1 删了什么、为什么能删
+
+| 参数 | 曾经的作用 | 为什么可以删（默认值即唯一值） | 删除后的替代 |
+|---|---|---|---|
+| `robot11_mount` | 仅 `robot:=robot11`；唯一合法值 `sensor`（`_LIVOX_MOUNTS=('sensor',)`，plugin/urdf 已硬报错）；只喂 xacro `livox_mount` + 一个组合检查 | 生成物 xacro 里 `<xacro:arg name="livox_mount" default="sensor"/>`，且三条 property 全是常量（`livox_mount_tilt_in_joint=False` / `livox_mount_sensor=False` / `livox_joint_rpy="0 0 0"`）⇒ **不传 = 传 `sensor`**，输出逐字节相同 | 无：安装方式的唯一语义（§4.12）由 xacro 默认值承担 |
+| `turret_yaw_deg` | 仅 `robot:=hzmirm`；`base_to_turret` 关节的静态 yaw（度），默认 0 | 上游 URDF 两个云台关节都是 **fixed**，本仓**没有 gimbal 控制器** ⇒ 它从来不是控制量，只是 spawn 时的**静态姿态**；默认 0 = 与上游数值等价 | 无：云台**固定** yaw=0 |
+| `turret_pitch_deg` | 仅 `robot:=hzmirm`；`turret_to_head` 关节的静态 pitch（度），默认 0 | 同上；`h = 0.6 + 0.2·cos(pitch)`，pitch=0 ⇒ h=0.8 m。pitch≠0 还会破坏雷达重力对齐（历史实验，见 docs/robot_models.md §3.3） | 无：云台**固定** pitch=0，h=0.8 m |
+
+为什么现在删（而不是继续保留一个"唯一值参数"）：唯一值参数只会制造"第二个所有者"的错觉 ——
+xacro 的默认值已经写着 `sensor`，launch 再传一份；云台角同理（默认 0/0 与不传完全等价）。
+删掉后接口只剩**真正会变的东西**。安装方式的完整历史（plugin/urdf/sensor 三档）见 §4.12 与
+`docs/tilted_lidar_fidelity.md` §J；云台的判断见 `docs/robot_models.md` §3.3。
+
+### 4.15.2 实现（file:line）
+
+**`src/rm_nav_bringup/launch/bringup_sim.launch.py`（主改动）**
+
+| 位置 | 改动 |
+|---|---|
+| 155–162 | `robot11_mount` 的历史注释替换成"已删除 / 为什么 / 去哪看" |
+| 219 | `_lio_adapter_robot11(mount='sensor')` → `_lio_adapter_robot11()`（`mount` 不再参与几何） |
+| 333–358 | `_robot_xacro_args()`：hzmirm **不再追加** `turret_yaw_deg`/`turret_pitch_deg`；robot11 **不再追加** `livox_mount`（只剩 `visual_decimated`） |
+| 561–584 | `_urdf_livox_mount_table()`：robot11 不再校验 mount；hzmirm 的 R(yaw,pitch) 在 0/0 时是单位阵 ⇒ 直接写 `xyz=[0,0,0.8]`、`rpy=[0,0,0]` |
+| 713–727 | `_parsed_livox_mount()`：`mount` 只作日志/缓存标签（`'sensor'`），不再读 launch 参数 |
+| 868–916 | 新增 `_REMOVED_LAUNCH_ARGS` + `_check_removed_launch_args()`（t=0 守卫，见 4.15.3） |
+| 1852–1870 | `_MountReadout` 改为静态收据（不再按 `robot11_mount` 分支） |
+| 2604–2612 | `sim_backend` 的 description 不再教人传 `robot11_mount:=sensor` |
+| 2648–2655 / 2746–2751 | 两处"已删除"说明；三个 `DeclareLaunchArgument` 全部删除 |
+| 3159–3179 | p2l **只剩一份**（`laserscan_params_sensor_frame.yaml` 增量覆盖，无条件）——删除前唯一合法值就是 `sensor`，`!= 'sensor'` 的门恒假 |
+| 4191 | 守卫作为 **LaunchDescription 的第一个 Action**（先于任何声明/节点） |
+| （删除） | `_LIVOX_MOUNTS` / `_validate_livox_mount()` / `_check_robot11_mount_combination()` / `declare_robot11_mount_cmd` / `declare_turret_yaw_deg_cmd` / `declare_turret_pitch_deg_cmd` / 组合检查的 `OpaqueFunction` / gz include 里的 `'robot11_mount': LaunchConfiguration(...)` |
+
+**`src/rm_simulation/rm_livox_gz_sim/launch/gz_sim.launch.py`（唯一一处越界改动，用户/父任务批准）**
+
+| 位置 | 改动 |
+|---|---|
+| 24 | 示例命令删掉 `robot11_mount:=sensor` |
+| 127–141 | `_materialize()` 不再读 `LaunchConfiguration('robot11_mount')` |
+| 158–161 | 删掉 `mount not in ('sensor','urdf')` 的校验（没有第二个取值可校验） |
+| 209–229 | 单独跑时的 `xacro` 命令去掉 `livox_mount:=$mount`（取 xacro 默认 `sensor`，输出逐字节不变） |
+| 353–358 | 删掉 `DeclareLaunchArgument('robot11_mount', …)` |
+
+为什么只动这一处：该文件是 `--show-args` 里 `robot11_mount` 的**唯一残余声明**（bringup 的声明
+删掉后，gz include 的同名声明会在 `get_launch_arguments()` 的递归里露出来，让总数只 −2）。
+删它是一个**声明**的删除，不改变 gz 生成物（见 §38.2 的 xacro md5）。除此之外
+`src/rm_simulation/**` 一个字节没动。
+
+### 4.15.3 t=0 硬报错守卫（no silent ignores）
+
+ROS 2 Humble 对**未知**的 `name:=value` 是**静默接受**的（§28.4 实测：exit 0、无 WARN），所以
+"删掉声明"本身**不够**。`_check_removed_launch_args()` 是 `LaunchDescription` 的**第一个 Action**，
+在 t=0 抛 `RuntimeError`，两个检测面任一命中：
+
+1. `context.launch_configurations` 里出现这三个名字。它们**没有声明** ⇒ 没有默认值 ⇒ 出现即
+   "有人显式设了"（命令行，或父 include 的 `launch_arguments` —— launch 的 include 会先执行
+   `SetLaunchConfiguration` 再访问子 LD，所以父 include 也逃不掉）；
+2. `context.argv` 原文（复用 §4.14 的 `_launch_arg_was_given()`）。①已覆盖②；保留②是为了"以后
+   即使有人给它们加回声明（带默认值），命令行显式传仍然会被抓"。
+
+消息给出每个被传的名字/值 + 替代说明，并指向本节 + measurements §38。实测（§38.5）：
+单独传三个名字、一次传三个、以及**父 include 传**都 exit 1，且**没有任何节点被启动**。
+为什么不用 §4.14 那种"声明成硬报错别名"：本任务的验收要求这三项从 `--show-args` **消失**，
+而声明了就一定还在。
+
+### 4.15.4 不变量
+
+| # | 不变量 | 判据（可执行） |
+|---|---|---|
+| **I17** | 默认路径（`robot:=''` / `hzmirm` / `robot11`）的生成物**逐字节不变** | `robot_description` 的 md5 = `bc62af22…` / `a13e0530…` / `4f19a8b4…`（§38.2 表）；生成物 xacro 文件本身 md5 不变；`h` = 0.235 / 0.8 / 0.25952717 |
+| **I18** | 传任一已删除参数 ⇒ **t=0 硬报错**，退出码 1，0 个节点启动 | §38.5 的 5 条命令；错误消息含 `§4.15` / `§38` |
+| **I19** | `--show-args` 不再列出这三个名字 | bringup 107 → **104**；gz 单独 17 → **16**；逐块 diff 只少这三个（§38.3） |
+| **I20** | 真正起进程的执行集不变 | 默认 / hzmirm / robot11 三组：process `Node/IncludeLaunchDescription/ExecuteProcess` **9 = 9**，归一化 md5 相同（§38.4） |
+
+### 4.15.5 边界与回滚
+
+- **回滚到旧行为**：`git show c661c2c:src/rm_nav_bringup/launch/bringup_sim.launch.py` 到 scratch
+  副本（不要覆盖工作树）；或对 `turret_*` 直接用 scratch xacro 传
+  `turret_yaw_deg:=… turret_pitch_deg:=…`（xacro 的 arg 仍在，只是 launch 不再暴露）。
+- **`robot11_mount` 的旧三档（plugin/urdf）**：xacro 侧 `livox_mount` arg 仍在但**不再改变几何**
+  （2026-10-21 起）；要让插件/关节真的变，必须改 scratch 生成物 + 上游 URDF，launch 不提供。
+- **`ground:=patchwork`**：旧 `_check_robot11_mount_combination()` 会因默认 `robot11_mount=sensor`
+  把 patchwork 硬拦下（该检查的前提 —— sensor 专属的 `gravity_aligned_frame` 覆盖文件 —— 已在
+  2026-10-21 删除）。这个检查随参数一起删除后，`ground:=patchwork` 不再被误拦；这不是本轮新增
+  的行为目标，登记在 §38.7 的诚实清单。
+- **`sim_backend:=gz`**：bringup 不再转发 `robot11_mount`；gz 后端自己的同名参数也已删除
+  （安装方式固定 = xacro 默认 `sensor`，gz 侧 `--tilt-rpy` 仍把传感器 link pose 钉成 −0.5236）。
+  直接 `ros2 launch rm_livox_gz_sim` 时若仍传 `robot11_mount:=…`，ROS 2 会**静默忽略**
+  （那个 launch 没有守卫）—— 这是"只允许改这一处"的已知边界；走 bringup 的路径会被 t=0 拦住。
