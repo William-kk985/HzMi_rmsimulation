@@ -7430,3 +7430,215 @@ lidar 系），所以 `pointBodyToWorld` 里那**一次** `R_IL` 正好是唯一
    `robot11 + robot11_mount:=sensor + RMUL2026 + gicp`。
 10. **没有改**地图/PCD 资产、`src/rm_simulation/**`、`src/rm_localization/**`、`docs` §1–§33 正文；
     本轮只追加本节 + 契约 §4.14.5 的第 8 条。
+
+## §35 第二十五轮（**本机 date=2026-10-27，07:48–08:20**）：LIO 外参**键名**修复 —— fastlio/pointlio 的 `mapping.extrinsic_*`、pointlio yaml 默认 Rx(+30°)、运行期断言；pointlio 3 跑
+
+> **本节只新增**（append-only）：§1–§34 一个字没改。任务（用户批准）：pointlio 运行期
+> `mapping.extrinsic_R = I`（§34.3#4 实测）⇒ robot11 的 +30° 从未进过 point_lio。要求：
+> ① 查清三个后端的键名并写表；② launch 按各自键名注入；③ 修 pointlio yaml 默认值；
+> ④ 加运行期断言；⑤ pointlio 3 跑复核（同 §34 协议）。
+> 代码 commit **`cdcd7e3`**（父仓）+ **`d281584`**（`src/rm_localization/point_lio` 子模块）。
+>
+> **一句话结论**：
+> ① 三个后端的键名**不是同一个**：fastlio/pointlio = `mapping.extrinsic_T/R`，SPL = 顶层
+> `extrinsic_T/R`。**fastlio 也一直是死键**（任务里"fastlio 大概是顶层"的猜测是反的）——
+> 它和 pointlio 一样只读 `mapping.*`，只是以前没人量过。
+> ② 修复后 pointlio 运行期 `mapping.extrinsic_R = Rx(+30°)`（1e-9 内逐元素相等），
+> 顶层死键消失（`Parameter not set`）。
+> ③ **pointlio 自己的地图地面从斜 30° 变成水平**：累积 `/cloud_registered` 拟合的地面法向
+> **30.05° → 0.030–0.054°**（3 跑）。这是本轮**唯一的结构性变化**。
+> ④ 但 **nav 观测量（in-band / local lethal / nearest / ahead / rpy）没有变**（§35.4/§35.5）：
+> 它们走 `/scan` = **原始云 + linefit + TF**，与 LIO 的 extrinsic 无关。§30/§32 的 pointlio
+> 导航数字**仍然有效**；但"pointlio 的 odom/地图是自洽的"这个隐含前提以前**不成立**。
+> ⑤ z 锚点本轮 **−10.5 / −8.2 / −7.5 mm**（旧 §32 −6.4/−6.1/−5.1 mm）：是 point_lio 自己
+> 0.5 s 初始化的 state z（§32 trace −3.8/−9.6/−6.1 mm 同量级），不是 extrinsic 的直接后果。
+
+### 35.1 键表（= 契约 §4.12.5；唯一真源 = launch 的 `_LIO_EXTRINSIC_KEYS`）
+
+| LIO 槽位（`lio:=`） | **节点实际读取的键** | 读取处（file:line） | launch 写键 | 断言节点 |
+|---|---|---|---|---|
+| `fastlio` | `mapping.extrinsic_T` / `mapping.extrinsic_R` | `src/rm_localization/FAST_LIO/src/laserMapping.cpp:834–835`（declare）、`:870–871`（get） | `_lio_extrinsic_params('fastlio')` | `lio_extrinsic_receipt.py` → `/laser_mapping` |
+| `pointlio` | `mapping.extrinsic_T` / `mapping.extrinsic_R` | `src/rm_localization/point_lio/src/parameters.cpp:179–183` | `_lio_extrinsic_params('pointlio')` | `lio_extrinsic_receipt.py` → `/laserMapping` |
+| `small_point_lio` | **顶层** `extrinsic_T` / `extrinsic_R` | `src/rm_localization/small_point_lio/src/small_point_lio/parameters.cpp:110–116` | `_lio_extrinsic_params('small_point_lio')` | `lio_extrinsic_receipt.py` → `/small_point_lio` |
+
+- 三个后端的外参**语义相同**（`p_imu = R_IL·p_lidar + t_IL`；fastlio `laserMapping.cpp:173/185`、
+  pointlio `Estimator.cpp:381–382`、SPL 的出点公式），**只有键名不同**。
+- **死键**：fastlio/pointlio 的顶层 `extrinsic_*`、SPL 的 `mapping.extrinsic_*` 一律不许有值。
+  修复前 launch 给三个槽位**都**传顶层 ⇒ fastlio/pointlio 一个都没读到（§34.3#4 只记了 pointlio，
+  本轮发现 fastlio 同病）。
+
+### 35.2 改了什么（file:line）
+
+| 文件 | 位置 | 改动 |
+|---|---|---|
+| `src/rm_nav_bringup/launch/bringup_sim.launch.py` | 1410–1487 | 新增 `_LIO_EXTRINSIC_KEYS`（per-LIO 键表）、`_LIO_NODE_NAMES`、`_lio_extrinsic_params`、`_lio_extrinsic_check_params`、`_lio_extrinsic_receipt` / `_LioExtrinsicReceipt`；`_check_gravity_contract` 末尾追加 `[lio_extrinsic]` t=0 收据 |
+| 同上 | 3208 / 3255 / 3342、3369 | 三个 LIO 的参数字典改成 `_lio_extrinsic_params(<slot>)`：fastlio/pointlio 落 `mapping.extrinsic_*`，SPL 落顶层（SPL 的值/键与改动前**逐字段相同**） |
+| 同上 | 3223–3228 / 3262–3267 / 3391–3396 | 每个 LIO 后加一个 `Node(rm_nav_bringup/lio_extrinsic_receipt.py)`（一次性断言） |
+| `src/rm_nav_bringup/scripts/lio_extrinsic_receipt.py` | 新增（253 行） | 运行期读回**生效**外参 + 死键探测 + 与 URDF 值比对；`OK`/`ERROR` 收据，不一致 exit 1 |
+| `src/rm_nav_bringup/CMakeLists.txt` | 56 | 把断言脚本装到 `lib/rm_nav_bringup/` |
+| `src/rm_localization/point_lio/config/pointlio_mid360_sim.yaml` | 53 / 62–64 | `mapping.extrinsic_R`：`I` → **`Rx(+30°)`**（`T` 仍 `[0,0,0.05]`）；launch 仍用 URDF 覆盖（唯一真源），改的是**独立使用**时的默认值 |
+
+### 35.3 运行期回读（before / after）
+
+`ros2 param get /laserMapping …`（探针结束后、同一跑内回读）：
+
+| 跑 | 代码 | `mapping.extrinsic_T` | `mapping.extrinsic_R` | 顶层 `extrinsic_T/R` | 断言节点 |
+|---|---|---|---|---|---|
+| `g35_before_pl`（07:52） | HEAD `550f596` | `[0, 0, 0.05]` | **`I`** | **`Parameter not set`**（死键） | 无（本轮才加） |
+| `g35_before_map_pl`（08:10，旧 launch + 旧 yaml） | HEAD `550f596` | `[0, 0, 0.05]` | **`I`** | `Parameter not set` | 无 |
+| `g35_pl_r1/r2/r3`（08:00/08:04/08:07） | `cdcd7e3` | `[0, 0, 0.05]` | **`Rx(+30°)` = `[1, 0, 0, 0, 0.866025404, −0.5, 0, 0.5, 0.866025404]`** | `Parameter not set` | **OK**（3/3，`tol=1e-9`） |
+
+### 35.4 pointlio 3 跑（修复后；协议 = §34.2.1 逐字同）
+
+命令：`world:=RMUL2026 mode:=nav localization:=gicp robot:=robot11 robot11_mount:=sensor
+lio:=pointlio spin_speed:=0.0 band_guard:=True nav:=mppi planner:=smac2d` +
+`nav_rviz/lio_rviz/gui:=False`；`SETTLE=20 WINDOW=20`（仿真秒）、私有 HOME/ROS_DOMAIN_ID/
+GAZEBO_MASTER_URI、一栈一跑、收尾 `scoped_cleanup.sh`。冻结：`git_head=550f596`（工作树 =
+`cdcd7e3` 的改动）、launch md5 `740dbeb5…`、pointlio yaml md5 `d78da583…`、断言脚本 md5
+`b425b7c8…`。原始数据 `.tmp_g35/g35_pl_r{1,2,3}/`（gitignored）。
+
+| 指标 | r1 | r2 | r3 | median | range |
+|---|---|---|---|---|---|
+| `mapping.extrinsic_R` 回读 | Rx(+30°) | Rx(+30°) | Rx(+30°) | — | 3/3 |
+| `lio_extrinsic_receipt` | **OK** | **OK** | **OK** | — | 3/3 |
+| 局部 in-band（生效带） | **773/773** | **773/773** | **773/773** | **100%** | 100–100 |
+| `band_guard`（local） | **OK 11/11** | **OK 11/11** | **OK 11/11** | **100%** | 100–100 |
+| 扫描面 z p50（`odom_level`） | +0.0915 | +0.0946 | +0.0948 | **+0.0946** | 3.4 mm |
+| local lethal | 202 | 236 | 206 | **206** | 34 |
+| local inscribed / free | 8827 / 43446 | 8946 / 43216 | 8842 / 43422 | 8842 / 43422 | 119 / 230 |
+| local **最近 lethal** | 0.7028 | 0.7006 | 0.7013 | **0.7013 m** | 2.2 mm |
+| local 前方 2.0×1.2 m lethal | 19 | 18 | 19 | **19** | 1 |
+| local 1 m 内 lethal | 25 | 25 | 26 | **25** | 1 |
+| global lethal / nearest | 1970 / 0.7761 | 1970 / 0.7741 | 1970 / 0.7756 | **1970 / 0.7756** | 0 / 2.1 mm |
+| **`base_link` z（`odom_level`）** | +0.0920 | +0.0943 | +0.0950 | **+0.0943** | 3.0 mm |
+| **换算 `floor_z` = base_z − GT** | **−10.5 mm** | **−8.2 mm** | **−7.5 mm** | **−8.2 mm** | 3.0 mm |
+| `odom_level→base_link` rpy（deg） | [0.082, 0.002, −0.263] | [−0.040, 0.212, −0.309] | [−0.067, 0.163, −0.329] | — | roll/pitch **≤0.212** |
+| `odom→base_link` rpy（deg） | 同值（静态边旋转 = I） | 同值 | 同值 | — | — |
+| 静态边 `odom→odom_level` | I / (0,0,0.216226) | 逐位同 | 逐位同 | — | 3/3 逐位 |
+| 原始云 `d` / 法向 vs +z | 0.2579 / 0.082° | 0.2592 / 0.016° | 0.2596 / 0.037° | 0.2592 / 0.037° | 1.7 mm / 0.066° |
+| **累积地图地面 tilt vs +z** | **0.048°** | **0.054°** | **0.030°** | **0.048°** | 0.024° |
+| **累积地图地面 `d`**（世界系） | 0.2276 | 0.2257 | 0.2250 | **0.2257 m** | 2.7 mm |
+| 累积平面 inliers（201 帧 / ~28.8k 点） | 6586 | 6599 | 6576 | — | — |
+| `h_meas`（SPL 式地面互检） | **不可用**（`/cloud_registered` 143 点/帧 < 500）⇒ `odom_level_tf` WARN「91 s 内没拿到可用点云，静态边用 URDF 值」 | 同 | 同 | — | — |
+
+`GT base_link z = 0.102495 m`（`/odom_ground_truth`；与 §32/§33 同口径）。`h_imu = 0.216226 m`
+⇒ 地图地面 `d = 0.2250–0.2276` = **`h_imu` + 8.8–11.4 mm**（point_lio 自己的 state z 误差）。
+
+### 35.5 与旧 pointlio 数字（全部 `R=I`）对比：**nav 不变，地图/初始化变**
+
+⚠️ **§33 没有 pointlio 臂**（4 臂都是 SPL 的 gravity 档）。pointlio 的旧基线是
+**§30.5.2（1 跑）**与 **§32.4（3 跑）**；§34 的 pointlio 只用于「初始化图 vs 逐帧图」回放
+（§34.3#4 记了 `R=I`）。
+
+| 量 | §30.5.2（R=I，1） | §32.4（R=I，3） | **§35 after（3）** |
+|---|---|---|---|
+| `base_link` z | +0.0298 / +0.0362 | +0.0961 / +0.0964 / +0.0974 | **+0.0920 / +0.0943 / +0.0950** |
+| 换算 `floor_z` | **−7.3 / −6.6 cm** | −6.4 / −6.1 / −5.1 mm | **−10.5 / −8.2 / −7.5 mm** |
+| `odom_level→base_link` rpy | roll/pitch ≤0.14° | ≤0.10° | **≤0.212°** |
+| local lethal | 238 / **0（空图）** / 317 | 227 / 332 / 213 | **202 / 236 / 206** |
+| local 最近 lethal | 0.7286 / — / 0.7068 | 0.7035 / 0.7091 / 0.7051 | **0.7028 / 0.7006 / 0.7013** |
+| local ahead | 21 | 18 / 20 / 18 | **19 / 18 / 19** |
+| in-band | 100% | 100% | **100%** |
+| 地图地面法向 | **未测**（稀疏云 <500 点） | **未测**（同） | **0.030–0.054°（水平）** |
+| 地图地面 `d` | 未测 | 未测 | **0.2250–0.2276 m**（= h_imu + 9–11 mm） |
+
+**读法**：
+1. **nav 数字没有因为 R=I 变**：in-band 100%、lethal 202–236、nearest 0.7006–0.7028、ahead 18–19
+   全部落在 §32（lethal 213–332、nearest 0.7035–0.7091、ahead 18–20）的跑间波动内。
+   原因**不是巧合**：nav 的 `/scan` 来自 `/segmentation/obstacle`（原始云 + linefit，§4.12 之后
+   点云本身水平），`local_costmap` 只在 `odom_level` 里做一次 TF；**LIO 的 extrinsic 没有进入
+   这两条链路**。所以 §30/§32 的 pointlio 导航结论**仍然有效**。
+2. **但地图/估计器内部以前是不自洽的**：`R=I` 时地图地面 = `rot_init·(水平点云)`，法向偏
+   30.05°（§35.6 实测）；`/cloud_registered`（gicp 的 source 云）与重力对齐的 `odom` 差 30°。
+   这解释了为什么 §32 只能用 base_z − GT **换算**地面、而量不到法向：不是"地面是平的所以不用量"，
+   是"稀疏云量不了"。
+3. **z 锚点低 2–5 mm**（§32 −5.1..−6.4 → 本轮 −7.5..−10.5 mm）：同一机制（pointlio 首帧后
+   0.5 s 就 `Set_init`，车还在落定），与 extrinsic 无直接关系；3 跑里 r1 **−10.5 mm** 略超
+   `0±1 cm` 判据（0.5 mm），r2/r3 在带内。**没有**为了这个 1 cm 去改 pointlio 的初始化门
+   （契约 §4.11.6 明确不在范围内）。
+4. **§34.1 的回放结论不受影响**：它比较的是"初始化图"与"逐帧图"两条路径，两者用**同一组**
+   `R=I` 外参 ⇒ 逐位相同仍然成立；但它的**绝对几何**建立在一张 30° 斜的地图上（§34.3#4 已记）。
+
+### 35.6 **修复前**的地图地面：实测 30.05°（旧 launch + 旧 yaml，1 跑）
+
+用 HEAD 的 launch（只传顶层死键）+ HEAD 的 pointlio yaml（`mapping.extrinsic_R=I`）跑
+`mode:=mapping lio:=pointlio robot:=robot11 robot11_mount:=sensor world:=RMUL2026`，累积
+`/cloud_registered` 20 仿真秒（201 帧 / 28651 点）后拟合：
+
+| 量 | **修复前**（`g35_before_map_pl`） | **修复后**（r1/r2/r3） |
+|---|---|---|
+| 运行期 `mapping.extrinsic_R` | **I** | **Rx(+30°)** |
+| 累积地图地面（内点最多的平面） | n = **(−0.0205, +0.5003, +0.8656)**、**tilt 30.05°**、d = **0.0536 m**、7018 inliers | n ≈ **(0, 0, 1)**、tilt **0.030–0.054°**、d = **0.2250–0.2276 m**、~6.6k inliers |
+| `+z` 先验能不能找到"水平地面" | **不能**：`plus_z` 先验收敛到**同一个 30° 平面**（内点更多）⇒ 图里**没有水平地面** | 能：三个先验（+z/±30°）全部收敛到水平面（并列） |
+| `rot_x_+30` 先验 | **None**（没有 −30° 法向的平面） | 与 +z 同 |
+| 静态边 `odom→odom_level` | 仍按 `input_world=level` 发 I/(0,0,0.216226)（**前提不成立**） | 同一条静态边，但前提现在成立 |
+
+⚠️ **诚实口径**：修复前那个平面的 `d=0.0536 m` **不是**物理 `h_imu`（0.2162）也不是单纯的
+`rot_init` 旋转（那会给 0.2595）——说明 `R=I` 不只是"把地图转斜 30°"，估计器在斜地图里还把
+**高度尺度/原点**拉歪了（这正是"静默错"的可怕处）。本轮只报测量值，**不**把 0.0536 分解成
+"旋转 + 平移"；结论只用**法向**（30.05° vs 0.03–0.05°）与"图里有没有水平地面"。
+
+### 35.7 默认路径有效参数不变（fastlio / SPL）
+
+`mode:=mapping` + **默认模型** + `gravity` 默认（`tf`），各 1 跑（`g35_def_fastlio` /
+`g35_def_spl`），运行期回读：
+
+| 槽位 | 节点 | 键 | 修复后生效值 | 修复前（= yaml / launch 的旧值） | 断言 |
+|---|---|---|---|---|---|
+| `lio:=fastlio` | `/laser_mapping` | `mapping.extrinsic_T` / `mapping.extrinsic_R` | `[0,0,0.05]` / **`I`** | 同（yaml 默认） | **OK** |
+| `lio:=small_point_lio` | `/small_point_lio` | 顶层 `extrinsic_T` / `extrinsic_R` | `[0,0,0.05]` / **`I`** | 同（launch 旧值逐字段相同） | **OK** |
+
+`ros2 launch … --show-args` = **107 个参数**（与 §33 的 107 逐字相同，没有新增 launch 参数）。
+⇒ 默认路径（默认模型 + fastlio/SPL）的**有效参数不变**；变化只发生在 robot11（fastlio/pointlio
+现在真的拿到 Rx(+30°)）与 **键名**（顶层 → `mapping.*`）。
+
+### 35.8 运行期断言：`lio_extrinsic_receipt.py`
+
+- **为什么不是 launch 期自检**：launch 只能证明"我传了什么"，证明不了"节点读的是什么"；
+  `ros2 param get` 读的才是 `declare/get_parameter` 看到的那一份。
+- 机制：launch 在每个 LIO 的 Node 后起一个**一次性**节点（`rm_nav_bringup/lio_extrinsic_receipt.py`），
+  参数 `target_node` / `param_prefix` / `expected_T` / `expected_R` **与 `_LIO_EXTRINSIC_KEYS`
+  同源**（键名只有一处可改）；它等 `get_parameters` 服务 → 读回**生效的**两个键 →
+  与 URDF 解析值逐元素比（`tol=1e-9`）→ 另用 `list_parameters` 查另一个命名空间有没有**死键** →
+  打 `[lio_extrinsic_receipt] OK/ERROR`，不一致/缺失/类型错/死键/超时 ⇒ **exit 1**。
+- **合成三例**（`.tmp_g35/receipt_{good,identity,dead}.log`）：好节点 **rc=0**；`R=I` 节点
+  **rc=1** 且消息给出"实际 = **I**：安装角根本没进来（典型死键症状）"；带顶层死键的节点
+  **rc=1** 且指名 `**死键** extrinsic_T 存在`。
+- **真跑**：r1/r2/r3 + fastlio/SPL 默认档 = **5/5 OK**（§35.3/§35.7）。
+- **故意不自动收栈**：exit 1 只会让 launch 打出红色 ERROR + `process has died`；宁可让人看见，
+  也不因一次慢机器的 90 s 超时误判把整栈收掉。
+
+### 35.9 诚实清单
+
+1. **任务前提有一处反了**：fastlio 不是"顶层 `extrinsic_T/R`"，它和 pointlio 一样只读
+   `mapping.extrinsic_*`（`laserMapping.cpp:834–835/870–871`）。⇒ **fastlio 也一直是死键**，
+   本轮一并修；**但 fastlio 没有重跑**（任务只要 pointlio 3 跑）⇒ **§32.7 的 fastlio `f1`
+   数字（robot11）也是 `R=I` 下量的**（base_link z 0.0409、local lethal 404、nearest 0.7089），
+   它们现在**过时**了，若要用 robot11 + fastlio 必须重测。
+2. **§33 没有 pointlio 臂**：旧基线是 §30.5.2（1 跑）与 §32.4（3 跑）；不要把 §33 的 SPL 数字
+   当 pointlio。
+3. **before 的 nav 基线是本轮补跑的 `g35_before_pl`**（HEAD 代码 + §34 协议），不是 §34 的
+   任何一跑（§34 的 6 跑是 SPL）；它和 §32.4 同量级（lethal 235 vs 213–332、nearest 0.7038 vs
+   0.7035–0.7091），可作 before。
+4. **before 地图地面 `d=0.0536 m` 的物理解释未做**（§35.6 的 ⚠️）：只用法向与"有没有水平地面"
+   作结论。
+5. **3 跑 n=3**，同机同时段、同一 launch md5；跑间 spread 已给（lethal 34、nearest 2.2 mm、
+   base_z 3.0 mm、地图 d 2.7 mm）。不许把 3 个点的 median 当精确值。
+6. **断言的死键探测走 `list_parameters`**（避免 rclcpp 对未声明名打 `Failed to get parameters`
+   的假 WARN）；若某实现返回空名字列表，死键探测会**跳过**，但"生效值 == URDF"这条主判据
+   仍会执行。
+7. **断言节点让默认路径的图里多一个瞬态节点** `lio_extrinsic_receipt`（启动后 ~1 s 退出，
+   `process has finished cleanly`）；**有效参数**不变（§35.7），但 `ros2 node list` 的启动段
+   会短暂多它一个。
+8. **pointlio 的 `h_meas` 仍然不可用**：`/cloud_registered` 143 点/帧 < 500 ⇒ SPL 式地面互检
+   与 `odom_level_tf` 的 `gravity_align_h_check` 都是 WARN 跳过（3/3）。本轮用**累积云拟合**
+   + 原始云 `d` + GT 三条独立证据代替。
+9. **`/cloud_registered` 帧名是 `camera_init`**（数值上 = `odom`，adapter/静态边都把 `odom`
+   当输入世界）。累积拟合把 `camera_init` 坐标直接当 `odom` 用；两者在 t0 同源，本轮 3 跑 +
+   before 跑都验证了静态边/`odom→base_link` 与这个假设一致（base z/地面都在 1 cm 内）。
+10. **没有改**地图/PCD 资产、`src/rm_simulation/**`、`docs` §1–§34 正文；`src/rm_localization/**`
+    只改了 pointlio yaml 一个文件（子模块提交 `d281584`），LIO 的 C++ 一行没动。
+11. 每次 pointlio 跑都会往 `src/rm_localization/point_lio/PCD/` 写 `scans_*.pcd`（包内
+    `pcd_save_en: true` 的既有行为，§34 之前就在）；**没有**提交这些产物。
+12. 修复后的 launch 让 `lio:=pointlio` 在 **robot11** 上第一次真正按 30° 外参跑；**`lio:=pointlio`
+    的非 robot11 槽位**（默认模型/hzmirm）仍是 `I`（launch 从 URDF 解析），没有被这一轮改变。

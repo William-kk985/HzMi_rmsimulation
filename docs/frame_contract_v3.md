@@ -769,6 +769,53 @@ rpy = −30°；原始云（`livox_frame`）里地面法向 vs +z ≈ 0°；`odo
   roll→pitch）→ 重跑生成器 → `_parsed_livox_mount()` 的 `gravity_rpy_deg`、`h`、`extrinsic_R`、
   `odom_level_tf` 的静态边全部跟着变；仓库里的上游文件 md5 不变。实测见 measurements §31.3。
 
+### 4.12.5 LIO 外参的**键名契约**与运行期断言（2026-10-27）
+
+> **本节只新增**（append-only）。它补的是 §4.12 表里那一行「LIO `extrinsic_R`」的**落地方式**：
+> 值由 URDF 解析是对的，但**键名每个后端不一样** —— 2026-10-27 之前 launch 给三个槽位都传顶层
+> `extrinsic_T/R`，只有 SPL 读顶层；fastlio/pointlio 读 `mapping.*` ⇒ robot11 的 +30° **静默丢失**，
+> 运行期实测 `mapping.extrinsic_R = I`（measurements §34.3#4 / §35.3）。
+
+**键表（唯一真源 = `bringup_sim.launch.py` 的 `_LIO_EXTRINSIC_KEYS`；launch 参数字典与断言
+节点都从它派生）**：
+
+| LIO 槽位（`lio:=`） | **节点实际读取的键** | 读取处（file:line） | launch 写键的方式 | 运行期断言节点 |
+|---|---|---|---|---|
+| `fastlio` | `mapping.extrinsic_T` / `mapping.extrinsic_R` | `src/rm_localization/FAST_LIO/src/laserMapping.cpp:834–835`（declare）、`:870–871`（get） | `_lio_extrinsic_params('fastlio')` | `lio_extrinsic_receipt.py` → `/laser_mapping` |
+| `pointlio` | `mapping.extrinsic_T` / `mapping.extrinsic_R` | `src/rm_localization/point_lio/src/parameters.cpp:179–183` | `_lio_extrinsic_params('pointlio')` | `lio_extrinsic_receipt.py` → `/laserMapping` |
+| `small_point_lio` | **顶层** `extrinsic_T` / `extrinsic_R` | `src/rm_localization/small_point_lio/src/small_point_lio/parameters.cpp:110–116` | `_lio_extrinsic_params('small_point_lio')` | `lio_extrinsic_receipt.py` → `/small_point_lio` |
+
+- **值**永远是 `T(imu←livox)`：`t_IL = [0, 0, 0.05] m`、`R_IL = R(base←imu)ᵀ`（robot11 =
+  `Rx(+30°)`；默认模型 / hzmirm = `I`）。三个后端都用同一公式
+  `p_imu = R_IL·p_lidar + t_IL`（fastlio `laserMapping.cpp:173/185`、pointlio
+  `Estimator.cpp:381–382`、SPL `small_point_lio.cpp` 的出点公式）⇒ 同一个
+  `(R_IL, t_IL)` 三个后端**同义**，只有键名不同。
+- **死键**：另一个命名空间（fastlio/pointlio 的顶层 `extrinsic_*`；SPL 的 `mapping.extrinsic_*`）
+  一律**不许有值**。断言节点会把它们读回来，非 `PARAMETER_NOT_SET` ⇒ **ERROR**。
+- **yaml 默认值**：`point_lio/config/pointlio_mid360_sim.yaml:53`（T）/`:62–64`（R）的
+  `mapping.extrinsic_R` 现在是**真的** `Rx(+30°)`（不再是 `I`），`extrinsic_T=[0,0,0.05]` 不变。
+  为什么两边都写：launch **覆盖**它（URDF 是唯一真源，默认模型/hzmirm 在 launch 下仍是 `I`），
+  但**独立跑这个 yaml**（不经 launch）时没有 URDF 解析 ⇒ 文件里的默认值必须也是真值，否则
+  独立使用仍然丢 30°。
+- **运行期断言（不是 launch 期自检）**：`src/rm_nav_bringup/scripts/lio_extrinsic_receipt.py`
+  是一个**一次性** rclpy 节点，launch 在每个 LIO 的 Node 后面各起一个（三个槽位互斥）：
+  1. 等目标节点的 `get_parameters` 服务就绪（`timeout_s=90`）；
+  2. 用 `get_parameters` 读回**该后端自己的**两个键（必须一次只读这两个：rclpy 的 parameter
+     service 遇到未声明名会清空整条 response，混入死键会假失败）；再用 `list_parameters`
+     查另一个命名空间有没有**死键**（只读名字，不触发 rclcpp 的
+     `Failed to get parameters` 假 WARN）；
+  3. 与 launch 从 URDF 解析出的 expected_T/R 逐元素比对（`tol=1e-9`）；
+  4. 打一行收据 `[lio_extrinsic_receipt] OK/ERROR …`；不一致 / 键缺失 / 类型错 / 死键 /
+     超时 ⇒ **ERROR + exit 1**（`strict:=True`）。
+  **故意不自动收栈**：宁可让用户看到红色 ERROR + `process has died`，也不要因一次误判
+  （慢机器上的 90 s 超时）把整栈收掉。t=0 另有一条 `[lio_extrinsic]` 收据（`LogInfo`，与
+  `[gravity]`/`[odom_level]` 同一批），把"这个后端读哪两个键、expected 多少、谁断言"写死。
+- **默认路径的有效参数不变**（`gravity:=tf` + 默认模型）：
+  `lio:=fastlio` / `lio:=small_point_lio` 的 `mapping.extrinsic_R` / `extrinsic_R` 都仍是 `I`、
+  `T` 仍是 `[0,0,0.05]`（与非 robot11 槽位的 yaml 默认值逐位相同）；变化只发生在
+  **robot11**（现在真的拿到 `Rx(+30°)`，以前是 `I`）与**键名**（顶层 → `mapping.*`）。
+  实测见 measurements §35.2/§35.5。
+
 ---
 
 ## §4.14 `gravity`：重力/水平帧参数组收口成**一个开关**（2026-10-21，默认路径）
