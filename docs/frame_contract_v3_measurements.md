@@ -7735,8 +7735,8 @@ GAZEBO_MASTER_URI、一栈一跑、收尾 `scoped_cleanup.sh`。冻结：`git_he
 `h_imu = 0.216226 m`。`h_meas` 3/3 都是 `odom_level_tf` 的
 `gravity_align_h_check: 91 s 内没拿到 /cloud_registered 的可用点云 ⇒ 跳过互检；静态边改用 URDF 值`
 （fastlio 的 `/cloud_registered` 只有 ~145 点/帧 < 500，与 §32.9#5 / §35.9#8 同因）⇒ 用
-**原始云 `d`（0.2576–0.2597 m）+ GT** 作替代证据，且 `odom_level→base_link` 的 z 与
-`base_z − GT` 都在 0.7 mm 内自洽（两者同一条 TF）。
+**原始云 `d`（0.2576–0.2597 m）+ GT** 作替代证据；另一条自洽证据是扫描面 z 与
+`base_link` z 只差 **2.1–4.4 mm**（同一条 TF 链的两个读数，本就该同高）。
 
 **读法**
 
