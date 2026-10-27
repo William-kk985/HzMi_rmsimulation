@@ -1185,6 +1185,12 @@ def _check_gravity_contract(context):
             'gravity_align_rpy（来源=%s）=[%.6f, %.6f, %.6f]°；z_origin=ground gravity_align_h='
             '%.6f m（odom 的 z=0 = 初始化时刻的地面）'
             % (_mount_source_label(context), rpy[0], rpy[1], rpy[2], h))))
+
+    # ★ 2026-10-27（契约 §4.12.5）：LIO 外参**键名**收据。放在 t=0、与 gravity 收据同一批：
+    #   把"这个后端读哪两个键、期望值、谁做运行期断言"写死；`--show-args` 不执行。
+    lio_sel = _Nav2ParamsForSlot._cfg(context, 'lio') or 'fastlio'
+    if lio_sel in _LIO_EXTRINSIC_KEYS:
+        actions.append(LogInfo(msg=[_LioExtrinsicReceipt()]))
     return actions
 
 
@@ -1381,6 +1387,102 @@ class _MountExtrinsic(Substitution):
 
     def describe(self):
         return '%s(%s)' % (type(self).__name__, self.__which)
+
+
+# =============================================================================
+# ★ 2026-10-27（契约 §4.12.5）：**每个 LIO 后端真正读取的外参键名**（唯一一张表）
+# -----------------------------------------------------------------------------
+#   槽位              键名                                        读取处（file:line）
+#   fast_lio          `mapping.extrinsic_T` / `mapping.extrinsic_R`
+#                     src/rm_localization/FAST_LIO/src/laserMapping.cpp:834–835（declare）、
+#                     870–871（get）
+#   point_lio         `mapping.extrinsic_T` / `mapping.extrinsic_R`
+#                     src/rm_localization/point_lio/src/parameters.cpp:179–183
+#   small_point_lio   `extrinsic_T` / `extrinsic_R`（**顶层**）
+#                     src/rm_localization/small_point_lio/src/small_point_lio/parameters.cpp:110–116
+#
+# 为什么要有这张表：2026-10-27 之前 launch 给三个槽位**都**传顶层 `extrinsic_T/R` ——
+# SPL 读顶层（对），fastlio/pointlio 读 `mapping.*`（**死键**）⇒ robot11 的 +30° 静默丢失，
+# 运行期 pointlio `mapping.extrinsic_R = I`（measurements §34.3#4 实测）。
+# 现在：① 参数字典（`_lio_extrinsic_params`）与 ② 运行期断言
+# （`_lio_extrinsic_check_params` → `scripts/lio_extrinsic_receipt.py`）**都从这张表派生**
+# ⇒ 键名只有一处可改，不会再出现"launch 传了键、节点不读"。
+_LIO_EXTRINSIC_KEYS = {
+    'fastlio': ('mapping.extrinsic_T', 'mapping.extrinsic_R'),
+    'pointlio': ('mapping.extrinsic_T', 'mapping.extrinsic_R'),
+    'small_point_lio': ('extrinsic_T', 'extrinsic_R'),
+}
+
+#: LIO 节点名（launch 的 `name=` / 源码里的 `Node("...")`）—— 断言节点按名字找参数服务。
+_LIO_NODE_NAMES = {
+    'fastlio': '/laser_mapping',        # FAST_LIO laserMapping.cpp：`Node("laser_mapping", ...)`
+    'pointlio': '/laserMapping',        # 本 launch 给 point_lio 的 `name='laserMapping'`
+    'small_point_lio': '/small_point_lio',
+}
+
+
+def _extrinsic_namespace(key):
+    """参数键 → 命名空间（`mapping.extrinsic_R` → `mapping`；`extrinsic_R` → ``）。"""
+    return key.rsplit('.', 1)[0] if '.' in key else ''
+
+
+def _lio_extrinsic_params(lio):
+    """该槽位的外参参数字典：键名来自 `_LIO_EXTRINSIC_KEYS`，值来自 URDF 解析。
+
+    值本身是 Substitution（惰性求值）⇒ 只有这个槽位真的被选时才展开 xacro。
+    """
+    key_T, key_R = _LIO_EXTRINSIC_KEYS[lio]
+    return {key_T: [_MountExtrinsic('xyz')], key_R: [_MountExtrinsic('rot')]}
+
+
+def _lio_extrinsic_check_params(lio):
+    """该槽位的运行期断言参数（交给 `scripts/lio_extrinsic_receipt.py`）。
+
+    `target_node` / `param_prefix` 与 `_lio_extrinsic_params` **同源** ⇒ 断言检查的就是
+    launch 写进节点的那两个键；`expected_*` 也是同一份 URDF 解析结果。
+    """
+    key_T, _ = _LIO_EXTRINSIC_KEYS[lio]
+    return {
+        'target_node': _LIO_NODE_NAMES[lio],
+        'param_prefix': _extrinsic_namespace(key_T),
+        'expected_T': [_MountExtrinsic('xyz')],
+        'expected_R': [_MountExtrinsic('rot')],
+        'timeout_s': 90.0,
+        'tol': 1e-9,
+        'strict': True,
+    }
+
+
+def _lio_extrinsic_receipt(context):
+    """`[lio_extrinsic]` t=0 收据：把"这个 LIO 读哪两个键、期望值、谁断言"写死（一行）。"""
+    lio = _Nav2ParamsForSlot._cfg(context, 'lio') or 'fastlio'
+    if lio not in _LIO_EXTRINSIC_KEYS:
+        return None
+    key_T, key_R = _LIO_EXTRINSIC_KEYS[lio]
+    parsed = _parsed_livox_mount(context)
+    if parsed is not None and parsed.get('extrinsic_R') is not None:
+        xyz, rot9 = parsed['extrinsic_xyz'], parsed['extrinsic_R']
+        src = parsed.get('source', '?')
+    else:
+        xyz, rot9 = [0.0, 0.0, 0.05], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        src = '**FALLBACK**（URDF 解析失败，见上面的 WARN）'
+    return ('[lio_extrinsic] lio=%s ⇒ 该后端只读 `%s` / `%s`；expected（来源 = %s）'
+            'T=[%s]、R=[%s]（行主序）；运行期断言 = rm_nav_bringup/lio_extrinsic_receipt.py '
+            '（node=%s，读回**生效值**；不一致/死键 ⇒ ERROR + exit 1；契约 §4.12.5）'
+            % (lio, key_T, key_R, src,
+               ', '.join('%.9f' % float(x) for x in xyz),
+               ', '.join('%.9f' % float(x) for x in rot9),
+               _LIO_NODE_NAMES[lio]))
+
+
+class _LioExtrinsicReceipt(Substitution):
+    """`LogInfo` 的消息体（惰性求值 ⇒ `--show-args` 不执行、不读参数）。"""
+
+    def perform(self, context):
+        return _lio_extrinsic_receipt(context)
+
+    def describe(self):
+        return '%s()' % type(self).__name__
 
 
 class _LioAdapterExtrinsic(Substitution):
@@ -3100,8 +3202,10 @@ def generate_launch_description():
                     # ★ 2026-10-21（契约 §4.12）：**LIO 外参从 URDF 解析**（点云水平、IMU 斜装）
                     #   ⇒ robot11 的 extrinsic_R = Rx(+30°)、extrinsic_T = [0,0,0.05]（不变）；
                     #   非斜装槽位解析出来就是单位阵/同一平移 ⇒ 与配置里的默认值逐位相同。
-                    {'extrinsic_T': [_MountExtrinsic('xyz')],
-                     'extrinsic_R': [_MountExtrinsic('rot')]},
+                    # ★ 2026-10-27（契约 §4.12.5）：键名**由 `_LIO_EXTRINSIC_KEYS` 决定**。
+                    #   FAST_LIO 只读 `mapping.extrinsic_T/R`（laserMapping.cpp:834–835/870–871）；
+                    #   原来这里传的是顶层 `extrinsic_T/R` = **死键**（节点一个都没读到）。
+                    _lio_extrinsic_params('fastlio'),
                     # 装配级：pcd 落盘路径按 world 自动指向 PCD/<world>.pcd
                     # （= icp_registration 的底图路径，建图产物直接可被重定位复用）。
                     # FAST-LIO 只在 /map_save 服务被调用时写这个文件，启动不加载它，所以不会"接着旧图建"。
@@ -3112,6 +3216,16 @@ def generate_launch_description():
                 remappings=[('/Odometry', '/odom')],
                 # 添加额外的参数以避免崩溃
                 arguments=['--ros-args', '--log-level', 'info']
+            ),
+            # ★ 2026-10-27（契约 §4.12.5）：**运行期断言** —— 读回这个节点**生效的**
+            #   `mapping.extrinsic_T/R`，与上面同一份 URDF 解析值比较；不一致/死键 ⇒
+            #   ERROR + exit 1（以后键名再写错，不会再"照跑但 R=I"）。
+            Node(
+                package='rm_nav_bringup',
+                executable='lio_extrinsic_receipt.py',
+                name='lio_extrinsic_receipt',
+                output='screen',
+                parameters=[_lio_extrinsic_check_params('fastlio')],
             ),
             Node(
                 package='rviz2',
@@ -3135,12 +3249,22 @@ def generate_launch_description():
                     pointlio_mid360_params,
                     # 算法调参键已并入 pointlio_mid360_sim.yaml（R1），此处仅留装配级 use_sim_time
                     # ★ 2026-10-21（契约 §4.12）：LIO 外参从 URDF 解析（同 fastlio 那条注释）
-                    {'use_sim_time': use_sim_time,
-                     'extrinsic_T': [_MountExtrinsic('xyz')],
-                     'extrinsic_R': [_MountExtrinsic('rot')]}
+                    # ★ 2026-10-27（契约 §4.12.5）：point_lio 也只读 `mapping.extrinsic_T/R`
+                    #   （parameters.cpp:179–183）；原来传的顶层键是**死键** ⇒ 运行期
+                    #   `mapping.extrinsic_R = I`（measurements §34.3#4），robot11 的 +30° 丢失。
+                    {'use_sim_time': use_sim_time, **_lio_extrinsic_params('pointlio')}
                 ],
                 # T2：统一里程计话题为 /odom（源话题 aft_mapped_to_init）
                 remappings=[('/aft_mapped_to_init', '/odom'), ('aft_mapped_to_init', '/odom')],
+            ),
+            # ★ 2026-10-27（契约 §4.12.5）：运行期断言（读回 `/laserMapping` 生效的
+            #   `mapping.extrinsic_T/R`，与 URDF 解析值比对；不一致/死键 ⇒ ERROR + exit 1）。
+            Node(
+                package='rm_nav_bringup',
+                executable='lio_extrinsic_receipt.py',
+                name='lio_extrinsic_receipt',
+                output='screen',
+                parameters=[_lio_extrinsic_check_params('pointlio')],
             ),
             Node(
                 package='rviz2',
@@ -3213,8 +3337,9 @@ def generate_launch_description():
                      'publish_tf': False,
                      'odom_convention': 'sensor',
                      # ★ 2026-10-21（契约 §4.12）：外参从 URDF 解析（点云水平、IMU 斜装）
-                     'extrinsic_T': [_MountExtrinsic('xyz')],
-                     'extrinsic_R': [_MountExtrinsic('rot')],
+                     # ★ 2026-10-27（§4.12.5）：SPL 读的是**顶层** `extrinsic_T/R`
+                     #   （small_point_lio/parameters.cpp:110–116）⇒ 键名仍走同一张表。
+                     **_lio_extrinsic_params('small_point_lio'),
                      # ★★ 2026-10-21（契约 §4.14）：初始化行为**硬编码**（删除了两个 launch 参数）：
                      #   · 不等落定（出生即落定；§32.8 证明门本来就不推迟任何一帧）；
                      #   · 初始化地图一律 `R_IL·p + t_IL`（§30 的根因之一；R_IL=I 时等价于 p+t_IL）；
@@ -3240,8 +3365,8 @@ def generate_launch_description():
                     small_point_lio_params,
                     {'use_sim_time': use_sim_time,
                      # ★ 2026-10-21（契约 §4.12）：外参从 URDF 解析（点云水平、IMU 斜装）
-                     'extrinsic_T': [_MountExtrinsic('xyz')],
-                     'extrinsic_R': [_MountExtrinsic('rot')],
+                     # ★ 2026-10-27（§4.12.5）：顶层键（与上面那份同一张表）。
+                     **_lio_extrinsic_params('small_point_lio'),
                      # ① 本节点不再发 odom→base_link（唯一发布者 = lio_tf_adapter，契约 I2）
                      'publish_tf': False,
                      # ② /Odometry 改发 LIO 原始状态 T_ol（frame_id=odom、child_frame_id=livox_frame）
@@ -3260,6 +3385,15 @@ def generate_launch_description():
                      'init_map_extrinsic': True},
                 ],
                 remappings=[('/Odometry', '/odom')],
+            ),
+            # ★ 2026-10-27（契约 §4.12.5）：运行期断言（读回 `/small_point_lio` 生效的
+            #   **顶层** `extrinsic_T/R`；两份互斥 Node 同名 ⇒ 这里只会看到一个）。
+            Node(
+                package='rm_nav_bringup',
+                executable='lio_extrinsic_receipt.py',
+                name='lio_extrinsic_receipt',
+                output='screen',
+                parameters=[_lio_extrinsic_check_params('small_point_lio')],
             ),
             Node(
                 package='rviz2',

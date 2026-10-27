@@ -49,6 +49,11 @@ install(PROGRAMS
   #   只读互检（h_meas / URDF↔IMU Δ）。level_frame:=odom_level（默认）时由 launch 起，
   #   把"重力对齐"从估计器补丁（E1）搬到帧图上。
   scripts/odom_level_tf.py
+  # ★ 2026-10-27（契约 §4.12.5）：LIO 外参「生效值」的**一次性断言**。
+  #   launch 给 fastlio/pointlio/SPL 注入 URDF 解析出的 T(imu←livox)，但三者读的**键名不同**
+  #   （fastlio/pointlio = `mapping.extrinsic_*`；SPL = 顶层 `extrinsic_*`）。本节点读回节点
+  #   **真正生效**的那两个键，与 expected 比对；不一致/死键 ⇒ ERROR + exit 1。
+  scripts/lio_extrinsic_receipt.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
