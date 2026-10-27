@@ -791,7 +791,7 @@ rpy = −30°；原始云（`livox_frame`）里地面法向 vs +z ≈ 0°；`odo
   `Estimator.cpp:381–382`、SPL `small_point_lio.cpp` 的出点公式）⇒ 同一个
   `(R_IL, t_IL)` 三个后端**同义**，只有键名不同。
 - **死键**：另一个命名空间（fastlio/pointlio 的顶层 `extrinsic_*`；SPL 的 `mapping.extrinsic_*`）
-  一律**不许有值**。断言节点会把它们读回来，非 `PARAMETER_NOT_SET` ⇒ **ERROR**。
+  一律**不许有值/不许被声明**。断言节点用 `list_parameters` 查它们；出现 ⇒ **ERROR**。
 - **yaml 默认值**：`point_lio/config/pointlio_mid360_sim.yaml:53`（T）/`:62–64`（R）的
   `mapping.extrinsic_R` 现在是**真的** `Rx(+30°)`（不再是 `I`），`extrinsic_T=[0,0,0.05]` 不变。
   为什么两边都写：launch **覆盖**它（URDF 是唯一真源，默认模型/hzmirm 在 launch 下仍是 `I`），
@@ -814,7 +814,7 @@ rpy = −30°；原始云（`livox_frame`）里地面法向 vs +z ≈ 0°；`odo
   `lio:=fastlio` / `lio:=small_point_lio` 的 `mapping.extrinsic_R` / `extrinsic_R` 都仍是 `I`、
   `T` 仍是 `[0,0,0.05]`（与非 robot11 槽位的 yaml 默认值逐位相同）；变化只发生在
   **robot11**（现在真的拿到 `Rx(+30°)`，以前是 `I`）与**键名**（顶层 → `mapping.*`）。
-  实测见 measurements §35.2/§35.5。
+  实测见 measurements §35.3 / §35.7。
 
 ---
 
