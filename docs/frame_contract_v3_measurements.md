@@ -6811,6 +6811,11 @@ nav2 一条 `Message Filter dropping` 都没有）。本轮 3 跑**都没有复�
 
 ### 32.7 fastlio 回归（1+1 A/B：旧 spawn vs 新 spawn）
 
+> ⚠️ **2026-10-27 更新（§36）**：本节 fastlio 数字全部是 **`R=I`（外参死键）时代**量的
+> （§35.9#1）；`cdcd7e3` 修复后已按 §34.2.1 协议重跑 **3 跑 after + 2 跑 before** ⇒
+> **已被 §36 取代**：nav 数字在跑间波动内，结构性变化 = `odom_level` 地图地面
+> **28.4–29.3° → 1.1–1.9°**。下面内容保留不改，只作历史对照。
+
 fastlio **没有** z 锚点逻辑（`input_world=tilted`，静态边照旧），但出生高度会影响它的初始状态。
 
 | 量 | `f0_fastlio_oldspawn`（`-z 0.2`） | `f1_fastlio_spawnz`（`-z 0.103499`） |
@@ -7642,3 +7647,230 @@ GAZEBO_MASTER_URI、一栈一跑、收尾 `scoped_cleanup.sh`。冻结：`git_he
     `pcd_save_en: true` 的既有行为，§34 之前就在）；**没有**提交这些产物。
 12. 修复后的 launch 让 `lio:=pointlio` 在 **robot11** 上第一次真正按 30° 外参跑；**`lio:=pointlio`
     的非 robot11 槽位**（默认模型/hzmirm）仍是 `I`（launch 从 URDF 解析），没有被这一轮改变。
+
+## §36 第二十六轮（**本机 date=2026-10-27，09:11–09:32**）：fastlio 的 `mapping.extrinsic_R = Rx(+30°)` 落地后 **robot11 3 跑重测** —— `odom_level` 地图地面 **28.4–29.3° → 1.1–1.9°**，nav 结论不变
+
+> **本节只新增**（append-only）：§1–§35 一个字没改；§32.7 只加了一条"已被本节取代"的指针
+> （它的内容不动）。任务（用户批准）：`cdcd7e3` 修好了 per-LIO 外参键名（fastlio 读
+> `mapping.extrinsic_*`，见 §35.1），但 §32.7 的 fastlio robot11 数字（base z 0.0409 /
+> lethal 404 / nearest 0.7089 …）是 **`R=I`** 时量的（§35.9#1 明记）⇒ 按 §34.2.1 协议重跑
+> 3 次、量地图地面、与 §32.7 对比并把旧数字标成"已被取代"。
+>
+> **一句话结论**
+> 1. **修复真的生效**：3/3 跑运行期 `mapping.extrinsic_R = Rx(+30°)`（逐元素，`tol=1e-9`）、
+>    断言 **OK 3/3**、顶层死键 `Parameter not set`；旧 launch（= `R=I`）2 跑回读 `I`
+>    （§36.2 / §36.3）。
+> 2. **判据帧是 `odom_level`，不是 raw `odom`**：fastlio 的 `odom` 是 **IMU 原始世界**
+>    （launch 收据 `input_world=tilted`），所以正确外参下 raw `odom` 里的地面**本来就该 ≈30°**
+>    （3 跑 30.96 / 31.10 / 31.86°）——这不是错误。把点搬进 `odom_level` 后：
+>    **修复前 28.38 / 29.34° → 修复后 1.60 / 1.10 / 1.90°**（3 跑，累积 `/cloud_registered`
+>    拟合）。这是本轮**唯一的结构性变化**。
+> 3. **没有变成 pointlio 的 0.03–0.05°**（§35.4）：fastlio **不做重力对齐**（初始 `R=I`，
+>    §4.14 的 `input_world=tilted`）⇒ 残余 1.1–1.9° 是它自己的姿态误差；同跑的
+>    `odom_level→base_link` roll 0.82 / 1.07 / 1.80° 与地图地面残余同量级（两条独立证据）。
+> 4. **nav 的判据级三项没有变**：in-band 生效带 **100%（`band_guard` 11/11 采样 × 3 跑）**、
+>    最近 lethal 0.701–0.713 m、前方 2.0×0.6 m 24–37 格（§32.7 的 0.7089 / 35 与 before 的
+>    0.7109–0.7119 / 33–36 都在内）。**但 `local lethal` 有一档未定的下移**：`R=I` 的 3 个样本
+>    （349 / 378.5 / 404）全部高于修复后的 3 个样本（282 / 309.5 / 323），下移 15–25%；8 个
+>    nav 指标里只有这 1 个完全分离，n=3v3 不足以定论（见 §36.4#2），但也不写成"逐位不变"。
+> 5. **§32.7 的 fastlio 数字全部标为"`R=I` 时代，已被 §36 取代"**。
+
+### 36.1 协议、隔离与冻结（= §34.2.1 / §35.4 逐字同）
+
+* 命令：`world:=RMUL2026 mode:=nav lio:=fastlio localization:=gicp robot:=robot11
+  robot11_mount:=sensor spin_speed:=0.0 band_guard:=True nav:=mppi planner:=smac2d
+  nav_rviz:=False lio_rviz:=False gui:=False`；`SETTLE=20 WINDOW=20`（**仿真秒**）。
+* 隔离：私有 `HOME` / `ROS_LOG_DIR` / `ROS_DOMAIN_ID`（按 tag 哈希）、先探空端口再占
+  `GAZEBO_MASTER_URI`、`unset DISPLAY`、`setsid`（进程组 = 本 run）、每跑硬超时 1100 s、
+  收尾只用 `tools/scripts/lib/scoped_cleanup.sh`（**无全机 pkill**）、**一栈一跑**（跑间 8 s）。
+  7 跑（3 after nav + 2 before nav + 2 mapping）收尾后 `sc_own_leftovers_desc` 全空、`gz=0`。
+* 冻结：所有跑的 `git_head = ffeca1e`（= `origin/master`）；当前 launch md5
+  **`740dbeb5a1bb4b72d3d74eef967457b0`**；fastlio yaml md5 **`fea68c66…`**
+  （yaml 里 `mapping.extrinsic_R` 默认仍是 `I`，robot11 由 launch 从 URDF 覆盖成 Rx(+30°)）；
+  断言脚本 md5 **`b425b7c8…`**。
+* 探针：`nav_band_probe.py --scan-frame odom_level`（+ `uc_procstats.py`）、`level_probe.py`
+  （TF + 原始云）、`cloudacc_probe.py`（§35 同款：累积 `/cloud_registered` 拟地面）、
+  `band_guard` 收据、运行期 `ros2 param get` 回读。原始数据 `.tmp_g36/g36_fl_r{1,2,3}/`（gitignored）。
+* **修复前对照（2 跑 nav + 1 跑 mapping）**：`g36_before_fl` / `g36_before_fl2`（nav，探针全套）与
+  `g36_before_mapcheck`（mapping，`/Laser_map` 交叉核验）都用
+  `git show 550f596:src/rm_nav_bringup/launch/bringup_sim.launch.py`
+  （md5 **`6ad0aaaedc18486dc8318ce235c7b738`** = §34.2.1 的冻结值）。三个子命令（launch/探针/收尾）
+  与修复后相同，唯一差异是 launch 里的外参键（旧 = 顶层死键）。运行期回读
+  `mapping.extrinsic_R = I`、顶层 `extrinsic_R/T = Parameter not set`（**死键**，与 §35.3 的
+  before 逐字同）；`g36_before_fl` 的 `/odom` 末态 z = **−0.0596** 与 §32.7 f1 的 **−0.0593**
+  逐位同量级 ⇒ 对照跑复现了 §32.7 的 `R=I` 条件。
+* **修复后 map 交叉核验（1 跑 mapping）**：`g36_mapcheck`，当前 launch，`/cloud_registered`
+  累积 + `/Laser_map`（节点自己的 ikdtree 全图，1 Hz）+ `/odom` 的 z 迹，并存抽样点云
+  `.npz` 供离线复核。
+
+### 36.2 fastlio robot11 3 跑（修复后；`mapping.extrinsic_R = Rx(+30°)`）
+
+| 指标 | r1 | r2 | r3 | median | range |
+|---|---|---|---|---|---|
+| 运行期 `mapping.extrinsic_R` 回读 | **Rx(+30°)** | **Rx(+30°)** | **Rx(+30°)** | — | 3/3 |
+| `lio_extrinsic_receipt` | **OK** | **OK** | **OK** | — | 3/3（`tol=1e-9`） |
+| 顶层死键 `extrinsic_T/R` | `Parameter not set` | 同 | 同 | — | 3/3 |
+| 局部 in-band（**生效带** `[-0.05,2]`） | **773/773** | **773/773** | **773/773** | **100%** | 100–100 |
+| `band_guard`（local） | **OK 11/11** | **OK 11/11** | **OK 11/11** | **100%** | 100–100 |
+| 探针 in-band（工具自己的 `[0,2]`） | 773/773（below 0） | 773/773（0） | 773/773（0） | 100% | 100–100 |
+| 扫描面 z p50（`odom_level`） | +0.0823 | +0.0734 | +0.0503 | **+0.0734** | 32.0 mm |
+| local lethal | 282 | 309.5 | 323 | **309.5** | 41 |
+| local inscribed / free | 10221.5 / 40427 | 10160 / 40431 | 10331 / 40148.5 | 10221.5 / 40427 | 171 / 282.5 |
+| local **最近 lethal** | 0.7014 | 0.7060 | 0.7127 | **0.7060 m** | 11.4 mm |
+| local 前方 **2.0×0.6 m** lethal | 35 | 37 | 24 | **35** | 13 |
+| local **1 m 内** lethal | 41 | 46 | 32 | **41** | 14 |
+| global lethal | 2094 | 2109.5 | 2138 | **2109.5** | 44 |
+| global 最近 lethal | 0.6254 | 0.6985 | 0.7436 | **0.6985 m** | 118.2 mm |
+| **`base_link` z（`odom_level`）** | +0.0793 | +0.0690 | +0.0482 | **+0.0690** | 31.1 mm |
+| 换算 `floor_z` = base_z − GT | **−23.2 mm** | **−33.5 mm** | **−54.3 mm** | **−33.5 mm** | 31.1 mm |
+| `odom_level→base_link` rpy（deg） | [0.824, 0.019, 0.023] | [1.072, 0.072, 0.477] | [1.799, −0.336, 0.211] | — | roll 0.82–1.80 |
+| `odom→base_link` rpy（deg） | [30.824, 0.032, 0.017] | [31.071, −0.183, 0.411] | [31.799, −0.387, −0.005] | — | roll 30.82–31.80 |
+| 静态边 `odom→odom_level`（发布值） | Rx(+30°) / (0, 0.108, −0.187) | 逐位同 | 逐位同 | — | 3/3 逐位 |
+| 原始云 `d` / 法向 vs +z | 0.2580 / 0.102° | 0.2593 / 0.021° | 0.2593 / 0.020° | 0.2593 / 0.021° | 1.3 mm / 0.08° |
+| `h_meas`（SPL 式地面互检） | **不可用** | 同 | 同 | — | 3/3 WARN |
+| `GT base_link z`（`/odom_ground_truth`） | 0.102498 | 0.102490 | 0.102498 | 0.102498 | — |
+| `/odom` 末态 z（state.z） | −0.0753 | −0.0857 | −0.0863 | −0.0857 | 11.0 mm |
+| **`odom_level` 地图地面 tilt**（累积云） | **1.603°** | **1.103°** | **1.899°** | **1.603°** | 0.80° |
+
+`h_imu = 0.216226 m`。`h_meas` 3/3 都是 `odom_level_tf` 的
+`gravity_align_h_check: 91 s 内没拿到 /cloud_registered 的可用点云 ⇒ 跳过互检；静态边改用 URDF 值`
+（fastlio 的 `/cloud_registered` 只有 ~145 点/帧 < 500，与 §32.9#5 / §35.9#8 同因）⇒ 用
+**原始云 `d`（0.2576–0.2597 m）+ GT** 作替代证据，且 `odom_level→base_link` 的 z 与
+`base_z − GT` 都在 0.7 mm 内自洽（两者同一条 TF）。
+
+**读法**
+
+1. **in-band 是 100%，且探针的 `below` 为 0**：本轮三跑的扫描面 z p50 = +0.050…+0.082，
+   整段都落在生效带 `[-0.05, 2.0]` 内，`band_guard` 的 11 次采样也是 `OK 11/11`、kept-y 双侧。
+   （§32.7 时代探针报 `below=65` 是它自己的 `[0,2]` 带造成的口径假象，§32.9#9；本节 before 跑
+   同样复现：`below=25/72`，而 `band_guard` 都是 100%。）
+2. **`odom→base_link` ≈ +30°，`odom_level→base_link` 小**：与契约一致（fastlio 不重力对齐 ⇒
+   raw `odom` 是斜的 IMU 世界；重力对齐由静态边负责）。但 `odom_level→base_link` 的 roll
+   并不稳定在 <0.5°（0.82/1.07/1.80°），这是 **fastlio 自己的姿态误差**，不是静态边——静态边
+   3/3 逐位相同（Rx(+30°)、t=(0,0,0.216226)）。
+3. **`floor_z` 仍在 −2…−5 cm 档**（§32.7 是 −61.6 mm；本轮 −23…−54 mm，同一档略高）：
+   fastlio 没有 z 锚点（§32.7 已经量过），本轮没有为它加锚点，也不在本任务范围。
+4. **重复性**：3 跑里 `scan z p50` 极差 32 mm、`base_z` 极差 31 mm、`local lethal` 极差 41
+   （13%）、`global nearest` 极差 118 mm ⇒ 这 3 个点的 median 不是精确值（§36.5#1）。
+
+### 36.3 地图地面：before / after（判据帧 = `odom_level`）
+
+**方法（与 §35.4/§35.6 同款）**：把 settle 后 20 仿真秒内的**所有** `/cloud_registered` 帧累积
+（201 帧 / ~28.8k 点），用 RANSAC+EVD 拟合"离原点 0.03–1.0 m 的大平面"（先验：+z 与 ±30°，
+取内点最多的）；再经静态边 `odom_level←odom` 把点搬进 `odom_level` 重拟。同一批跑还做了
+**`/Laser_map`**（fastlio 节点自己的 ikdtree 全图，1 Hz，`map_en: true`）与**近场**（0.8–2.0 m）
+两个独立复核，并存了抽样点云离线复算（`.tmp_g36/maptable.py`）。
+
+| 量 | **before（`R=I`）** | **after（`Rx(+30°)`）** | 判读 |
+|---|---|---|---|
+| 运行期 `mapping.extrinsic_R` | **I**（顶层死键） | **Rx(+30°)**（断言 OK） | 修复点 |
+| 累积地图地面：raw `odom` tilt | 3.41° / 4.15°（2 跑 nav） | 30.96 / 31.10 / 31.86°（3 跑 nav） | raw `odom` 是斜的 IMU 世界 ⇒ after 的 ~31° 才是**物理正确** |
+| 同上，near-field 0.8–2.0 m | 2.09°（cloud）/ 2.07°（`/Laser_map`） | 31.13°（cloud）/ 31.11°（map） | 与 whole-range 同结论 |
+| 累积地图地面：**`odom_level` tilt** | **28.38° / 29.34°**（2 跑 nav） | **1.603 / 1.103 / 1.899°**（3 跑 nav） | ⭐ **唯一的结构性变化** |
+| 同上，near-field 0.8–2.0 m | **29.07°（cloud）/ 28.91°（map）** | **1.13°（cloud）/ 1.12°（map）** | 近场干净平面 = 同结论 |
+| 平面 `d`（raw `odom`，离原点） | near-field **0.2397 / 0.2457**；whole-range 0.1143 / 0.0758 | near-field **0.2433 / 0.2447**；whole-range 0.0738 / 0.2441 / 0.2656 | **near-field** after ≈ before（差 ≤4 mm）⇒ **外参没有改 z 锚点** |
+| `d − h_imu` | **+23.5 / +29.5 mm** | **+27.1 / +28.5 mm** | 同档（fastlio 自己的 map/pose 自洽 ~2–5 cm） |
+| `odom_level` 地面 `floor_z` | near-field −0.058 / −0.064 | near-field −0.027 / −0.029 | 同量级（fastlio 的 z 漂） |
+| 内点 / `resid_p50` | whole 6864–7148 / **8.4–9.7 mm**；near/map 1.3–3.0 mm | whole 6407–6891 / **2.1–8.8 mm**；near/map 1.4–2.4 mm | 见下面的"抹开" |
+| 帧数 / 点数 | 201 / 28709–28794 | 201 / 28737–28833 | 同口径 |
+| 静态边 `odom_level←odom` | Rx(−30°) / (0, 0, 0.216226) | 逐位同 | 3/3 逐位 |
+
+**读法（这是本节最需要说清的三点）**
+
+1. **before 的 28.4–29.3° 是"LIO 地图与帧图契约不自洽"的直接证据**：`R=I` 时 fastlio 把
+   **水平的点云**当成 **IMU 系**点云用，地图在该世界里的地面法向只有 2–4°，可这个世界本身是
+   **斜 30° 的 IMU 世界** ⇒ 静态边（正确的 Rx(+30°)）把地面搬进 `odom_level` 后变成
+   **28.4–29.3°**。nav 的 `/scan` 不经过这张地图，所以**导航没坏，地图坏了**——与 §35.6 对
+   pointlio 的 30.05° 是同一类病，只是 fastlio 的 raw `odom` 约定不同（pointlio 的静态边是
+   `I`，所以它的 30° 直接出现在 raw 与 level 两个系里）。
+2. **after 的 1.1–1.9° 不是 0.03–0.05°**：fastlio **没有重力对齐**（初始 R=I，`input_world=tilted`），
+   它的姿态自身就有 1–2° 的误差——同一跑的 `odom_level→base_link` roll 是 0.82/1.07/1.80°，
+   与地图地面的残余 1.60/1.10/1.90° 一一对应。pointlio 能到 0.03–0.05°，是因为它的
+   `ImuProcess::Set_init` 真做了重力对齐（§35 的 3 跑）；**不能拿 pointlio 的 0.03° 当 fastlio 的
+   验收线**。正确说法：**30° 的系统性倾斜消失了，剩下的是 LIO 自己的 1–2° 姿态误差**。
+3. **whole-range 的 `d` 不能当判据**：fastlio 的姿态在 20 s 窗口内会漂（`g36_mapcheck` 的
+   `/odom` rpy 实测 roll 0.99→1.24°、yaw 0.21→−0.66°），远场（4–8 m）地面点被漂移抹开
+   （0.5° × 4–8 m ≈ 3.5–7 cm），形成第二层"平行、更薄、resid ~9 mm"的带；whole-range RANSAC
+   会锁到这一层（d 0.074–0.114），**近场 0.8–2.0 m** 才是干净平面（resid 1.3–1.4 mm，
+   d=0.243，与 `/Laser_map` 的 0.2447/2.4 mm 一致）。因此本节以 **tilt** 作主判据，`d`
+   只作"before/after 没有量级变化"的辅证。pointlio 没这个问题是因为它的姿态在窗口内 ≤0.2°。
+
+### 36.4 与 §32.7 的对比（**§32.7 = `R=I` 时代，已被 §36 取代**）
+
+> §32.7 是 **1+1 A/B**（旧 spawn vs 新 spawn）里的 `f1_fastlio_spawnz`；它的 fastlio 数字量于
+> 2026-10-21、`R=I`（外参死键）。本节 = 2026-10-27 的 3 跑 after + 2 跑 before（同日同协议）。
+
+| 量 | §32.7 f1（`R=I`，1 跑） | **本轮 before（`R=I`，2 跑）** | **§36 after（3 跑）** | 判读 |
+|---|---|---|---|---|
+| `base_link` z（`odom_level`） | 0.0409 | 0.0563 / 0.0832 | **0.0482 / 0.0690 / 0.0793** | §32.7 比本轮 5 跑的**下界**还低 7 mm（单跑 + spawn A/B 的余波） |
+| 扫描面 z | 0.0517 | 0.0630 / 0.0878 | 0.0503 / 0.0734 / 0.0823 | 同档 |
+| `odom_level→base_link` rpy | [1.86, −1.63, −0.15]° | [1.56, −1.65, 0.07] / [0.88, −2.72, 0.46]° | [0.82, 0.02, 0.02] / [1.07, 0.07, 0.48] / [1.80, −0.34, 0.21]° | 同族（fastlio 自身姿态误差 1–3°） |
+| 生效带 in-band | 100% | **100%** | **100%** | 不变 |
+| local lethal | **404** | 349 / 378.5 | **282 / 309.5 / 323** | `R=I` 的 3 个样本全高于 after 的 3 个（↓15–25%）⇒ 可能有一档真实下移；n=3v3 不足以定论（正文#2） |
+| local 最近 lethal | 0.7089 | 0.7119 / 0.7109 | **0.7014 / 0.7060 / 0.7127** | 同档（≤1.2 cm） |
+| local ahead（2.0×0.6 m） | 35 | 36 / 33 | 35 / 37 / 24 | 同档 |
+| global lethal | 1970 | 2140 / 2085 | 2094 / 2109.5 / 2138 | §32.7 低 6–8%，单跑 |
+| global 最近 lethal | 0.7696 | 0.7521 / 0.5982 | 0.6254 / 0.6985 / 0.7436 | §32.7 略高于本轮 5 跑的 before 上界 0.752（+1.7 cm，n=1） |
+| **`odom_level` 地图地面 tilt** | **未测**（sparse cloud <500 点，只能换算） | **28.38 / 29.34°** | **1.10–1.90°** | ⭐ 唯一结构性变化 |
+| 地图地面 `d` | 未测 | near-field 0.2397 / 0.2457 | near-field 0.2433 / 0.2447 | 不变（差 ≤4 mm） |
+| `h_meas` | 不可用 | 不可用（3/3 WARN） | 不可用（3/3 WARN） | 同因（~145 点/帧） |
+
+**判定：有没有 nav 结论翻转？——没有。**
+
+1. **判据级三项全部同档**：in-band 生效带 3/3 = 100%（`band_guard` 11/11 × 3）、最近 lethal
+   0.701–0.713 m（§32.7 0.7089、before 0.7109–0.7119 都在内）、前方 2.0×0.6 m 24–37 格
+   （§32.7 35、before 33–36 都在内）。
+2. **`local lethal` 有一档 15–25% 的下移，但只能记为"未定"**：`R=I` 的 3 个样本是
+   **404（§32.7，1 跑）/ 349 / 378.5**，修复后的 3 个是 **282 / 309.5 / 323**——**3v3 完全分离**。
+   它有一个同向的机制候选：before 的 `odom_level→base_link` **pitch = −1.65°/−2.72°**，
+   after 是 **+0.02°/+0.07°/−0.34°** ⇒ 扫描面在代价图帧里的俯仰不同，命中"lethal 格"的数量
+   跟着变。**但**：8 个 nav 指标里只有这 1 个完全分离（`global lethal` 2140/2085 vs
+   2094–2138 有重叠；`global 最近` 0.598–0.752 vs 0.625–0.744 有重叠；`base_z`、`scan z`、
+   `nearest`、`ahead`、`in-band` 都有重叠），n=3v3 且跨了一个 spawn A/B 实验
+   ⇒ **不宣称"修复让 lethal 系统性变好"**，也不宣称"完全不变"；判据级结论没有翻转。
+3. **唯一能确定的变化是地图地面**：`odom_level` 里 **~29° → ~1.1–1.9°**。原因不是 nav 链路变了，
+   而是 **`/scan` = 原始云 + linefit + TF，LIO 的 `mapping.extrinsic_R` 根本不进这条链路**
+   （与 §35.5 对 pointlio 的结论同因）；所以 §30/§32 的 **nav 数字仍然有效**，但"fastlio 的
+   odom/地图是自洽的"这个隐含前提到 `cdcd7e3` 之前**不成立**。
+4. **`base_link` z / `floor_z` 没有系统性移动**：§32.7 0.0409（−61.6 mm）、before 0.0563/0.0832
+   （−46/−19 mm）、after 0.0482–0.0793（−54…−23 mm）全在同一档；fastlio 没有 z 锚点这件事
+   **没有**被外参修复改变。
+
+### 36.5 诚实清单
+
+1. **n=3 after + 2 before（nav）+ 1 before（mapping）**：fastlio 的跑间波动很大（本轮 base_z
+   极差 35 mm、lethal 极差 96、global nearest 极差 154 mm）⇒ **不能**把 10–25% 的 lethal 差异
+   归因给外参；本节只声明"没有结论级变化"，不声明"逐位不变"。
+2. **whole-range 地图地面 `d` 被 fastlio 自己的姿态漂移污染**（§36.3#3）：同一批点，whole-range
+   RANSAC 得到 d=0.074–0.114 / resid ~9 mm，近场 0.8–2.0 m 得到 d=0.243 / resid 1.4 mm，
+   `/Laser_map` 得到 0.2447 / 2.4 mm。**tilt 是稳健的**（两条路径差 ≤0.5°），`d` 只作辅证。
+   没有把 `d` 硬解释成"z 锚点"。
+3. **残余 1.1–1.9° ≠ pointlio 的 0.03–0.05°**：fastlio 不做重力对齐；残余与
+   `odom_level→base_link` 的 roll/pitch 同量级。这不是外参没修好，而是 **LIO 自身姿态**的
+   1–2° 误差。若要把 fastlio 也做到 <0.5°，得改它的初始化/重力对齐（`src/rm_localization/**`，
+   本任务禁改）。
+4. **`h_meas` 3/3 不可用**：`/cloud_registered` ~145 点/帧 < 500 ⇒ `odom_level_tf` 的
+   `gravity_align_h_check` WARN 跳过（与 §32.9#5 / §35.9#8 逐字同）。替代 = 原始云 `d`
+   （0.2576–0.2597，法向 0.020–0.112°）+ GT 0.102498 + TF 自洽。
+5. **`nav_band_probe.py` 自己的带仍是 `[0,2]`**（不是代价图生效带 `[-0.05,2]`）：before 两跑
+   分别报 `below=25 / 72`，而 `band_guard` 是 **100%**（z min = −0.025 / −0.011，都在 −0.05 之上）。
+   权威口径 = `band_guard`（读活栈参数服务），与 §32.9#9 同。
+6. **`ahead` 窗口的口径**：工具里 `AHEAD_X, AHEAD_Y = 2.0, 0.6`（`nav_band_probe.py:43`），
+   本节按 **2.0×0.6 m** 写；§34.2.1/§35.4 正文写的是 "2.0×1.2 m"（那是文字笔误，数值仍是同一
+   工具的 0.6 窗口）。§32.7 的 35 与本轮 24–37 可直接比。
+7. **before 用的 launch 不是当前 launch**：`git show 550f596:…`（md5 6ad0aaa…，= §34.2.1 冻结值），
+   与 `cdcd7e3` 的差异已用 `git diff 550f596..HEAD -- launch` 核对：只有外参键/receipt/日志，
+   没有别的行为变化；`mapping.extrinsic_R = I` 与顶层死键的运行期回读是直接证据。
+8. **`spawn_entity.py` 的 "Spawn service failed. Exiting." 每跑都有**（§34/§35 同样）：实体实际
+   生成成功（`/odom_ground_truth`、`/scan`、`/cloud_registered` 都有数据，GT z=0.1025），
+   是既有的良性时序消息（§32.9#13）。收尾 `sc_own_leftovers_desc` 全空。
+9. **`pcd_save_en: true` 没有落盘**（fastlio 的 `install/.../share/` 不存在，`save` 路径无效）；
+   仓库里没有新增 PCD 产物。
+10. **没有改**地图/PCD 资产、`src/rm_simulation/**`、`src/rm_localization/**`、默认路径
+    （`lio:=small_point_lio` 一个字节没动）；本轮提交只改 `docs/frame_contract_v3_measurements.md`
+    （§36 + §32.7 一行指针）。
+11. **`map→odom` 的 rpy ≈ −32°（GICP 初始对齐）在 before/after 都存在**（§35 的 pointlio 也有
+    ~−3° pitch 的同族现象），不是本轮的验收面；nav 的局部代价图不依赖它。
+12. **`/odom` 末态 z 与地图 `d` 只能做 2–5 cm 级的自洽检查**：fastlio 的 z 在跑内会漂
+    （after 三跑末态 −0.075/−0.086/−0.086，before 两跑 −0.060/−0.021），`d` 的绝对值随之
+    有 2–5 cm 的不确定度——这也是为什么本节用 **tilt** 而不是 `d` 作主判据。
