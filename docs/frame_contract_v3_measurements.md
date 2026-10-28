@@ -9728,6 +9728,11 @@ lio_tf_adapter / robot_state_publisher`；`odom_level_tf` 只在 `/tf_static` �
     （平移 0.204 m）就**不≈I** ⇒ 旧写法会让启动 `map→base` 多 0.26 m。只有 `T_odom_base≈I`
     （旧场地/纯平帧）时才与旧行为逐元素等价（§4.17.1 的测试显式断言了这一点）；
     §44.2 的 live A3 里，这个差会改变 GICP 在 SC 前的收敛轨迹（见 #1）。
+12. **包级 lint 仍有既有失败**：`colcon test --packages-select gicp_registration` 的 `flake8`
+    失败在 `launch/gicp.launch.py`（9 条既有缩进，本轮未动）；`uncrustify` 失败在
+    `src/gicp_registration.cpp` 的 3 处**既有**行（705/753/777，本轮未动）。
+    本轮新增/改动的 `seed_math.hpp`、`gicp_seed_math_test.cpp` 与本轮新写入的行均通过
+    uncrustify；`gicp_seed_math_test` 本身 **Passed**。
 
 ### 44.8 复现命令（scratch 在 `.tmp_piece2/`，不入库）
 

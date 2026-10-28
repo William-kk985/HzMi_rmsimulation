@@ -82,7 +82,8 @@ int main()
   // 旧写法（少一个 inverse）必须被抓住：它把种子推到 T_map_base·T_bl²。
   const Eigen::Matrix4d T_map_odom_old = T_map_base * T_odom_base;
   const auto rt_old = seedRoundTrip(T_map_odom_old, T_odom_base, T_map_base);
-  std::printf("  旧写法（少求逆）round-trip: trans=%.6f m, rot=%.6f°\n",
+  std::printf(
+    "  旧写法（少求逆）round-trip: trans=%.6f m, rot=%.6f°\n",
     rt_old.trans_m, rt_old.rot_deg);
   expect(!rt_old.ok, "旧写法（少求逆）必须被 round-trip 判据拒绝");
   expect(std::abs(rt_old.trans_m - 0.4089) < 5e-3, "旧写法的误差 ≈ §43 的 0.409 m（3D）");
@@ -104,13 +105,15 @@ int main()
   int n_ok = 0;
   constexpr int N = 500;
   for (int i = 0; i < N; ++i) {
-    const Eigen::Matrix4d T_mb = makePose(5.0 * u(rng), 5.0 * u(rng), 0.5 * u(rng),
-        0.6 * u(rng), 0.6 * u(rng), kPi * u(rng));
+    const Eigen::Matrix4d T_mb = makePose(
+      5.0 * u(rng), 5.0 * u(rng), 0.5 * u(rng),
+      0.6 * u(rng), 0.6 * u(rng), kPi * u(rng));
     // 覆盖 §43 的两种几何：live 种子时刻（纯平移 T_bl）与建图帧（30° 倾斜 + 米级平移）
-    const Eigen::Matrix4d T_ob = (i % 2 == 0)
-      ? makePose(0.3 * u(rng), 0.5 * u(rng), 0.3 * u(rng), 0.0, 0.0, 0.2 * u(rng))
-      : makePose(2.0 * u(rng), 2.0 * u(rng), 0.3 * u(rng),
-          30.0 * kPi / 180.0, 0.0, kPi * u(rng));
+    const Eigen::Matrix4d T_ob = (i % 2 == 0) ?
+      makePose(0.3 * u(rng), 0.5 * u(rng), 0.3 * u(rng), 0.0, 0.0, 0.2 * u(rng)) :
+      makePose(
+      2.0 * u(rng), 2.0 * u(rng), 0.3 * u(rng),
+      30.0 * kPi / 180.0, 0.0, kPi * u(rng));
     const Eigen::Matrix4d T_mo = composeMapOdomFromSeed(T_mb, T_ob);
     const auto r = seedRoundTrip(T_mo, T_ob, T_mb);
     max_trans = std::max(max_trans, r.trans_m);
