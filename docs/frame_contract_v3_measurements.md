@@ -9257,6 +9257,12 @@ rc=1（**在起 Gazebo 之前**；日志里没有 gzserver/spawn 行）
 | `/tf` publisher | gicp / robot_state_publisher / fake_vel_transform / complementary_filter / lio_tf_adapter（与改造前同一组；没有本槽） |
 | `robot_description` | 未改任何 URDF/xacro/`robot`/spawn 代码；`git diff` 不触及 `urdf/**`、`robot_description` 生成路径 |
 
+**RMUC2027 默认 `none` 补测**（同一套 launch，`world:=RMUC2027`，`global_relocalizer:=none`）：
+`/navigate_to_pose` goal (map (1.5,0)) **SUCCEEDED**；`map→base`（sim 9.9 s）=(1.396, −0.028, −0.001) m，
+yaw 21.4°；`ros2 node list`/`topic list` **没有** `scan_context_relocalizer` 的任何条目；
+`/tf` publisher 仍是同一组 5 个（gicp / robot_state_publisher / fake_vel_transform /
+complementary_filter / lio_tf_adapter）。⇒ 默认档在 RMUC2027 也是健康的，且节点集/话题集不变。
+
 ### 42.7 诚实清单（§42）
 
 1. **DB 的“同会话 / 跨会话”**：DB 与 `PCD/RMUC2027.pcd`、`map/RMUC2027.pgm` 来自**同一个建图跑**
