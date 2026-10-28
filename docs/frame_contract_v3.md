@@ -139,7 +139,7 @@ v3 要求每个槽位**声明**三项能力：`cap_global`（能否无先验整�
 |---|---|---|---|---|---|
 | 1 | **`odom`** | `fastlio`（默认）\| `pointlio` \| `small_point_lio` \| `none` \| `cartographer`（全包，降级） | 提供连续 `odom→base_link`（**经 adapter**）；`cap_gravity` = 世界系是否重力对齐（E1 决定） | **否**（由 `lio_tf_adapter` 发，§2） | **是**（`/odom` 频率 + 时间戳 + `gravity_align` 结果行） |
 | 2 | **`map_source`** | `2d_grid` \| `pcd` \| `pbstream` \| `posegraph` \| `none` | 提供地图/先验资产；`cap_version`（世界/出生点一致性 sidecar） | **否（硬约束）** | **是**（加载完成 + 版本 + 失败原因） |
-| 3 | **`global_relocalizer`** | `none` \| `amcl_global` \| `pcd_multistart` \| `descriptor` | `cap_global=true`：无先验 → 位姿假设 + 质量 | **否（硬约束）** | **是** |
+| 3 | **`global_relocalizer`** | `none`（默认）\| **`scan_context`（已实现，§4.16）** \| `amcl_global` \| `pcd_multistart` \| `descriptor`（v3a 预留名） | `cap_global=true`：无先验 → 位姿假设 + 质量 | **否（硬约束）** | **是** |
 | 4 | **`local_tracker`** | `amcl` \| `beluga` \| `slam_toolbox_localization` \| `cartographer_localization` \| `gicp` \| `small_gicp` \| `icp` \| `ndt` \| `none` | `cap_local=true`；**唯一** `map→odom` 发布者 | **是**（`map→odom`） | **是**（`valid/quality/state`） |
 | 5 | **`nav`** | `rpp`（默认）\| `dwb` \| `teb` \| `mppi` | 控制器槽 | 否 | 否（消费者） |
 | 6 | **`planner`** | `navfn`（默认）\| `smac2d` | 全局规划器槽 | 否 | 否（消费者） |
@@ -945,6 +945,161 @@ description 以 `[已删除 / 硬报错别名]` 开头），但**不参与任何
    以及 point_lio「初始化图 vs 逐帧图」一致性核验见 `docs/frame_contract_v3_measurements.md` §34；
    数值支持**默认档保持 `tf`**（§34.2.4）。
 
+## §4.16 `global_relocalizer`：**全局重定位器**槽（2026-10-28；默认 `none`）
+
+> **本节是新增**（append-only；§4.1–§4.14 正文未改）。它把 §1.3 里一直"只有名字"的
+> `global_relocalizer` 槽落成一个**可选**入口：`none`（默认，当前行为）| `scan_context`（Scan Context
+> keyframe 检索）。**它不替代 `localization`**：`localization` 仍是 `map→odom` 的唯一所有者（I3），
+> 本槽只回答"机器人大概在哪"并把它写成 `/initialpose`（I4）。
+
+### 4.16.1 槽位语义（两个值）
+
+| 值 | 起什么 | 新话题 | 对 `map→odom` 的影响 | 默认 |
+|---|---|---|---|---|
+| **`none`** | **什么都不起**（节点/话题/时序与改造前逐字节相同） | 无 | 无 | ✅ |
+| **`scan_context`** | `scan_context_relocalizer` 节点 | `/initialpose`、`/scan_context_relocalizer/{health,candidates}`、服务 `~/relocalize` | **零影响**：只发 `/initialpose`，**绝不发 TF** | — |
+
+`scan_context` 只在 `mode:=nav`（且有 LIO、`lio!=cartographer`）时生效：
+- 它需要 `odom_level`（重力对齐帧；`gravity:=tf` 的静态边，§4.11）和 `/cloud_registered`；
+- `lio:=cartographer` 的全包形态自己发 `map→odom`、且不消费 `/initialpose`，故跳过（与 localization 槽的
+  `lio!=cartographer` 条件同款）。
+
+**与 `localization` 正交**：`localization:=gicp|small_gicp|icp|amcl|beluga` 都订阅 `/initialpose`；
+`global_relocalizer` 只决定"要不要有人替操作员点 RViz 的 2D Pose Estimate"。因此：
+
+```
+localization:=gicp + global_relocalizer:=none        # 现状：必须有人给初值（RViz / initial_pose）
+localization:=gicp + global_relocalizer:=scan_context # 无先验：SC 给粗位姿，gicp 继续持有 map→odom
+```
+
+**不是** `localization` 的新值：不选 `scan_context` 的旧命令一个字节都不用改（§7 的别名表继续成立）。
+
+### 4.16.2 谁发布什么（发布者表）
+
+| 输出 | 发布者（唯一） | 帧 / 语义 | 备注 |
+|---|---|---|---|
+| `map→odom` | **`localization` 槽的 local tracker**（gicp/small_gicp/icp/amcl/…） | `T_map←odom` | **不是**本槽（I3） |
+| `odom→base_link` | LIO / `lio_tf_adapter` | `T_odom←base` | 不变 |
+| `/initialpose` | **`scan_context_relocalizer`**（仅闸门通过时） | `PoseWithCovarianceStamped`，`frame_id=map`，**机器人（`base_link`）位姿** | 与 AMCL/gicp 的 `/initialpose` 语义逐字相同 |
+| `~/health` | `scan_context_relocalizer` | `diagnostic_msgs/DiagnosticStatus`，≥1 Hz | §4.16.4 |
+| `~/candidates` | `scan_context_relocalizer`（可选） | `MarkerArray`（map 系箭头） | 只给 rviz 看，不参与控制 |
+| TF（任何边） | **没有** | — | `ros2 node info` 里**没有** `tf2_ros/transform_broadcaster`（I4） |
+
+**单发布者证据**（§42.4）：`ros2 topic info /tf -v` 的 5 个 publisher 是
+`fake_vel_transform / lio_tf_adapter / complementary_filter_gain_node / gicp_registration /
+robot_state_publisher`；`scan_context_relocalizer` **只出现在 subscriber 列表**。
+
+### 4.16.3 数据流、帧与描述子原点（写死，避免"差一个杆臂/差一个 yaw"）
+
+```
+/cloud_registered (odom)  --TF odom→odom_level-->  p_level
+                          --减去 T_odom_level←base_link 的平移-->  q（base_link 原点、重力对齐）
+q --Scan Context(20 ring × 60 sector, max-height)--> descriptor
+descriptor --ring-key top-K + 60 次列移位--> (keyframe i, SC 距离 d, shift s)
+```
+
+* **描述子原点 = `base_link`，不是雷达**。建库与查询都走
+  `q = T_level←cloud·p − t_level←base`；两边同源 ⇒ 不需要再补 `base→livox` 的 0.13 m 杆臂。
+  （这是 §41 `sensor_frame_cloud()` 的 `A·p_odom − A·T_odom_base` 的等价写法。）
+* **level 帧 = `odom_level`**（§4.11 的静态边）。它 z 朝上，但 **yaw 是 LIO 初始化时的朝向**，
+  不同会话可以不同 ⇒ DB 必须逐 keyframe 存 `level_yaws`（见 4.16.5）。
+* **yaw 的三段换算**（跨会话必须这样算）：
+  ```
+  shift ⇒ Δ = query 的 level 帧相对 keyframe 的 level 帧的 yaw 差
+  yaw_level_q = yaw_level_k + Δ                      # DB 的 level_yaws[k]
+  yaw_map_q   = yaw_level_q + yaw(T_level←base(q))    # 机体系相对 level 帧的 heading
+  ```
+  只在"query 的 level 帧 = keyframe 的 level 帧"（同会话）时才能用 `yaw_k + Δ`；
+  本仓 `third_party/eval/run_sc_scandb.py` 的 `T_map_base_kf @ Rz(yaw)` 就是那个同会话写法，
+  跨会话会差一个 LIO 初始朝向（实测 54°，§42.5）。
+* 位置：SC 只给"最近 keyframe 的 base 位置"（不做亚米级插值）；roll/pitch 取 0，由 local tracker 精配准修。
+
+### 4.16.4 闸门与健康信号（`~/health`）
+
+通过条件（全部满足才发 `/initialpose`）：
+
+```
+score = 1 / (1 + d)                 >= min_score      （默认 0.70 ⇒ d <= 0.4286）
+d                                   <= max_sc_dist    （默认 0.60；防 min_score 被调成 0）
+second_d - d                        >= min_margin     （默认 0.01；second = 离最优 >1 m 的最近候选）
+```
+
+`~/health` 是 `DiagnosticStatus`（`name = global_relocalizer=scan_context`），
+`values[]` 同时给 §5.4 的统一字段与源特有量：
+
+| key | 含义 |
+|---|---|
+| `valid` / `quality` / `state` / `source` / `reason` | §5.4 统一字段；`state ∈ {IDLE, RELOCALIZING, MATCH, NO_MATCH}` |
+| `sc_distance` / `score` / `margin` / `second_distance` | 本帧检索量 |
+| `best_index` / `shift_deg` / `hypothesis_xyz` / `hypothesis_yaw_deg` | 假设与来源 keyframe |
+| `n_keyframes` / `db_world` / `db_path` / `db_legacy_no_level_yaws` | DB 自述 |
+| `attempts` / `accepted` / `stamp` | 计数与源时刻（I7 用） |
+
+**失败模式（全部 loud，不静默）**：
+
+| 情况 | 行为 |
+|---|---|
+| DB 文件缺失 | **launch 直接失败**（`_WorldScDbFile.perform()` 抛 RuntimeError，打印建库命令）；不会起一个空节点 |
+| 点云/TF 未就绪 | `~/health.valid=false, state=NO_MATCH`，不发布 |
+| 描述子有效 bin < 10 / 点太少 | 同上，reason 说明 |
+| SC 距离大 / 裕度小 | `NO_MATCH`，**不发布 `/initialpose`**（§42.3 实测 d=0.581、margin=0.002 被拒） |
+| 跨会话 yaw 差 | 由 `level_yaws` 修正（4.16.3）；DB 没有 `level_yaws` 时 health 标 `db_legacy_no_level_yaws=true` |
+| 匹配到错误地点 | 闸门（score+margin）是第一道；下游 local tracker 的 fitness/innovation 门是第二道。**本槽不发明位姿** |
+
+### 4.16.5 DB 文件（`PCD/<world>_sc_db.npz`）
+
+numpy `.npz`，**无 pickle**。字段：
+
+| key | shape | 含义 |
+|---|---|---|
+| `format_version` | int64 | 1 |
+| `num_rings` / `num_sectors` | int64 | 20 / 60 |
+| `max_radius` / `height_max` | float64 | 12.0 m / 3.0 m |
+| `descriptors` | (K,20,60) f32 | 每个 keyframe 的 SC（base_link 原点、重力对齐） |
+| `ring_keys` | (K,20) f32 | `descriptors.mean(axis=1)` |
+| `poses` | (K,4,4) f64 | `T_map_base` |
+| `level_yaws` | (K,) f64 | keyframe 时刻 level 帧在 map 系里的 yaw（4.16.3 的换算必需） |
+| `stamps` | (K,) f64 | 建库 bag 的点云时间戳（追溯） |
+| `meta` | JSON str | world / source bag / 参数 / 命令 / keyframe 规则 |
+
+**建库（离线，一次）**：
+
+```bash
+source /opt/ros/humble/setup.bash && source install/setup.bash
+ros2 run scan_context_relocalizer build_sc_db -- \
+  --bag <mapping-run>/bag/raw --world <world> \
+  --pcd src/rm_nav_bringup/PCD/<world>.pcd \
+  --out src/rm_nav_bringup/PCD/<world>_sc_db.npz
+# 新文件要重新 build 才进 install（PCD 是逐文件/目录安装的）
+colcon build --symlink-install --packages-select rm_nav_bringup
+```
+
+输入只要建图跑的 `/cloud_registered` + `/tf` + `/tf_static`（**不需要真值/PCD**；`--pcd` 只用于
+"位姿合理性 bbox"拦截 slam_toolbox 发散帧）。keyframe 规则默认 `move>=0.35 m`（或原地转
+`yaw>=15°` 且 `move>=0.10 m`），可 `--min-move/--max-keyframes/--exclude-stamps` 调整。
+**为什么以扫描库而不是 PCD 建库**：SC 的 max-height 图对"库看的是地面以上薄壳、查询看的是雷达一圈"
+非常敏感（`docs/scan_context_samesource_gate_report.md`）；扫描库与查询同源，§41 的 10/13 就是这么来的。
+
+### 4.16.6 launch 槽位（实现位置）
+
+* `bringup_sim.launch.py`：`DeclareLaunchArgument('global_relocalizer', default='none',
+  choices=['none','scan_context'])`；`scan_context` 时 `Node(package='scan_context_relocalizer',
+  executable='scan_context_relocalizer_node')`，`db_path` 由 `_WorldScDbFile` 按 `world` 惰性解析
+  （`--show-args` / 不选该槽位 = 零成本）。
+* 节点包：`src/rm_localization/scan_context_relocalizer/`（ament_python；SC 实现复制
+  `third_party/eval/sc.py` 并加 `query_yaw_from_shift()`，算法本体未改；selftest 24/25 保留）。
+* 参数文件：包内 `config/scan_context_relocalizer_sim.yaml`（`db_path` 留空，由 launch 注入）。
+
+### 4.16.7 回退
+
+* 逐字节回退：`global_relocalizer:=none`（默认；本槽的 Node condition 恒假）。
+* 保留节点但不发 `/initialpose`：`publish_initialpose:=false`（只发 health/candidates，用于 A/B）。
+* 换 DB：覆盖 `PCD/<world>_sc_db.npz` 后重启（节点启动时一次性读入）。
+* 关自动跑、只用服务：`auto_start:=false` + `ros2 service call /scan_context_relocalizer/relocalize
+  std_srvs/srv/Trigger "{}"`。
+
+---
+
 ## §5 重定位契约
 
 ### 5.1 能力分层（P4 的落地）
@@ -1032,6 +1187,7 @@ description 以 `[已删除 / 硬报错别名]` 开头），但**不参与任何
 | L3 | `nav` | `2d_grid` | `amcl_global` | `amcl` | **M1** | 一体机；`global_relocalizer` 与 tracker 是**同一节点**，允许 |
 | L4 | `nav` | `2d_grid` | `none` | `amcl` | M1（只给初值） | `initial_pose:=known` 时必须 |
 | L5 | `nav` | `pcd` | `descriptor` | `gicp` | **M2 串联** | 全局给先验 → 局部精配准；`initial_pose` 可为 `unknown` |
+| L5b | `nav` | `pcd` | **`scan_context`** | `gicp`/`small_gicp`/`icp` | **M2 串联（已实现）** | §4.16：SC keyframe DB → `/initialpose`；`localization` 仍独占 `map→odom` |
 | L6 | `nav` | `pcd` | `none` | `gicp` | M2（外部初值） | 必须 `initial_pose:=known` 或 `/initialpose` |
 | L7 | `nav` | `posegraph` | `none` | `slam_toolbox_localization` | M1 变体 | 起点靠 `/initialpose`（S3 §2） |
 | L8 | `nav` | `pbstream` | `none` | `cartographer_localization` | M1 变体 | 图冻结；只支持局部窗口（S3 §3.3） |
@@ -1094,6 +1250,7 @@ description 以 `[已删除 / 硬报错别名]` 开头），但**不参与任何
 | `localization:=slam_toolbox` | 原样 | `map_source:=posegraph` + `global_relocalizer:=none` + `local_tracker:=slam_toolbox_localization` | v3b |
 | `localization:=cartographer` | 原样 | `map_source:=pbstream` + `local_tracker:=cartographer_localization` | v3b |
 | `localization:=icp\|gicp\|small_gicp` | 原样 | `map_source:=pcd` + `global_relocalizer:=none` + `local_tracker:=<同值>` | v3b |
+| `global_relocalizer:=scan_context`（2026-10-28 新增） | 原样（新增槽位；与 `localization` 正交） | 见 §4.16：只发 `/initialpose` + health，**不写 `map→odom`** | — |
 | `mapper:=slam_toolbox\|cartographer`（仅 `mode:=mapping`） | 原样 | `map_source:=posegraph\|pbstream` + `mode:=mapping` | v3b |
 | `robot11_mount:=sensor` | 原样（= v3 的唯一语义） | （无，语义合并进 `robot`） | v3b（参数消失，行为不变） |
 | `robot11_mount:=plugin` | **原样**，打 `DEPRECATED: 平帧+斜数据，v3b 移除` | 暂时保留 | v3b（**唯一的破坏性变更**） |

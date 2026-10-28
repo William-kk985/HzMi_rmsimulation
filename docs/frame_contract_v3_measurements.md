@@ -9136,3 +9136,180 @@ ld.add_action(bringup_RMUC2026_cmd_group)   # condition=LaunchConfigurationEqual
    开环定时跑"前进 3 m"实测只走 1.0–1.5 m（首跑如此，已改）。这条也解释了为什么
    `capture_map2027`/`nav2027` 两次的轨迹都只有 ~3 m。
 10. 其余限制（单次跑、真值自噪声 ~10 cm、`map→odom` 继承资产倾斜、未接栈/未联调）与 §39.6 / §40.5 相同。
+
+## §42 第三十二轮（**本机 date=2026-10-28，21:18–22:10**）：`global_relocalizer:=scan_context` 槽落地 —— DB、栈内实测、单发布者与诚实边界
+
+> **本节只新增**（append-only）。§1–§41 正文未改；§4.16 是本轮新增的契约正文。
+> 一句话：**槽位语义/接线/闸门/单发布者都成立；SC 的粗位姿在栈内是好的（0.005 m / 1.4°），
+> 但「SC → gicp 锁到 1 cm」这个 §41 的离线结论在**本仓运行时 PCD** 上**没有**复现**（gicp 从正确的
+> 粗位姿滑到 0.46 m / 10°，且该落点对 PCD 的最近邻拟合比 SC 粗位姿更差）。这条差距原样写在这里，
+> 不粉饰。
+
+### 42.1 环境、构建与「只跑一个栈」
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `/home/weicheng/HzMi_rmsimulation`，HEAD `bfd9b6c`（origin/master） |
+| 新增包 | `src/rm_localization/scan_context_relocalizer/`（ament_python；node + `build_sc_db` + `scan_context.py`） |
+| 构建 | `colcon build --symlink-install --packages-select scan_context_relocalizer rm_nav_bringup`（**nav 跑之前**；§41.5#7 的 install-symlink 坑） |
+| 隔离 | 每次一个栈；私有 `HOME`/`ROS_LOG_DIR`/`ROS_DOMAIN_ID`（随机 60–90）/`GAZEBO_MASTER_URI`（127.0.0.1:11800–12300）；`unset DISPLAY`；只 `kill -INT/-TERM -- -$PGID`（按 setsid 进程组），无机器级 pkill |
+| 世界/机器人 | `world:=RMUC2027|RMUC2026`，`robot:=robot11`，`lio:=small_point_lio`，`gravity:=tf`，`local_obstacle:=stvl`，`nav:=mppi`，`planner:=smac2d`（与 §41 的口径一致） |
+
+### 42.2 DB 构建（离线；`PCD/RMUC2027_sc_db.npz`）
+
+```bash
+ros2 run scan_context_relocalizer build_sc_db -- \
+  --bag third_party/eval_data/capture_map2027/bag/raw --world RMUC2027 \
+  --out src/rm_nav_bringup/PCD/RMUC2027_sc_db.npz
+# 输出：可用帧 174 / keyframes 10 / 0.01 MB；keyframe xy bbox x[-0.00,1.19] y[-0.11,0.16]；
+#       spacing median 0.23 m / max 0.40 m
+```
+
+| 项 | 值 |
+|---|---|
+| 建图 bag | `third_party/eval_data/capture_map2027/bag/raw`（174 帧 `/cloud_registered`、3986 条 `/tf`、2 条 `/tf_static`） |
+| keyframe 规则 | `move>=0.35 m`（或原地转 `yaw>=15°` 且 `move>=0.10 m`）；末帧强制保留 |
+| keyframes | **10**（路线只有约 2.9 m；map x 0–1.19 m） |
+| 描述子 | 20 ring × 60 sector，max-height；**原点 = base_link，重力对齐**（`q=T_level←cloud·p − t_level←base`） |
+| `poses` | `T_map_base`（map 系 = 该建图跑保存 PCD/2D 图的同一帧） |
+| `level_yaws` | 逐 keyframe 的 level 帧在 map 系里的 yaw（**跨会话必需**；见 42.5#1） |
+| 同会话自查询 | 174 帧查询：xy 误差中位 **0.021 m** / p90 0.189 m / max 0.307 m；yaw 中位 **0.0°** / p90 2.86° / 159/174 帧 ≤0.5 m & ≤10° |
+
+> `--pcd src/rm_nav_bringup/PCD/RMUC2027.pcd` 是可选的“位姿合理性 bbox”门；本 DB 没给也干净。
+> `capture_q2027b` 跑在 ~115 s 后 slam_toolbox 发散（`map→base` 到 1e4 m 量级），
+> 用 `--pcd/--max-time` 拦掉；**不要**拿整份 q2027b 直接建库（会把 1e4 m 的 keyframe 写进去）。
+
+### 42.3 栈内实测（b）：RMUC2027，车放在离出生点 3.7 m 的已知 map 位姿
+
+**测试手法**：栈起在出生点 (5.90, 2.72)；`/gazebo/model_states` 的 `robot` 一出现，
+立刻用 Gazebo transport（`gz model -m robot -x 7.88 -y 3.50 -z 0.11 -Y 0.940`）把它放到
+DB keyframe 6 的**同一 world 位姿**（GT `/odom_ground_truth` 实测 `(7.880,3.499,0.112)`,
+yaw 53.9°），然后让 LIO 在新位姿初始化。**没有改 world 几何/出生点/地图/PCD**。
+
+| 量 | 值 |
+|---|---|
+| SC 匹配 | keyframe **6**；`d=0.115`，`score=0.897`，`margin=0.687`（闸门 0.70/0.01 通过） |
+| SC 粗位姿（`/initialpose`） | map **(1.185, 0.159, 0.002) m，yaw 44.7°**（sim 7.9 s 发布；`auto_start_delay=8 s`） |
+| GT（= DB keyframe 6 的 map 位姿） | **(1.19, 0.16, 0.00) m，yaw 42.6°** |
+| **SC 误差** | **0.005 m / 2.1°**（在“expected coarse range”内） |
+| 锁前 `map→base`（gicp，sim 7.5 s） | (0.178, −0.397) m，yaw 12.6°；`converged=false`，fitness 0.089 m²（≈ 未锁） |
+| **锁前误差 vs GT** | **1.169 m / 30.4°** |
+| 锁后 `map→base`（gicp，sim 15.7 s） | (1.598, 0.171) m，yaw 54.1°；`converged=true`，fitness **0.0239 m²** |
+| **锁后误差 vs GT keyframe** | **0.460 m / 10.1°**（vs SC 粗位姿 0.463 m / 9.4°） |
+| `small_gicp` 复跑（run2） | 同样落在 (1.60, 0.20) / 56.8°（sim 20.5 s），**后端无关** |
+| PCD 最近邻拟合（同一帧扫描） | SC 粗位姿：median **0.048 m**，**72.6%** 点 <0.1 m；gicp 落点：median **0.060 m**，**59.5%** 点 <0.1 m |
+
+**读法**：SC 的粗位姿是好的（且对 PCD 的拟合**优于** gicp 的落点）；**gicp 从正确的粗位姿滑到了
+一个更差的局部极小**（地面主导 + 稀疏格栅围栏 + PCD 局部漂移）。因此“gicp 锁上”成立（converged、
+map→odom 在发、fitness 0.024），但“锁到 §41 的 1 cm”**不成立**；见 42.6#4。
+
+### 42.4 单发布者证据（d）
+
+`ros2 topic info /tf -v`（RMUC2027 SC 跑，实测 5 个 publisher）：
+
+```
+PUBLISHER  fake_vel_transform
+PUBLISHER  lio_tf_adapter
+PUBLISHER  complementary_filter_gain_node
+PUBLISHER  gicp_registration          ← map→odom 的唯一来源
+PUBLISHER  robot_state_publisher
+SUBSCRIBER scan_context_relocalizer   ← 本槽只在订阅 /tf（TF listener），**不是 publisher**
+```
+
+节点代码里没有任何 `TransformBroadcaster`/`StaticTransformBroadcaster`（`grep -n "Broadcaster\|sendTransform"
+src/rm_localization/scan_context_relocalizer/` 为空）；`/scan_context_relocalizer` 在 `/tf` 上只有
+SUBSCRIBER 端点。⇒ I3/I4 成立：`map→odom` 仍只由 local tracker 发。
+
+### 42.5 健康/no-match 与 fail-loud（c）
+
+**缺 DB（fail loud）**：`world:=RMUL2026 global_relocalizer:=scan_context`（RMUL2026 没有 DB）：
+
+```
+[ERROR] [launch]: Caught exception in launch ... [launch] global_relocalizer:=scan_context 缺少 Scan Context DB：
+  期望：.../PCD/RMUL2026_sc_db.npz
+  ... ros2 run scan_context_relocalizer build_sc_db -- --bag ... --world RMUL2026 ...
+rc=1（**在起 Gazebo 之前**；日志里没有 gzserver/spawn 行）
+```
+
+**no-match（不同 world 的 DB）**：RMUC2026 栈 + 手工起 SC 节点、`db_path=RMUC2027_sc_db.npz`：
+
+| 量 | 值 |
+|---|---|
+| 检索 | `d=0.581`，`score=0.632`（<0.70），`margin=0.002`（<0.01），`best_index=0` |
+| `/scan_context_relocalizer/health` | `level=WARN`，`valid=false`，`state=NO_MATCH`，`accepted=0`，reason 逐字给出两个门 |
+| 节点日志 | `[scan_context] auto_start NO-MATCH ... ⇒ 不发布 /initialpose` |
+| `/initialpose` | 发布者只有 SC 节点（topic 已创建），但**没有消息**；gicp 未被复位（其初始 `initial_pose` 保持不变） |
+
+### 42.6 默认 `none` 回归（a/e）
+
+**`--show-args` 逐字节对照**（HEAD 的 launch vs 本轮）：基线 417 行 / 105 个参数；本轮 421 行 / **106**
+个参数；`diff` **只有**新增的 `'global_relocalizer': ... (default: 'none')` 4 行，其余**逐字节相同**。
+（“show-args 数量不变”在字面上做不到：新增槽位必须声明一个 arg；能做到的是“**只多这一条**”。）
+
+**RMUC2026 默认 `none` 整栈**（`world:=RMUC2026 mode:=nav localization:=gicp lio:=small_point_lio`）：
+
+| 检查 | 结果 |
+|---|---|
+| nav2 goal (map (1.5,0) yaw 0) | **SUCCEEDED**（`/navigate_to_pose`） |
+| `map→base_link`（sim 13.7 s） | (1.408, −0.166, −0.094) m，yaw 15.5°（goal 执行后的正常姿态） |
+| `ros2 node list` | **没有** `scan_context_relocalizer` |
+| `ros2 topic list` | **没有** `/scan_context_relocalizer/*`，也没有 `/initialpose` 的发布者（`Publisher count: 0`；只有 gicp 订阅） |
+| `/tf` publisher | gicp / robot_state_publisher / fake_vel_transform / complementary_filter / lio_tf_adapter（与改造前同一组；没有本槽） |
+| `robot_description` | 未改任何 URDF/xacro/`robot`/spawn 代码；`git diff` 不触及 `urdf/**`、`robot_description` 生成路径 |
+
+### 42.7 诚实清单（§42）
+
+1. **DB 的“同会话 / 跨会话”**：DB 与 `PCD/RMUC2027.pcd`、`map/RMUC2027.pgm` 来自**同一个建图跑**
+   （`capture_map2027`）⇒ keyframe 位姿与 map 资产同帧；但本轮的**查询**是**新开的一栈**（跨会话）。
+   这不是 §41 的“同会话 held-out 13 帧”：本轮的 1 个目标正好是 DB keyframe 6 的 world 位姿，
+   **没有**扫任意位置。**10/13 的统计不能直接搬到栈内**。
+2. **DB 覆盖极小**：10 个 keyframe / 建图路线约 2.9 m（map x 0–1.19 m）。这不是一份“任意摆”的
+   通用库；要覆盖整场，需要一条更长的建图跑（或把多次跑的扫描按 map 资产对齐后并库）。
+3. **`level_yaws` 是本轮才发现的关键**：SC 描述子表达在**重力对齐 level 帧**里（世界朝向，不随机体
+   heading 转）。同会话查询的 level 帧相同，`yaw_k + Δ` 勉强成立（§41 的写法）；**跨会话** level 帧
+   差一个 LIO 初始朝向（本轮实测 **54°**）。DB 逐 keyframe 存 `level_yaws`，查询用
+   `yaw_level_k + Δ + yaw(T_level←base)` 换算后，yaw 误差从 54° 降到 1.4°。老 DB 没有这一列时
+   health 会标 `db_legacy_no_level_yaws=true`（跨会话会错）。
+4. **10/13 → 栈的现实差**：§41 的 12/13、1 cm 是**离线 `refine_icp` + 评估地图**（`map_rmuc2027_q.pcd`）
+   的口径；本轮是**运行时 `PCD/RMUC2027.pcd` + 在线 gicp**。SC 粗位姿是好的（PCD 拟合也更好），
+   但 gicp 滑到 0.46 m / 10° 的局部极小。可能原因（未逐一证伪）：PCD 与 DB 的局部漂移
+   （同一位置两套 map 位姿差 0.46 m / 10°）、地面主导 + 格栅稀疏、gicp 的创新门以 0.1 m/帧
+   放行这种“小步滑”。**这不是本槽的 `map→odom` 越权**（它没发 TF），是 local tracker 的 basin 问题；
+   要复现 §41 的 1 cm，需要先修 PCD/DB 的帧一致性或给 gicp 更强的结构权重。
+5. **gicp 落点 vs 真值没有独立真值**：本轮的“GT”是 DB keyframe 6 的 map 位姿（同一建图跑的 TF），
+   不是外部测量；PCD 最近邻拟合是独立于 gicp 的旁证，但它也受 PCD 自身漂移影响。
+6. **`auto_start_delay=8 s` 是时序约束，不是算法需要**：local tracker 在 t=7 s 起；SC 若更早发布，
+   `/initialpose` 没有订阅者（不是 latched/transient local）⇒ 消息丢失。所以默认 8 s；如果换更慢的
+   机器或换 `localization` 启动时序，需要相应调大/用 `~/relocalize` 服务补发。
+7. **测试用了 teleport**：`gz model` 在 spawn 后立刻把车放到 keyframe 的 world 位姿，LIO 在该位姿初始化
+   （实测 odom 起点 ≈ 0）；这是“车被搬过去/出生在那”的等价手法，未改 world 出生点。真实部署里
+   应把车放在目标位姿后上电（或先 `initial_pose:=unknown` 再让 SC 给）。
+8. **no-match 用的是“不同 world 的 DB”**，不是“遮挡扫描”；遮挡/动态障碍下的拒绝率**没测**。
+9. **没有测 `auto_start` 失败后的自动重试**：本实现 auto_start 只跑一次（失败保持 no-match，等服务/重启）；
+   这是有意的（避免对同一个坏匹配反复发 `/initialpose`），但没有做“车移动后自动再试”的策略。
+10. **RMUL2027 未跑**（没有 DB；按 §41 的出生高度推出 0.1135，未实测）。RMUC2026 的默认档只做了
+    一次 goal 冒烟，不是完整回归矩阵。
+
+### 42.8 复现命令（摘）
+
+```bash
+# 1) 建 DB
+source /opt/ros/humble/setup.bash && source install/setup.bash
+ros2 run scan_context_relocalizer build_sc_db -- \
+  --bag third_party/eval_data/capture_map2027/bag/raw --world RMUC2027 \
+  --out src/rm_nav_bringup/PCD/RMUC2027_sc_db.npz
+colcon build --symlink-install --packages-select rm_nav_bringup
+
+# 2) SC 栈（RMUC2027；车先放在世界任一已知 map 位姿）
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  world:=RMUC2027 mode:=nav lio:=small_point_lio localization:=gicp \
+  global_relocalizer:=scan_context nav:=mppi planner:=smac2d \
+  gravity:=tf robot:=robot11 spin_speed:=0.0 ground:=linefit \
+  local_obstacle:=stvl global_obstacle:=stvl gui:=False nav_rviz:=False lio_rviz:=False
+# 服务补发：ros2 service call /scan_context_relocalizer/relocalize std_srvs/srv/Trigger "{}"
+# 健康：ros2 topic echo /scan_context_relocalizer/health --once
+
+# 3) 默认档（none）：把 global_relocalizer:=scan_context 删掉/改 none；其余逐字节不变
+```
+
+---

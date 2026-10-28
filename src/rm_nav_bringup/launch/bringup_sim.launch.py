@@ -57,6 +57,9 @@ _SLOT_ALTERNATIVES = {
     'patchwork_ground_segmentation': 'ground:=linefit（默认值，现有已验证路径）',
     'rm_ground_traversability': '无替代槽位：它是两个地面分割节点的**编译期依赖**（header-only 判据库），'
                                 '不构建它两个节点都编不过 —— 见 docs/ground_segmentation_slots.md §10',
+    'scan_context_relocalizer': 'global_relocalizer:=none（默认，当前行为）或先建 DB：'
+                                'ros2 run scan_context_relocalizer build_sc_db -- --bag <建图 bag/raw> '
+                                '--world <world> --out <PCD/<world>_sc_db.npz>',
 }
 
 
@@ -104,6 +107,49 @@ class _PackageShareFile(Substitution):
     def describe(self):
         return '%s(package=%s, path=%s)' % (
             type(self).__name__, self.__package_name, os.path.join(*self.__relative_path))
+
+
+# =============================================================================
+# global_relocalizer 槽位（2026-10-28）—— 全局重定位器（可选；默认关）
+# -----------------------------------------------------------------------------
+# 语义（契约 §4.16 / I3 / I4）：
+#   · `none`（默认）= **当前行为逐字节不变**：不声明节点、不引入任何话题；
+#   · `scan_context` = 起 scan_context_relocalizer：一帧激光 → SC keyframe DB → 闸门通过后
+#     发 `/initialpose`（map 系粗位姿）+ `~/health`；**绝不发 TF**（map→odom 仍归 local tracker）。
+#   · 与 `localization` **正交**：`localization:=gicp|small_gicp|icp|amcl|beluga|…` 都消费
+#     `/initialpose`；槽位只决定"要不要有人替操作员点 2D Pose Estimate"。
+#
+# DB 路径 = `<rm_nav_bringup>/PCD/<world>_sc_db.npz`。**缺文件 = 响亮失败**：
+#   `_WorldScDbFile` 在 Node.execute() 时才求值（--show-args / 不选该槽位 ⇒ 零成本），
+#   报错里直接给建库命令 —— 与文件顶部 `_PackageShareFile` 的原则一致。
+# =============================================================================
+class _WorldScDbFile(Substitution):
+    """按 `world` 惰性解析 `PCD/<world>_sc_db.npz`；缺文件时给出可操作的建库命令。"""
+
+    def perform(self, context):
+        world = (context.launch_configurations.get('world') or '').strip()
+        if not world:
+            raise RuntimeError('[launch] global_relocalizer:=scan_context 需要 world:=<name>（不能为空）')
+        share = get_package_share_directory('rm_nav_bringup')
+        path = os.path.join(share, 'PCD', '%s_sc_db.npz' % world)
+        if not os.path.isfile(path):
+            raise RuntimeError(
+                "[launch] global_relocalizer:=scan_context 缺少 Scan Context DB：\n"
+                "  期望：%(path)s\n"
+                "  本次命令**显式选了** scan_context 槽 ⇒ 先离线建库（用该 world 的建图跑 bag）：\n"
+                "    source /opt/ros/humble/setup.bash && source install/setup.bash\n"
+                "    ros2 run scan_context_relocalizer build_sc_db -- \\\n"
+                "      --bag <mapping run bag/raw> --world %(world)s \\\n"
+                "      --pcd <rm_nav_bringup>/PCD/%(world)s.pcd \\\n"
+                "      --out <workspace>/src/rm_nav_bringup/PCD/%(world)s_sc_db.npz\n"
+                "    colcon build --symlink-install --packages-select rm_nav_bringup\n"
+                "  （格式/命令/诚实边界见 docs/frame_contract_v3.md §4.16）\n"
+                "  · 或者回退到默认：global_relocalizer:=none"
+                % {'path': path, 'world': world})
+        return path
+
+    def describe(self):
+        return '%s(world→PCD/<world>_sc_db.npz)' % type(self).__name__
 
 
 # =============================================================================
@@ -2521,6 +2567,10 @@ def generate_launch_description():
     # ★ 2026-10-05：同一类修复 —— 惰性解析，缺包只挡住 localization:=gicp / small_gicp 这两个槽位
     gicp_registration_params_dir = _PackageShareFile(
         'gicp_registration', 'config', 'gicp_registration_sim.yaml')
+    # ★ 2026-10-28（契约 §4.16）：global_relocalizer:=scan_context 的参数（同 `_PackageShareFile`
+    #   的惰性原则 —— 不选该槽位就永不 perform；缺包只挡这一条）。
+    sc_relocalizer_params = _PackageShareFile(
+        'scan_context_relocalizer', 'config', 'scan_context_relocalizer_sim.yaml')
     ################################# icp_registration parameters end #################################
 
     # Declare launch options
@@ -2593,6 +2643,29 @@ def generate_launch_description():
                     '5.0 = 复现上游哨兵小陀螺行为（默认模型/其它槽位）；'
                     'robot:=robot11 的默认值 = **0.0**（该模型轮子是真 cylinder、云台无控制器，'
                     '仿真里既无执行机构也无实测依据）；0.0 = 角速度直通（等价普通 nav2）')
+
+    # ★ 2026-10-28（契约 §4.16）：`global_relocalizer:=scan_context` 的节点定义。
+    #   条件 = nav + 选了 scan_context + lio!=cartographer（cartographer 全包形态自己发 map→odom，
+    #   不消费 /initialpose；它继续由 localization 槽的语义管）。默认 `none` ⇒ condition 恒假
+    #   ⇒ 节点集/话题集/时序与改造前**逐字节相同**。
+    #   参数：DB 路径按 world 惰性解析（缺文件响亮失败），其余走包内 YAML；
+    #   `auto_start_delay_sec` 默认 8 s，等 LIO/TF（与 localization 组 4 s 起、gicp 7 s 起的既有
+    #   时序同量级）。
+    sc_relocalizer_node = Node(
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mode'), "' == 'nav' and '",
+            LaunchConfiguration('global_relocalizer'), "' == 'scan_context' and '",
+            LaunchConfiguration('lio'), "' != 'cartographer'"])),
+        package='scan_context_relocalizer',
+        executable='scan_context_relocalizer_node',
+        name='scan_context_relocalizer',
+        output='screen',
+        parameters=[
+            sc_relocalizer_params,
+            {'use_sim_time': use_sim_time,
+             'db_path': _WorldScDbFile()},
+        ],
+    )
 
     declare_world_cmd = DeclareLaunchArgument(
         'world',
@@ -2789,6 +2862,19 @@ def generate_launch_description():
                     'icp / gicp / small_gicp 三者都吃同一份 PCD/<world>.pcd，'
                     '初值都给 /initialpose（RViz 2D Pose Estimate）或 initial_pose 参数；'
                     '留空 = 回退用法，直接用 LIO 当绝对定位并由静态桥补帧')
+
+    # ★ 2026-10-28（契约 §4.16）：`global_relocalizer` 槽 —— **全局重定位器**（可选）。
+    #   默认 `none` = 当前行为（不新增节点/话题）；`scan_context` = 起 scan_context_relocalizer。
+    #   它与 `localization` **正交**：后者持有 map→odom，前者只发 `/initialpose` 假设（I3/I4）。
+    declare_global_relocalizer_cmd = DeclareLaunchArgument(
+        'global_relocalizer',
+        default_value='none',
+        choices=['none', 'scan_context'],
+        description='全局重定位器槽（与 localization 正交；只发 /initialpose + ~/health，绝不发 TF）: '
+                    'none（默认，当前行为不变）| '
+                    'scan_context（Scan Context keyframe DB 检索 —— 需预先建 '
+                    'PCD/<world>_sc_db.npz；`mode:=nav` 时生效，缺 DB 会响亮失败）。'
+                    '为 localization:=gicp|small_gicp|icp|amcl 等提供"没有先验"时的粗位姿。')
 
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
@@ -4273,6 +4359,7 @@ def generate_launch_description():
              _MountReadout()]))
     ld.add_action(declare_mode_cmd)
     ld.add_action(declare_localization_cmd)
+    ld.add_action(declare_global_relocalizer_cmd)
     ld.add_action(declare_LIO_cmd)
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_planner_cmd)
@@ -4314,6 +4401,10 @@ def generate_launch_description():
     #   读 launch 进程的 `os.environ['GAZEBO_MODEL_PATH']`；本 Action 通过 `AppendEnvironmentVariable`
     #   改的正是这个 `os.environ`（launch 的 `context.environment` 就是 `os.environ`）。
     #   顺序反了 ⇒ mesh 解析根晚一步，gzclient 照样会回落到在线模型库并卡住（本 Task 的回归点）。
+    # ★ 2026-10-28（契约 §4.16）：global_relocalizer 槽（默认 none ⇒ condition 假，节点集不变）。
+    #   放在 `start_rm_simulation` **之前**：选 scan_context 但 DB 缺失时，`_WorldScDbFile.perform()`
+    #   在起 Gazebo 之前就抛错（fail fast，不留半个仿真）；正常档它在 t=0 起，自己等 TF/点云。
+    ld.add_action(sc_relocalizer_node)
     ld.add_action(OpaqueFunction(function=_gazebo_model_path_setup))
     ld.add_action(start_rm_simulation)
     # 只有 sim_backend:=gz 才执行；classic 档它是一个 condition 为假的空 Action。

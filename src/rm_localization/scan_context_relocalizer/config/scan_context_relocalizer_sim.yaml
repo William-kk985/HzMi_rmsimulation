@@ -1,0 +1,38 @@
+# scan_context_relocalizer —— `global_relocalizer:=scan_context` 的默认参数（仿真）。
+#
+# 契约（docs/frame_contract_v3.md §4.16）：
+#   · 只发 /initialpose（map 系机器人位姿）+ ~/health + ~/candidates；
+#   · **不发任何 TF**；map→odom 的唯一发布者仍是 localization:=gicp|small_gicp|icp|amcl|beluga|…
+#   · 闸门不过 ⇒ 不发布 /initialpose，~/health.valid=false + reason 说明。
+#
+# 槽位：`global_relocalizer:=scan_context` 时由 bringup_sim.launch.py 起；DB 路径由 launch
+# 按 world 推导（PCD/<world>_sc_db.npz），本文件的 db_path 留空 = 必须由 launch 注入。
+/scan_context_relocalizer:
+  ros__parameters:
+    use_sim_time: true
+
+    # ---- 数据源 / 帧 ----
+    db_path: ""                       # launch 注入 <rm_nav_bringup>/PCD/<world>_sc_db.npz
+    scan_topic: /cloud_registered     # odom 系点云（与建库同源；不要换成 /scan）
+    map_frame: map
+    base_frame: base_link
+    level_frame: odom_level           # 重力对齐帧（契约 §4.11 的静态边 odom→odom_level）
+
+    # ---- 检索 ----
+    max_candidates: 20                # ring-key top-K（再逐个做 60 次列移位）
+    candidate_min_sep: 1.0            # m；次优"地点"至少离最优这么远（否则不参与 margin）
+    min_score: 0.70                   # score = 1/(1+SC 距离)；0.70 ⇒ 距离 <= 0.4286
+    min_margin: 0.01                  # 次优距离 - 最优距离；小 = 两个地点一样像
+    max_sc_dist: 0.60                 # 硬上限（score 与它取与；防 min_score 被调成 0）
+    min_scan_points: 500
+
+    # ---- 输出 ----
+    publish_initialpose: true         # false = 只发 health/candidates（调试用）
+    publish_candidates: true          # ~/candidates（MarkerArray；只在闸门通过时发）
+    health_rate_hz: 1.0               # 契约 I6：>= 1 Hz
+
+    # ---- 启动行为 ----
+    auto_start: true                  # 启动后自动跑一次（失败不重试；可用服务/重启重试）
+    auto_start_delay_sec: 8.0         # 等 LIO/TF 就绪；也避开 spawn 落定期
+    auto_start_timeout_sec: 90.0      # 这么久还没有点云/TF ⇒ 放弃并在 health 里说明
+    tf_timeout_sec: 0.30

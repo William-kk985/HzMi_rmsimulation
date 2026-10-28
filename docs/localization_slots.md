@@ -774,7 +774,7 @@ python3 tools/scripts/diag/record_tf_monotonic.py
 
 | 计划槽位值 | 用什么 | 依赖 / 资产 | 落地要点 | 估时 |
 |---|---|---|---|---|
-| `scan_context` | Scan Context **全局检索** + ICP/GICP **精配准**（两级） | 需引入 Scan Context 实现 + 用 PCD 建描述子库 | 解决"**车随便摆 / 被搬动**"（ICP 类天生初值敏感）；检索出粗位姿 → 现有精配准 | 2~3 天 |
+| ~~`scan_context`~~ | **已落地为独立的 `global_relocalizer:=scan_context` 槽**（2026-10-28）——**不是** `localization` 的新值 | `PCD/<world>_sc_db.npz`（用建图 bag 离线建；SC 实现复用 `third_party/eval/sc.py`） | 运行：`global_relocalizer:=scan_context` + `localization:=gicp\|small_gicp`；只发 `/initialpose` + health，**不发 TF** | ✅ 已实现（见 `docs/frame_contract_v3.md` §4.16 / measurements §42） |
 | `fastlio_loc` | LIO + 先验 PCD 做配准得 `map→odom`（一体化配方） | PCD 已有 | 与我们 `lio_tf_adapter` 有职责重叠 ⇒ 作为**对照实现** | 1~2 天 |
 | `teaserpp` | TEASER++ 无初值全局配准 | 需引入 TEASER++ + 特征 | 远期；开销大 | 远期 |
 
