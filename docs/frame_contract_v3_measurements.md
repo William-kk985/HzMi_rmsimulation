@@ -9319,3 +9319,234 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py \
 ```
 
 ---
+
+## §43 第三十三轮（**本机 date=2026-10-28，22:20–23:10**）：`localization:=gicp` 为什么从**好的 Scan Context 种子**滑走 —— **只诊断、只测量，不改行为**
+
+> **本节只新增**（append-only）。§1–§42 正文未改；**没有改任何已提交行为**，gicp 节点也**没有**打补丁。
+> 一句话：**SC 的 `/initialpose` 值本身是好的（0.005 m / 2.1°）**，但它**没有被正确地变成 gicp 的初值**——
+> `T_map_odom = T_map_base · T_odom←base` 少求了一次逆（应乘 `T_base←odom`），在本地形里把种子
+> 平移了 **0.262 m（横向）/ 0.314 m（z）、3D 0.409 m**；随后 gicp 的第一帧精配准想再挪 **0.46 m 级**，
+> 被创新门拒绝 3 帧后又被**自愈重锚的"豁免采纳"原样放行**（`gate_reanchor_after_rejects=3`），
+> 所以它不是"0.1 m/帧慢慢滑"，而是**一次性跳过去**。第三层原因是**建图跑本身的 map→odom 与真值差到
+> 2.19 m / 28.4°**，PCD 里同一段围栏被按不同时刻的位姿叠了多层（结构 2D 残差中位 **0.160 m**），
+> 所以即使种子完全正确，GICP 的盆地也不在种子上——这一层决定了"能不能到 §41 的 1 cm"。
+>
+> **30° 安装角不是本案的凶手**：`base_link→livox_frame` 的 rpy=0（2026-10-27 约定），LIO 刚初始化时
+> `T_ol=I`，所以 LIO 自己发的 `odom→base_link = T_ol·T_bl` 在种子时刻是**纯平移**
+> `(0.000562, 0.130916, 0.157028)`。30° 只在 `odom→odom_level` 与**建图跑**的 `T_odom←base` 里；
+> 一旦 `T_odom←base` 带上 30°/2 m，同一个"少求逆"会把种子扔到 **4.5 m / 125°**（§43.1 的回放对照）。
+
+### 43.1 口径、隔离与"没有 live 录像"这件事
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `/home/weicheng/HzMi_rmsimulation`，HEAD `649074e`（origin/master） |
+| 数据 | `third_party/eval_data/capture_map2027/bag/raw`（174 帧 `/cloud_registered`、3986 条 `/tf`、3 条 `/tf_static`、174 条真值 `/odom_ground_truth`）；`src/rm_nav_bringup/PCD/RMUC2027.pcd`（35 433 点 / 0.10 m 体素）；`PCD/RMUC2027_sc_db.npz`（10 keyframe） |
+| 缺口 | **§42.3 的 live 跑没有录 bag**（没有 `/gicp_registration/gate`、live 的查询扫描、`/initialpose` 时刻）。所以本轮用**离线重建 + 未改节点回放**：把 bag 的 kf6 扫描放回 `livox_frame`、按 live 的 TF 几何重放 `/clock` `/tf` `/tf_static` `/livox/lidar/pointcloud` `/initialpose`，跑**仓库里的** `gicp_registration_node`（`use_sim_time=true`、`pcd_path=…/RMUC2027.pcd`、`initial_pose=[0,0,0]`） |
+| 隔离 | 私有 `ROS_DOMAIN_ID=77`、`HOME=.tmp_43/home`、`ROS_LOCALHOST_ONLY=1`、`unset DISPLAY`；一次只有一个节点；只按 PID `kill -INT/-TERM`（无机器级 pkill）；**没有起 Gazebo** |
+| scratch | 全部脚本在 `.tmp_43/`（`extract.py` `chain.py` `ghost.py` `lag.py` `timeseries.py` `build_maps.py` `pcd_geom.py` `replay.py` `run_replay.sh` `analyze.py`），`.tmp_*/` 已 gitignore ⇒ **不入库**；仓库里唯一的改动就是本节 |
+
+**回放与 live 的两处已知不同**（结论里按"机理复现"而不是"逐位复现"读）：① bag 里**没有** `/livox/lidar/pointcloud`
+（live 的 gicp 订阅它），回放用 `/cloud_registered` 反算到 `livox_frame`——两者差一次去畸变，且回放里
+kf6 扫描就在 PCD 里（live 的查询扫描是**新会话的 held-out 扫描**）；② live 的 `/initialpose` 时间戳/姿态
+没有记录，回放按 DB keyframe 6 的 `T_map_base` 注入。
+
+### 43.2 Q1：种子被正确应用了吗？——**没有，round-trip 不成立**
+
+`/initialpose` 的语义 = **map 系机器人（base_link）位姿**。节点要做的是
+`T_map←odom = T_map←base · T_base←odom`，而 `lookupTf(odom, base_link)` 返回的是 **`T_odom←base`**（tf2 的
+target←source），所以**必须求逆**：
+
+```text
+gicp_registration.cpp:1413  lookupTf(odom_frame_id_, base_frame_id_, stamp, true, T_odom_base, …)
+gicp_registration.cpp:1419  const Eigen::Matrix4d T_map_odom = T_map_base * T_odom_base;   // ← 少一个 .inverse()
+gicp_registration.cpp:988   T_map_odom_cur = T_map_base_init * T_odom_base;                 // ← 参数 initial_pose 同一条路
+```
+
+**回放实测（live 几何：LIO 在 teleport 位姿刚初始化 ⇒ `T_odom←base = T_bl`）**：
+
+| 量 | 值 | 说明 |
+|---|---|---|
+| `/initialpose`（SC 给的值） | **(1.1851, 0.1594, 0.0024) m，yaw 42.62°** | 与 DB keyframe 6 / GT 一致（§42.3：0.005 m / 2.1°） |
+| 节点日志 `map→odom` | **(1.0969, 0.2561, 0.1594)** | = `T_map_base · T_bl`（实测与解析值逐位一致） |
+| **实际发布的 `map→base`** | **(1.0086, 0.3528, 0.3165) m，yaw 42.62°** | = `T_map_base · T_bl²`（回放 `/gicp_registration/pose` 首条，逐位一致） |
+| **种子误差向量（map）** | **(−0.1765, +0.1934, +0.3141) m** | **3D 0.4089 m；水平 0.2618 m；z 0.3141 m** |
+| 正确时应为 | `map→odom = (1.2733, 0.0627, −0.1546)`，发布 `map→base = (1.1851,1.594,0.0024)` | round-trip 回到 `/initialpose` |
+
+**误差的来历（正好是"0.13 m"这条杆臂的两倍）**：`base_link→livox_frame = (0.000562, 0.130916, 0.157028)`、
+rpy=0（契约 §4.12 的实车约定），`|t| = 0.204443 m`；`T_bl²` 的平移 = `2·t` ⇒ 水平 **0.2618 m**（车体 +y）、
+z **0.3141 m**，3D **0.4089 m = 2·|t|**。**30° 没有参与**：种子时刻 `T_ol=I`，`T_odom←base=T_bl`（纯平移）。
+
+**对照（证明"少求逆"只有在 `T_odom←base≈I` 时才隐形）**：同一回放改用**建图跑 kf6 时刻**的
+`T_odom←base`（含 30° 倾斜与 ~2 m 平移，即 bag 的 `odom→odom_level→base_link` 链），节点发布的
+`map→base` = **(0.498, 3.956, …) yaw 168°** ⇒ **4.5 m / 125°**。⇒ 老场地（`odom` 平、`T_odom←base≈I`）
+里这条 bug 看不出来；本仓 2027 的 `gravity:=tf` + 30° 斜装一旦让 `T_odom←base` 不≈I，代价就是米级。
+
+> 反过来，**建图跑的帧链本身是对的**：`T_map_base = T_map_odom · T_odom←odom_level · T_odom_level←base`
+> 复算出的 kf6 = **(1.1851, 0.1594, 42.620°)**，与 `RMUC2027_sc_db.npz` 的 `poses[6]` 逐位相同 ⇒
+> "DB 位姿与 PCD 不同帧"**不是**静态帧错，问题在时间一致性（§43.4）。
+
+### 43.3 Q2：种下之后逐帧怎么走？——**不是 0.1 m/帧，是"拒 3 帧 → 重锚豁免 → 一次跳 0.46–2.3 m"**
+
+回放（live 几何，12 s，dt=0.100 s，`gate_*` 全默认）：
+
+| 帧（sim） | 创新 | 门限 | 结果 | 说明 |
+|---|---|---|---|---|
+| 102.19 | **0.818 m / 4.49°** | 0.300 m / 6.00° | 拒（streak 1） | 种子后第 1 帧 |
+| 102.29 | 0.818 / 4.49 | 0.300 / 6.00 | 拒（streak 2） | |
+| 102.39 | 0.818 / 4.49 | 0.300 / 6.00 | 拒（streak 3） | |
+| **102.49** | **0.818 / 4.49** | 0.010 / 0.50（这是 0.01 m 收紧档；默认档 0.300/6.00） | **豁免采纳（flags=bit1）** | `★ 重锚后的豁免采纳`，一次跳 0.818 m |
+
+**12 s 统计（三档参数，其余逐字节相同）**：
+
+| 档 | 种后帧数 | 采纳 | 拒绝 | **重锚豁免帧数** | 豁免跳变（m） | 12 s 末 `map→base` |
+|---|---|---|---|---|---|---|
+| 默认（0.10/0.30/0.60 m，3°/6°/15°） | 119 | 42 | 77 | **23** | 0.818 … **2.337** | (−1.259, −1.452, 0.574) yaw 28.4° |
+| **门限收紧到 0.01 m / 0.5°**（`gate_trans_step_min/rate/max=0.01`、`gate_yaw_*=0.5`） | 118 | 29 | 89 | **29** | 0.818 … **2.379** | (−1.266, −1.439, 0.581) yaw 28.4° |
+| **`gate_reanchor_after_rejects:=0`**（门限保持默认） | 25 | **0** | 25 | **0** | — | **(1.0086, 0.3528, 0.3165) yaw 42.62°（冻结在种子上）**，第 25 帧判 LOST、停发 |
+
+读法（三条都重要）：
+
+1. **不是 0.1 m/帧**。种子后第 1 帧的**创新就是 0.818 m / 4.49°**；12 s 里被采纳的帧的创新中位 **0.453 m**、
+   p90 **0.985 m**、max **2.337 m**；被拒帧的创新中位 0.882 m、max 2.361 m。**没有**任何一帧的修正量
+   落在 0.1 m 量级。
+2. **0.1 m 下限不是生效的那条线**。`allow_xy = clamp(rate·dt, min, max)`：dt=0.100 s ⇒
+   `3.0×0.1 = 0.30 m`（yaw `60×0.1=6°`），**下限 0.10 m 只在 dt<33 ms 时才生效**。live 的云是 10 Hz
+   且 gicp 每帧 ~20–80 ms，回放实测 dt=0.100 s ⇒ **门限一直是 0.30 m**，不是 0.10 m。
+3. **真正的洞是"重锚豁免"**。`gate_reanchor_after_rejects=3`：连续 3 帧被拒 ⇒ 把锚点拉回"只信里程计"的
+   预测位姿并 `reanchor_pending_=true`，**下一帧不管创新多大都放行**（`gated by score/plausibility only`）。
+   于是"拒绝 0.818 m 的跳变"在 0.3 s 后变成"接受同一个 0.818 m 的跳变"。**把门限收紧到 0.01 m 也没用**
+   （第二行：29 次豁免、跳变 2.379 m）——**单拧下限是无效修复**。把重锚关掉，位姿 12 s 一直停在种子上
+   （第三行），代价是 25 帧后判 LOST、停发 `map→odom`。
+
+> **与 live 的对应**：§42.3 的 live 落点离 SC 种子 0.463 m / 9.4°，`converged=true`、fitness 0.0239。
+> 这与"种子后头几帧创新超 0.3 m → 3 帧后重锚豁免 → 一次跳 0.46 m"**完全同构**；回放里的 0.818 m 更大，
+> 是因为回放的扫描/PCD 组合与 live 的 held-out 扫描不同（§43.1 的两处已知不同），**机理逐条相同，
+> 数值不逐位相同**。live 的 0.46 m 跳变还带着 §43.2 的 0.262 m 种子偏置。
+
+### 43.4 Q3：DB 的 `T_map_base` 与 `PCD/RMUC2027.pcd` 一致吗？——**"静态帧"一致，"时间一致性"不一致**
+
+**(a) 静态帧链没有 0.46 m/10° 的错**：用 bag 的 TF 重建建图跑的 `map→base`：
+`T_map_base = T_map_odom · T_odom←odom_level · T_odom_level←base`，kf6 复算 = **(1.1851, 0.1594, 42.620°)**，
+与 DB `poses[6]` 逐位相同；SC 的 `/initialpose`（1.185,0.159,44.7°）与它的差就是 §42.3 的 0.005 m / 2.1°
+（yaw 差来自 SC 的 level-yaw 换算）。PCD 是 `map` 系（出生点相对、水平；35 433 点 / 0.10 m 体素；
+bbox x[−22.18, 8.80] y[−19.57, 10.79] z[−0.50, 1.80]；地面 z 峰 **−0.10**）。gicp 的 `T_sensor←odom`
+在点云 `frame_id=odom` 时是单位阵；用 `/livox/lidar/pointcloud` 时是 `T_odom←livox`，两条路都与 PCD 同帧。
+⇒ **不存在一个恒定的 DB↔PCD 外参错位**。
+
+**(b) 建图跑的 `map→base` 相对真值最大差 2.19 m / 28.4°**（按 t=5 s 的 map↔world 锚定；1 s 采样）：
+
+| t (s) | map→base (x,y,yaw) | GT→map (x,y,yaw) | 误差 |
+|---|---|---|---|
+| 5 | (−0.001, −0.024, −0.5°) | (−0.003, −0.024, −0.5°) | 0.002 m |
+| 10 | (0.843, −0.067, 21.5°) | (0.961, −0.029, 21.7°) | 0.124 m |
+| 12 | (0.860, −0.079, 12.0°) | (1.488, 0.237, 26.6°) | 0.703 m / −14.7° |
+| 15 | (1.052, 0.039, 42.7°) | (1.841, 0.573, 53.8°) | 0.952 m / −11.2° |
+| 17 | (1.109, 0.006, 54.2°) | (2.241, 1.123, 54.0°) | 1.590 m |
+| 20 | (1.169, 0.046, 55.9°) | (2.830, 1.434, 27.5°) | 2.164 m / +28.4° |
+| 22 | (1.149, 0.032, 55.4°) | (2.830, 1.436, 27.0°) | **2.190 m / +28.4°** |
+
+同时：**map 系路径长度 1.15 m，GT 3.15 m（压缩 ≈3×）**；`map→odom` 在 0.5–2 s 内阶跃
+（yaw `0.03° → −0.53° → 0.66° → −14.6° → −11.1° → 0.04° → 0.25° → 11.75° → 28.31°`，
+平移单步最大 ~1.5 m）。`cloud_accumulator` 是**逐帧用当时的 TF** 把 `/livox/lidar/pointcloud` 放进 `map`
+（`target_frame="map"`、`voxel 0.10`、`accumulated_points=1 789 924`、`skipped_frames_jump=0`）⇒
+**同一段静态围栏被按不同时刻的 `map→odom` 叠进 PCD**。把**同一朵 kf6 扫描**放到不同时刻的 `map→odom`
+快照下，落点在 x **0.71–1.98**、y **−1.02–0.72**、yaw **39.2–82.1°** 之间，最大散布 **2.13 m / 28.3°**。
+
+**(c) 对 PCD 的最近邻拟合（kf6 扫描，0.10 m 体素）**：
+
+| 位姿 | 地面点（z<0.05，n=6 969） | 结构点（z≥0.15，n=5 052） | 全部点 |
+|---|---|---|---|
+| **DB / SC 种子** | 3D 中位 **0.037** / p90 0.054 / **100% <0.1** | 3D 中位 **0.385** / p90 0.456 / **32.7% <0.1**；**2D 中位 0.160** | 3D 中位 0.045 / 73.1% <0.1 |
+| gicp 落点（1.598,0.171,54.1°） | 3D 中位 0.043 / **85.2% <0.1** | 3D 中位 0.363 / **20.4% <0.1**；**2D 中位 0.107** | 3D 中位 0.060 / 58.8% <0.1 |
+
+读法：**地面完美、结构不完美**。DB 位姿对 PCD 的**地面**是 3.7 cm（100% <0.1 m），但对**围栏/立柱**
+（格栅，§41.5#4）2D 中位差 **0.160 m**；gicp 落点把结构 2D 残差从 **0.160 → 0.107 m**，代价是地面
+0.037 → 0.043、全部点 0.045 → 0.060。⇒ **GICP 确实在"牺牲地面换结构"**（地面主导 Hessian 的直接证据），
+但结构盆地的位移量只有 ~0.1 m 级，**单靠它解释不了 0.46 m**；0.46 m 里还有 §43.2 的 0.26 m 种子偏置
+和 §43.3 的重锚放行。
+
+**(d) 30°/0.13 m 的判决**：PCD 与 DB 的链里 `base_link→livox_frame` 的 0.1309 m/0.1570 m 与
+`odom→odom_level` 的 30°/`(0, +0.1081, −0.1873)` 是**同一条链的两端**，在"扫描→map"和"`/initialpose`→map"
+里**同时出现、互相抵消**（§43.4a 已用 kf6 位姿逐位验证）。它们**不会**产生 PCD↔DB 的 0.46 m/10°；
+唯一把 0.13 m 放大成误差的是 §43.2 的"少求逆"（×2），30° 只在 `T_odom←base` 不≈I 时被卷进来
+（§43.1 的 4.5 m/125° 对照）。
+
+### 43.5 四问的数字总表
+
+| # | 问题 | 判决 | 关键数字（本轮实测） |
+|---|---|---|---|
+| 1 | 种子应用正确？ | **否**（`T_odom←base` 少求逆，line 1419 / 988） | `/initialpose` (1.1851,0.1594,0.0024,42.62°) → 发布 (1.0086,0.3528,0.3165,42.62°)；误差 3D **0.4089 m**、水平 **0.2618 m**、z **0.3141 m**；正确 `map→odom=(1.2733,0.0627,−0.1546)` |
+| 2 | 逐帧漂移 | **一次性跳，不是 0.1 m/帧** | 种后首帧创新 **0.818 m/4.49°**（dt=0.1 s ⇒ 门限 **0.300 m/6°**）；拒 3 帧 → **重锚豁免**；12 s 采纳创新中位 **0.453 m**、p90 0.985、max **2.337 m**；重锚豁免 **23 次** |
+| 3 | DB↔PCD 帧一致？ | **静态一致、时间不一致（鬼影）** | kf6 位姿与 `poses[6]` 逐位相同；建图跑 map→base vs GT **max 2.190 m/28.4°**；路径 1.15 vs 3.15 m；同一扫描放置散布 **2.13 m/28.3°**；PCD 结构 2D 中位 **0.160 m** vs 地面 **0.037 m** |
+| 4 | 主导原因 | **① 种子少求逆 ② 重锚豁免 ③ 建图 map 鬼影** | 反事实见 §43.6：关重锚→冻结在种子（12 s，0/25 采纳）；收紧门限→**照样豁免 2.38 m**；修正逆→种子误差 0.409→0 |
+
+### 43.6 反事实（全部离线；没有 live 改参，除了回放节点自己的 `-p`）
+
+| 反事实 | 做法 | 结果 | 结论 |
+|---|---|---|---|
+| **A. 关掉重锚** | `-p gate_reanchor_after_rejects:=0`，其余默认 | **0/25 采纳**；12 s 发布值一直 = **(1.0086,0.3528,0.3165) yaw 42.62°**（= 种子，含 §43.2 的偏置）；第 25 帧判 LOST、停发 | **门限（0.30 m）本身就足以挡住 0.46 m 级跳变**；是重锚把它放行的 |
+| **B. 只收紧门限** | `gate_trans_step_min/rate/max=0.01 m`、`gate_yaw_*=0.5°`，重锚仍 =3 | **29 次豁免**、跳变到 **2.379 m**；末态 (−1.266,−1.439,0.581) | **单拧下限无效**（这是"便宜但无效"的选项） |
+| **C. 修正逆（离线算术）** | 把 line 1419/988 改成 `* T_odom_base.inverse()` | 发布的 `map→base` = **(1.1851,0.1594,0.0024) 42.62°**（round-trip 精确回种子） | 种子偏置 0.409→0；但 GICP 仍会从"正确的种子"往外走（首帧创新 0.818 m）⇒ **C 单独不够**，只是把 0.26 m 的起点偏置消掉 |
+| **D. 干净地图（离线重建）** | 用 GT 位姿把同一批 `/cloud_registered` 累积成 `map_gt.pcd`（0.10 m 体素） | kf6 结构点 3D NN 中位 **0.385 → 0.145 m**、<0.1 占比 32.7% → **27.8%**（我的重建口径；repo PCD 的 2D 结构中位 0.160）；地面 0.048 不变 | 结构残差能降，但**没有跑完**"干净地图 + gicp"的端到端反事实（诚实清单 #4） |
+| **E. 0.01 m/帧 + 关重锚** | A∪B 的离线推演 | 由 A 的逐帧数据：所有帧创新 ≥0.818 m > 0.01 ⇒ **全部拒绝** ⇒ 发布值 = 种子 | **"夹到 0.01 m/帧"能让位姿停在种子上**（问题里问的那条），但**停的是含 0.26 m 偏置的种子**；修了 C 才是停在 0.005 m 的 SC 值上 |
+
+### 43.7 主导原因判决（按证据强度排序）
+
+1. **`/initialpose` → `map→odom` 的逆变换 bug（确定性、可复现、0.409 m 3D / 0.262 m 水平）**。
+   证据：§43.2 的 round-trip 表（解析值与回放日志逐位一致）、line 1419/988、以及"建图帧下会放大到 4.5 m/125°"的对照。
+   这是"SC 好、gicp 从错地方出发"的**直接原因**，也是 0.46 m 里最大的一块可控项。
+2. **自愈重锚的"豁免采纳"在全局种子后立刻生效（3 帧 ≈ 0.3 s）**。
+   证据：§43.3 的三档回放（默认/收紧/关重锚）。它把"拒绝一次 0.46 m 跳变"变成"0.3 s 后原样接受"；
+   **收紧门限完全无效**，关掉它则位姿冻结在种子。这是"为什么门限没挡住"的**机制**。
+3. **建图跑的 map 时间一致性坏（map→base vs GT 2.19 m/28.4°；PCD 结构鬼影 0.16 m 2D）**。
+   证据：§43.4 的 1 s 轨迹表、同一扫描的 2.13 m/28.3° 放置散布、地面/结构 NN 分裂。
+   它是"即使种子完全正确、GICP 也到不了 §41 的 1 cm"的**根因**，也解释了 0.46 m 里剩下的 ~0.1–0.2 m。
+4. **不是**：0.1 m 门限下限（实际生效 0.30 m；且被重锚绕过）；30° 安装角（种子时刻 `T_odom←base` 是纯平移；
+   帧链自洽）；DB↔PCD 的静态外参错位（kf6 位姿逐位一致、地面 3.7 cm/100%）。
+
+### 43.8 诚实清单（§43）
+
+1. **live 跑没有 bag**：§42.3 的 `/gicp_registration/gate`、live 查询扫描、`/initialpose` 时刻都没录。
+   本节的"逐帧"数字来自**离线回放**（未改节点 + bag 的 kf6 扫描），不是 live 的同一帧。
+2. **回放源不同**：bag 没有 `/livox/lidar/pointcloud`，回放用 `/cloud_registered` 反算 `livox_frame`；
+   差一次去畸变，且 kf6 扫描**在 PCD 里**（live 的查询扫描是 held-out）。所以回放的 0.818 m ≠ live 的 0.46 m；
+   **机理相同、数值不逐位相同**。
+3. **PCD 结构 NN 两种口径**：3D 中位 0.385（含 3 根横杆的 z 间距污染）/ 2D 中位 0.160。本节把 **2D 0.160**
+   当"结构鬼影"的主口径，3D 只作旁证。
+4. **"干净地图 + gicp"的端到端反事实没跑完**：只测到"干净地图把 kf6 结构残差 0.385→0.145（3D）/ 27.8% <0.1"，
+   没有在干净地图上重跑 gicp（时间/算力）。
+5. **建图跑的 SLAM 为什么坏没有查**（slam_toolbox 日志只有启动/关闭两行；`map→odom` 的阶跃与 GT 对不上）。
+   本节只报"它坏了、坏多少、对 PCD/DB 有什么后果"，**没有**给出修复方案。
+6. **`T_odom←base` 在 live 种子时刻 = `T_bl` 是推断**（LIO 在 teleport 位姿刚初始化 ⇒ `T_ol=I`；
+   没有 live 的 `tf2_echo odom base_link` 存档）。若 live 的 `T_odom←base` 不是 `T_bl`，§43.2 的 0.262 m
+   会变（更大或更小）；但"round-trip 不成立"这条**与具体值无关**（line 1419/988 的乘/逆方向是代码事实）。
+7. **没有验证"Odom 抖动/时钟"**：本节的 dt 用点云戳差，回放里恒 0.100 s；live 的 dt 分布没有录。
+8. 其余限制（单次回放、无 live 重复、真值自噪声 ~10 cm、`map→odom` 继承资产倾斜）同 §41.5 / §42.7。
+
+### 43.9 复现命令（scratch 全在 `.tmp_43/`，不入库）
+
+```bash
+# 0) 离线取数（TF / GT / 全 174 朵云）
+python3 .tmp_43/extract.py                 # → .tmp_43/bag.pkl
+python3 .tmp_43/chain.py                   # kf6 的 map→odom→odom_level→base 复算 = DB poses[6]
+python3 .tmp_43/timeseries.py              # 建图跑 map→base vs GT（最大 2.19 m / 28.4°）
+python3 .tmp_43/ghost.py                   # 同一扫描 × 不同 map→odom 快照 = 2.13 m / 28.3°
+python3 .tmp_43/build_maps.py              # 重建 bag-TF 地图 / GT 地图（0.10 m 体素）
+python3 .tmp_43/pcd_geom.py                # repo PCD 的地面/结构 NN（DB / gicp 两个位姿）
+
+# 1) 回放（私有域；一次一个节点；未改 gicp 节点）
+bash .tmp_43/run_replay.sh .tmp_43/replay_init.jsonl    .tmp_43/gicp_init.log    12 init
+bash .tmp_43/run_replay.sh .tmp_43/replay_tight.jsonl   .tmp_43/gicp_tight.log   12 init \
+  "-p gate_trans_step_min:=0.01 -p gate_trans_rate:=0.01 -p gate_trans_step_max:=0.01 \
+   -p gate_yaw_step_min_deg:=0.5 -p gate_yaw_rate_deg:=0.5 -p gate_yaw_step_max_deg:=0.5"
+bash .tmp_43/run_replay.sh .tmp_43/replay_noreanchor.jsonl .tmp_43/gicp_noreanchor.log 12 init \
+  "-p gate_reanchor_after_rejects:=0"
+python3 .tmp_43/analyze.py .tmp_43/replay_init.jsonl
+```
+
+`run_replay.sh` 固定：`ROS_DOMAIN_ID=77`、`HOME=.tmp_43/home`、`ROS_LOCALHOST_ONLY=1`、`unset DISPLAY`、
+`use_sim_time:=true`、`pcd_path=…/src/rm_nav_bringup/PCD/RMUC2027.pcd`、`initial_pose=[0,0,0]`；
+回放节点按 `--tf-mode init`（live 几何：`T_odom←base=T_bl`）或 `bag`（建图 kf6 的 TF，含 30°/2 m）注入。
+
+---
