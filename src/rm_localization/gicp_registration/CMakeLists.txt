@@ -139,6 +139,17 @@ if(BUILD_TESTING)
   # the following line skips cpplint (only works in a git repo)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  # ============================ 种子数学回归测试（2026-10-29，契约 §4.17） ============================
+  # test/gicp_seed_math_test.cpp 只测 include/gicp_registration/seed_math.hpp 的纯数学：
+  #   T_map_odom = T_map_base · T_odom_base.inverse() + round-trip 不变量（<1 mm / <0.1°）。
+  # 不链接本包的库（header-only + Eigen）⇒ 秒级、无 ROS/无 PCD ⇒ 进 ctest 不会拖慢 CI。
+  # 它钉住 §43.2 的"少求逆"bug：旧写法必须被 round-trip 判据拒绝（含 §43 的 0.409 m 实测值）。
+  find_package(Eigen3 REQUIRED)
+  add_executable(gicp_seed_math_test test/gicp_seed_math_test.cpp)
+  target_include_directories(gicp_seed_math_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(gicp_seed_math_test Eigen3::Eigen)
+  add_test(NAME gicp_seed_math_test COMMAND gicp_seed_math_test)
 endif()
 
 ament_auto_package(

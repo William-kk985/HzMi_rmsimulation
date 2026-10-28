@@ -1100,6 +1100,149 @@ colcon build --symlink-install --packages-select rm_nav_bringup
 
 ---
 
+## §4.17 gicp 的「全局种子」契约：round-trip 不变量 + 信任窗口（2026-10-29；append-only）
+
+> **本节是新增**（append-only；§4.1–§4.16 正文未改）。它回答 §43 留下的两个**确定性**问题：
+> ① `/initialpose` → `map→odom` 少求一次逆（种子被平移 0.262 m / 3D 0.409 m，§43.2）；
+> ② `gate_reanchor_after_rejects` 的**豁免采纳**在种后 3 帧（≈0.3 s）把拒绝掉的 0.46–2.3 m
+> 跳变原样放行（§43.3）。
+>
+> **不改帧图**：`map→odom` 仍只由 `localization` 槽的 local tracker 发布（I3），
+> `odom→odom_level` 仍是 `odom_level_tf` 的静态边（§4.11），`/initialpose` 仍只由
+> `global_relocalizer` / RViz 发布（§4.16.2）。本节只改 **`/initialpose` 被 gicp 消费后**
+> 的两件事：种子怎么算、种后一小段时间里自愈逻辑还能不能绕过创新门。
+
+### 4.17.1 种子 round-trip 不变量（必须）
+
+`/initialpose` 的语义 = **map 系下机器人（`base_link`）位姿** `T_map←base`（与 AMCL 一致）。
+tf2 的 `lookupTf(odom, base_link)` 返回的是 **`T_odom←base`**（target←source），所以唯一正确的
+组合是
+
+```text
+T_map←odom = T_map←base · T_base←odom = T_map←base · T_odom←base.inverse()
+```
+
+两条路径（`/initialpose` 与启动 `initial_pose` 参数）都必须走这一个公式；代码里收成
+`include/gicp_registration/seed_math.hpp::composeMapOdomFromSeed()`，**不允许再手写第二份**。
+
+**不变量（运行期断言）**：应用一次 `/initialpose` 后，把组合出的 `T_map←odom` 重新乘上
+`T_odom←base`，必须回到 `/initialpose` 的 `T_map←base`：
+
+| 量 | 判据 |
+|---|---|
+| 平移误差 `‖(T_map_odom·T_odom_base − T_map_base).translation‖` | **< 1 mm** |
+| 旋转误差 `angle(R_rt, R_seed)` | **< 0.1°** |
+| 失败行为 | `RCLCPP_ERROR` 打 `★★★ SEED_ROUNDTRIP_BROKEN`（含两个误差），并在 `~/gate` 置 `ok=0`；**不静默** |
+
+**暴露方式**（不新增话题，避免改默认话题集）：`~/gate`（`Float64MultiArray`）在**原有 0–15 列之后**
+追加（老工具按下标读，顺序不变）：
+
+| 下标 | 含义 |
+|---|---|
+| 16 | 已有种子 round-trip 记录 (1/0) |
+| 17 | round-trip 平移误差 (m) |
+| 18 | round-trip 旋转误差 (°) |
+| 19 | round-trip 通过 (1/0) |
+| 20 | 信任窗口 active (1/0) |
+| 21 | 窗口剩余 (s；不在窗口内 = 0) |
+| 22 | 窗口内「本来会触发重锚」的次数（被抑制；证据用） |
+| 23 | 本次窗口以 NO_CONVERGE 结束 (1/0) |
+
+**与默认路径的关系**：没有 `/initialpose` 时（启动 `initial_pose` 参数路径）**不触发信任窗口**，
+不改变话题/参数集合。该路径的旧行为在 `T_odom←base ≈ I` 时与修复前**数值等价**（§43.2 已证
+旧场地看不出这个 bug）；`test/gicp_seed_math_test.cpp` 显式断言 `T_odom_base=I ⇒ 新旧写法逐元素相同`。
+**不是**"加参数才能修"——修复无条件生效；只有"信任窗口"有开关。
+
+### 4.17.2 信任窗口（trust window）：`seed_trust_window_sec`
+
+**触发**：任何一个 `/initialpose` 被**应用**（`consumePendingInitialPose()` 成功返回）时。
+来源不限：`global_relocalizer:=scan_context` 的自动种子、RViz 的 2D Pose Estimate、脚本/服务补发，
+**语义完全相同**。启动 `initial_pose` 参数**不**触发（它是"没有人工输入的默认路径"）。
+
+**窗口长度**：`seed_trust_window_sec`（秒，默认 **5.0**；`0` = 关闭）。
+**提前结束**：窗口内**第一帧被采纳**即结束（"GICP 与种子在创新门内一致"⇒ 窗口目的已达到）。
+
+| 阶段 | 重锚 + 豁免（`gate_reanchor_after_rejects`） | 失效判定 | 发布值 |
+|---|---|---|---|
+| 窗口内（未采纳） | **禁用**（`~/gate` flags bit1 恒 0） | **不因** `lost_after_rejections` 提前判失效 | 保持在种子（`T_map_odom_` 不被改写） |
+| 窗口内**第一帧被采纳** | 恢复普通门限 | 正常 | 正常采纳值（允许在创新门内偏离种子） |
+| 窗口到期仍**无一帧被采纳** | 恢复普通行为（进入下面的失效态） | **NO_CONVERGE**：`localization_lost_=true`、`estimate_valid_=false` ⇒ **停发 `map→odom`/`~/pose`** | 停止发布（不是"偷偷跟随 GICP"） |
+| NO_CONVERGE 之后 | 既有失效态自愈探针（`lost_probe_period_sec`，每 1 s 一帧只算不发；连续 `gate_reanchor_after_rejects` 次通过 ⇒ 重锚恢复） | — | 恢复后正常发布 |
+
+**为什么这两个条件都要**：
+
+* "禁用豁免"挡住 §43.3 的机制：种后第 1 帧的**创新 = 种子准不准**，此时放行"拒 3 帧 → 重锚 → 豁免"
+  等于把 0.46–2.3 m 的错盆地原样吃下；
+* "或直到第一帧被采纳"避免把**正确**的种子冻死：GICP 若在创新门内同意种子（实测首帧
+  0.0018–0.047 m），说明没有"错盆地"问题，窗口应立刻让位给正常跟踪；
+* "窗口内不提前判 LOST"是"发布值保持在种子上"的前提：`lost_after_rejections=25` 在 10 Hz 下
+  2.5 s 就会停发，早于 5 s 窗口；
+* "到期 NO_CONVERGE + 停发 + 恢复探针"让失败**响亮**且**可恢复**：它不发明位姿，也不把
+  操作员/SC 给的位姿悄悄换成 GICP 的另一个盆地。
+
+**`~/gate` flags 追加位**：`bit3` = 本帧在信任窗口内；`bit4` = 本帧是窗口到期 NO_CONVERGE
+（同帧进入失效态，只出现一次）。`bit0`（首帧免创新门）/`bit1`（本帧重锚）/`bit2`（失效探针帧）语义不变。
+
+**日志（逐字可检索）**：
+
+```text
+[INFO] 种子 round-trip ✅：map→base 回到 /initialpose（平移 0.000000 mm / 旋转 0.000000°，判据 <1 mm / <0.1°）
+[INFO] ★ 全局种子信任窗口开始：5.00 s 内（或直到第一帧被采纳）**禁用重锚豁免** ...
+[INFO] ★ 种子信任窗口结束：第一帧被采纳（窗口 0.00 s；本帧创新 0.0453 m / 0.247°；... 窗口内重锚豁免 0 次、被抑制 0 次）
+[ERROR] ★★★ NO_CONVERGE：全局种子的信任窗口 5.00 s 已到期，仍**没有一帧被采纳**（连续 51 帧被拒；窗口内重锚豁免执行 0 次、被抑制 16 次；发布值离种子 0.0000 m）
+```
+
+### 4.17.3 实现位置
+
+| 内容 | 位置 |
+|---|---|
+| 种子公式 + round-trip 判据（header-only） | `src/rm_localization/gicp_registration/include/gicp_registration/seed_math.hpp` |
+| 两条应用路径 | `src/gicp_registration.cpp`：`consumePendingInitialPose()`（/initialpose）与参数初值惰性初始化（`initial_pose`） |
+| 信任窗口状态/参数 | 同文件（`seed_trust_*` 成员与 `declare_parameter("seed_trust_window_sec", 5.0)`） |
+| 参数文件 | `config/gicp_registration_sim.yaml`：`seed_trust_window_sec: 5.0` |
+| 回归测试（不启 ROS） | `test/gicp_seed_math_test.cpp`，`colcon test --packages-select gicp_registration` 或直接跑 `build/gicp_registration/gicp_seed_math_test` |
+
+**适用范围**：`localization:=gicp` 与 `localization:=small_gicp`（同一个节点、同一套门限；`backend`
+只换配准实现）。`amcl` / `beluga` / `slam_toolbox` / `cartographer` **不受影响**。
+
+### 4.17.4 回退
+
+* **关闭信任窗口**（逐字节回到 2026-10-28 的重锚语义）：`-p seed_trust_window_sec:=0.0`
+  （或参数文件改 0）。此时 §43.3 的豁免会在种后 3 帧生效——**只用于 A/B 对照**，不要用于
+  带全局种子的生产跑。
+* **关闭自愈探针/重锚**（旧旧语义）：`gate_reanchor_after_rejects:=0` + `lost_probe_period_sec:=0.0`
+  （与 §4.17 之前的回退表相同）。
+* **不要**用参数复现"少求逆"的 bug：逆变换修复是无条件的。要复现 §43.2，只能用 scratch 构建
+  （`T_map_base * T_odom_base`）或离线算术。
+* 回退不改帧图/话题集：窗口只读写本节点状态与 `~/gate` 的追加列。
+
+### 4.17.5 边界与诚实清单
+
+1. **TF 的 lookahead**：`map→odom` 的戳 = `now + tf_lookahead_sec(0.45 s)`，`odom→base_link` 是
+   LIO 的当前戳。种子的**跳变**要等 `odom→base` 的戳追上 `map→odom` 的新戳才在 TF 链上可见
+   （实测 ≤0.45 s 仿真时间）⇒ 外部用 `tf2_echo map base_link` 量 round-trip 时会晚半秒；**节点内部**
+   的不变量在应用瞬间计算，`~/pose` 也是应用瞬间发布。两者在 §44.2 都给了数。
+2. **窗口内允许"被采纳的偏离"**：窗口只禁用"豁免"，不禁用**通过创新门**的采纳。因此若种后第一帧
+   创新 ≤ 门限（0.3 m @10 Hz），位姿会离开种子最多一个门限的距离；§44.3 的 live 跑就是
+   0.045 m、53/53 采纳。这不算"跟随错盆地"——它是**被门限允许且被记录**的精修。
+3. **第一帧采纳后窗口即结束**：如果种后第一帧"碰巧"通过创新门、随后又开始拒绝，重锚豁免会
+   重新可用。这是**有意**的取舍（否则正确种子的正常跟踪会被 5 s 窗口拖住）；残余风险已写入
+   §44.7。
+4. **NO_CONVERGE 之后的探针**：失效态探针只认 fitness+合理性，可能在几次通过后重锚到**另一个**
+   盆地（包括种子不同意的那个）。这是"**先大声失败，再走既有的自愈路径**"，不是"静默跟随"；
+   §44.3 的 wrong-seed live 跑给了"失败瞬间仍离种子 0 mm、之后 1.2 m 的恢复是探针做的"的分解。
+5. **单发布者仍按端点+冲突判定**：ROS 2 的 `TFMessage` 不带 authority（`gz_contract_check.py` 已记录），
+   所以 `map→odom` 的"唯一发布者"是**多路证据**：`/tf` 端点清单、localization tracker 唯一、
+   同戳不同值冲突为 0。§44.5 的两跑都给出"唯一 owner = amcl"。
+6. **没有真机验证**：本节与 §44 的所有数字都来自仿真（RMUL2026 / RMUC2027）。实车的 LIO 噪声、
+   TF 延迟与 PCD 质量不同，`seed_trust_window_sec=5.0` 是**仿真标定**，上真机前应按"定位更新率 / 最高车速"
+   重定（与 §5.5 的告诫同源）。
+7. **`gate_reanchor_after_rejects` 没有被删除**：它在**没有新全局种子**时仍是"恒定创新自愈"的
+   唯一机制（§44.4 的死锁回归 89/89 采纳）。本节的定位是**收窄**它，不是替代全部信任域；
+   真正的 trust-region 判据仍未实现。
+
+---
+
 ## §5 重定位契约
 
 ### 5.1 能力分层（P4 的落地）

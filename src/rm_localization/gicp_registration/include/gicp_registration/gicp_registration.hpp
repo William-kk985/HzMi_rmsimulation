@@ -204,6 +204,31 @@ private:
   // 一阶低通：published ← slerp/lerp(published, 最近采纳的测量, 1-exp(-dt/tau))，按 50 Hz 定时器推进。
   bool smoothing_enable_;
   double smoothing_tau_;
+  // ---- 全局种子的**信任窗口**（2026-10-29，契约 §4.17；治 §43.3 的"重锚豁免吃种子"）----
+  // 收到 /initialpose（SC 或 RViz 的 2D Pose Estimate）后的 T 秒内（或直到第一帧被采纳）：
+  //   · `gate_reanchor_after_rejects` 的**重锚 + 豁免采纳**被**禁用**（拒绝就拒绝，发布值保持种子）；
+  //   · 不因 `lost_after_rejections` 提前判失效（否则还没到窗口结束就停发 map→odom，
+  //     "位姿停在种子上"就无从谈起）；
+  //   · 窗口到期仍没有一帧被采纳 ⇒ **大声失败**（NO_CONVERGE）并进入既有的失效态自愈探针，
+  //     恢复正常行为（探针/重锚重新可用）。
+  // 为什么这是"重锚"的替换而不是叠加：重锚的作用是"恒定创新造成的永久拒绝"的自愈；
+  // 但在**刚给了全局种子**的场景里，第一帧的"创新"= 种子对不对，此时豁免 = 把错种子放行。
+  // 0 = 关闭本窗口（逐字节回到 2026-10-28 行为）。
+  double seed_trust_window_sec_;
+  // 以下只在 align 组内读写（consumePendingInitialPose / pointcloudCallback / publishGateMetrics）
+  // ⇒ 不需要 mutex_；定时器不读它们。
+  bool seed_trust_active_ = false;          // true = 当前处于种子信任窗口
+  bool seed_trust_failed_ = false;          // true = 上一次窗口以 NO_CONVERGE 结束（诊断/日志用）
+  rclcpp::Time seed_trust_start_;           // 窗口起点（节点时钟 = 仿真时间）
+  rclcpp::Time seed_trust_deadline_;        // 窗口截止
+  double seed_trust_elapsed_ = 0.0;         // 窗口结束时的实际时长（诊断）
+  int seed_trust_reanchor_suppressed_ = 0;  // 窗口内被抑制的重锚次数（应恒为 0 执行；这是"触发过"计数）
+  Eigen::Matrix4d seed_T_map_odom_ = Eigen::Matrix4d::Identity();  // 本次种子应用的 map→odom（算"离种子多远"）
+  // 种子 round-trip 不变量（§4.17）：/initialpose 应用后，map→base 必须回到 /initialpose。
+  bool seed_roundtrip_valid_ = false;
+  bool seed_roundtrip_ok_ = false;
+  double seed_roundtrip_trans_m_ = 0.0;
+  double seed_roundtrip_rot_deg_ = 0.0;
   // TF map→odom（以及 ~/pose）的时间戳前瞻量（秒）= AMCL transform_tolerance 语义：
   // 把 map→odom 盖成**未来**时间戳，nav2 消费者在 now+margin 处才查得到（否则 tf2 抛
   // "Lookup would require extrapolation into the future"）。详见 config 与本文件 publishTf 注释。

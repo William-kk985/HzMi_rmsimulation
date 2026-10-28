@@ -68,6 +68,7 @@
 //       故意**不**持状态锁发布 —— 一次阻塞的 DDS 写会把定时器线程一起拖住，等于把"饿死"带回来。
 
 #include "gicp_registration/gicp_registration.hpp"
+#include "gicp_registration/seed_math.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -282,6 +283,17 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
   gate_skip_innovation_first_ = declare_parameter<bool>("gate_skip_innovation_first", true);
   gate_reanchor_after_rejects_ = declare_parameter<int>("gate_reanchor_after_rejects", 3);
   lost_probe_period_sec_ = declare_parameter<double>("lost_probe_period_sec", 1.0);
+  // ---- 全局种子的信任窗口（2026-10-29，契约 §4.17；治 §43.3 的"重锚豁免吃种子"）----
+  // /initialpose 后的 T 秒内（或直到第一帧被采纳）禁用重锚免除；到期仍无采纳 ⇒ NO_CONVERGE。
+  // 0 = 关闭（逐字节回到 2026-10-28 行为）。不作用于启动时的 initial_pose 参数路径。
+  seed_trust_window_sec_ = declare_parameter<double>("seed_trust_window_sec", 5.0);
+  if (seed_trust_window_sec_ < 0.0) {
+    RCLCPP_WARN(
+      get_logger(), "seed_trust_window_sec=%.3f 非法（>=0；0 = 关闭）⇒ 用 0.0",
+      seed_trust_window_sec_);
+    seed_trust_window_sec_ = 0.0;
+  }
+
   if (gate_reanchor_after_rejects_ < 0) {
     RCLCPP_WARN(
       get_logger(), "gate_reanchor_after_rejects=%d 非法（>=0；0 = 关闭重锚）⇒ 用 0",
@@ -600,6 +612,11 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     "  ★ 失效策略：连续 %d 帧被拒 ⇒ **停发 map→odom**（不再配准），等 /initialpose"
     "（lost_after_rejections<=0 表示永不放弃）\n"
     "  ★ 输出平滑：enable=%s tau=%.2f s（发布值朝最近采纳的测量做一阶低通；高频运动由里程计提供）\n"
+    "  ★ 全局种子信任窗口（2026-10-29，契约 §4.17）：/initialpose 后 %.2f s 内（或直到第一帧被采纳）\n"
+    "     **禁用重锚豁免**（bit1 恒 0）⇒ 拒绝就拒绝、发布值保持在种子上；到期仍无采纳 ⇒ "
+    "NO_CONVERGE + 停发 map→odom（0 = 关，回到 2026-10-28 行为）\n"
+    "     · 种子 round-trip 不变量：应用 /initialpose 后 map→base 必须回到它（<1 mm / <0.1°），"
+    "结果见 ~/gate 的 16–19 列\n"
     "  ★ 场地自相似性提醒（为什么必须有上面这些判据）：本场地是**重复墙体 + 大片地板**，"
     "地板在任意 (x,y) 都自洽 ⇒ 单靠 fitness 分不出对错（实测偏 62 m 时 score 仍 0.005 m²）；"
     "机制与实测见 docs/gicp_divergence_and_jitter.md\n"
@@ -636,7 +653,7 @@ GicpNode::GicpNode(const rclcpp::NodeOptions & options)
     map_min.y - plausible_margin_xy_, map_max.y + plausible_margin_xy_, plausible_margin_xy_,
     plausible_z_min_, plausible_z_max_,
     lost_after_rejections_,
-    smoothing_enable_ ? "true" : "false", smoothing_tau_);
+    smoothing_enable_ ? "true" : "false", smoothing_tau_, seed_trust_window_sec_);
 }
 
 // ============================ 工具 ============================
@@ -985,7 +1002,10 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
     bool init_used_latest = false;
     if (lookupTf(odom_frame_id_, base_frame_id_, stamp, false, T_odom_base, init_used_latest)) {
       const Eigen::Matrix4d T_map_base_init = initialPoseParamToMatrix();
-      T_map_odom_cur = T_map_base_init * T_odom_base;
+      // 与 /initialpose 同一条公式（契约 §4.17）：T_map←odom = T_map←base · T_base←odom。
+      // §43 的 bug 在这条路径上也存在（line 988 的旧写法 `* T_odom_base`）。
+      // 默认场景（T_odom_base≈I）下两种写法数值等价；T_odom_base 不≈I 时旧写法会把种子扔偏。
+      T_map_odom_cur = composeMapOdomFromSeed(T_map_base_init, T_odom_base);
       {
         std::lock_guard<std::mutex> lock(mutex_);
         // 参数初值也是"人工给的初值"：测量链与发布值都直接对齐它（无平滑滞后）。
@@ -1149,8 +1169,10 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   // 之后那一个"忽略创新"的采纳，落点仍必须过 converged/score/合理性三道既有判据。
   // 代价：环境量（传感器外参偏置、地图轻微错位）造成的**恒定**创新会被吸收成一次 0.2 m 级的
   // 位姿修正，而不是像旧语义那样冻死（旧语义下它就是 0/25 采纳 + 判失效 + 停发 map→odom）。
+  // ★ 2026-10-29（契约 §4.17）：**刚给了全局种子**的信任窗口内禁用这条"豁免" —— 见 ⑦b'。
   bool reanchored = false;
-  if (!lost_probe && gate_reanchor_after_rejects_ > 0) {
+  const bool seed_window = seed_trust_active_;
+  if (!lost_probe && !seed_window && gate_reanchor_after_rejects_ > 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (gate_reject_streak_ >= gate_reanchor_after_rejects_) {
       T_map_odom_ = guess;          // 发布值 = 只信里程计的预测位姿
@@ -1159,6 +1181,15 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       reanchor_pending_ = true;
       reanchored = true;
       ++reanchor_count_;
+    }
+  } else if (!lost_probe && seed_window && gate_reanchor_after_rejects_ > 0) {
+    // 只计数"本来会触发几次重锚"，**不执行**（证据：~/gate flags bit1 在整个窗口内恒 0，
+    // 这个计数应 ≥0 但实际豁免采纳 = 0）。用来证明"是窗口挡住了它"，而不是碰巧没到阈值。
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (gate_reject_streak_ >= gate_reanchor_after_rejects_ &&
+      gate_reject_streak_ % gate_reanchor_after_rejects_ == 0)
+    {
+      ++seed_trust_reanchor_suppressed_;
     }
   }
   if (reanchored) {
@@ -1236,11 +1267,28 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, converged ? "true" : "false",
         scoreToStr(score).c_str(), max_fitness_score_, poseToStr(T_map_odom_cur).c_str());
     }
+    // ★ 2026-10-29（契约 §4.17）：窗口的**另一种**结束方式 —— 第一帧被正常采纳。
+    // 这时"信任窗口"的目的已经达到（配准结果与种子在创新门内一致），恢复普通门限/重锚。
+    if (seed_window) {
+      seed_trust_active_ = false;
+      seed_trust_elapsed_ = (now() - seed_trust_start_).seconds();
+      const Eigen::Vector3d d = T_map_odom_cur.block<3, 1>(0, 3) -
+        seed_T_map_odom_.block<3, 1>(0, 3);
+      RCLCPP_INFO(
+        get_logger(),
+        "★ 种子信任窗口结束：第一帧被采纳（窗口 %.2f s；本帧创新 %.4f m / %.3f°；"
+        "map→odom 相对种子平移 %.4f m；窗口内重锚豁免 0 次、被抑制 %d 次）⇒ 恢复普通门限",
+        seed_trust_elapsed_, innov_xy, innov_yaw_deg, d.norm(),
+        seed_trust_reanchor_suppressed_);
+    }
   } else {
     int n = 0;
     int n_gate = 0, n_bound = 0;
     bool went_lost = false;
+    bool seed_no_converge = false;   // 窗口到期仍无一帧被采纳 ⇒ NO_CONVERGE（契约 §4.17）
     int lost_streak = 0;
+    int seed_streak = 0;
+    double seed_dev = 0.0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       n = ++no_improve_cycles_;
@@ -1253,7 +1301,28 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
       }
       n_gate = gate_rejects_;
       n_bound = bound_rejects_;
-      if (!lost_probe && lost_after_rejections_ > 0 &&
+      if (!lost_probe && seed_trust_active_) {
+        // ★ 2026-10-29（契约 §4.17）：信任窗口内**不提前判失效** —— 否则窗口还没到，
+        // map→odom 就停发了，"发布值保持在种子上"无从谈起。窗口到期再一次性大声失败。
+        // 但"是否到期"必须在**这一帧被拒**时判（到期仍无采纳 = 本次场景），见下。
+        if (now() >= seed_trust_deadline_) {
+          seed_trust_active_ = false;
+          seed_trust_failed_ = true;
+          seed_trust_elapsed_ = (now() - seed_trust_start_).seconds();
+          seed_streak = gate_reject_streak_;
+          seed_dev = (T_map_odom_.block<3, 1>(0, 3) -
+            seed_T_map_odom_.block<3, 1>(0, 3)).norm();
+          // 大声失败：进入既有失效态（停发 map→odom），恢复"探针/重锚"的正常行为。
+          localization_lost_ = true;
+          estimate_valid_ = false;
+          lost_after_streak_ = gate_reject_streak_;
+          reanchor_pending_ = false;
+          lost_probe_passes_ = 0;
+          went_lost = true;
+          seed_no_converge = true;
+          lost_streak = gate_reject_streak_;
+        }
+      } else if (!lost_probe && lost_after_rejections_ > 0 &&
         gate_reject_streak_ >= lost_after_rejections_)
       {
         // —— 第三条判据：连续 N 帧拒绝 ⇒ 判"定位失效" ⇒ **停发 map→odom**，等 /initialpose ——
@@ -1266,7 +1335,26 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
         lost_streak = gate_reject_streak_;
       }
     }
-    if (went_lost) {
+    if (seed_no_converge) {
+      gate_flags |= 0x10;
+      // fail loud：窗口到期、仍无一帧被采纳。注意**不是**静默跟随 GICP —— 发布值停在种子上
+      // （= 操作员/SC 给的位姿），然后停发 map→odom 并进入自愈探针（正常行为恢复）。
+      RCLCPP_ERROR(
+        get_logger(),
+        "★★★ NO_CONVERGE：全局种子的信任窗口 %.2f s 已到期，仍**没有一帧被采纳**"
+        "（连续 %d 帧被拒；窗口内重锚豁免执行 0 次、被抑制 %d 次；发布值离种子 %.4f m）。\n"
+        "     判据：创新 %.4f m / %.3f°（门限 %.4f m / %.3f°）、score=%s m²（阈值 %.3f）、"
+        "converged=%s、合理性=%s。\n"
+        "     ⇒ 判定定位失效、停发 map→odom（**不会**为了继续发 TF 而把种子偷偷丢掉）；"
+        "从下一帧起恢复正常行为：每 %.2f s 的自愈探针 + 连续 %d 次通过后重锚恢复。\n"
+        "     若种子本身就是错的（RViz 点歪了/SC 错配），正确结果就是**失败**而不是跟随；"
+        "请重新给 /initialpose 或重启导航栈。",
+        seed_trust_window_sec_, seed_streak, seed_trust_reanchor_suppressed_, seed_dev,
+        innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, scoreToStr(score).c_str(),
+        max_fitness_score_, converged ? "true" : "false",
+        plaus_ok ? "通过" : ("✗" + plaus_why).c_str(),
+        lost_probe_period_sec_, gate_reanchor_after_rejects_);
+    } else if (went_lost) {
       const std::string plaus_txt = plaus_ok ? std::string("通过") : ("不通过（" + plaus_why + "）");
       RCLCPP_ERROR(
         get_logger(),
@@ -1314,10 +1402,15 @@ void GicpNode::pointcloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr
   }
   publishHealth(true, score, accepted && score <= fitness_score_warn_);
   // 判据的**逐帧**证据（~/gate）：必须在"采纳/拒绝"两支都走完之后发（要带本帧处理后的连击数）。
-  // flags 位定义（2026-10-21 新增；改前档恒为 0）：
+  // flags 位定义（2026-10-21 新增；改前档恒为 0；2026-10-29 追加 bit3/bit4）：
   //   bit0 = 本帧**跳过**了创新门限（无先验的首帧 / 重锚后的第一帧）
   //   bit1 = 本帧**执行了重锚**（re-anchor，见 gate_reanchor_after_rejects）
   //   bit2 = 本帧是"判失效"状态下的探针帧（见 lost_probe_period_sec）
+  //   bit3 = 本帧处于**全局种子信任窗口**内（契约 §4.17；bit1 在整个窗口内恒 0）
+  //   bit4 = 本帧是**窗口到期 NO_CONVERGE**（同帧进入失效态；只出现一次）
+  if (seed_trust_active_) {
+    gate_flags |= 0x8;
+  }
   {
     int streak_now = 0;
     {
@@ -1416,7 +1509,31 @@ bool GicpNode::consumePendingInitialPose()
       odom_frame_id_.c_str(), base_frame_id_.c_str(), lastTfError().c_str());
     return false;  // 不改任何状态（estimate_valid_ 不会因此变 true ⇒ 仍然不发 map→odom）
   }
-  const Eigen::Matrix4d T_map_odom = T_map_base * T_odom_base;
+  const Eigen::Matrix4d T_map_odom = composeMapOdomFromSeed(T_map_base, T_odom_base);
+  // ---- 种子 round-trip 不变量（契约 §4.17；§43.2 的回归断言）----
+  // 正确性判据：把刚组合出的 T_map←odom 重新乘上 T_odom←base，必须回到 /initialpose 的
+  // T_map←base（平移 <1 mm、旋转 <0.1°）。§43 的"少求逆"会让它偏 0.409 m ⇒ 这里当场报 ERROR。
+  const auto seed_rt = seedRoundTrip(T_map_odom, T_odom_base, T_map_base);
+  {
+    seed_roundtrip_valid_ = true;
+    seed_roundtrip_ok_ = seed_rt.ok;
+    seed_roundtrip_trans_m_ = seed_rt.trans_m;
+    seed_roundtrip_rot_deg_ = seed_rt.rot_deg;
+  }
+  if (seed_rt.ok) {
+    RCLCPP_INFO(
+      get_logger(),
+      "种子 round-trip ✅：map→base 回到 /initialpose（平移 %.6f mm / 旋转 %.6f°，判据 "
+      "<1 mm / <0.1°）", seed_rt.trans_m * 1e3, seed_rt.rot_deg);
+  } else {
+    RCLCPP_ERROR(
+      get_logger(),
+      "★★★ SEED_ROUNDTRIP_BROKEN：/initialpose → map→odom 的组合没有回到 /initialpose！"
+      "误差 平移 %.6f m / 旋转 %.6f°（判据 <1 mm / <0.1°）。"
+      "这通常意味着 T_odom←base 少求了逆（契约 §4.17 / meas §43.2），或 TF %s←%s 在应用期间跳变。"
+      "发布的 map→base 会偏离种子的量级 = 上述误差。",
+      seed_rt.trans_m, seed_rt.rot_deg, odom_frame_id_.c_str(), base_frame_id_.c_str());
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     // 人工初值 = 唯一可信的"绝对"来源 ⇒ 测量链与发布值**都直接对齐**它（不走平滑，
@@ -1436,6 +1553,29 @@ bool GicpNode::consumePendingInitialPose()
     gate_no_prior_ = false;
     reanchor_pending_ = false;
     lost_probe_passes_ = 0;
+  }
+  // ---- 全局种子的信任窗口（契约 §4.17）----
+  // 从**这一帧**开始、在 T 秒内（或直到第一帧被采纳）禁用重锚豁免。窗口状态只在 align 组内读写。
+  seed_trust_failed_ = false;
+  seed_trust_elapsed_ = 0.0;
+  seed_trust_reanchor_suppressed_ = 0;
+  seed_trust_start_ = now();
+  seed_T_map_odom_ = T_map_odom;
+  if (seed_trust_window_sec_ > 0.0) {
+    seed_trust_active_ = true;
+    seed_trust_deadline_ =
+      seed_trust_start_ + rclcpp::Duration::from_seconds(seed_trust_window_sec_);
+    RCLCPP_INFO(
+      get_logger(),
+      "★ 全局种子信任窗口开始：%.2f s 内（或直到第一帧被采纳）**禁用重锚豁免** —— "
+      "拒绝就拒绝、发布值保持在种子上；到期仍无一帧被采纳 ⇒ 大声判 NO_CONVERGE。"
+      "（gate_reanchor_after_rejects=%d 在本窗口内不生效；param seed_trust_window_sec=%.2f，0=关）",
+      seed_trust_window_sec_, gate_reanchor_after_rejects_, seed_trust_window_sec_);
+  } else {
+    seed_trust_active_ = false;
+    RCLCPP_INFO(
+      get_logger(),
+      "seed_trust_window_sec=0 ⇒ 不做种子信任窗口（重锚豁免按原样生效；逐字节回到 2026-10-28 行为）");
   }
   if (lost_before) {
     RCLCPP_WARN(
@@ -1709,15 +1849,28 @@ void GicpNode::publishGateMetrics(
   //   9  下采样后的源点数
   //   10 align 耗时 (ms)
   //   11 本帧处理后的连续拒绝帧数
-  //   12 flags（bit0 跳过创新门限 / bit1 本帧重锚 / bit2 失效态探针帧）
+  //   12 flags（bit0 跳过创新门限 / bit1 本帧重锚 / bit2 失效态探针帧 /
+  //             bit3 全局种子信任窗口内 / bit4 窗口到期 NO_CONVERGE）
   //   13 创新分量 dx（≈map 系，m）      14 创新分量 dy（同上）      15 创新分量 dz（同上）
+  //   ---- 2026-10-29 追加（契约 §4.17；**只追加、不改 0–15 的顺序**，老工具按老下标继续读）----
+  //   16 种子 round-trip 是否已有记录 (1/0)        17 round-trip 平移误差 (m)
+  //   18 round-trip 旋转误差 (°)                  19 round-trip 通过 (1/0)
+  //   20 信任窗口是否 active (1/0)                21 窗口剩余 (s；不在窗口内为 0)
+  //   22 窗口内"本来会触发重锚"的次数（被抑制；证据用）  23 窗口到期 NO_CONVERGE (1/0)
   // 语义与 ~/fitness_score、~/converged 一致：**只读观测**，不参与任何判据或发布决策。
   std_msgs::msg::Float64MultiArray msg;
+  double trust_remaining = 0.0;
+  if (seed_trust_active_) {
+    trust_remaining = std::max(0.0, (seed_trust_deadline_ - now()).seconds());
+  }
   msg.data = {
     now().seconds(), innov_xy, innov_yaw_deg, allow_xy, allow_yaw_deg, gate_dt, score,
     accepted ? 1.0 : 0.0, converged ? 1.0 : 0.0, static_cast<double>(source_points), align_ms,
     static_cast<double>(reject_streak), static_cast<double>(flags),
-    innov_vec.x(), innov_vec.y(), innov_vec.z()};
+    innov_vec.x(), innov_vec.y(), innov_vec.z(),
+    seed_roundtrip_valid_ ? 1.0 : 0.0, seed_roundtrip_trans_m_, seed_roundtrip_rot_deg_,
+    seed_roundtrip_ok_ ? 1.0 : 0.0, seed_trust_active_ ? 1.0 : 0.0, trust_remaining,
+    static_cast<double>(seed_trust_reanchor_suppressed_), seed_trust_failed_ ? 1.0 : 0.0};
   gate_pub_->publish(msg);
 }
 

@@ -9550,3 +9550,211 @@ python3 .tmp_43/analyze.py .tmp_43/replay_init.jsonl
 回放节点按 `--tf-mode init`（live 几何：`T_odom←base=T_bl`）或 `bag`（建图 kf6 的 TF，含 30°/2 m）注入。
 
 ---
+
+## §44 第三十四轮（**本机 date=2026-10-29，01:40–02:10**）：gicp 全局种子的**求逆修复 + 信任窗口**，以及导航冒烟工具的契约更新
+
+> **本节只新增**（append-only；§1–§43 正文未改）。本轮做两件事（用户批准「1+2」）：
+> **①** 修 §43 的两个确定性缺陷（种子少求逆、重锚豁免吃种子），把它们变成**可断言**的契约（§4.17）；
+> **②** 修 `tools/scripts/regress/nav_smoke_regression.py` 的陈旧 TF 检查（它还在要求
+> `odom→base_link`，把默认 `gravity:=tf` 的健康栈判 FAIL）。
+> 一句话结论：**种子 round-trip 从 0.409 m（§43.2）降到 0（<1e-9 m）；种后信任窗口内重锚豁免
+> 执行 0 次、发布值停在种子上（窗口内最大偏离 0.0 m / 错种子 0.0073 m）；窗口到期仍拒绝 ⇒
+> NO_CONVERGE + 停发，不静默跟随。** 无种子的死锁回归（89/89 采纳）与默认/none 冒烟都保持。
+
+### 44.1 环境、构建与改动面
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `/home/weicheng/HzMi_rmsimulation`，起点 HEAD `8c42b71`（origin/master） |
+| 构建 | `colcon build --symlink-install --packages-select gicp_registration rm_nav_bringup`；本包 **0 warning**（`-Wall -Wextra -Wpedantic`），新增 `gicp_seed_math_test` 进 ctest |
+| 隔离 | 每次一个栈；私有 `HOME`/`ROS_LOG_DIR`/`MPLCONFIGDIR`/`ROS_DOMAIN_ID`（78/82/165/171）/`GAZEBO_MASTER_URI`（11901/11902/11905）；`unset DISPLAY`；只按 **setsid 进程组** `kill -INT/-TERM/-9 -- -$PGID`，无机器级 pkill；scratch 全在 `.tmp_piece2/`（gitignored） |
+| 代码改动 | `gicp_registration/{src,include,config,CMakeLists,test}`、`tools/scripts/regress/nav_smoke_regression.py`；**没有**改 launch/URDF/xacro/`robot_description`/world/地图/PCD |
+| 文档 | 契约新增 §4.17；本节 §44；`src/rm_utils/README.md` 的 #11（`workaround → 已被种子信任窗口取代/收窄`）与诚实清单 #6/#8 |
+
+### 44.2 （a）种子求逆：round-trip 证据
+
+**改动**：`T_map_odom = T_map_base · T_odom_base.inverse()`，两条路径共用
+`seed_math.hpp::composeMapOdomFromSeed()`；应用瞬间做 round-trip 断言（<1 mm / <0.1°），
+`~/gate` 16–19 列 + INFO/ERROR 日志暴露（§4.17.1）。
+
+**单元测试**（`build/gicp_registration/gicp_seed_math_test`，不启 ROS）：
+
+| 用例 | 结果 |
+|---|---|
+| §43.2 的 seed（`T_map_base=(1.1851,0.1594,0.0024,42.62°)`、`T_odom_base=T_bl`）→ `map→odom` | **(1.2733, 0.0627, −0.1546)**（与 §43.2「正确时应为」一致） |
+| 同一 seed 的 round-trip | **1.3e-17 m / 0.0°**（通过） |
+| 旧写法（`T_map_base·T_odom_base`，少求逆） | round-trip **0.408887 m**（= §43.2 的 3D 0.409 m）⇒ **必须被拒绝** |
+| `T_odom_base=I` | 新旧写法逐元素相同（默认路径等价） |
+| 500 个随机位姿（含 30° 倾斜/米级平移） | max trans **1.02e-15 m**、max rot **3.2e-6°**，全部通过 |
+
+**Live（RMUC2027，SC keyframe 6，§42 场景）**：`world:=RMUC2027 mode:=nav lio:=small_point_lio
+localization:=gicp global_relocalizer:=scan_context nav:=mppi planner:=smac2d gravity:=tf robot:=robot11`，
+spawn 后立即把车 teleport 到 keyframe-6 的 world 位姿 `(7.88, 3.50, 0.11, yaw 0.940)`。
+
+| 量 | 值（run A3，2026-10-29 02:00） |
+|---|---|
+| SC 匹配 | kf **6**，`d=0.140`、`score=0.877`、`margin=0.629`（闸门 0.70/0.01 通过） |
+| `/initialpose`（SC 种子） | **(1.185093, 0.159447, 0.002415) m，yaw 44.72°** |
+| 节点日志 round-trip | **平移 0.000000 mm / 旋转 0.000000°**（判据 <1 mm / <0.1°） |
+| `~/gate` 16–19 | `valid=1, trans=0.0 m, rot=0.0°, ok=1` |
+| `~/pose` 的 round-trip（外部记录） | **0.0 mm / 0.0°**（seed 应用瞬间那条 `map→base`） |
+| 种后第一帧采纳 | 创新 **0.0466 m**（门限 0.3 m）；window 内 53/53 帧采纳 |
+| 种子是否还带 §43 的 0.26 m 偏置 | **不带**：发布值 = `/initialpose`；旧写法会在同一 `T_odom_base=T_bl` 下多出 **0.262 m（水平）/0.409 m（3D）**（§43.2 的解析值） |
+| 窗口内 TF `map→base` 最大偏离 | **0.0549 m / 1.255°**（≈5 cm；53/53 帧是被门限允许的精修，见 §44.7#2） |
+| 终止 `map→base`（sim 19.5 s） | (1.224471, 0.206712) yaw 47.985° |
+| 终止 vs GT（DB kf6 = (1.1851,0.1594,42.62°)） | **0.0616 m / 5.37°** |
+| 终止 vs 种子 | 0.0615 m / 3.26° |
+
+> **为什么 §42 的 0.46 m 在这跑里没出现**：修复后的启动 `initial_pose=[0,0,0]` 不再把 map→odom
+> 多乘一次 `T_odom_base`（旧写法让起点多 0.26 m），GICP 在 SC 种子（sim 8 s）之前就已经
+> 靠里程计从 1.2 m 外走到 `(0.31, 0.69)`，种后第一帧只精修 **0.046 m**（见 §44.7#1）。
+> 这不是"修复无关"，而是"种子偏置消掉后，GICP 的盆地离种子更近"。
+
+### 44.3 （f）信任窗口：replay + live（含故意错种子）
+
+参数：`seed_trust_window_sec: 5.0`（sim 秒，`0`=关）。窗口内：重锚+豁免禁用、不提前判失效、
+发布值保持种子；第一帧采纳即结束；到期仍无采纳 ⇒ NO_CONVERGE + 停发 + 恢复探针（§4.17.2）。
+
+**(i) 离线 replay（§43 同一套 bag/kf6 扫描/未改节点，仅换本轮构建）**
+
+| 跑 | 种后帧 | 采纳 | 重锚豁免（bit1） | 窗口内最大偏离 | 结局 |
+|---|---|---|---|---|---|
+| **窗口 5 s（默认）** | 51 拒绝 | **0** | **0** | **0.0 m / 0.0°**（发布值 = 种子） | 5.00 s 到期 **NO_CONVERGE**（bit4=1）、停发；被抑制重锚 **16** 次 |
+| **窗口 0（A/B，旧语义）** | 3 拒后豁免 | 49 | **1**（0.3613 m / 4.561° 被放行） | **0.383 m / 4.57°** | 12 s 末 (1.099997, −0.214387)（+0.38 m） |
+| **无 `/initialpose`（死锁回归）** | — | **89/89** | 0 | — | `map→odom` 445 条，末值 (−0.0998, 0.0390, 0.1241) ⇒ 旧修复未破 |
+
+窗口 0 的 A/B 与 §43.3 的默认档（23 次豁免、2.337 m）同构：**是窗口把它挡住了**，
+不是"这次碰巧没到阈值"（被抑制计数 16 证明阈值到过 16 次）。
+
+**(ii) Live：SC 正确种子**（run A3）：窗口 0.00 s（第一帧创新 0.0466 m 被采纳即结束），
+窗口内重锚豁免 **0**；发布值离种子最大 0.0549 m（见 §44.2）。
+
+**(iii) Live：**故意错的种子**（run B：SC 先给正确种子，sim 12.0 s 再发
+`/initialpose=(3.1851,0.6594,59.72°)`，偏移 +2.0 m/+0.5 m/+15°）
+
+| 量 | 值 |
+|---|---|
+| 错种子的节点 round-trip | **4.34e-19 m / 0.0°**（自洽：节点忠实地把"错的"变成 map→odom） |
+| `~/pose` 外部 round-trip | **0.0 mm / 0.0°** |
+| 窗口内 | 52 帧全拒、**采纳 0**、**重锚豁免 0**、bit3=50 帧、被抑制 16 次 |
+| 窗口内最大偏离种子 | **0.00732 m / 1.511°**（≪0.05 m；发布值一直 = 错种子） |
+| 到期 | **NO_CONVERGE**（bit4=1）：日志「发布值离种子 0.0000 m」⇒ 停发 `map→odom`/`~/pose` |
+| 失败后（sim 19.8 s，normal lost-probe 恢复） | (1.9654, 0.7737) yaw 59.17° ⇒ 离错种子 **1.225 m**、离 GT **0.993 m** |
+
+读法：**错种子没有被"静默跟随"**——5 s 窗口内位姿停在错种子上（<1 cm），到期**大声失败并停发**；
+之后 1.2 m 的移动是**显式失败之后**的既有探针重锚（§4.17.2 表的最后一行），不是窗口内的行为。
+
+### 44.4 死锁回归（无 `/initialpose`）
+
+| 项 | 值 |
+|---|---|
+| 跑 | replay `--no-seed`（`initial_pose=[0,0,0]`、`T_odom_base=T_bl`、7 s） |
+| 采纳 | **89/89 帧**（拒绝 0） |
+| `map→odom` | 445 条 TF，末值 (−0.0998, 0.0390, 0.1241) |
+| 结论 | `gate_skip_innovation_first` + `gate_dt_from_last_received` 的旧修复**原样保留**；信任窗口只挂在 `/initialpose` 上，无种子路径不受影响 |
+
+### 44.5 Piece 1：导航冒烟工具的契约更新（实测）
+
+**旧检查（HEAD 8c42b71）**：就绪要求 `odom->base_link` + `map->odom`；yaw 链写死
+`map->odom ∘ odom->base_link ∘ fake`。默认 `gravity:=tf` 的真实链是
+`map→odom→odom_level→base_link`（`/tf` 上**没有** `odom→base_link`）⇒ 旧工具把健康栈判
+`链路未就绪，缺: TF:odom->base_link`（本机 2026-10-29 的 RMUL2026 跑里 `tf_seen` 只有
+`map->odom / odom_level->base_link / base_link->base_link_fake`，可复现）。
+
+**新检查（本轮）**：
+
+1. 原有链路频率：pcloud / imu / scan / odom / footprint（不变）；
+2. `map→odom` 存在；`odom→odom_level` 存在且**在 `/tf_static`** 上；
+3. `odom→odom_level` 的 **rpy** 与 `--robot` 的期望一致（robot11 = **[30,0,0]°**，`''`/hzmirm = [0,0,0]°，容差 0.5°）；
+4. `odom_level→base_link` 存在；`map→base_link` 可由 tf2 **三维**解析（含 30° 倾斜，不做 yaw 相加）；
+5. `odom→base_link` **不要求**；`gravity:=tf` 下若存在 ⇒ **FAIL**（多父边/旧档/错档）；`--gravity base|lio|raw` 才要求它；
+6. `map→odom` **单发布者**：`/tf` 端点清单（已知作者表 + 唯一 tracker）、`/tf_static` 上不得与 `tf_bridge_*` 并存、同戳不同值冲突 = 0；
+   同戳重复且仿真钟没走（RTF 低/启动期）**不算**冲突；
+7. 其余冒烟（settle / 目标预检 / 四跳命令链 / 真值 / 假到达）**原样保留**，快照新增 `gravity/robot/tf_contract/map_odom_publishers` 字段。
+
+**实测（RMUL2026，默认 `gravity:=tf`，`lio:=fastlio`、`localization:=amcl`）**：
+
+| 跑 | 结果 | TF 契约 | `map→odom` 发布者 | 目标 |
+|---|---|---|---|---|
+| **默认 `robot=''`**（01:52 一跑） | **✅ PASS**（rtf 0.80） | rpy **0.0000/0.0000/0.0000°**、`map→base=(0.0881,0.0212,−0.004)` | 唯一 owner = **amcl**，冲突 0 | SUCCEEDED 6.4 s，d_min=0.0 |
+| **`robot:=robot11`**（02:04 一跑） | **✅ PASS**（rtf 0.44） | rpy **30.0000/0.0000/0.0000°**、`map→base=(0.0285,−0.0787,0.0035)` | 唯一 owner = **amcl**，冲突 0 | SUCCEEDED 11.6 s，d_min=0.0 |
+
+两跑的 `/tf` 端点都是 `amcl / complementary_filter_gain_node / fake_vel_transform / laser_mapping /
+lio_tf_adapter / robot_state_publisher`；`odom_level_tf` 只在 `/tf_static` 上（静态边），
+`odom→base_link` **没有出现**（新检查通过；旧检查会因缺它而 FAIL）。
+
+### 44.6 默认/none 回归与「不变」证据
+
+* **nav 冒烟（RMUL2026，默认档）健康**：见 §44.5 的两跑（PASS）。
+* **`--show-args`**：本轮 `--show-args` 输出 **421 行**；与迁移轮基线（`.tmp_rmutils/showargs_before.txt`）
+  的**唯一**差异是上一轮已提交的 `band_guard` 包名文本（`rm_nav_bringup` → `rm_utils`），
+  **不是本轮引入**；`git diff --name-only` **没有** `launch/**` / `urdf/**` / xacro。
+* **`robot_description`**：本轮 diff 不触及 `urdf/**`、xacro、spawn/robot 生成路径 ⇒ 逐字节不变。
+* **话题/参数集**：信任窗口不新增话题（只用 `~/gate` 的**追加**列 16–23）；`seed_trust_window_sec`
+  只加了一个参数（默认值在 yaml 里，`--show-args` 的 launch 参数数量不变）。
+
+### 44.7 诚实清单（§44）
+
+1. **live 的 SC 种子没有复现 §42 的 0.46 m 拒绝**：修复后启动种子不再带 0.26 m 偏置，GICP 在
+   SC 之前已从 1.2 m 外走到 `(0.31, 0.69)`，种后第一帧只差 0.0466 m（被采纳）。因此 live 的
+   "窗口 5 s 全拒 → NO_CONVERGE"证据来自 **replay**（同一节点、§43 的 kf6 扫描）与 **live 的
+   故意错种子注入**；没有一次 live 同时满足"正确种子 + 首帧拒绝"。
+2. **窗口内允许被采纳的精修**：live A3 的 53/53 帧都在创新门内被采纳，窗口内最大偏离 5.49 cm
+   （>0.05 m 一点）。这属于 §4.17.5#2 的"被门限允许且被记录的精修"，不是静默跟随；若要求
+   **严格 ≤0.05 m**，需要把窗口内的采纳也夹到信任域（本轮没做）。
+3. **replay 的几何与 live 不同**：bag 没有 `/livox/lidar/pointcloud`，回放用 kf6 扫描反算到
+   `livox_frame`，且 kf6 扫描**在 PCD 里**（live 是 held-out）。所以 replay 的 0.818 m/51 帧
+   与 live 的 0.046 m 不是同一组数；**机理相同、数值不逐位相同**（§43.1 的同一限制）。
+4. **TF 的外部 round-trip 有 lookahead 延迟**：`map→odom` 戳 = now+0.45 s，种子跳变要等
+   `odom→base` 戳追上才在 TF 链上可见（实测 ≤0.45 s sim）。所以"外部 tf2 的 <1 mm"采样不到应用
+   瞬间；应用瞬间的证据是节点日志/`~/gate` 与 `~/pose`（两者都是 **0.0 mm / 0.0°**）。
+5. **NO_CONVERGE 之后的恢复**：错种子失败后，lost-probe 在 ~3 s 后重锚到 (1.9654,0.7737)
+   （离 GT 0.993 m）——这是**显式失败之后**的既有自愈，不是窗口行为；若要求失败后一直冻住，
+   需要另加"失败锁存"（本轮没做）。
+6. **RMUC2027 在本机的 RTF ≈0.30–0.32**：在这套栈上跑 nav 冒烟会在 RTF/Hz 判据 FAIL
+   （TF 契约与单发布者两项 **PASS**：rpy 30、唯一 owner=gicp）。Piece 1 的"健康 PASS"用
+   RMUL2026（RTF 0.44/0.80）给出；不要把 RMUC2027 的低 RTF 当成工具回归。
+7. **只注入了一次错种子**：没有重复统计、没有"错 0.5 m / 错 5 m"的分布；`seed_trust_window_sec=5.0`
+   是仿真标定，真机需按更新率/车速重定（§4.17.5#6）。
+8. **窗口以仿真秒计时**：RTF 低时 5 s 窗口对应更长的墙钟；本轮 live 的 5 s 窗口在错种子跑里
+   实际墙钟 ≈16 s（RTF 0.3）。这是设计（应跟随仿真/数据时间），但读数时要换算。
+9. **单发布者是端点级证据**：ROS 2 `TFMessage` 无 authority，无法从消息本身数"这条边几个作者"；
+   本轮用端点清单 + tracker 唯一 + 同戳冲突（`gz_contract_check.py` 同一套三路证据）。
+   同戳冲突判据对"仿真钟停滞时 50 Hz 墙钟定时器重复盖同一 lookahead 戳"做了豁免（否则启动期
+   会误报 644 次，本轮实测）。
+10. **没有真机**；**没有**改 world 几何/地图/PCD；**没有**改 §4.1–§4.16 与 §1–§43 正文。
+11. **启动 `initial_pose` 参数路径的数值也变了（是修复，不是回归）**：同一条求逆公式也用在
+    `initial_pose` 惰性初始化上。本仓 `gravity:=tf` + robot11 的 `T_odom←base = T_bl`
+    （平移 0.204 m）就**不≈I** ⇒ 旧写法会让启动 `map→base` 多 0.26 m。只有 `T_odom_base≈I`
+    （旧场地/纯平帧）时才与旧行为逐元素等价（§4.17.1 的测试显式断言了这一点）；
+    §44.2 的 live A3 里，这个差会改变 GICP 在 SC 前的收敛轨迹（见 #1）。
+
+### 44.8 复现命令（scratch 在 `.tmp_piece2/`，不入库）
+
+```bash
+# 构建 + 单测（种子数学，无 ROS）
+colcon build --symlink-install --packages-select gicp_registration rm_nav_bringup
+ctest --test-dir build/gicp_registration -R gicp_seed_math_test --output-on-failure
+
+# Piece 1：RMUL2026 默认档 nav 冒烟（amcl；PASS）
+bash tools/scripts/localization/run_nav_smoke_regress.sh \
+  --tag p1_rmul2026 --domain 171 --port 11901 --world RMUL2026 \
+  --lio fastlio --localization amcl --goal -1.0 2.0 --settle 5
+
+# Piece 1：RMUL2026 + robot11（rpy 30 检查；PASS）
+bash .tmp_piece2/run_nav_robot11.sh --tag p1_rmul_robot11 --domain 165 --port 11905 \
+  --world RMUL2026 --lio fastlio --localization amcl --goal -1.0 2.0 --settle 5
+
+# Piece 2：RMUC2027 SC+gicp（§42 场景；teleport 到 kf6）
+bash .tmp_piece2/run_live_sc2027.sh A3 60 0     # 正确 SC 种子
+bash .tmp_piece2/run_live_sc2027.sh B  60 1     # SC 后再注入故意错的 /initialpose
+python3 .tmp_piece2/analyze_live.py .tmp_piece2/live_A3/record.jsonl
+
+# Piece 2：离线 replay（§43 同一套 bag；窗口 A/B 与无种子回归）
+bash .tmp_piece2/run_replay.sh .tmp_piece2/replay_correct.jsonl  .tmp_piece2/gicp_correct.log  12.0 init
+bash .tmp_piece2/run_replay.sh .tmp_piece2/replay_nowin.jsonl    .tmp_piece2/gicp_nowin.log    12.0 init "-p seed_trust_window_sec:=0.0"
+bash .tmp_piece2/run_replay.sh .tmp_piece2/replay_noseed.jsonl   .tmp_piece2/gicp_noseed.log   7.0  init "" "--no-seed"
+python3 .tmp_piece2/analyze.py .tmp_piece2/replay_correct.jsonl
+```
+
+---

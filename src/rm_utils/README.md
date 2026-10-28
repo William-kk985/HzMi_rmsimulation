@@ -71,7 +71,7 @@ import、`tools/scripts/mapping/map_archive.sh` 直接 `python3` 调），因此
 | 8 | 已删除参数硬报错（`_REMOVED_LAUNCH_ARGS`：`robot11_mount`、`turret_yaw_deg`、`turret_pitch_deg`） | `rm_nav_bringup/launch/bringup_sim.launch.py` | 同上：这三项已从 `--show-args` 消失，但仍传 ⇒ t=0 硬报错 | 安装方式只剩 URDF `sensor` 一种、云台是静态的；删声明不会让 Humble 报错，所以加守卫。契约 §4.15；meas §38.5 | **migration shim** | owner = 帧图契约/模型。expiry：同 #7 的清理轮；或 Humble 换成对未知 launch 参数会报错的版本（那时守卫可删） |
 | 9 | 历史：`robot11_mount` / `turret_yaw_deg` / `turret_pitch_deg` | **已删除**（历史，仅 #8 的守卫还在） | 曾经的三档安装方式 / 云台静态姿态参数 | 三档并存 = 倾角有三个所有者；契约 §4.15 / meas §38 | **history** | 已删；不要再加回来。新需求走 URDF / xacro，不要走 launch |
 | 10 | 历史：`livox_mount` / `livox_tilt_rpy` / `livox_tilt_axis` / `livox_raise_m` | **已删除**（历史） | 曾经由 launch 传的雷达安装方式/倾角/轴/抬升 | 安装角唯一来源收口到上游 URDF → 生成物 xacro（§4.12.4；meas §28/§31）。⚠️ 这组**没有**像 #8 那样的 t=0 硬报错守卫：今天再传会被 Humble 静默接受 | **history** | 已删；如需要「传了就停」，把它们加进 `_REMOVED_LAUNCH_ARGS`（见 §5 的诚实清单） |
-| 11 | `gate_reanchor_after_rejects` + `lost_probe_period_sec` | `rm_localization/gicp_registration/config/gicp_registration_sim.yaml`（**本轮未改**） | 连续被创新门拒 N 帧 ⇒ 锚点拉回「只信里程计」的预测位姿，并**豁免下一帧的创新门**；判失效后每 1 s 跑一帧只算不发 | 传感器外参偏置这类恒定创新会被创新门永久拒绝；「永久停发」比「接受偏置继续跟」更糟。**但 §43.3 证明它把 0.46–2.3 m 的跳变放行了** | **workaround**（明确标记） | owner = gicp/定位。**待 trust-region 门（§43 结论）落地后删除**；届时 `gate_reanchor_after_rejects: 0` + `lost_probe_period_sec: 0.0`，由信任域判据代替「豁免」 |
+| 11 | `gate_reanchor_after_rejects` + `lost_probe_period_sec` | `rm_localization/gicp_registration/config/gicp_registration_sim.yaml` | 连续被创新门拒 N 帧 ⇒ 锚点拉回「只信里程计」的预测位姿，并**豁免下一帧的创新门**；判失效后每 1 s 跑一帧只算不发 | 传感器外参偏置这类恒定创新会被创新门永久拒绝；「永久停发」比「接受偏置继续跟」更糟。**但 §43.3 证明它把 0.46–2.3 m 的跳变放行了** | **workaround → 已被 §4.17 的「种子信任窗口」取代/收窄**（历史行保留） | owner = gicp/定位。2026-10-29 起：`/initialpose` 后的 `seed_trust_window_sec`（默认 5 s，或直到第一帧被采纳）内**禁用**重锚+豁免；到期仍无采纳 ⇒ NO_CONVERGE。窗口外的旧语义只在「没有新全局种子」时仍起作用（无种子的恒定创新自愈，§44.4 死锁回归）；彻底删除仍待信任域判据落地，届时 `gate_reanchor_after_rejects: 0` + `lost_probe_period_sec: 0.0` |
 | 12 | `scan_band_min`（默认 `-0.05`，只许 ≤0） | `rm_nav_bringup/launch/bringup_sim.launch.py` + `config/nav2_params_sim_local_scan_band.yaml` | 局部 2D scan 高度带下界的小负余量 | hybrid 最低波束端点只有 +0.007 m，而 LIO z 漂移 −0.065…−0.077 m ⇒ 只剩 7 mm 余量。meas §25/§26 | **workaround** | owner = nav2/帧图。expiry：LIO 的 z 漂移被压到厘米级以下、或高度带由标定自动生成时；回滚 = `scan_band_min:=0.0` |
 | 13 | `cloud_accumulator_target_frame:=odom` | `rm_nav_bringup/launch/bringup_sim.launch.py` + `rm_perception/cloud_accumulator` | 3D 先验累积改用平滑的 LIO `odom` 系，落盘后再用一次 `map←odom` 搬进 `map` | `map→odom` 的修正会撕裂已累积的点云，实测墙面残差 0.2–0.4 m「鬼影」。meas §23.9#1 / §24.5 | **workaround**（默认仍是 `map`） | owner = 3D 先验/建图。expiry：累积器能对每帧记录当时的 `map→odom` 并回搬（或 SLAM 后端提供连续 `map→odom`）后可去掉这个开关 |
 | 14 | 出生点表镜像（`bringup_sim.launch.py::world_configs` ↔ `map_asset_guard.py::WORLD_SPAWN`） | launch + 本包 | 两张表必须逐 world 的 x/y/z/yaw 一致；`ros2 run rm_utils map_asset_guard.py spawn-table --check` 对账 | 存档 sidecar 的 `spawn_pose` 比对以 `WORLD_SPAWN` 为基准；改了 launch 的 z 会让既有存档全判 `refused_spawn` | **workaround**（重复真源） | owner = 建图资产。expiry：出生点表移进**一份** YAML，launch 与守卫都读它（那时删掉镜像与对账命令） |
@@ -123,19 +123,23 @@ import、`tools/scripts/mapping/map_archive.sh` 直接 `python3` 调），因此
 5. **`band_guard` 的 launch 参数 description 文本改了**（`rm_nav_bringup/band_guard.py`
    → `rm_utils/band_guard.py`），因此 `--show-args` 有 **1 行**合法包名差异；
    参数名/默认值/choices/数量都不变。
-6. **`gate_reanchor_after_rejects` 仍是 workaround**：本轮只登记，**没有**改
-   `rm_localization/**`（约束）。它必须由 §43 的 trust-region 修法替换，不能靠调小阈值长期共存。
+6. **`gate_reanchor_after_rejects` 仍是 workaround，但已收窄**：rm_utils 迁移轮只登记、没改
+   `rm_localization/**`；2026-10-29 的修复轮在 gicp 包加了 `seed_trust_window_sec`（§4.17），
+   在**新全局种子**后禁用「重锚+豁免」；窗口外的旧语义仍保留（无种子死锁自愈，§44.4）。
+   彻底删除要等信任域判据落地，不能靠调小阈值长期共存。
 7. **`band_guard` / `map_session_announcer` 的用法 docstring** 从
    `ros2 run rm_nav_bringup ...` 改成 `ros2 run rm_utils ...`（包路径）；wire schema
    （`rm_nav_bringup/band_guard@1` / `rm_nav_bringup/map_session@1`）**保持原样**——
    它是协议标识，不是路径。`map_asset_guard.py` 里的 `find_share_dir('rm_nav_bringup')`
    也保持原样：它找的是 map/PCD **资产**的归属包，和守卫代码放在哪个包无关。
-8. **`tools/scripts/regress/nav_smoke_regression.py` 仍按 v3 之前的 TF 链检查**
-   （`FULL_CHAIN` 里写死 `odom->base_link`）。默认 `gravity:=tf` 的真实链是
-   `map→odom→odom_level→base_link`，所以它会把**健康**的栈判成
-   `链路未就绪，缺: TF:odom->base_link`——这是**工具陈旧**，不是本次搬迁引入的。
-   本轮 nav 冒烟改用 `tf2_echo map base_link` + `ros2 action send_goal` 复核
-   （见 §6 的实测表）；修这个工具是下一轮的独立事项。
+8. **`tools/scripts/regress/nav_smoke_regression.py` 的 TF 链已修（2026-10-29，§4.17/§44.5）**：
+   旧版在 `FULL_CHAIN` 里写死 `odom->base_link`，默认 `gravity:=tf` 的健康栈会被判
+   `链路未就绪，缺: TF:odom->base_link`（工具陈旧）。现在检查当前契约：
+   `map→odom`、`odom→odom_level`（静态，`--robot` 决定期望 rpy：robot11 = [30,0,0]°，
+   `''`/hzmirm = [0,0,0]°）、`odom_level→base_link`、`map→base_link` 可解析；
+   **不要求** `odom→base_link`，且 `gravity:=tf` 下出现它即 FAIL；`map→odom` 的单发布者
+   用「/tf 端点清单 + tracker 唯一 + 同戳冲突」多路证据断言。
+   RMUL2026 默认档与 `robot:=robot11` 两跑均 PASS（§44.5）。
 
 ## 6. 验证（本轮实测口径）
 
