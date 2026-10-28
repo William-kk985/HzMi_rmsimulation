@@ -30,7 +30,7 @@
 与"`.session.yaml` + 活性证明"两条路），绝不会挡住建图。
 
 直接手工跑（一般由 launch 起，不用手工）：
-    ros2 run rm_nav_bringup map_session_announcer.py --ros-args -p map_name:=X -p world:=RMUC2026
+    ros2 run rm_utils map_session_announcer.py --ros-args -p map_name:=X -p world:=RMUC2026
 """
 import json
 import os

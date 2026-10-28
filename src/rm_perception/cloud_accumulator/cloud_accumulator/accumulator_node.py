@@ -16,7 +16,7 @@
     以后 `pcd_to_nav2_map.py` / icp_registration 直接吃，没有额外变换；
   · 存档 `<pcd_dir>/<map_name>.pcd` + sidecar `<map_name>.meta.yaml`，
     world/出生点不一致时**默认拒绝 load 与 save**（判定与 launch/shell 共用
-    rm_nav_bringup/scripts/map_asset_guard.py 的同一份文本，见 docs/continue_mapping.md）；
+    rm_utils 的 map_asset_guard.py 的同一份文本，见 docs/continue_mapping.md）；
   · 打断（Ctrl+C）不会毁存档：只有 `save` 服务真的写文件，其余时间只在内存里累积。
 
 服务（std_srvs/srv/Trigger，与仓库既有 /map_save 同一口径；名字由 `map_name` 参数决定）：
@@ -63,13 +63,19 @@ CLOUD_QOS = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
 
 
 def _import_guard(share_dir=None):
-    """加载 rm_nav_bringup/scripts/map_asset_guard.py（判定/消息文本的唯一出处）。"""
+    """加载 rm_utils 的 map_asset_guard.py（判定/消息文本的唯一出处）。"""
     import importlib.util
     cands = []
     try:
         from ament_index_python.packages import get_package_share_directory
-        cands.append(os.path.join(get_package_share_directory('rm_nav_bringup'),
+        cands.append(os.path.join(get_package_share_directory('rm_utils'),
                                   'scripts', 'map_asset_guard.py'))
+    except Exception:
+        pass
+    try:
+        from ament_index_python.packages import get_package_prefix
+        cands.append(os.path.join(get_package_prefix('rm_utils'), 'lib', 'rm_utils',
+                                  'map_asset_guard.py'))
     except Exception:
         pass
     if share_dir:
@@ -82,8 +88,8 @@ def _import_guard(share_dir=None):
             return mod
     raise RuntimeError(
         "[cloud_accumulator] 找不到地图存档守卫模块 map_asset_guard.py（试过：%s）\n"
-        '  它在 rm_nav_bringup 包里（scripts/），装法：\n'
-        '      colcon build --symlink-install --packages-select rm_nav_bringup\n'
+        '  它在 rm_utils 包里（scripts/），装法：\n'
+        '      colcon build --symlink-install --packages-select rm_utils\n'
         '      source install/setup.bash' % ' / '.join(cands))
 
 

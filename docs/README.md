@@ -14,6 +14,17 @@
 
 > 3 分钟路径：这三份的 §0/§1 → 要动手看 [`smoke_test_runbook.md`](smoke_test_runbook.md) 与 [`map_assets.md`](map_assets.md) → 要改帧/TF 先读 [`tf_interface_contract.md`](tf_interface_contract.md) 与 [取代表](#取代表不再成立的说法)。
 
+## 代码放哪：`rm_utils` / `tools/` / 功能包
+
+> **2026-10 整理**：运行期「缝缝补补」已集中到 `src/rm_utils/`。
+> - **`src/rm_utils/`** = 运行期胶水/诊断（存档守卫、续建体检、会话播报、LIO 外参断言、高度带守卫）；
+>   分类表 + 每条的**删除条件**见 [`src/rm_utils/README.md`](../src/rm_utils/README.md)。
+> - **`tools/scripts/`** = 离线工具（存档、回放、对账、bench），不进 ROS 图、不装成可执行节点。
+> - **功能**（谁发布哪条 TF/话题、算法实现与参数）= **留在各自的功能包**，不搬进 `rm_utils`；
+>   例如 `odom_level_tf` 是契约 §4.11 的静态重力边，仍属 `rm_nav_bringup`。
+> 旧文档里的 `src/rm_nav_bringup/scripts/<name>.py` 是**历史坐标**；现行路径以
+> `src/rm_utils/README.md` 为准（本轮按约束未改 §1–§43 正文）。
+
 ## ① 入门 / 总览
 
 | 文档 | 看它解决什么问题 | 状态 |

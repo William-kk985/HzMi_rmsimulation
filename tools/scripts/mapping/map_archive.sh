@@ -36,7 +36,7 @@
 # 为什么必须有 sidecar + 守卫：本工程 `map` 系 = **出生点相对系**，换 world 就是换原点。
 #   把 A 场地的位姿图/点云加载到 B 场地 = 两场比赛的地图叠在一起（假墙/回环错配/定位全废）。
 #   判定与报错文本与 launch / cloud_accumulator 共用同一份：
-#       src/rm_nav_bringup/scripts/map_asset_guard.py
+#       src/rm_utils/rm_utils/map_asset_guard.py
 #   ⚠️ 注意：守卫只管"world/spawn **对不对**"，管不了"图**本身歪了**"（当天事故就是后者）
 #      ⇒ 续建后另有一次一致性检查（launch 参数 map_resume_check*，见 docs/continue_mapping.md §8）。
 #
@@ -78,7 +78,7 @@
 set -u
 
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-GUARD="$WS/src/rm_nav_bringup/scripts/map_asset_guard.py"
+GUARD="$WS/src/rm_utils/rm_utils/map_asset_guard.py"
 NAME=""; WORLD=""; TIMEOUT=60; ALLOW=0; WITH_CLOUD=1; RESOLUTION=""
 FROM=""; DRY_RUN=0; KEEP=3; LIST_JSON=0; KIND="all"; ALLOW_XSESSION=0
 SESSION=""; SESSION_SOURCE=""; SESSION_WORLD=""; SESSION_SPAWN=""; SESSION_ID=""

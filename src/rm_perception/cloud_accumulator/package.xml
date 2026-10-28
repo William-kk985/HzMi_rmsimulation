@@ -8,7 +8,7 @@
     并提供 save/load 服务 ⇒ **3D 先验（PCD/&lt;name&gt;.pcd）也能跨会话续建**，不必再手工拼接两次跑图。
     存档带 sidecar（&lt;name&gt;.meta.yaml，记录 world/出生点）并在 load/save 前核对：
     场地不一致默认拒绝（与 bringup_sim.launch.py 的 2D 续建守卫共用
-    rm_nav_bringup/scripts/map_asset_guard.py 的同一份判定与错误文本）。
+    rm_utils 的 map_asset_guard.py 的同一份判定与错误文本）。
     只读消费者：不发 /map、不发 TF、不发 /segmentation ⇒ 既有单一发布者契约不变。
     用法与实测见 docs/continue_mapping.md。
   </description>
@@ -23,7 +23,8 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
-  <!-- 存档守卫 + 存档目录（map/ PCD/）的归属包；cloud_accumulator 只用它的 scripts/map_asset_guard.py -->
+  <!-- 存档守卫模块（map_asset_guard.py）在 rm_utils；存档目录（map/ PCD/）仍归 rm_nav_bringup -->
+  <exec_depend>rm_utils</exec_depend>
   <exec_depend>rm_nav_bringup</exec_depend>
   <!-- 可选：livox_ros_driver2 在就顺手支持 CustomMsg，不在也不影响（见 accumulator_node._setup_custom_sub） -->
   <exec_depend>livox_ros_driver2</exec_depend>

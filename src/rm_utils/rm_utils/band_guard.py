@@ -38,7 +38,7 @@
   而不是由 launch 从同一份 nav2 params 文件里再算一遍。理由：
     1. 不会漂移 —— launch 的深合并（base → robot11 覆盖 → global_obstacle:=scan 覆盖）
        与 RewrittenYaml 的 rewrite 都可能改值；参数服务返回的是 nav2 **真正拿到**的值；
-    2. 可独立运行 —— `ros2 run rm_nav_bringup band_guard.py` 能挂到**任意**已在跑的栈上，
+    2. 可独立运行 —— `ros2 run rm_utils band_guard.py` 能挂到**任意**已在跑的栈上，
        不需要用户告诉它参数文件在哪、也不需要 launch 改动；
     3. 覆盖动态改参 —— 参数被 `ros2 param set` 改过（或以后加了新的槽位覆盖）也能看到。
   代价：需要 nav2 节点已起、参数服务可查；本节点用 500 ms 轮询等待它们（不挡任何启动），
@@ -49,13 +49,13 @@
   由 launch 起（launch arg `band_guard:=True`，默认 False）：
       ros2 launch rm_nav_bringup bringup_sim.launch.py mode:=nav ... band_guard:=True
   独立挂到已在跑的栈（推荐先 `source install/setup.bash`）：
-      ros2 run rm_nav_bringup band_guard.py --ros-args -p use_sim_time:=true
+      ros2 run rm_utils band_guard.py --ros-args -p use_sim_time:=true
       # 换节点名/话题/周期：
-      ros2 run rm_nav_bringup band_guard.py --ros-args \
+      ros2 run rm_utils band_guard.py --ros-args \
           -p use_sim_time:=true -p period_s:=2.0 \
           -p costmap_nodes:="['/local_costmap/local_costmap','/global_costmap/global_costmap']"
   纯源码树（不装）：
-      python3 src/rm_nav_bringup/scripts/band_guard.py --ros-args -p use_sim_time:=true
+      python3 src/rm_utils/rm_utils/band_guard.py --ros-args -p use_sim_time:=true
 
 参数（全部可在 launch / 命令行覆盖）：
   scan_topic             /scan

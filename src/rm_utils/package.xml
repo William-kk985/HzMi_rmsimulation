@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm_utils</name>
+  <version>0.1.0</version>
+  <description>
+    运行期「胶水 / 诊断」节点（不属于算法功能，也不参与默认控制路径）：
+    LIO 外参生效值断言（lio_extrinsic_receipt）、地图存档的场地隔离守卫与 sidecar
+    （map_asset_guard，纯 Python，launch / cloud_accumulator / map_archive.sh 三处共用）、
+    续建后一次性一致性检查（map_resume_check）、会话身份播报（map_session_announcer）、
+    nav2 高度带静默丢波束的只读诊断（band_guard）。
+    功能（例如 odom_level_tf 这条静态重力边）不在这里，留在它所属的包里。
+    分类表、删除条件与历史 patch 见本包 README.md。
+  </description>
+  <maintainer email="dev@hzmi.local">HzMi</maintainer>
+  <license>MIT</license>
+  <author email="dev@hzmi.local">HzMi</author>
+
+  <!-- rclpy 节点 + 参数服务回读 -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <!-- map_session_announcer：latched 话题 + Trigger 查询服务 -->
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <!-- band_guard：/scan -->
+  <exec_depend>sensor_msgs</exec_depend>
+  <!-- map_resume_check / band_guard：TF -->
+  <exec_depend>tf2_ros</exec_depend>
+  <!-- map_resume_check：数值 -->
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- map_asset_guard：sidecar YAML（缺失时会退回内置 mini 解析器，但正常安装应具备） -->
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- map_asset_guard：定位 rm_nav_bringup 的 map/ PCD/ 目录（资产归属包）。
+       这里**不声明** rm_nav_bringup：launch 反过来要起本包的节点，声明成环会让 colcon
+       的依赖图出现循环。资产目录在运行期按 ament index 查，缺包时守卫会给可操作报错。 -->
+  <exec_depend>ament_index_python</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

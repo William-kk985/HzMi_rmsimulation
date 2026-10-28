@@ -3,7 +3,10 @@
 <package format="3">
   <name>rm_nav_bringup</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>
+    RM 仿真/实车整栈 launch、地图资产与帧图装配（URDF/xacro、map/PCD 存档）。
+    运行期诊断/守卫节点不在本包：它们在 rm_utils（见 src/rm_utils/README.md）。
+  </description>
   <maintainer email="lihanchen2004@163.com">Lihan Chen</maintainer>
   <license>MIT</license>
   <author email="lihanchen2004@163.com">Lihan Chen</author>
@@ -11,20 +14,18 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>rviz2</exec_depend>
-  <!-- 会话播报器 map_session_announcer.py（2026-10-06 存档写错名字事故后新增）与
-       map_resume_check.py 都是 rclpy 节点；播报器另用 std_msgs/String（latched 负载）
-       + std_srvs/Trigger（查询服务）。 -->
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
-  <!-- band_guard.py：/scan + TF2 + 两张 costmap 的只读参数服务（rcl_interfaces） -->
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>rcl_interfaces</exec_depend>
+  <!-- launch 会起 rm_utils 里的运行期断言/守卫节点（map_session_announcer / map_resume_check /
+       lio_extrinsic_receipt / band_guard），并惰性 import 它的 map_asset_guard.py。
+       rm_utils 那边不反向声明本包（会成环），它只在运行期按 ament index 查 map/ PCD/ 目录。 -->
+  <exec_depend>rm_utils</exec_depend>
   <!-- odom_level_tf.py（契约 v3 §4.11）：静态边 odom→odom_level（写 /tf_static，latched）
        + 只读互检（/cloud_registered 拟合地面、IMU 静止均值）。 -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

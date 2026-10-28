@@ -1471,7 +1471,7 @@ class _MountExtrinsic(Substitution):
 # SPL 读顶层（对），fastlio/pointlio 读 `mapping.*`（**死键**）⇒ robot11 的 +30° 静默丢失，
 # 运行期 pointlio `mapping.extrinsic_R = I`（measurements §34.3#4 实测）。
 # 现在：① 参数字典（`_lio_extrinsic_params`）与 ② 运行期断言
-# （`_lio_extrinsic_check_params` → `scripts/lio_extrinsic_receipt.py`）**都从这张表派生**
+# （`_lio_extrinsic_check_params` → `rm_utils/lio_extrinsic_receipt.py`）**都从这张表派生**
 # ⇒ 键名只有一处可改，不会再出现"launch 传了键、节点不读"。
 _LIO_EXTRINSIC_KEYS = {
     'fastlio': ('mapping.extrinsic_T', 'mapping.extrinsic_R'),
@@ -1502,7 +1502,7 @@ def _lio_extrinsic_params(lio):
 
 
 def _lio_extrinsic_check_params(lio):
-    """该槽位的运行期断言参数（交给 `scripts/lio_extrinsic_receipt.py`）。
+    """该槽位的运行期断言参数（交给 `rm_utils/lio_extrinsic_receipt.py`）。
 
     `target_node` / `param_prefix` 与 `_lio_extrinsic_params` **同源** ⇒ 断言检查的就是
     launch 写进节点的那两个键；`expected_*` 也是同一份 URDF 解析结果。
@@ -1533,7 +1533,7 @@ def _lio_extrinsic_receipt(context):
         xyz, rot9 = [0.0, 0.0, 0.05], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
         src = '**FALLBACK**（URDF 解析失败，见上面的 WARN）'
     return ('[lio_extrinsic] lio=%s ⇒ 该后端只读 `%s` / `%s`；expected（来源 = %s）'
-            'T=[%s]、R=[%s]（行主序）；运行期断言 = rm_nav_bringup/lio_extrinsic_receipt.py '
+            'T=[%s]、R=[%s]（行主序）；运行期断言 = rm_utils/lio_extrinsic_receipt.py '
             '（node=%s，读回**生效值**；不一致/死键 ⇒ ERROR + exit 1；契约 §4.12.5）'
             % (lio, key_T, key_R, src,
                ', '.join('%.9f' % float(x) for x in xyz),
@@ -2133,7 +2133,8 @@ def _gazebo_model_path_setup(context):
 #      节点本身仍在 4 s 起（TimerAction 由 OpaqueFunction 内部返回，时序与原来逐字节一致）。
 # =============================================================================
 
-# 惰性加载守卫模块（模块本体在 share/rm_nav_bringup/scripts/map_asset_guard.py，与 shell 脚本共用同一份判定）
+# 惰性加载守卫模块（模块本体已移到 rm_utils：share/rm_utils/scripts/map_asset_guard.py，
+# 与 cloud_accumulator、tools/scripts/mapping/map_archive.sh 共用同一份判定）
 _MAP_GUARD_CACHE = {}
 
 
@@ -2142,8 +2143,8 @@ def _find_source_pkg_dir(share_dir):
 
     为什么需要：`colcon build --symlink-install` 下 share 里的每个文件是**单独**的软链
     （目录本身是真的）⇒ 运行期新建的 `map/<name>.posegraph` 不会自动出现在 share 里。
-    守卫模块因此优先从源码树加载（与 map_asset_guard.canonical_asset_dir() 同一套判断，
-    互为兜底：即使忘了重编 rm_nav_bringup，launch 也能找到源码里的守卫）。
+    这里只用它做**兜底**：从 rm_nav_bringup 的 share 反推 src/，再找同级的 rm_utils
+    （与 map_asset_guard.canonical_asset_dir() 同一套判断，忘了重编 rm_utils 也能找到）。
     """
     for sub in ('map', 'PCD', 'launch'):
         d = os.path.join(share_dir, sub)
@@ -2161,19 +2162,35 @@ def _find_source_pkg_dir(share_dir):
     return None
 
 
-def _load_map_asset_guard(share_dir):
+def _load_map_asset_guard():
     if 'mod' in _MAP_GUARD_CACHE:
         return _MAP_GUARD_CACHE['mod']
-    cands = [os.path.join(share_dir, 'scripts', 'map_asset_guard.py')]
-    src_pkg = _find_source_pkg_dir(share_dir)
-    if src_pkg:
-        cands.append(os.path.join(src_pkg, 'scripts', 'map_asset_guard.py'))
+    cands = []
+    try:
+        cands.append(os.path.join(get_package_share_directory('rm_utils'),
+                                  'scripts', 'map_asset_guard.py'))
+    except PackageNotFoundError:
+        pass
+    try:
+        from ament_index_python.packages import get_package_prefix
+        cands.append(os.path.join(get_package_prefix('rm_utils'), 'lib', 'rm_utils',
+                                  'map_asset_guard.py'))
+    except Exception:                                          # noqa: BLE001 - 只是候选路径
+        pass
+    # 源码树兜底：rm_nav_bringup 的 share 反推 src/ ⇒ 同级 rm_utils
+    try:
+        src_pkg = _find_source_pkg_dir(get_package_share_directory('rm_nav_bringup'))
+        if src_pkg:
+            cands.append(os.path.join(os.path.dirname(src_pkg), 'rm_utils', 'rm_utils',
+                                      'map_asset_guard.py'))
+    except Exception:                                          # noqa: BLE001
+        pass
     path = next((p for p in cands if os.path.isfile(p)), None)
     if path is None:
         raise RuntimeError(
             "[launch] 找不到地图存档守卫模块 map_asset_guard.py（试过：%s）\n"
-            '  它是 rm_nav_bringup 包的一部分，安装方式：\n'
-            '      colcon build --symlink-install --packages-select rm_nav_bringup\n'
+            '  它现在是 rm_utils 包的一部分，安装方式：\n'
+            '      colcon build --symlink-install --packages-select rm_utils\n'
             '      source install/setup.bash\n'
             '  （续建 + 场地隔离都靠它，缺了它宁可不起栈，也不要在没有隔离检查的情况下续建。）'
             % ' / '.join(cands))
@@ -2962,7 +2979,7 @@ def generate_launch_description():
         default_value='False',
         choices=['True', 'False'],
         description='False（默认，行为不变）= 不起 band_guard；True = 起只读诊断节点 '
-                    '`rm_nav_bringup/band_guard.py`：订阅 /scan + TF，回读两张 costmap 的**生效**'
+                    '`rm_utils/band_guard.py`：订阅 /scan + TF，回读两张 costmap 的**生效**'
                     '高度带参数，若 in-band==0（ERROR）/ <10%（WARN）/ kept-y 单侧（WARN）就'
                     '打日志 + 发 /band_guard/status(JSON)。**不改任何数据/控制路径**。'
                     '只在 mode:=nav|slam_nav 生效。')
@@ -3063,7 +3080,7 @@ def generate_launch_description():
     #   动机：场地隔离守卫只管"world/spawn 对不对"，管不了"图本身歪了"——
     #   当天用户续建的 map/RMUC2026.posegraph 里已经含有一段 LIO 退化（ATE max 1.15 m），
     #   加载进来的图与真实场地不一致 ⇒ 建出来的图/定位"飘"。
-    #   做法：续建时额外起一个**一次性**小节点（rm_nav_bringup/scripts/map_resume_check.py），
+    #   做法：续建时额外起一个**一次性**小节点（rm_utils/map_resume_check.py），
     #   它只订阅 /tf、不发任何话题/TF（「map→odom 单一发布者」契约逐字不变）；等 TF 可用 + 静置/
     #   收敛窗口（map_resume_check_delay）结束后判两条：① 自基线以来 map→odom 被修正了多少
     #   （图歪了会把位姿拉走，这条不需要机器人静止）② 实测 map→base_link 与**存档记录的
@@ -3309,7 +3326,7 @@ def generate_launch_description():
             #   `mapping.extrinsic_T/R`，与上面同一份 URDF 解析值比较；不一致/死键 ⇒
             #   ERROR + exit 1（以后键名再写错，不会再"照跑但 R=I"）。
             Node(
-                package='rm_nav_bringup',
+                package='rm_utils',
                 executable='lio_extrinsic_receipt.py',
                 name='lio_extrinsic_receipt',
                 output='screen',
@@ -3348,7 +3365,7 @@ def generate_launch_description():
             # ★ 2026-10-27（契约 §4.12.5）：运行期断言（读回 `/laserMapping` 生效的
             #   `mapping.extrinsic_T/R`，与 URDF 解析值比对；不一致/死键 ⇒ ERROR + exit 1）。
             Node(
-                package='rm_nav_bringup',
+                package='rm_utils',
                 executable='lio_extrinsic_receipt.py',
                 name='lio_extrinsic_receipt',
                 output='screen',
@@ -3477,7 +3494,7 @@ def generate_launch_description():
             # ★ 2026-10-27（契约 §4.12.5）：运行期断言（读回 `/small_point_lio` 生效的
             #   **顶层** `extrinsic_T/R`；两份互斥 Node 同名 ⇒ 这里只会看到一个）。
             Node(
-                package='rm_nav_bringup',
+                package='rm_utils',
                 executable='lio_extrinsic_receipt.py',
                 name='lio_extrinsic_receipt',
                 output='screen',
@@ -3977,7 +3994,7 @@ def generate_launch_description():
     # 决定传不传 map_file_name）；② 判定/横幅提前到 t=0（节点本身仍由内部 TimerAction 延后 4 s）。
     # 节点的包/可执行文件/节点名/参数文件一律没变 ⇒ /map、map→odom 的"唯一发布者"契约不变。
     def _launch_slam_toolbox_mapping(context, *args, **kwargs):
-        guard = _load_map_asset_guard(rm_nav_bringup_dir)
+        guard = _load_map_asset_guard()
         world_v = context.perform_substitution(LaunchConfiguration('world')).strip()
         name_v = context.perform_substitution(LaunchConfiguration('map_name')).strip() or world_v
         autocontinue = _as_bool(context.perform_substitution(LaunchConfiguration('map_autocontinue')),
@@ -4053,7 +4070,7 @@ def generate_launch_description():
         if _as_bool(context.perform_substitution(LaunchConfiguration('map_session_announce')),
                     'map_session_announce'):
             actions.append(Node(
-                package='rm_nav_bringup',
+                package='rm_utils',
                 executable='map_session_announcer.py',
                 name='map_session',
                 output='screen',
@@ -4082,8 +4099,8 @@ def generate_launch_description():
                 exp = [float(v) for v in (man.get('map_start_pose') or [0.0, 0.0, 0.0])]
                 sp = man.get('spawn_pose') or {}
                 check_node = Node(
-                    package='rm_nav_bringup',
-                    executable='map_resume_check.py',        # install(PROGRAMS …) 装到 lib/rm_nav_bringup/
+                    package='rm_utils',
+                    executable='map_resume_check.py',        # scripts= 装到 lib/rm_utils/
                     name='map_resume_check',
                     output='screen',
                     parameters=[{
@@ -4163,7 +4180,7 @@ def generate_launch_description():
         LaunchConfiguration('cloud_accumulator'), "' == 'True'"]))
 
     def _launch_cloud_accumulator(context, *args, **kwargs):
-        guard = _load_map_asset_guard(rm_nav_bringup_dir)
+        guard = _load_map_asset_guard()
         world_v = context.perform_substitution(LaunchConfiguration('world')).strip()
         name_v = context.perform_substitution(LaunchConfiguration('map_name')).strip() or world_v
         autocontinue = _as_bool(context.perform_substitution(LaunchConfiguration('map_autocontinue')),
@@ -4243,7 +4260,7 @@ def generate_launch_description():
             "'", LaunchConfiguration('band_guard'), "'.lower() == 'true' and (",
             "'", LaunchConfiguration('mode'), "' == 'nav' or '",
             LaunchConfiguration('mode'), "' == 'slam_nav')"])),
-        package='rm_nav_bringup',
+        package='rm_utils',
         executable='band_guard.py',
         name='band_guard',
         output='screen',

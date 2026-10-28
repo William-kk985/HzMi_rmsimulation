@@ -211,7 +211,7 @@ class _SpawnZ(Substitution):
     base_link 离地高度"表）把**落定高度 + 1 mm** 透传进来 ⇒ 车从第一帧起就是静止的。
 
     ⚠️ 只改真正 spawn 用的 `-z`：`get_world_config()` 里的 `z` **不动**。那张表同时被
-    `rm_nav_bringup/scripts/map_asset_guard.py::WORLD_SPAWN` 镜像、并被存档 sidecar 的
+    `rm_utils/rm_utils/map_asset_guard.py::WORLD_SPAWN` 镜像、并被存档 sidecar 的
     `spawn_pose` 比对（`spawn-table --check`）⇒ 改它会让既有 RMUL2026/RMUC2026 存档
     全部判成 `refused_spawn`。地图原点只取决于 x/y/yaw，z 只是出生高度。
     """

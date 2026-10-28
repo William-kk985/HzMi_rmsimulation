@@ -260,7 +260,7 @@ def write_manifest(base, name, kind, world, files, map_start_pose=None,
         'file_sizes': {os.path.basename(f): (os.path.getsize(f) if os.path.isfile(f) else None)
                        for f in files},
         'versions': ros_versions(),
-        'written_by': 'rm_nav_bringup/scripts/map_asset_guard.py',
+        'written_by': 'rm_utils/rm_utils/map_asset_guard.py',
     }
     if extra:
         man.update(extra)
