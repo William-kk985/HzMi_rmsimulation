@@ -1875,3 +1875,34 @@ ROS 2 Humble 对**未知**的 `name:=value` 是**静默接受**的（§28.4 实�
   （安装方式固定 = xacro 默认 `sensor`，gz 侧 `--tilt-rpy` 仍把传感器 link pose 钉成 −0.5236）。
   直接 `ros2 launch rm_livox_gz_sim` 时若仍传 `robot11_mount:=…`，ROS 2 会**静默忽略**
   （那个 launch 没有守卫）—— 这是"只允许改这一处"的已知边界；走 bringup 的路径会被 t=0 拦住。
+
+## §4.18 地图资产（PCD / 2D / SC DB）的**同帧**契约（2026-10-29，§45）
+
+> 起因：2027 的建图跑 `map→odom` 坏了（§43/§45.2），PCD/2D/DB 都从**同一个坏位姿**长出来，
+> 于是"DB 与 PCD 静态同帧"成立、**时间一致性**不成立（围栏被叠成 10 层），
+> 而 §42/§44 的验收又把"同一份坏位姿"当真值 ⇒ 看起来 0.005 m，实际对真值 0.86 m。
+
+### 4.18.1 三条断言（资产替换时必须全部为真）
+
+| # | 断言 | 检查 |
+|---|---|---|
+| **A1** | **PCD 与 2D 图同源**：`map/<world>.pgm/.yaml` 由 `PCD/<world>.pcd` 经 `pcd_to_nav2_map.py` 投影得到，**不再**从 slam_toolbox 的 `/map` 另存 | 2D 的 `origin` = PCD 的 bbox 角；重跑一次投影应逐字节可比 |
+| **A2** | **DB 与 PCD 同一帧**：每个 keyframe 的扫描按 `poses[i]` 搬到 map 后，与 PCD 的最近邻中位 ≤0.05 m、p90 ≤0.12 m、`frac<0.10 m ≥0.90`；描述子与 bag 复算逐元素相同 | `tools/scripts/mapping/check_db_pcd_same_frame.py`（**退出码 1 = fail loud**） |
+| **A3** | **位姿源可追**：`PCD/<world>.meta.yaml` 带 `pose_source`，且 `PCD/<world>_slam_poses.jsonl` 就是建库用的那份 `T_map_base` | sidecar 字段 + `build_sc_db --poses` 的 meta |
+
+### 4.18.2 禁止
+
+1. **不要**混用两次跑/两套 `map→odom` 的资产（PCD 来自 A 跑、DB 来自 B 跑）——A2 会抓到，但别等它抓。
+2. **不要**拿"同一跑自己的 DB 位姿"当验收真值（§42.7#5 的教训）；离线验收的参考必须是
+   `/odom_ground_truth`（仿真）或外部测量。
+3. **不要**在 `mode:=mapping` 里让 `cloud_accumulator` 用坏掉的 `map→odom` 累积后直接当资产：
+   累积器是忠实执行者，位姿坏了它只会忠实地叠鬼影。先验位姿的健康度用
+   **`map→base` vs 真值**判（§45.2），不是看 `~/save` 成功。
+
+### 4.18.3 边界
+
+- 本契约只约束**资产之间**的关系，不改 `map` 帧的定义（出生点相对系）与 `initial_pose` 语义。
+- `map` 的 **z 原点**允许两套（交付件沿用历史约定：地面峰 ≈ −0.11 m；GT 参考件用出生瞬间
+  `base_link` z：地面峰 ≈ −0.13 m），但**同一份资产内部**必须自洽，且不得混用。
+- 2D 图的 `origin` 是**栅格左下角**，不是地图原点；把它当地图原点会让 amcl/gicp 的
+  `initial_pose` 偏一个窗口尺寸。

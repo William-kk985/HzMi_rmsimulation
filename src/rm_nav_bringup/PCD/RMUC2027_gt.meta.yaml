@@ -1,0 +1,49 @@
+name: RMUC2027_gt
+kind: pcd
+world: RMUC2027
+created_at: '2026-10-29T02:58:43+08:00'
+updated_at: '2026-10-29T02:58:49+08:00'
+spawn_pose:
+  x: 5.9
+  y: 2.72
+  z: 0.2
+  yaw: 0.0
+map_start_pose:
+- 0.0
+- 0.0
+- 0.0
+resolution: null
+frames:
+  map: map
+  odom: odom
+  base: base_link
+  convention: map 系 = 出生点相对系（原点 = 机器人出生点，x 前 y 左，单位 m/rad）；odom = LIO 里程计系；base =
+    base_link。因此同一 world 只要出生点不变，map(0,0,0) 恒等于出生点。
+files:
+- RMUC2027_gt.pcd
+file_sizes:
+  RMUC2027_gt.pcd: 421273
+versions:
+  ros_distro: humble
+  packages:
+    slam_toolbox: 2.6.10
+written_by: rm_utils/rm_utils/map_asset_guard.py
+pose_source: gt(/odom_ground_truth)
+accumulated_points: 2105517
+voxel_size: 0.1
+bbox:
+- - -19.935403855341555
+  - -9.013514739308203
+  - -0.2904200245469322
+- - 8.147886846163122
+  - 6.843129470885033
+  - 1.8003751158691939
+z_span: 2.0907951404161262
+health_warning: false
+dropped_points_height: 24917
+dropped_points_range: 91385
+skipped_frames_jump: 0
+skipped_frames_tf_fallback: 0
+tf_frames_ok: 174
+tf_frames_failed: 0
+source: tools/scripts/mapping/accumulate_pcd_gt.py

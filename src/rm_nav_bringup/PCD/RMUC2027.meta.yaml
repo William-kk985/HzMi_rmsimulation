@@ -2,7 +2,7 @@ name: RMUC2027
 kind: pcd
 world: RMUC2027
 created_at: '2026-10-28T19:24:59+08:00'
-updated_at: '2026-10-28T19:24:59+08:00'
+updated_at: '2026-10-29T02:58:49+08:00'
 spawn_pose:
   x: 5.9
   y: 2.72
@@ -22,29 +22,28 @@ frames:
 files:
 - RMUC2027.pcd
 file_sizes:
-  RMUC2027.pcd: 1134105
+  RMUC2027.pcd: 423097
 versions:
   ros_distro: humble
   packages:
-    rm_nav_bringup: 0.0.0
     slam_toolbox: 2.6.10
-    cloud_accumulator: 0.1.0
-written_by: rm_nav_bringup/scripts/map_asset_guard.py
-accumulated_points: 1789924
+written_by: rm_utils/rm_utils/map_asset_guard.py
+pose_source: trace(odom_level, min_travel 0.6, anchor-first)
+accumulated_points: 2087355
 voxel_size: 0.1
 bbox:
-- - -22.18341273748441
-  - -19.570993460936503
-  - -0.49753064854831813
-- - 8.797007972186996
-  - 10.791560600795268
-  - 1.803536295459646
-z_span: 2.3010669440079643
+- - -19.95347414098263
+  - -9.067059847920547
+  - -0.39033104657753276
+- - 8.14697465880323
+  - 6.812419517426088
+  - 1.8012171788786486
+z_span: 2.1915482254561813
 health_warning: false
-dropped_points_height: 28593
-dropped_points_range: 707049
+dropped_points_height: 24299
+dropped_points_range: 84779
 skipped_frames_jump: 0
-skipped_frames_tf_fallback: 1
-source: cloud_accumulator
-tf_frames_ok: 193
-tf_frames_failed: 19
+skipped_frames_tf_fallback: 0
+tf_frames_ok: 172
+tf_frames_failed: 2
+source: tools/scripts/mapping/accumulate_pcd_gt.py

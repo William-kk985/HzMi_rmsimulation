@@ -111,6 +111,23 @@ def build(args):
         print('[build_sc_db] 位姿合理性 bbox（PCD + %.2f m）：x[%.2f, %.2f] y[%.2f, %.2f]'
               % (args.map_margin, bbox[0][0], bbox[1][0], bbox[0][1], bbox[1][1]))
 
+    ext_poses = []
+    if args.poses:
+        for line in open(args.poses):
+            row = json.loads(line)
+            ext_poses.append((float(row['stamp']), np.array(row['T_map_base'], dtype=np.float64).reshape(4, 4)))
+        ext_poses.sort(key=lambda x: x[0])
+        if not ext_poses:
+            raise SystemExit('--poses 为空：%s' % args.poses)
+        print('[build_sc_db] 外部位姿 %d 条（%s）：T_map_base 用它覆盖 bag 的 map→odom 链'
+              % (len(ext_poses), args.poses))
+
+    def external_pose(ts):
+        best = min(ext_poses, key=lambda x: abs(x[0] - ts))
+        if abs(best[0] - ts) > 0.11:
+            return None
+        return best[1]
+
     exclude = np.zeros(0, dtype=np.float64)
     if args.exclude_stamps:
         idx = json.load(open(args.exclude_stamps))['frames']
@@ -144,6 +161,10 @@ def build(args):
         except KeyError:
             skipped['tf'] += 1
             continue
+        if ext_poses:
+            # 外部位姿按**点云 header stamp**（仿真时间）对齐；ts 是 bag 接收时间（epoch），两者不同轴
+            cstamp = cmsg.header.stamp.sec + cmsg.header.stamp.nanosec * 1e-9
+            T_map_base = external_pose(cstamp)
         if T_map_base is None or T_level_base is None or T_level_cloud is None:
             skipped['tf'] += 1
             continue
@@ -221,6 +242,8 @@ def build(args):
         'descriptor_origin': 'base_link origin, gravity-aligned (level_frame); '
                              'q = T_level_cloud*p - t_level_base',
         'level_yaws': 'keyframe 时刻 T_map_level 的 yaw（rad）；跨会话换算 heading 用，见 db.py',
+        'pose_source': ('external jsonl: %s' % os.path.abspath(args.poses)) if args.poses
+                        else 'bag map→odom TF',
         'sc_impl': 'third_party/eval/sc.py（复制为 scan_context_relocalizer/scan_context.py）',
         'notes': 'poses 是 map 系 T_map_base；map 系 = 该建图跑保存的 PCD/map 的同一帧',
     }
@@ -262,6 +285,9 @@ def main(argv=None):
     ap.add_argument('--max-time', type=float, default=0.0,
                     help='可选：只用 bag 开始后这么多秒内的帧（<=0 = 全用）。'
                          '作用：建图跑中途 slam 发散时截断（§41 的 q2027b 在 ~115 s 后发散）')
+    ap.add_argument('--poses', default='',
+                    help='外部位姿 jsonl（accumulate_pcd_gt.py --poses-out）：逐帧覆盖 T_map_base。'
+                         '描述子仍从 bag 的 level 帧算（与位姿源无关）；用于"用干净位姿重建同一份扫描库"')
     ap.add_argument('--exclude-stamps', default='', help='index.json（frames[].stamp）：排除这些查询 ±窗口')
     ap.add_argument('--exclude-window', type=float, default=0.6)
     ap.add_argument('--eval-dir', default=os.path.join(_repo_root(), 'third_party', 'eval'),

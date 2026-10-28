@@ -9763,3 +9763,314 @@ python3 .tmp_piece2/analyze.py .tmp_piece2/replay_correct.jsonl
 ```
 
 ---
+
+---
+
+## §45 第三十五轮（**本机 date=2026-10-29，02:37–04:20**）：2027 地图资产**重建** —— 坏 `map→odom` 的根因、GT vs SLAM 两张图、SC DB 重建 + "同帧"硬检查、§41/§42 前后对照
+
+> **本节只新增**（append-only；§1–§44 正文未改）。用户批准「e」（重建资产 + 修鬼影 + 同帧检查 + 重跑验收）。
+> 一句话：**坏 `map→odom` 的根因不是模式选错、也不是回环**，而是**为 2026 调出来的
+> `minimum_travel_distance=0.2` 节点密度**在 2027 的 1.5 m 格栅围栏上让 karto 的"上一次修正 + 里程计"先验
+> 沿栅栏**无约束滑动**（关掉回环逐字节不变、换 level 里程计也不救）；**把节点间距放到 0.6 m 后
+> `map→base` 对真值的误差从 2.19 m/28.4° 降到 0.10 m（≈刚性）/0.22°**。用这套干净位姿重建的
+> `PCD/RMUC2027.pcd` + `map/RMUC2027.*` + `PCD/RMUC2027_sc_db.npz` 让 §41 的 SC 自查询对真值从
+> **50/174（29%）→ 173/173（100%）**（xy 中位 0.862 → **0.075 m**），§42 的 live 种子对真值从
+> **0.796 m/7.9° → 0.27 m/1.9°**、终点从 **0.948 m/5.9° → 0.035 m/6.6°**。
+> 同帧检查（新工具）在旧资产上 **❌ FAIL**（NN p90 0.40–0.50 m），在新资产上 **✅ PASS**（中位 0.033–0.042 m）。
+
+### 45.1 环境、构建与改动面
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `/home/weicheng/HzMi_rmsimulation`，起点 HEAD `7a17b05`（origin/master） |
+| 构建 | `colcon build --symlink-install --packages-select rm_nav_bringup scan_context_relocalizer`（新 PCD/2D/DB 必须重建才进 `install/`；§41.5#7 的老坑） |
+| 数据 | `third_party/eval_data/capture_map2027/bag/raw`（174 朵 `/cloud_registered`、174 条真值、3986 条 `/tf`）；**没有新跑 Gazebo**（离线重放同一条 bag，见 45.2c） |
+| 隔离 | 每次一个栈；私有 `HOME`/`ROS_LOG_DIR`/`MPLCONFIGDIR`/`ROS_DOMAIN_ID`（83 重放 / 86 live）/`GAZEBO_MASTER_URI`（11999 / 11912）；`unset DISPLAY`；只按 setsid 进程组 `kill -INT/-TERM/-9 -- -$PGID`，无机器级 pkill；scratch 全在 `.tmp_45/`（gitignored） |
+| 新增工具 | `tools/scripts/mapping/accumulate_pcd_gt.py`（离线累积，位姿可来自 GT / bag TF / 重放 trace）、`tools/scripts/mapping/map_quality_45.py`（时间一致性 + 围栏厚度/层数）、`tools/scripts/mapping/check_db_pcd_same_frame.py`（DB↔PCD 同帧硬断言） |
+| 改代码 | `scan_context_relocalizer/build_db.py` **只加** `--poses <jsonl>`（默认行为逐字节不变；描述子仍从 bag 的 level 帧算） |
+| 资产（**替换/新增**，逐个列） | `PCD/RMUC2027.pcd`（替换）、`PCD/RMUC2027.meta.yaml`（替换）、`PCD/RMUC2027_sc_db.npz`（替换）、`map/RMUC2027.pgm`/`.yaml`（替换，改为 PCD 投影）、**新增** `PCD/RMUC2027_gt.pcd` + `.meta.yaml`、**新增** `map/RMUC2027_gt.pgm`/`.yaml`、**新增** `PCD/RMUC2027_slam_poses.jsonl`（DB 的位姿源，可复核） |
+| **没有**改 | 2026 的四个 world、2027 的 world 几何（围栏）、launch/URDF/xacro、`slam_toolbox` 的参数文件、§1–§44 正文 |
+
+### 45.2 根因：坏 `map→odom` 是谁发的、为什么阶跃
+
+#### (a) 谁在发 —— `slam_toolbox`，且**模式是对的**
+
+采集跑的命令（`third_party/eval_data/capture_map2027/env.txt` + `launch.log`）：
+`mode:=mapping mapper:=slam_toolbox cloud_accumulator:=True lio:=small_point_lio gravity:=tf ground:=linefit robot:=robot11`。
+`/tf` 上 `map→odom` 的**唯一**张成者是 `async_slam_toolbox_node`（gicp 在 `mode:=mapping` 里根本不启动；
+`cloud_accumulator` 是只读消费者，不发 TF）。所以"哪个节点"没有疑问；疑问是**它为什么坏**。
+
+生效参数（`slam_toolbox/config/mapper_params_online_async_sim.yaml`）：
+`odom_frame: odom`、`transform_publish_period 0.02`（50 Hz 重发**同一个值** ⇒ 阶跃看起来是 50 Hz 的）、
+`map_update_interval 5.0`、`transform_timeout 0.2`、`minimum_time_interval 0.25`（4 Hz 处理）、
+`minimum_travel_distance 0.2`、`minimum_travel_heading 0.2`、`scan_buffer_size 10`、
+`do_loop_closing true`、`correlation_search_space_dimension 0.5`。
+
+#### (b) **先排除**：里程计本身是好的（1–3 cm）
+
+把建图跑的 `odom_level→base_link`（= LIO 输出）与 `/odom_ground_truth` 逐帧比（相对首帧）：
+
+| 量 | 值 |
+|---|---|
+| 位置差 | **1–3 cm**（全程；median 0.01 m，max 0.03 m） |
+| 朝向差 | **≤0.4°**（median 0.0°） |
+
+⇒ 4 Hz 处理的每一帧，mapper 手上都有一个**近乎完美**的里程计先验。它仍然丢了 2.19 m ⇒ 问题在
+**scan matching 的模型**，不在输入。
+
+#### (c) A/B：把同一条 bag **重放**进同一个节点（确定性，一次一个节点）
+
+重放脚本 `/tmp` 外置在 `.tmp_45/`（publishes `/clock`(按 header stamp 缩放)、`/tf`(**剔掉 `map→odom`**)、
+`/tf_static`、`/scan`、`/cloud_registered`；`async_slam_toolbox_node` 用**合并后的参数文件**启动 ——
+注意 `--params-file` 会**盖掉**命令行的 `-p`，这是本轮踩到的坑）。误差 = `map→base` 对真值
+（map 系 = world − 出生点）。"刚性"= 误差的时间变化量。
+
+| 档 | 改动 | 位置 max | 朝向 max | 备注 |
+|---|---|---|---|---|
+| **A** | 原样 | **1.99 m** | **40.1°** | 复现了 live 的 2.19 m/28.4°（机理同、数值不逐位同） |
+| B | `do_loop_closing:=false` | 1.99 m | 40.1° | **与 A 逐字节相同**（md5 相同）⇒ **回环不是原因** |
+| C | `odom_frame:=odom_level` | 2.11 m | 51.2° | 30° 倾斜**不是原因**（它只让先验朝向差 3–4°，见 45.2d） |
+| D | `use_scan_matching:=false` | 0.335 m | 8.1° | 纯里程计下界（含 30° 系的 2D 投影偏置） |
+| E | `correlation_search_space_dimension:=1.0` + `scan_buffer_size:=30` | 2.54 m | 26.1° | 把搜索窗放大**更糟**（假极小更多） |
+| F | `minimum_travel_distance:=0.4` / `heading 0.3` | 0.36 m | 3.3° | 已经好一个数量级 |
+| **G** | `minimum_travel_distance:=0.6` / `heading 0.5` | **0.047 m 中位 / 0.158 max** | 3.3° | 位置好了，朝向留 3.3°（= 30° 系的先验偏置，匹配器没纠正） |
+| **H** | G + `odom_frame:=odom_level` | **0.105 m（刚性，p90 0.111）** | **0.22°** | 最终采用的那组 |
+| H2 | H + `do_loop_closing:=true` | 0.105 m | 0.22° | 回环开着也无害（本跑只有 2.9 m，无真回环） |
+
+**机理（读源码 + 数据两条都对上）**：karto `Mapper::Process` 用
+
+```text
+pScan->SetCorrectedPose( Transform(lastOdom, lastCorrected) ∘ currentOdom )   // "上次修正 + 里程计增量"
+ScanMatcher::MatchScan(..., GetRunningScans())                                // 只在 ±0.5 m / ±20° 里找
+```
+
+⇒ 搜索中心**不是**当前里程计，而是"**上一次修正**搬到当前里程计"；匹配只对着最近
+`scan_buffer_size≈10` 个节点（4 Hz ⇒ ≈2.5 s ⇒ ≈0.5–0.8 m 基线）。在 2027 的**格栅围栏**
+（2 m 立柱 + 3 根 5 cm 横杆）上，**沿栅栏方向没有约束**：每帧允许的 0.1–0.2 m 滑动不会被惩罚，
+并被**下一帧继承**。数据正是这样：t=11.3 起 GT 继续前进（1.21→1.61 m）而 map 停在 0.84→0.89 m，
+累积的偏置再以 `map→odom` 的阶跃（−14.6° / +11.2° / +11.75° / +28.31°）被"制度化"。
+节点越密（0.2 m）基线越短、越贴着同一段栅栏 ⇒ 越糟；0.6 m 立刻回到 4.7 cm。
+
+`map_update_interval` 与 `transform_timeout` **不是**原因：前者只决定 `publishVisualizations()` 里
+`updateMap()` 的周期（`slam_toolbox_common.cpp:297-305`），后者只改 TF 的戳（`scan_timestamp + transform_timeout_`）。
+
+#### (d) 30° 倾斜是**二阶**项，不是元凶
+
+`gravity:=tf` 下 `odom→odom_level` 是 `Rx(30°)`，而 slam_toolbox 把 `T_odom←base` 压成 `(x,y,yaw)`：
+`yaw(Rx30·Rzθ) = atan2(0.866 sinθ, cosθ)` ⇒ 在 θ=27°/54° 处**先验朝向低 3.1°/3.8°**（实测
+`yaw_ext` 23.6/50.0 vs 真值 27.2/53.9）。这解释了 G 档残留的 3.3°（H 档用 level 系后 →0.22°），
+但**不是** 2 m 的来源（C 档证明：换 level 系后误差反而 2.11 m/51.2°）。
+
+#### (e) 顺带发现：§43.6 D 的"GT 地图"是**冻结位姿**建出来的
+
+`§43` 的 `build_maps.py` 里 `at(mo, t)` / `at(ol, t)` 把**bag 接收时间**（epoch ~1.79e9）与**点云 header stamp**
+（仿真 4.7–22.2 s）相比 ⇒ 永远选到第一条。所以 §43.6 D 的 `map_gt.pcd`（72 957 点、y 到 −20.86 m）
+其实是"GT 位姿 × **冻结的** `T_odom←base`"叠加出来的，不是 GT 累积。本轮用正确的时间轴重建后：
+**GT 图 = 13 157 点、x[−19.94,8.15] y[−9.01,6.84]（= 28.1 × 15.9 m，正是场地尺寸）**。
+§43 的主结论（对 **repo PCD** 的残差）不受影响；但 **D 的反事实数字作废**，以本节 45.3 为准。
+
+### 45.3 两张图：GT 上界 vs SLAM 现实
+
+图例：`GT` = 用 `/odom_ground_truth` + 静态链累积（`--pose-source gt`）；`SLAM` = 重放跑（H2 档）的
+`map→odom_level` + 同一静态链累积（`--pose-source trace --trace-frame odom_level --anchor-first`）；
+`OLD` = `--pose-source tf`（复现历史资产，用作 before 对照，**不是**交付物）。
+
+| 项 | OLD（before） | **GT**（新增） | **SLAM**（交付） |
+|---|---|---|---|
+| 点数 / 文件 | 34 833 / 1.13 MB | **13 157** / 0.42 MB | **13 214** / 0.42 MB |
+| XYZ 跨度 (m) | 30.98 × 30.39 × 2.30 | **28.08 × 15.86 × 2.09** | **28.10 × 15.88 × 2.19** |
+| 地面 z 峰 | −0.110 | −0.130 | −0.110（**与旧资产一致**） |
+| 围栏 FWHM（x±/y±） | 0.02 / 0.02 / **0.04** / **0.04** | **0.01 / 0.01 / 0.02 / 0.02** | 0.02 / 0.02 / 0.02 / 0.03 |
+| 围栏多峰（离主峰>10 cm） | **2 / 11 / 11 / 9** | **0 / 0 / 0 / 0** | 0 / 0 / 1 / 1 |
+| **南围栏 z 层数**（y=−8.55，3 根横杆） | **10 层**（0.33/0.57/0.61/0.63/0.75/0.85/0.95/1.03/1.07/1.11） | **3 层** 0.17/0.57/0.97 | **3 层** 0.07/0.47/0.87（整体 −0.10 m，见下） |
+| 时间一致性（leave-time-out NN 中位） | **0.163 m** | **0.025 m** | **0.027 m** |
+| 抽检帧中位 <5 cm 的比例 | **0%** | 86% | **89%** |
+| 同帧检查（45.4） | **FAIL**（p90 0.40–0.50） | PASS | **PASS**（中位 0.033–0.042） |
+
+读法：
+1. **鬼影消失是"外扩"级的**：旧图 y 方向 30.4 m（场地只有 15.9 m）——多出来的 14 m 全是同一段围栏
+   按不同 `map→odom` 叠到场地外的副本；点数从 34 833 → 13 214（−62%）。
+2. **层数**：南围栏在旧图里有 **10 个 z 峰**（3 根横杆各自被叠成 2–3 层，再加地面附近的层）；
+   GT/SLAM 都是**恰好 3 层**，FWHM 1–3 cm。
+3. SLAM 图的 3 层整体比 GT **低 0.10 m**（0.07/0.47/0.87 vs 0.17/0.57/0.97）——这是**map 的 z 原点**
+   差（GT 用出生瞬间的 `base_link` z=0.132 定原点，SLAM 用 H2 的 `map→odom_level` 首帧），
+   **是刚性偏置不是鬼影**：`--anchor-first` 只锚 x/y/yaw（不改 z），而 SLAM 的地面 z 峰 −0.110
+   与**旧资产逐位相同** ⇒ 与既有 gicp/SC 的 z 约定继续一致。GT 图是"另一套 z 原点"的参考件。
+4. 时间一致性的 p90 0.73 m 三张图都一样：那 11% 的帧在**转弯段**（t≈11.5–12.8，34°/s，100 ms 扫描
+   ⇒ ~3.4° 拖影）且看到"只有它自己看过"的远处结构；GT 与 SLAM 的尾部分布**逐帧相同**（最差 4 帧
+   GT 0.087/0.116/0.135/0.156 vs SLAM 0.100/0.122/0.155/0.160）⇒ 这是**扫描本身的运动畸变/覆盖**，
+   不是图的鬼影。
+
+### 45.4 SC DB 重建 + "DB 与 PCD 同一帧"硬检查
+
+#### (a) 重建
+
+```bash
+ros2 run scan_context_relocalizer build_sc_db -- \
+  --bag third_party/eval_data/capture_map2027/bag/raw --world RMUC2027 \
+  --poses src/rm_nav_bringup/PCD/RMUC2027_slam_poses.jsonl \
+  --pcd src/rm_nav_bringup/PCD/RMUC2027.pcd \
+  --out src/rm_nav_bringup/PCD/RMUC2027_sc_db.npz
+```
+
+| 项 | 旧 DB | **新 DB** |
+|---|---|---|
+| keyframes | 10 | **12** |
+| keyframe xy bbox | x[0.00,1.19] y[−0.11,0.16]（**被压缩的 map**） | **x[0.00,2.82] y[−0.08,1.40]**（整条 2.9 m 路线） |
+| 间距 median/max | 0.23 / 0.40 m | **0.36 / 0.39 m** |
+| 描述子 | 20×60、原点 base_link/level 帧 | **逐字节同一口径**（`--poses` 只换 `poses`，不碰描述子） |
+| `meta.pose_source` | （无） | `external jsonl: …/RMUC2027_slam_poses.jsonl` |
+
+#### (b) 新工具 `check_db_pcd_same_frame.py`（**fail loud**）
+
+对每个 keyframe：① 按 `T_map_base` 把该帧扫描搬到 map，与 PCD 做最近邻（`median/p90/frac<tol`）；
+② 用 bag 的 TF 复算 `q = T_level←cloud·p − t_level←base`、重算描述子与 npz **逐元素**比；
+③ `poses[:,2,3]≈0`（map 是水平/出生高度系）。任一条不过 ⇒ 打印逐帧清单 + **退出码 1**。
+
+| 资产对 | NN 中位（最差帧） | NN p90（最差帧） | frac<0.10 m | 描述子 | 判决 |
+|---|---|---|---|---|---|
+| **旧 DB + 旧 PCD** | 0.23–0.86 m | **0.40–0.50 m** | 0.72–0.75 | OK | **❌ FAIL** |
+| **新 DB + 新 PCD** | **0.033–0.042 m** | 0.051–0.098 m | **0.90–1.00** | **12/12 OK** | **✅ PASS** |
+
+> 描述子 12/12 逐元素相同 ⇒ **描述子原点约定没变**（base_link、重力对齐 level 帧）；只有 `poses` 换了源。
+> 门限里 `frac<0.10 m ≥ 0.90` 而不是 0.05/0.95：PCD 是 0.10 m 体素（质心），单点最大量化误差
+> 0.087 m ⇒ 0.05 m 门限的物理上限只有 ~75%；新资产实测 0.90–1.00，旧资产 0.72–0.75，**仍然分得开**。
+
+### 45.5 验收：§41 离线 SC + §42 栈内（前后对照）
+
+#### (a) §41 离线：SC 自查询（同一协议：173 帧查询 → 12 keyframe 检索 → `hypothesis()`）
+
+**关键**：参考系必须换成**真值**。§42.3/§44.2 的"0.005 m/2.1°""0.0616 m/5.37°"都是拿**同一次跑自己的
+DB 位姿**当真值——它把鬼影一起当成了标准答案。
+
+| 指标 | 旧 DB | **新 DB** |
+|---|---|---|
+| `1-d` score 中位 / min | 0.895 / 0.703 | 0.902 / **0.768** |
+| 闸门（score≥0.70 & margin≥0.01） | 174/174 | 173/173 |
+| **对 DB 位姿** xy 中位 | 0.034 m | 0.022 m |
+| **对真值** xy 中位 / p90 / max | **0.862 / 2.208 / 2.210 m** | **0.075 / 0.157 / 0.267 m** |
+| **对真值** yaw 中位 / p90 | 2.34° / **28.27°** | **0.31° / 3.37°** |
+| **成功（≤0.3 m & ≤5°）** | **50/174 = 29%** | **173/173 = 100%** |
+
+读法：旧 SC **检索本身没错**（对自家 DB 0.034 m），错在**整张图/整库被同一个 `map→odom` 带偏**；
+换成干净位姿后，同一个描述子/同一个检索器，对真值从 29% → 100%。
+
+**KISS（记录用，§40 的 map-grid 管线，`run_eval.py --map PCD/RMUC2027.pcd --max-frames 8`，cap2027 的 8 帧）**：
+`km` 2/8（frame_00 0.13 m/0.9°、01 0.12/0.5°；02 0.10/1.4° 刚好；03 0.22/7.1°、04 1.72/39.6° 失败；
+05–07 `NO_ANSWER`），SC(map-grid) 3/8。⇒ 干净地图让 KISS 从 §41 的 1/13 变成 2/8（+1 帧），
+**没有改变"KISS 在本场地不可用"的判决**（它的失败是 FPFH 对"平面+细格栅"的对应问题，不是资产鬼影）。
+⚠️ 这是 §40 的 map-grid 管线，**不是**运行时扫描库；运行时数字看上一张表。
+
+#### (b) §42 栈内（RMUC2027，`global_relocalizer:=scan_context` + `localization:=gicp`，kf6 场景）
+
+同一场景：spawn 后 `gz model -m robot -x 7.88 -y 3.50 -z 0.11 -Y 0.940`（world）⇒ **真值 map 位姿
+(1.980, 0.779) m，yaw 53.86°**。`run_live_sc2027.sh A45 70 0`，`ROS_DOMAIN_ID=86`、`GAZEBO_MASTER_URI=:11912`。
+
+| 量 | §44（旧资产） | **§45（新资产）** |
+|---|---|---|
+| SC 匹配 | kf6，d=0.140，score 0.877，margin 0.629 | **kf8**，d=0.257，score **0.796**，margin **0.399**（闸门通过） |
+| `/initialpose`（SC 种子） | (1.1851, 0.1594, 0.0024) 44.72° | **(2.1604, 0.9728, −0.0164) 55.79°** |
+| **种子 round-trip**（节点） | 0.000000 mm / 0.000000° | **0.000000 mm / 0.000000°**（`~/gate` 16–19：`valid=1 ok=1`） |
+| **种子 vs 真值** | **0.796 m / 7.9°**（对 ghosted kf6 记的是 0.005 m/2.1°） | **0.272 m / 1.93°** |
+| 信任窗口（5 s） | 53/53 帧被门限采纳，最大偏离 0.0549 m | **52 帧全拒、采纳 0、重锚豁免 0**；`map→base` 离种子最大 **0.008 m / 1.358°** |
+| 窗口结局 | 采纳即结束 | **NO_CONVERGE（bit4=1）**：首帧创新 **0.308 m** vs 门限 **0.300 m**（差 8 mm），压制重锚 16 次 |
+| 终点 `map→base`（sim 25.2 s） | (1.2245, 0.2067) 47.99° | **(1.9798, 0.7439) 60.47°** |
+| **终点 vs 真值** | **0.948 m / 5.88°** | **0.035 m / 6.61°** |
+| 终点 vs 种子 | 0.0615 m / 3.26° | 0.292 m / 4.68° |
+
+读法：
+1. **位置端到端从 0.948 m → 0.035 m（27×）**；朝向残留 **6.6°**（本节最诚实的一条：见 45.6#3）。
+2. **NO_CONVERGE 是"正确的大声失败"，不是回归**：种子离真值 0.27 m（keyframe 间距 0.36 m 的量化下限），
+   GICP 首帧创新 0.308 m 只差 8 mm 就越过 0.30 m 门限 ⇒ 信任窗口按 §4.17 拒绝 52 帧、到期报 NO_CONVERGE
+   并停发；随后既有 lost-probe 在窗口**之后**才重锚到 0.035 m/6.6°。旧资产"顺利收敛"恰恰是因为
+   **种子、PCD、DB 三者共享同一个鬼影**（创新只有 0.0466 m）。
+3. 窗口内的 `map→base` 离种子 **8 mm**（旧 5.49 cm）⇒ §44.7#2 的"窗口内允许精修 >5 cm"这条**这次不成立**
+   （没有一帧被采纳）。
+
+### 45.6 资产约定（contract note）
+
+1. **PCD 的位姿源必须随 sidecar 走**：`PCD/<world>.meta.yaml` 新增 `pose_source` 字段
+   （`gt(...)` / `trace(...)` / `gt/tf/trace`），并与 `PCD/<world>_slam_poses.jsonl` 一起提交；
+   **不许**再出现"PCD 与 DB 位姿来自不同一次跑/不同一个 `map→odom`"。
+2. **2D 图改由 PCD 投影**（`pcd_to_nav2_map.py`），不再用 slam_toolbox 的 `/map` 另存：
+   旧 `map/RMUC2027.pgm` 只有 334×318（16.7×15.9 m，slam_toolbox 只长了它走过的那块），
+   新图 582×325（29.1×16.3 m，覆盖 PCD 全图）。`origin` 由 PCD 的 bbox 决定 ⇒ **map(0,0) 语义不变**
+   （amcl/gicp 的 `initial_pose` 约定不受影响），但**不要**把 yaml 的 `origin` 当成地图原点。
+3. **map 的 z 原点有两套**：`RMUC2027.pcd`（交付）沿用历史约定（地面峰 −0.110）；
+   `RMUC2027_gt.pcd`（参考）用出生瞬间 base_link z 定原点（地面峰 −0.130）。两者相差一个**刚性**
+   −0.10 m，**不要**混用；gicp/SC 用交付那份。
+4. **同帧检查进流程**：任何一次替换 PCD 或 DB，都必须跑
+   `tools/scripts/mapping/check_db_pcd_same_frame.py` 并贴出 PASS 行（本节 45.4b 的表）。
+
+### 45.7 诚实清单（§45）
+
+1. **没有重跑 Gazebo 建图**：45.3 的 SLAM 图来自"**同一条 bag 重放进同一个 `async_slam_toolbox_node`**"
+   （H2 参数组合），不是新开一栈的 `mode:=mapping`。好处是确定性/可复现；代价是**没有验证 live
+   采集在新参数下也能产出这张图**（launch 里 `minimum_travel_distance` 仍是 0.2，需要给 mapper 加
+   per-world 参数槽 —— 本轮**没改** launch，因为改全局会回归 §23/slam_toolbox_tuning 的 2026 调参）。
+2. **H 档用了 `odom_frame:=odom_level`，这不是生产可用的接线**：slam_toolbox 会把 `map→odom_level`
+   发出来，与静态边 `odom→odom_level` 冲突（两个父节点）。本轮只把它当**离线位姿发生器**
+   （只取 `corrected pose`，不消费它发出来的 TF 树）。要落到 live，需要"level 系 odom + 一个
+   `map→odom` 中继节点"，那是另一次改动。
+3. **终点朝向残留 6.6°**：位置 0.035 m 很好，但 yaw 从种子的 1.93° 走到 6.61°（lost-probe 重锚
+   在窗口之后又挪了 4.68°）。§42.6#4 的"地面主导 + 细格栅"的解释仍然适用；**没有**做"结构加权/GICP
+   参数"的 A/B，故不宣称"已修"。
+4. **NO_CONVERGE 的 8 mm**：首帧创新 0.308 vs 门限 0.300 只差 8 mm，结论对 0.30 m 门限很敏感；
+   本轮**没有**扫门限（只跑了一次 live）。要判"0.27 m 的种子该不该被拒"，需要门限扫描 + 更细的
+   keyframe 间距（0.36 m 的库本身就把种子误差下限压到 ~0.18 m）。
+5. **SC 的 §41 口径变了**：§41 用的是**另一条跑**（cap2027）的 13 帧 held-out + 精配准；本节用的是
+   **同一条 bag 的 174 帧自查询**（§42.2 口径）对真值。两者不能直接比 10/13 vs 173/173。
+   45.5a 的 KISS/SC(map-grid) 才是 §41 口径（2/8 与 3/8），但它**不是**运行时扫描库。
+6. **`--anchor-first` 是约定，不是测量**：map 原点 = 第一帧 base_link 位姿（identity）。它把
+   H 档那 0.105 m 的"刚性偏置"消掉（消掉后 SLAM 对真值 0.01–0.03 m），但**如果**有人要
+   "绝对出生点"口径，则应改用 GT 锚（GT 图那份）。两种口径在 §45.3 都给了。
+7. **时间一致性的 p90 不能当鬼影指标**：三张图 p90 都是 0.73 m，原因是转弯帧的运动畸变 +
+   单次覆盖；用中位/分帧分布才分得开（0.163 vs 0.025/0.027）。
+8. **单次 live**：§42 场景只跑了一次（A45），没有重复统计；SC 的 keyframe 选择（kf8 vs kf6）
+   依赖车的落地姿态，重复跑可能落到相邻 kf（间距 0.36 m）。
+9. **只跑了一个 world**：RMUL2027 没有 GT/DB，本轮不动；2026 的资产**一个字节都没改**。
+10. **`build_db.py` 的 `--poses` 没有单测**：只有本节的一次端到端（12 kf + 45.4b 的 12/12 PASS）+
+    "不给 `--poses` 时行为不变"（§42 的 10 kf 复现）两条证据；`colcon test --packages-select
+    scan_context_relocalizer` 未跑（时间）。
+11. **KISS 的 2/8 用的是 `--max-frames 8`**（不是 §41 的 13 帧全集），且 `gicp@none` 那一列
+    在本轮输出里恒为 0.11 m/0.2°（疑似该列用的是真值初值），**不引用**它。
+
+### 45.8 复现命令（scratch 在 `.tmp_45/`，不入库）
+
+```bash
+# 0) 构建
+colcon build --symlink-install --packages-select rm_nav_bringup scan_context_relocalizer
+
+# 1) 重放（H2：level odom + 0.6 m 节点 + 回环开）→ map→odom 记录
+bash .tmp_45/run_replay.sh H2_level_far_loop odom_frame=odom_level \
+  minimum_travel_distance=0.6 minimum_travel_heading=0.5
+python3 .tmp_45/eval_replay.py H2_level_far_loop            # 0.105 m / 0.22°
+
+# 2) 两张图（GT / SLAM）
+python3 tools/scripts/mapping/accumulate_pcd_gt.py --bag third_party/eval_data/capture_map2027/bag/raw \
+  --pose-source gt --spawn 5.90 2.72 0.132 0.0 --world RMUC2027 \
+  --out src/rm_nav_bringup/PCD/RMUC2027_gt.pcd --poses-out .tmp_45/gt/poses_gt.jsonl
+python3 tools/scripts/mapping/accumulate_pcd_gt.py --bag third_party/eval_data/capture_map2027/bag/raw \
+  --pose-source trace --trace .tmp_45/H2_level_far_loop/mo.jsonl --trace-frame odom_level --anchor-first \
+  --world RMUC2027 --out src/rm_nav_bringup/PCD/RMUC2027.pcd \
+  --poses-out src/rm_nav_bringup/PCD/RMUC2027_slam_poses.jsonl
+
+# 3) 2D 图（两份都从 PCD 投影）
+python3 tools/scripts/mapping/pcd_to_nav2_map.py --pcd src/rm_nav_bringup/PCD/RMUC2027.pcd    --out src/rm_nav_bringup/map/RMUC2027
+python3 tools/scripts/mapping/pcd_to_nav2_map.py --pcd src/rm_nav_bringup/PCD/RMUC2027_gt.pcd --out src/rm_nav_bringup/map/RMUC2027_gt
+
+# 4) 质量闸（bbox/FWHM/层数/时间一致性）
+python3 tools/scripts/mapping/map_quality_45.py --pcd src/rm_nav_bringup/PCD/RMUC2027.pcd \
+  --bag third_party/eval_data/capture_map2027/bag/raw --poses src/rm_nav_bringup/PCD/RMUC2027_slam_poses.jsonl
+
+# 5) DB 重建 + 同帧硬检查
+ros2 run scan_context_relocalizer build_sc_db -- --bag third_party/eval_data/capture_map2027/bag/raw \
+  --world RMUC2027 --poses src/rm_nav_bringup/PCD/RMUC2027_slam_poses.jsonl \
+  --pcd src/rm_nav_bringup/PCD/RMUC2027.pcd --out src/rm_nav_bringup/PCD/RMUC2027_sc_db.npz
+python3 tools/scripts/mapping/check_db_pcd_same_frame.py \
+  --db src/rm_nav_bringup/PCD/RMUC2027_sc_db.npz --pcd src/rm_nav_bringup/PCD/RMUC2027.pcd
+
+# 6) §42 栈内（kf6 场景；私有域/端口，一次一个栈）
+bash .tmp_45/run_live_sc2027.sh A45 70 0
+python3 .tmp_45/analyze_live.py .tmp_45/live_A45/record.jsonl --gt 1.9798 0.7789 -0.013 53.86
+```
