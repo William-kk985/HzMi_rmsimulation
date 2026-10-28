@@ -1,0 +1,1314 @@
+<?xml version='1.0'?>
+<sdf version='1.7'>
+  <!-- RMUC2027_fence：场地四周的静态围栏（由 tools/scripts/world/perimeter_fence.py 生成，勿手改）。
+       中心线矩形 x [-14.000, 14.000] × y [-5.850, 9.150]（28.00 × 15.00 m，周长 86.0 m）
+       立柱 0.06×0.06 m，顶面 z=1.50，向下埋 0.10 m；间距 2.000 m（14 段）/ 1.875 m（8 段）
+       横杆 3 根 0.05×0.05 m，中心 z = 0.30/0.70/1.10
+       一共 44 根立柱 + 12 根横杆 = 56 个盒子（每个 collision + visual）
+       为什么需要它 / 实测数字见 docs/worlds_2027.md §9；坐标与场地地面的关系见 §3。 -->
+  <model name='RMUC2027_fence'>
+    <static>true</static>
+    <allow_auto_disable>true</allow_auto_disable>
+    <pose>0 0 0 0 0 0</pose>
+    <link name='fence'>
+      <inertial>
+        <mass>1000.0</mass>
+        <inertia><ixx>100.0</ixx><ixy>0.0</ixy><ixz>0.0</ixz><iyy>100.0</iyy><iyz>0.0</iyz><izz>100.0</izz></inertia>
+        <pose>0 0 0 0 0 0</pose>
+      </inertial>
+      <pose>0 0 0 0 0 0</pose>
+      <gravity>true</gravity>
+      <self_collide>false</self_collide>
+      <kinematic>false</kinematic>
+      <enable_wind>false</enable_wind>
+      <collision name='post_000_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_000_vis'>
+        <pose>-14.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_001_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_001_vis'>
+        <pose>-14.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_002_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-12.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_002_vis'>
+        <pose>-12.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_003_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-12.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_003_vis'>
+        <pose>-12.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_004_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-10.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_004_vis'>
+        <pose>-10.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_005_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-10.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_005_vis'>
+        <pose>-10.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_006_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-8.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_006_vis'>
+        <pose>-8.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_007_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-8.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_007_vis'>
+        <pose>-8.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_008_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-6.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_008_vis'>
+        <pose>-6.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_009_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-6.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_009_vis'>
+        <pose>-6.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_010_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-4.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_010_vis'>
+        <pose>-4.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_011_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-4.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_011_vis'>
+        <pose>-4.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_012_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-2.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_012_vis'>
+        <pose>-2.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_013_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-2.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_013_vis'>
+        <pose>-2.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_014_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_014_vis'>
+        <pose>0.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_015_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_015_vis'>
+        <pose>0.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_016_col'>
+        <max_contacts>10</max_contacts>
+        <pose>2.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_016_vis'>
+        <pose>2.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_017_col'>
+        <max_contacts>10</max_contacts>
+        <pose>2.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_017_vis'>
+        <pose>2.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_018_col'>
+        <max_contacts>10</max_contacts>
+        <pose>4.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_018_vis'>
+        <pose>4.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_019_col'>
+        <max_contacts>10</max_contacts>
+        <pose>4.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_019_vis'>
+        <pose>4.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_020_col'>
+        <max_contacts>10</max_contacts>
+        <pose>6.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_020_vis'>
+        <pose>6.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_021_col'>
+        <max_contacts>10</max_contacts>
+        <pose>6.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_021_vis'>
+        <pose>6.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_022_col'>
+        <max_contacts>10</max_contacts>
+        <pose>8.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_022_vis'>
+        <pose>8.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_023_col'>
+        <max_contacts>10</max_contacts>
+        <pose>8.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_023_vis'>
+        <pose>8.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_024_col'>
+        <max_contacts>10</max_contacts>
+        <pose>10.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_024_vis'>
+        <pose>10.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_025_col'>
+        <max_contacts>10</max_contacts>
+        <pose>10.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_025_vis'>
+        <pose>10.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_026_col'>
+        <max_contacts>10</max_contacts>
+        <pose>12.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_026_vis'>
+        <pose>12.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_027_col'>
+        <max_contacts>10</max_contacts>
+        <pose>12.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_027_vis'>
+        <pose>12.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_028_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_028_vis'>
+        <pose>14.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_029_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_029_vis'>
+        <pose>14.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_030_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 -3.9750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_030_vis'>
+        <pose>-14.0000 -3.9750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_031_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 -3.9750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_031_vis'>
+        <pose>14.0000 -3.9750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_032_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 -2.1000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_032_vis'>
+        <pose>-14.0000 -2.1000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_033_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 -2.1000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_033_vis'>
+        <pose>14.0000 -2.1000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_034_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 -0.2250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_034_vis'>
+        <pose>-14.0000 -0.2250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_035_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 -0.2250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_035_vis'>
+        <pose>14.0000 -0.2250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_036_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_036_vis'>
+        <pose>-14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_037_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_037_vis'>
+        <pose>14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_038_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 3.5250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_038_vis'>
+        <pose>-14.0000 3.5250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_039_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 3.5250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_039_vis'>
+        <pose>14.0000 3.5250 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_040_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 5.4000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_040_vis'>
+        <pose>-14.0000 5.4000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_041_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 5.4000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_041_vis'>
+        <pose>14.0000 5.4000 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_042_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 7.2750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_042_vis'>
+        <pose>-14.0000 7.2750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='post_043_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 7.2750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='post_043_vis'>
+        <pose>14.0000 7.2750 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0600 0.0600 1.6000</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_000_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 -5.8500 0.3000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_000_vis'>
+        <pose>0.0000 -5.8500 0.3000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_001_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 9.1500 0.3000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_001_vis'>
+        <pose>0.0000 9.1500 0.3000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_002_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 1.6500 0.3000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_002_vis'>
+        <pose>-14.0000 1.6500 0.3000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_003_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 1.6500 0.3000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_003_vis'>
+        <pose>14.0000 1.6500 0.3000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_004_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_004_vis'>
+        <pose>0.0000 -5.8500 0.7000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_005_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_005_vis'>
+        <pose>0.0000 9.1500 0.7000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_006_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_006_vis'>
+        <pose>-14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_007_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_007_vis'>
+        <pose>14.0000 1.6500 0.7000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_008_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 -5.8500 1.1000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_008_vis'>
+        <pose>0.0000 -5.8500 1.1000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_009_col'>
+        <max_contacts>10</max_contacts>
+        <pose>0.0000 9.1500 1.1000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_009_vis'>
+        <pose>0.0000 9.1500 1.1000 0 0 0</pose>
+        <geometry><box><size>28.0000 0.0500 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_010_col'>
+        <max_contacts>10</max_contacts>
+        <pose>-14.0000 1.6500 1.1000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_010_vis'>
+        <pose>-14.0000 1.6500 1.1000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+      <collision name='rail_011_col'>
+        <max_contacts>10</max_contacts>
+        <pose>14.0000 1.6500 1.1000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1</mu><mu2>1</mu2><fdir1>0 0 0</fdir1><slip1>0</slip1><slip2>0</slip2></ode></friction>
+          <bounce><restitution_coefficient>0</restitution_coefficient><threshold>1e+06</threshold></bounce>
+        </surface>
+      </collision>
+      <visual name='rail_011_vis'>
+        <pose>14.0000 1.6500 1.1000 0 0 0</pose>
+        <geometry><box><size>0.0500 15.0000 0.0500</size></box></geometry>
+        <material>
+          <lighting>true</lighting>
+          <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+        <transparency>0</transparency>
+        <cast_shadows>1</cast_shadows>
+      </visual>
+    </link>
+  </model>
+</sdf>

@@ -156,6 +156,13 @@
       <!-- 核心修改：x改为8.5，y保持4.5 -->
       <pose>0 0 0 0 0 0</pose>
     </model>
+    <!-- ★ 2027-10-28：场地四周的静态围栏（真实赛场 1~3 m 高度上那一圈边界结构，
+         见 docs/worlds_2027.md §9）。centerline / 立柱 / 横杆参数全部由
+         tools/scripts/world/perimeter_fence.py 生成，这里只做 include。 -->
+    <include>
+      <uri>model://RMUL2027_fence</uri>
+      <name>RMUL2027_fence</name>
+    </include>
     <light name='user_directional_light_0' type='directional'>
       <pose>-1.17769 -0.68451 13 0 -0 0</pose>
       <diffuse>0.5 0.5 0.5 1</diffuse>
