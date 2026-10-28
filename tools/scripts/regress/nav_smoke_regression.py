@@ -2,8 +2,15 @@
 """P0 回归：一条命令回答"这套槽位组合能不能正常走完一次导航，断点在哪"。
 
 它做五件事（都不改算法/参数，只订阅 + 发一个目标点）：
-  0) 等链路就绪：/livox/lidar/pointcloud、/livox/imu、/scan、/odom、TF(odom->base_link, map->odom)、
+  0) 等链路就绪：/livox/lidar/pointcloud、/livox/imu、/scan、/odom、**当前契约的 TF 链**、
      costmap footprint —— 每项都要出现且频率达标；否则直接给出「第一个断点」。
+     · 默认 `gravity:=tf` 的帧树是 **map→odom→odom_level→base_link**（没有 odom→base_link）：
+       本脚本检查 map→odom、odom→odom_level（/tf_static，robot11 的 rpy=[30,0,0]°）、
+       odom_level→base_link，并用 tf2 查 map→base_link 可解析；**不要求** odom→base_link，
+       且在 gravity:=tf 下它若出现就是 FAIL（多父边/旧档/错档）。
+     · `--gravity base|lio|raw` 时退回旧链 map→odom→base_link（要求 odom→base_link 存在）。
+     · `map→odom` 必须只有**一个**发布者（localization 槽的 local tracker；判定见
+       `map_odom_publisher_check()`：/tf 端点清单 + tracker 唯一 + 同戳不同值冲突 = 0）。
   0.5) **把"发目标"这件事做成人在 RViz 里的语义**（2026-09 新增，之前三点都不对，会产生误导性 FAIL）：
        · 等定位稳定（--settle，默认 3 s）：map→odom 在最近 --settle 秒内平移漂移 ≤0.02 m、
          yaw 漂移 ≤0.01 rad 才继续。人在 RViz 里也是等定位不飘了才点 2D Goal Pose；
@@ -11,8 +18,9 @@
        · 目标可用性预检（--no-precheck 跳过）：读先验地图 /map（RELIABLE + TRANSIENT_LOCAL，
          map_server 是 latched）把目标格分类 free/occupied/unknown/out_of_map；非 free 直接
          报"请换一个 free 点"并 **exit 3、不发目标**（这不叫导航失败）。
-       · 目标朝向（--yaw，默认 auto）：auto = **车当前朝向**，由三条 TF 平面复合得到
-         （map->odom ∘ odom->base_link ∘ base_link->base_link_fake），而不是原来写死的 yaw=0
+       · 目标朝向（--yaw，默认 auto）：auto = **车当前朝向**，由 tf2 查 `map→base_link`
+         （默认链 map->odom ∘ odom->odom_level ∘ odom_level->base_link；含 30° 倾斜，
+         所以用 tf2 的三维复合而不是只加 yaw），而不是原来写死的 yaw=0
          （"到点朝地图东"）；人在 RViz 里拖箭头默认就是朝车头方向。
   1) 发目标（默认 -1.0, 2.0，可用 --goal 指定；--skip-goal 只做链路自检）。
   2) 四跳命令链断言：/cmd_vel_nav → /cmd_vel → /cmd_vel_chassis，并用 /odom_ground_truth（仿真真值）
@@ -32,7 +40,9 @@
   python3 tools/scripts/regress/nav_smoke_regression.py --goal -1.0 2.0 --localization gicp
 
 `--localization <NAME>`：给这次跑**贴标签**（通常 = launch 的 `localization:=<NAME>`，例如
-gicp / amcl / beluga / icp）。它只影响打印与快照，不改任何行为；给了就写进 JSON 的
+gicp / amcl / beluga / icp）。它**也决定 `map→odom` 的合法 owner**（`amcl`→amcl、`gicp`/`small_gicp`→
+gicp_registration、`icp`→icp_registration、`slam_toolbox`→slam_toolbox、`cartographer`→cartographer_node）：
+不给就跳过"单发布者"断言（只打 note），给了则按 §4.17/§44.5 的三路证据断言。标签本身写进 JSON 的
 `localization` 字段（`compare_regress_snapshots.py` 的「方法」列会**自动**读出来，不必再用
 `--label` 事后标注）；不给则字段不写入（旧行为/向后兼容，表里显示 `?`）。
 
@@ -52,12 +62,14 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.time import Time
 from geometry_msgs.msg import PolygonStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav2_msgs.action import NavigateToPose
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import PointCloud2, LaserScan, Imu
 from tf2_msgs.msg import TFMessage
+import tf2_ros
 
 BEST = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                   durability=DurabilityPolicy.VOLATILE, history=HistoryPolicy.KEEP_LAST)
@@ -66,10 +78,52 @@ RELI = QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE,
 # 先验地图：与 map_server / segment_goal_navigator.py 的订阅端一致（latched）
 MAP_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
+# /tf_static 是 latched（TRANSIENT_LOCAL），晚加入也能拿到 odom→odom_level
+STATIC_QOS = QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE,
+                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                        history=HistoryPolicy.KEEP_LAST)
 
-# 三段 TF：map 系里的车体位姿 = 依次平面复合这三段（fake_vel_transform 只发纯 yaw 的 base_link→base_link_fake）
-FULL_CHAIN = ("map->odom", "odom->base_link", "base_link->base_link_fake")
-POS_CHAIN = ("map->odom", "odom->base_link")      # 只用来拿"车在地图里的位置"（算朝目标的方向）
+# ---- 当前帧图契约（§4.11 / §4.12）----
+# 默认 gravity:=tf：map→odom→odom_level→base_link。**没有** odom→base_link
+# （LIO 的 odom→base 被 lio_tf_adapter 改成 odom_level→base_link；两条边同时存在 = 多父边）。
+# gravity:=base|lio|raw：没有 odom_level，旧链 map→odom→base_link 仍然成立。
+TF_CHAINS = {
+    "tf": ("map->odom", "odom->odom_level", "odom_level->base_link"),
+    "base": ("map->odom", "odom->base_link"),
+    "lio": ("map->odom", "odom->base_link"),
+    "raw": ("map->odom", "odom->base_link"),
+}
+# 只用于 age 判据的动态边（odom→odom_level 是 /tf_static，戳不随 /clock 走，别拿它算 age）
+DYNAMIC_TF = ("map->odom", "odom_level->base_link", "odom->base_link",
+              "base_link->base_link_fake")
+
+# localization 槽 → 该槽里发 map→odom 的节点名（`ros2 node list` 里的名字）。
+# beluga 在 launch 里被起成 amcl（lifecycle node_names=['map_server','amcl']）。
+TRACKER_NODE = {
+    "amcl": "amcl",
+    "beluga": "amcl",
+    "slam_toolbox": "slam_toolbox",
+    "cartographer": "cartographer_node",
+    "icp": "icp_registration",
+    "gicp": "gicp_registration",
+    "small_gicp": "gicp_registration",
+}
+# 已知的 /tf 发布者职责表（契约 I1–I4；不在这张表里的节点出现在 /tf 上 = 未知 TF 作者）。
+# LIO 节点名来自 launch 的 `_LIO_NODE_NAMES`：fastlio 发 camera_init→body（孤立岛）、
+# pointlio 发自己的世界边、small_point_lio 在 gravity:=tf 时由 adapter 代发（名字仍可能出现）。
+TF_PUBLISHER_BASELINE = {
+    "robot_state_publisher",      # URDF 固定关节
+    "lio_tf_adapter",             # odom_level→base_link（gravity:=tf）
+    "fake_vel_transform",         # base_link→base_link_fake
+    "complementary_filter_gain_node",  # 名字里的 IMU 互补滤波
+    "laser_mapping",              # lio:=fastlio（FAST_LIO 的 Node("laser_mapping")）
+    "laserMapping",               # lio:=pointlio
+    "small_point_lio",            # lio:=small_point_lio（gravity!=tf 时自己发 odom→base）
+}
+# gravity:=tf 的 odom→odom_level 静态边 rpy 由安装几何决定（launch 从 URDF 算）：
+#   robot11 的 Livox 斜装 30° ⇒ [30,0,0]；本仓默认模型 '' 与 hzmirm 的雷达是平的 ⇒ [0,0,0]。
+ROBOT_ODOM_LEVEL_RPY_DEG = {"": [0.0, 0.0, 0.0], "hzmirm": [0.0, 0.0, 0.0],
+                            "robot11": [30.0, 0.0, 0.0]}
 
 EXIT_PASS, EXIT_FAIL, EXIT_GOAL_UNUSABLE = 0, 1, 3
 
@@ -92,8 +146,9 @@ TH = {
 
 
 # ---------------------------------------------------------------- 纯函数（不依赖 ROS，可单测）
-# TF 记录统一存成 (stamp, (x, y, z), (qx, qy, qz, qw))；本仓库所有相关 TF 都是平面的
-# （roll/pitch ≈ 0），所以只用 yaw 做平面复合 —— 刻意不引入 tf_transformations 依赖。
+# TF 记录统一存成 (stamp, (x, y, z), (qx, qy, qz, qw))。平面复合只在"没有 tf2 buffer"的
+# 退化路径里用（gravity:=base 的旧链是平面的）；gravity:=tf 的 odom→odom_level 带 30° 倾斜，
+# 真实位姿一律走 tf2 的三维复合（lookup_map_base），不做 yaw 相加。
 def wrap_angle(t):
     """把角度归一到 (-pi, pi]。"""
     return math.atan2(math.sin(t), math.cos(t))
@@ -103,6 +158,23 @@ def yaw_from_quaternion(q):
     """四元数 (x, y, z, w) → 平面 yaw（绕 z 轴）。"""
     x, y, z, w = q
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def rpy_from_quaternion(q):
+    """四元数 (x, y, z, w) → URDF 约定 rpy（弧度，Rz·Ry·Rx）。用于核对静态边 odom→odom_level。"""
+    x, y, z, w = q
+    # 归一化（TF 值可能带 1e-6 级误差）
+    n = math.sqrt(x * x + y * y + z * z + w * w) or 1.0
+    x, y, z, w = x / n, y / n, z / n, w / n
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (w * y - z * x)
+    pitch = math.asin(max(-1.0, min(1.0, sinp)))
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return (roll, pitch, yaw)
 
 
 def planar_of(T):
@@ -123,6 +195,7 @@ def compose_chain(tf, keys):
     """按 keys 顺序复合若干段 TF ⇒ 末帧在首帧里的 (x, y, yaw)；缺任一段返回 None。
 
     tf: {key: (stamp, (x,y,z), (qx,qy,qz,qw))}，key 形如 "map->odom"（顺序即父子方向）。
+    仅作退化兜底：倾斜链（重力档的 odom→odom_level）必须用 tf2。
     """
     pose = (0.0, 0.0, 0.0)
     for k in keys:
@@ -133,20 +206,29 @@ def compose_chain(tf, keys):
     return pose
 
 
-def choose_goal_yaw(tf, goal, yaw_arg, full_chain=FULL_CHAIN, pos_chain=POS_CHAIN):
+def choose_goal_yaw(tf, goal, yaw_arg, full_chain=TF_CHAINS["tf"],
+                    pos_chain=("map->odom", "odom_level->base_link"), base_pose=None):
     """决定发目标用的平面 yaw（人类在 RViz 里拖 2D Goal Pose 的语义）。
+
+    base_pose: 由 tf2 查到的 map→base_link 平面位姿 (x, y, yaw)。默认 gravity:=tf 的
+    链含 30° 倾斜，**只有三维复合才对**，所以优先用它；没有时才退回平面计算。
 
     返回 (yaw, source, why)，source ∈ {"explicit", "tf", "to_goal", "fallback"}：
       · explicit —— 用户给了 --yaw <rad>（A/B 用，原"写死朝向"的行为可这样复现：--yaw 0）
-      · tf       —— auto：三条 TF 平面复合得到车当前朝向（首选，与人类习惯一致）
+      · tf       —— auto：tf2 的 map→base_link（首选，与人类习惯一致）
       · to_goal  —— auto 但 TF 位姿还不全：退回"车→目标"的方向
       · fallback —— 连车的位置都没有：最后兜底 yaw=0
     """
     if yaw_arg != "auto":
         return float(yaw_arg), "explicit", f"--yaw {float(yaw_arg):.3f} 显式指定（非 auto）"
+    if base_pose is not None:
+        return base_pose[2], "tf", ("车当前朝向：tf2 查 map→base_link 得到 (%.3f, %.3f) "
+                                    "yaw=%.3f rad（含 odom→odom_level 的倾斜，三维复合）"
+                                    % (base_pose[0], base_pose[1], base_pose[2]))
     pose = compose_chain(tf, full_chain)
     if pose is not None:
         return pose[2], "tf", ("车当前朝向：由 TF 链 %s 平面复合得到 yaw=%.3f rad"
+                               "（退化路径：没有 tf2 buffer，倾斜链时可能不准）"
                                % (" ∘ ".join(full_chain), pose[2]))
     base = compose_chain(tf, pos_chain)
     if base is not None:
@@ -213,10 +295,106 @@ def parse_yaw(s):
         raise argparse.ArgumentTypeError("--yaw 只能是 auto 或弧度值（例：--yaw 1.57），得到 %r" % s)
 
 
+def parse_rpy_deg(s):
+    """--expect-odom-level-rpy 的取值：三个逗号分隔的**度**（例：'30,0,0'）。"""
+    try:
+        vals = [float(x) for x in s.replace(" ", "").split(",")]
+    except ValueError:
+        vals = []
+    if len(vals) != 3:
+        raise argparse.ArgumentTypeError("--expect-odom-level-rpy 需要 3 个数（度），例：30,0,0；得到 %r" % s)
+    return vals
+
+
 def grid_from_msg(m):
     """nav_msgs/OccupancyGrid → goal_cell_state() 要的 grid 元组。"""
     i = m.info
     return (i.resolution, i.width, i.height, i.origin.position.x, i.origin.position.y, m.data)
+
+
+def run_cli(cmd, timeout=20):
+    """跑一条 ROS CLI 并返回 stdout+stderr（失败也返回文本，不抛异常）。"""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout + r.stderr
+    except Exception as exc:  # noqa: BLE001
+        return "ERROR: %s" % exc
+
+
+def parse_topic_endpoints(text):
+    """从 `ros2 topic info -v` 的文本里抽 PUBLISHER / SUBSCRIBER 的节点名。
+
+    返回 (publishers, subscribers)，元素是节点名（`/` 前缀已去掉、去重后排序）。
+    """
+    pubs, subs, cur = set(), set(), None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("Node name:"):
+            cur = {"node": s.split(":", 1)[1].strip().lstrip("/")}
+        elif s.startswith("Endpoint type:") and cur is not None:
+            cur["kind"] = s.split(":", 1)[1].strip().upper()
+        elif s == "" and cur is not None:
+            (pubs if cur.get("kind", "").startswith("PUB") else subs).add(cur["node"])
+            cur = None
+    if cur is not None:
+        (pubs if cur.get("kind", "").startswith("PUB") else subs).add(cur["node"])
+    return sorted(pubs), sorted(subs)
+
+
+def map_odom_publisher_check(args, conflicts=0, skipped_dups=0):
+    """`map→odom` 的单发布者检查（ROS 2 的 TFMessage **不带 authority**，所以是多路证据）。
+
+    ROS 2 里同一条 TF 边没有"作者"字段（tf2 的 view_frames 也全叫 default_authority），
+    因此无法从消息本身直接数"这条边有几个发布者"。本检查用三路**可验证**证据：
+      ① `/tf` 的**端点清单**（ros2 topic info -v）：已知 TF 作者 = 基础表（robot_state_publisher /
+         lio_tf_adapter / fake_vel_transform / complementary_filter_gain_node）+ **唯一** tracker；
+      ② tracker 必须是 `--localization` 指定的那个节点（localization 槽的 local tracker）；
+      ③ 同 (边, stamp) 出现**两个不同值** = 两个作者抢同一条边（conflicts 必须为 0）。
+    另记 `/tf_static` 上是否有 tf_bridge_*（localization:='' 的回退桥）与 tracker 并存 —— 并存即双发布。
+    """
+    loc = args.localization
+    tracker = TRACKER_NODE.get(loc)
+    tf_txt = run_cli(["ros2", "topic", "info", "-v", "/tf"])
+    pubs, _ = parse_topic_endpoints(tf_txt)
+    static_txt = run_cli(["ros2", "topic", "info", "-v", "/tf_static"])
+    spubs, _ = parse_topic_endpoints(static_txt)
+    bridges = [x for x in spubs if x.startswith("tf_bridge")]
+    trackers_present = sorted(set(pubs) & set(TRACKER_NODE.values()))
+    unexpected = sorted(set(pubs) - TF_PUBLISHER_BASELINE - set(trackers_present))
+    res = {
+        "checked": tracker is not None,
+        "localization": loc,
+        "tracker": tracker,
+        "tf_publishers": pubs,
+        "known_trackers_on_tf": trackers_present,
+        "unexpected_tf_publishers": unexpected,
+        "tf_static_bridge_publishers": bridges,
+        "stamp_conflicts_map_odom": conflicts,
+        "stamp_dups_skipped_clock_stalled": skipped_dups,
+    }
+    if tracker is None:
+        res["ok"] = None
+        res["reason"] = ("未给 --localization（或 %r 不是已知槽位）⇒ 无法判定 map→odom 的 "
+                         "owner；跳过单发布者断言（/tf 作者=%s）" % (loc, pubs))
+        return res
+    probs = []
+    if tracker not in pubs:
+        probs.append("tracker %s 不在 /tf 发布者里（实际：%s）" % (tracker, pubs))
+    if trackers_present != [tracker]:
+        probs.append("localization tracker 不唯一：%s（应为 [%s]）"
+                     % (trackers_present, tracker))
+    if unexpected:
+        probs.append("/tf 上有未知作者 %s（已知表=%s）"
+                     % (unexpected, sorted(TF_PUBLISHER_BASELINE | {tracker})))
+    if bridges:
+        probs.append("/tf_static 上还有回退桥 %s（与 tracker 并存 ⇒ map→odom 双发布）"
+                     % bridges)
+    if conflicts:
+        probs.append("map→odom 同戳不同值冲突 %d 次（两个作者抢同一条边）" % conflicts)
+    res["ok"] = not probs
+    res["reason"] = "；".join(probs) if probs else (
+        "唯一 owner = %s（/tf 端点：%s；同戳冲突 0）" % (tracker, pubs))
+    return res
 
 
 class Regress(Node):
@@ -229,9 +407,18 @@ class Regress(Node):
         self.clock0 = None
         self.wall0 = time.time()
         self.stamp, self.cnt = {}, {}
-        self.tf, self.tf_seen = {}, set()          # key -> 最新戳（tf_age 判据沿用）
-        self.tf_full = {}                          # key -> (stamp, (x,y,z), (qx,qy,qz,qw))：平面复合成 map 位姿
+        self.tf, self.tf_seen = {}, set()          # key -> 最新戳（tf_age 判据只用**动态**边）
+        self.tf_full = {}                          # key -> (stamp, (x,y,z), (qx,qy,qz,qw))
+        self.tf_static_seen = set()                # 收到于 /tf_static 的边（latched）
+        self.map_odom_conflicts = 0                # map→odom 同戳不同值 = 两个作者抢同一条边
+        self.map_odom_dup_same_clock = 0           # 同戳重复且仿真钟没走 ⇒ 时钟停滞/重投递，**不算**双发布
+        self._mo_stamp_vals = {}
+        self._mo_last_clock = None                 # 上一条 map→odom 到达时的 /clock
+        self._mo_last_sig = None                   # 上一条 (stamp, payload)：完全重复直接跳过
         self.map_msg = None                        # 先验地图（/map，latched）
+        # tf2：gravity:=tf 的链含 30° 倾斜，map→base_link 必须做**三维**复合，不能只加 yaw
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.fp_stamps = []
         self.cmd = {"nav": (0.0, 0.0), "smooth": (0.0, 0.0), "chassis": (0.0, 0.0)}
         self.gt_twist_max = 0.0
@@ -257,6 +444,8 @@ class Regress(Node):
                                  self.on_fp, RELI)
         self.create_subscription(Odometry, "/odom_ground_truth", self.on_gt, RELI)
         self.create_subscription(TFMessage, "/tf", self.on_tf, RELI)
+        self.create_subscription(TFMessage, "/tf_static",
+                                 lambda m: self.on_tf(m, static=True), STATIC_QOS)
         self.create_subscription(OccupancyGrid, a.map_topic, self.on_map, MAP_QOS)
         self.create_subscription(Twist, "/cmd_vel_nav", self.on_nav, RELI)
         self.create_subscription(Twist, "/cmd_vel", self.on_smooth, RELI)
@@ -285,16 +474,106 @@ class Regress(Node):
         t = m.twist.twist
         self.gt_twist_max = max(self.gt_twist_max, abs(t.linear.x), abs(t.linear.y), abs(t.angular.z))
 
-    def on_tf(self, m):
+    def on_tf(self, m, static=False):
         for t in m.transforms:
             k = f"{t.header.frame_id.lstrip('/')}->{t.child_frame_id.lstrip('/')}"
-            if k in ("odom->base_link", "map->odom", "base_link->base_link_fake"):
-                s = t.header.stamp.sec + t.header.stamp.nanosec * 1e-9
-                self.tf[k] = s
-                # ★ 存**整条变换**（平移 + 四元数）而不只是时间戳：yaw=auto 要用它做平面复合
-                tr, q = t.transform.translation, t.transform.rotation
-                self.tf_full[k] = (s, (tr.x, tr.y, tr.z), (q.x, q.y, q.z, q.w))
+            if k not in self._tf_interest():
+                continue
+            s = t.header.stamp.sec + t.header.stamp.nanosec * 1e-9
+            tr, q = t.transform.translation, t.transform.rotation
+            payload = (round(tr.x, 9), round(tr.y, 9), round(tr.z, 9),
+                       round(q.x, 9), round(q.y, 9), round(q.z, 9), round(q.w, 9))
+            if static:
+                self.tf_static_seen.add(k)
+            else:
                 self.tf_seen.add(k)
+                if k in DYNAMIC_TF:
+                    self.tf[k] = s      # 只有动态边参与 tf_age（静态边戳不随 /clock 走）
+                if k == "map->odom":
+                    # 同 (边, stamp) 收到两个不同值 ⇒ 可能是两个作者在抢 map→odom。
+                    # 但要先排除两种**正常**重复：① 完全相同的消息（重投递）；② 仿真钟停滞时
+                    # 50 Hz 墙钟定时器连续盖出同一个 lookahead 戳（RTF 很低/启动期），值却因平滑
+                    # 在变 —— 那不是双发布。只有"仿真钟在走、同戳却换了值"才算冲突。
+                    sig = (s, payload)
+                    same_msg = (self._mo_last_sig == sig)
+                    prev = self._mo_stamp_vals.get(s)
+                    if not same_msg and prev is not None and prev != payload:
+                        clk = self.clock
+                        adv = (clk is not None and self._mo_last_clock is not None
+                               and (clk - self._mo_last_clock) > 1e-4)
+                        if adv:
+                            self.map_odom_conflicts += 1
+                        else:
+                            self.map_odom_dup_same_clock += 1
+                    self._mo_last_sig = sig
+                    self._mo_last_clock = self.clock
+                    self._mo_stamp_vals[s] = payload
+                    if len(self._mo_stamp_vals) > 20000:
+                        self._mo_stamp_vals.clear()
+            self.tf_full[k] = (s, (tr.x, tr.y, tr.z), (q.x, q.y, q.z, q.w))
+
+    @staticmethod
+    def _tf_interest():
+        keys = {"base_link->base_link_fake"}
+        for chain in TF_CHAINS.values():
+            keys.update(chain)
+        return keys
+
+    def map_base_pose(self):
+        """tf2 查 map→base_link，返回 (x, y, yaw) 或 None（三维复合；含 odom_level 倾斜）。"""
+        try:
+            tr = self.tf_buffer.lookup_transform("map", "base_link", Time())
+        except Exception:  # noqa: BLE001  （Extrapolation/Timeout/Lookup 都算"还解析不了"）
+            return None
+        t, r = tr.transform.translation, tr.transform.rotation
+        return (t.x, t.y, yaw_from_quaternion((r.x, r.y, r.z, r.w)))
+
+    def tf_contract_checks(self, a):
+        """当前帧图契约的链路自检；返回 (fails, info)。
+
+        默认 gravity:=tf：map→odom、odom→odom_level（/tf_static，rpy=[30,0,0]°）、
+        odom_level→base_link、map→base_link 可解析；**odom→base_link 不得存在**。
+        gravity:=base|lio|raw：map→odom、odom→base_link；odom_level 不应存在。
+        """
+        chain = TF_CHAINS[a.gravity]
+        fails = []
+        missing = [k for k in chain if k not in self.tf_seen and k not in self.tf_static_seen]
+        if missing:
+            fails.append("TF 链缺边（gravity:=%s）：%s" % (a.gravity, ", ".join(missing)))
+        info = {"gravity": a.gravity, "required": list(chain), "missing": missing,
+                "tf_seen": sorted(self.tf_seen), "tf_static_seen": sorted(self.tf_static_seen)}
+        if a.gravity == "tf":
+            info["odom_level_static"] = "odom->odom_level" in self.tf_static_seen
+            if "odom->odom_level" in self.tf_static_seen:
+                T = self.tf_full.get("odom->odom_level")
+                if T is not None:
+                    rpy = [math.degrees(v) for v in rpy_from_quaternion(T[2])]
+                    info["odom_level_rpy_deg"] = [round(v, 4) for v in rpy]
+                    exp = list(a.expect_odom_level_rpy)
+                    bad = [(i, rpy[i], exp[i]) for i in range(3)
+                           if abs(rpy[i] - exp[i]) > a.odom_level_rpy_tol]
+                    if bad:
+                        fails.append("odom→odom_level 的 rpy 与期望 %s° 不符（实测 %s°；容差 %.2f°）"
+                                     % (exp, [round(v, 3) for v in rpy], a.odom_level_rpy_tol))
+            else:
+                fails.append("odom→odom_level 不是静态边（不在 /tf_static 上；gravity:=tf 要求 "
+                             "odom_level_tf 唯一发布、latched）")
+            if "odom->base_link" in self.tf_seen or "odom->base_link" in self.tf_static_seen:
+                fails.append("gravity:=tf 下不应存在 odom→base_link（它与 odom→odom_level→base_link "
+                             "并列 = base_link 多父边/旧档/错档）")
+        else:
+            if "odom->base_link" not in self.tf_seen:
+                fails.append("gravity:=%s 要求 odom→base_link 存在（实测 /tf=%s）"
+                             % (a.gravity, sorted(self.tf_seen)))
+            if "odom->odom_level" in self.tf_static_seen:
+                fails.append("gravity:=%s 下不应有 odom_level 静态边（它在 gravity:=tf 才存在）"
+                             % a.gravity)
+        pose = self.map_base_pose()
+        info["map_base"] = None if pose is None else [round(pose[0], 4),
+                                                      round(pose[1], 4), round(pose[2], 4)]
+        if pose is None:
+            fails.append("map→base_link 解析不了（tf2 lookup 失败；链路未连通）")
+        return fails, info
 
     def on_map(self, m):
         self.map_msg = m
@@ -380,9 +659,20 @@ def main():
     ap.add_argument("--goal-timeout", type=float, default=180.0)
     ap.add_argument("--skip-goal", action="store_true")
     ap.add_argument("--yaw", type=parse_yaw, default="auto", metavar="{auto|<rad>}",
-                    help="目标朝向：auto（默认）= 车当前朝向（map→odom∘odom→base_link∘"
-                         "base_link→base_link_fake 平面复合，与人在 RViz 里拖箭头一致）；"
+                    help="目标朝向：auto（默认）= 车当前朝向（tf2 查 map→base_link，含 "
+                         "odom→odom_level 的 30° 倾斜；与人在 RViz 里拖箭头一致）；"
                          "也可给弧度值做 A/B（--yaw 0 = 旧行为『到点朝地图东』）")
+    ap.add_argument("--gravity", default="tf", choices=["tf", "base", "lio", "raw"],
+                    help="本次 launch 的 gravity 档（默认 tf = 当前默认档）：tf ⇒ 帧树 "
+                         "map→odom→odom_level→base_link（无 odom→base_link），base|lio|raw ⇒ "
+                         "map→odom→base_link")
+    ap.add_argument("--robot", default="", choices=["", "hzmirm", "robot11"],
+                    help="本次 launch 的 robot 档（默认 '' = launch 默认的旧模型）。它决定 gravity:=tf "
+                         "时 odom→odom_level 静态边的期望 rpy：robot11 → [30,0,0]°；''/hzmirm → [0,0,0]°")
+    ap.add_argument("--expect-odom-level-rpy", type=parse_rpy_deg, default=None, metavar="R,P,Y",
+                    help="覆盖 gravity:=tf 时 odom→odom_level 的期望 rpy（度）；默认按 --robot 推导")
+    ap.add_argument("--odom-level-rpy-tol", type=float, default=0.5,
+                    help="上面的 rpy 容差（度，默认 0.5）")
     ap.add_argument("--settle", type=float, default=3.0,
                     help="发目标前要求 map→odom 已稳定多久（秒，默认 3.0；0 = 不等，立即发）")
     ap.add_argument("--settle-timeout", type=float, default=30.0,
@@ -396,9 +686,11 @@ def main():
     ap.add_argument("--localization", default=None, metavar="NAME",
                     help="给本次跑贴标签（= launch 的 localization:=<NAME>，如 gicp/amcl/beluga/icp）："
                          "打印在运行头部 + 写进快照的 localization 字段（对比工具自动读作「方法」列）；"
-                         "不给则快照不写该字段（向后兼容，表里显示 ?）")
+                         "**同时决定 map→odom 的合法 owner**，用于单发布者断言；不给则跳过该断言")
     ap.add_argument("--outdir", default=".tmp_bags")
     a = ap.parse_args()
+    if a.expect_odom_level_rpy is None:
+        a.expect_odom_level_rpy = list(ROBOT_ODOM_LEVEL_RPY_DEG[a.robot])
 
     rclpy.init()
     n = Regress(a)
@@ -406,9 +698,10 @@ def main():
 
     # ---------------- 运行头部：这次跑的是哪一路定位（--localization 贴的标签）----------------
     print("=" * 72, flush=True)
-    print("P0 回归｜localization=%s（--localization%s）｜goal=%s｜%s"
+    print("P0 回归｜localization=%s（--localization%s）｜robot=%s｜gravity:=%s｜goal=%s｜%s"
           % (a.localization or "?", "" if a.localization else " 未给，快照不写该字段",
-             a.goal, time.strftime("%Y-%m-%d %H:%M:%S")), flush=True)
+             a.robot or "''(默认)", a.gravity, a.goal,
+             time.strftime("%Y-%m-%d %H:%M:%S")), flush=True)
     print("=" * 72, flush=True)
     if a.localization:
         # 同时进 notes：老快照/文本解析路径（METHOD_RE）也能认出方法名
@@ -423,19 +716,24 @@ def main():
                  ",".join(sorted(n.tf_seen)) or "--"), flush=True)
 
     # ---------------- 阶段 0：链路就绪 ----------------
-    print("[0] 等链路就绪（最多 %.0fs）… 请确认栈已启动" % a.ready_timeout, flush=True)
+    required_tf = TF_CHAINS[a.gravity]
+    print("[0] 等链路就绪（最多 %.0fs；gravity:=%s ⇒ TF 链 %s）… 请确认栈已启动"
+          % (a.ready_timeout, a.gravity, " ∘ ".join(required_tf)), flush=True)
     t0 = time.time()
     while time.time() - t0 < a.ready_timeout:
         n.drain(2.0)
         hp()
+        chain_ok = all((k in n.tf_seen or k in n.tf_static_seen) for k in required_tf)
         if (n.cnt.get("pcloud", 0) and n.cnt.get("imu", 0) and n.cnt.get("scan", 0)
                 and n.cnt.get("odom", 0) and n.cnt.get("footprint", 0)
-                and {"odom->base_link", "map->odom"} <= n.tf_seen):
+                and chain_ok and n.map_base_pose() is not None):
             break
     else:
         missing = [k for k in ("pcloud", "imu", "scan", "odom", "footprint") if not n.cnt.get(k)]
-        if not {"odom->base_link", "map->odom"} <= n.tf_seen:
-            missing += ["TF:" + x for x in ("odom->base_link", "map->odom") if x not in n.tf_seen]
+        missing += ["TF:" + x for x in required_tf
+                    if x not in n.tf_seen and x not in n.tf_static_seen]
+        if all((k in n.tf_seen or k in n.tf_static_seen) for k in required_tf):
+            missing.append("TF:map->base_link(解析不了)")
         fails.append("链路未就绪，缺: " + ", ".join(missing))
 
     rtf = n.rtf()
@@ -454,6 +752,27 @@ def main():
         fails.append(f"TF 最新戳落后 /clock {age:.2f}s > {TH['tf_age_max']}s")
     print(f"[0] RTF={rtf if rtf is None else round(rtf,2)} hz={ {k: round(v,1) for k,v in hz.items()} } "
           f"fp_distinct={fp_distinct} tf_age={None if age is None else round(age,2)}", flush=True)
+
+    # ---- 0b 当前帧图契约（不是"有没有 TF"，而是"是不是当前约定的那几条边"）----
+    tf_fails, tf_contract = n.tf_contract_checks(a)
+    fails.extend(tf_fails)
+    print("[0b] TF 契约 gravity:=%s：required=%s missing=%s odom_level_static=%s rpy=%s "
+          "map→base=%s %s"
+          % (a.gravity, " ∘ ".join(tf_contract["required"]),
+             tf_contract["missing"] or "无",
+             tf_contract.get("odom_level_static", "-"),
+             tf_contract.get("odom_level_rpy_deg", "-"),
+             tf_contract.get("map_base", "-"),
+             "✅" if not tf_fails else "❌ " + tf_fails[0]), flush=True)
+    # map→odom 的单发布者（ROS 2 的 TFMessage 不带 authority ⇒ 端点清单 + tracker 唯一 + 同戳冲突）
+    pub_info = map_odom_publisher_check(a, n.map_odom_conflicts, n.map_odom_dup_same_clock)
+    if pub_info["ok"] is False:
+        fails.append("map→odom 单发布者断言失败：" + pub_info["reason"])
+    elif pub_info["ok"] is None:
+        notes.append(pub_info["reason"])
+    print("[0b] map→odom 发布者：%s %s"
+          % ("✅" if pub_info["ok"] else ("❌" if pub_info["ok"] is False else "⚠️"),
+             pub_info["reason"]), flush=True)
 
     # ---------------- 阶段 1：发目标（先"像人一样"选时机 + 验目标，再发） ----------------
     goal_yaw, yaw_source, yaw_why, abort = None, None, None, None
@@ -491,7 +810,10 @@ def main():
             settle["note"] = "--settle 0 ⇒ 跳过稳定性等待"
 
         # ---- 1b 目标朝向（默认 auto = 车当前朝向，与人在 RViz 里拖箭头一致）----
-        goal_yaw, yaw_source, yaw_why = choose_goal_yaw(n.tf_full, a.goal, a.yaw)
+        goal_yaw, yaw_source, yaw_why = choose_goal_yaw(
+            n.tf_full, a.goal, a.yaw,
+            full_chain=TF_CHAINS[a.gravity] + ("base_link->base_link_fake",),
+            pos_chain=TF_CHAINS[a.gravity], base_pose=n.map_base_pose())
         print("[1b] 目标朝向 yaw=%.3f rad (%.1f°)  yaw_source=%s —— %s"
               % (goal_yaw, math.degrees(goal_yaw), yaw_source, yaw_why), flush=True)
         notes.append("目标朝向 yaw=%.3f rad (%.1f°) source=%s" % (goal_yaw, math.degrees(goal_yaw), yaw_source))
@@ -631,7 +953,10 @@ def main():
             "goal_yaw": goal_yaw,
             "goal_yaw_deg": None if goal_yaw is None else round(math.degrees(goal_yaw), 2),
             "yaw_arg": a.yaw, "yaw_source": yaw_source, "yaw_note": yaw_why,
-            "settle": settle, "map_check": map_check}
+            "settle": settle, "map_check": map_check,
+            # ↓ 2026-10-29（§4.17）：帧图契约 + map→odom 单发布者证据
+            "gravity": a.gravity, "robot": a.robot, "tf_contract": tf_contract,
+            "map_odom_publishers": pub_info}
     with open(out, "w") as f:
         json.dump(snap, f, ensure_ascii=False, indent=2)
 
@@ -656,6 +981,13 @@ def main():
     if map_check["enabled"] and map_check["state"] is not None:
         print("  目标可用性：%s（value=%s，落格 %s）"
               % (map_check["state"], map_check["value"], map_check["cell"]))
+    print("  TF 契约：gravity:=%s，链 %s；map→base=%s"
+          % (a.gravity, " ∘ ".join(tf_contract["required"]),
+             tf_contract.get("map_base", "?")))
+    if tf_contract.get("odom_level_rpy_deg") is not None:
+        print("  odom→odom_level（静态）：rpy=%.4f/%.4f/%.4f°（期望 %.3f/%.3f/%.3f°，容差 %.2f°）"
+              % (*tf_contract["odom_level_rpy_deg"], *a.expect_odom_level_rpy, a.odom_level_rpy_tol))
+    print("  map→odom 发布者：%s" % (pub_info["reason"] or pub_info["ok"]))
     print(f"  首个断点：{fails[0] if fails else ('无（但目标未发）' if abort else '无')}")
     print(f"  快照 -> {out}（可抄进 docs/algorithm_matrix.md §四）")
     print("=" * 72)
