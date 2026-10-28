@@ -1280,7 +1280,15 @@ _HZMI_SPAWN_Z_MARGIN_M = 0.001
 #: 只有这些 world 才把 spawn_z 改成"落定高度"；别处（RMUC/RMUL 2024 等）保持 world 配置的 z。
 #: ⚠️ `get_world_config()` 的 z **不动**：它是 `map_asset_guard.WORLD_SPAWN` 的镜像源，也是既有
 #: 存档 sidecar 的 `spawn_pose.z` 比对基准 ⇒ 改它会让既有 RMUL2026/RMUC2026 存档全部 `refused_spawn`。
-_HZMI_SPAWN_AT_SETTLED_WORLDS = ('RMUC2026', 'RMUL2026')
+_HZMI_SPAWN_AT_SETTLED_WORLDS = ('RMUC2026', 'RMUL2026', 'RMUC2027', 'RMUL2027')
+
+#: 各 world **出生点脚下**的地面高度（world 系, m）。2026 两个 world 的出生点在 z=0 的地板上；
+#: 2027 两个的出生候选落在**局部抬高**的地面上（`docs/worlds_2027.md` §6.2 / §9.4 的落板实测）：
+#:   · RMUC2027 (5.90, 2.72)：地面 **+0.030 m**（0.2 m 方块落到底面 +0.0299）
+#:   · RMUL2027 (−0.85, +0.05)：地面 **+0.010 m**（10 mm 中央垫高层）
+#: 不含这一项 ⇒ spawn_z 会把车**埋进**这 1–3 cm 的地面里（1992.6 的物理步会把它弹出来 = 又制造
+#: 了一次小下落，正是 `_SpawnZForRobot` 要消掉的东西）。默认值表里没有的 world ⇒ 0.0（= 旧行为）。
+_HZMI_SPAWN_GROUND_Z = {'RMUC2026': 0.0, 'RMUL2026': 0.0, 'RMUC2027': 0.030, 'RMUL2027': 0.010}
 
 
 class _SpawnZForRobot(Substitution):
@@ -1305,7 +1313,8 @@ class _SpawnZForRobot(Substitution):
         off = _HZMI_BASE_LINK_HEIGHT_M.get(robot)
         if off is None:
             return ''
-        return '%.6f' % (off + _HZMI_SPAWN_Z_MARGIN_M)
+        ground = _HZMI_SPAWN_GROUND_Z.get(world, 0.0)
+        return '%.6f' % (ground + off + _HZMI_SPAWN_Z_MARGIN_M)
 
     def describe(self):
         return '%s(settled_worlds=%s, margin=%.3f)' % (
@@ -2480,10 +2489,12 @@ def generate_launch_description():
     #   （pgm origin = [场地左下角 - 出生点] = [-25.925, -9.425]，出生点在 map 里就是原点）
     #   ⇒ 与 RMUL2026 同一口径：0.0 / 0.0。依据见 docs/worlds.md §3~§4。
     amcl_init_x = PythonExpression([
-        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0, 'RMUC2026': 0.0}['",
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0, 'RMUC2026': 0.0,"
+        " 'RMUC2027': 0.0, 'RMUL2027': 0.0}['",
         LaunchConfiguration('world'), "']"])
     amcl_init_y = PythonExpression([
-        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0, 'RMUC2026': 0.0}['",
+        "{'RMUC': 0.0, 'RMUL': 0.0, 'RMUL2026': 0.0, 'RMUC2026': 0.0,"
+        " 'RMUC2027': 0.0, 'RMUL2027': 0.0}['",
         LaunchConfiguration('world'), "']"])
     ################################### navigation2 parameters end ####################################
 

@@ -24,6 +24,10 @@ class WorldType:
     RMUL = 'RMUL'
     RMUL2026 = 'RMUL2026'
     RMUC2026 = 'RMUC2026'
+    # ★ 2026-10-28：2027 两个新场地（STEP→STL，见 docs/worlds_2027.md）。只加枚举值，
+    #   2026 四个 world 的配置逐字节不变。
+    RMUC2027 = 'RMUC2027'
+    RMUL2027 = 'RMUL2027'
 
 # =============================================================================
 # `model://` 的本地解析根（2026-10-08 新增）
@@ -137,6 +141,27 @@ def get_world_config(world_type):
             'z': '0.2',
             'yaw': '0.0',
             'world_path': 'RMUC2026_world/RMUC2026_world.world'
+        },
+        # ★ 2026-10-28 新增：2027 两个场地（STEP→STL，`docs/worlds_2027.md` §6.2 的出生候选）。
+        #   `z` 保持 2026 的口径（0.2 = 悬空余量），真正的出生高度由
+        #   `rm_nav_bringup/bringup_sim.launch.py::_SpawnZForRobot` 的"落定高度 + 1 mm"给
+        #   （这两个 world 已加进 `_HZMI_SPAWN_AT_SETTLED_WORLDS`，见 docs/worlds_2027.md §6.3）。
+        #   ⚠️ 出生点**本机实测过**（不只是几何候选）：RMUC2027 在 (5.90, 2.72) 出生并落定，
+        #      GT 实测 base_link z = 0.13（`_HZMI_SPAWN_GROUND_Z` 给的 spawn_z = 0.030 + 0.102499
+        #      + 0.001 = 0.133499），见 measurements §41.1。
+        WorldType.RMUC2027: {
+            'x': '5.90',
+            'y': '2.72',
+            'z': '0.2',
+            'yaw': '0.0',
+            'world_path': 'RMUC2027_world/RMUC2027_world.world'
+        },
+        WorldType.RMUL2027: {
+            'x': '-0.85',
+            'y': '0.05',
+            'z': '0.2',
+            'yaw': '0.0',
+            'world_path': 'RMUL2027_world/RMUL2027_world.world'
         }
     }
     return world_configs.get(world_type, None)
@@ -410,6 +435,10 @@ def generate_launch_description():
     bringup_RMUL_cmd_group = create_gazebo_launch_group(WorldType.RMUL)
     bringup_RMUL2026_cmd_group = create_gazebo_launch_group(WorldType.RMUL2026)
     bringup_RMUC2026_cmd_group = create_gazebo_launch_group(WorldType.RMUC2026)
+    # ★ 2026-10-28：2027 两个 world 的 gzserver+spawn 组（**必须在这里生成并 add_action**，
+    #   否则 world:=RMUC2027/RMUL2027 只会起 LIO/nav 那一半、一条 gzserver 日志都没有）。
+    bringup_RMUC2027_cmd_group = create_gazebo_launch_group(WorldType.RMUC2027)
+    bringup_RMUL2027_cmd_group = create_gazebo_launch_group(WorldType.RMUL2027)
 
     # Create the launch description and populate
     ld = LaunchDescription()
@@ -439,6 +468,8 @@ def generate_launch_description():
     ld.add_action(bringup_RMUC_cmd_group) # type: ignore
     ld.add_action(bringup_RMUL2026_cmd_group) # type: ignore
     ld.add_action(bringup_RMUC2026_cmd_group) # type: ignore
+    ld.add_action(bringup_RMUC2027_cmd_group) # type: ignore
+    ld.add_action(bringup_RMUL2027_cmd_group) # type: ignore
 
     # Uncomment this line if you want to start RViz
     ld.add_action(start_rviz_cmd)
