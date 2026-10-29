@@ -10398,3 +10398,210 @@ mapper 那条按 per-world 槽落地（0.6/0.5 实测生效），地图对 GT �
   如果以后跑满 10 Hz/30 万点，这段要改成 C++ 或 numpy 化。
 * 没验证 `livox_ros_driver2` 的 `CustomMsg` 里 `offset_time` 语义（原样透传，与插件一致）；
   也没验证 p2l 的 `target_frame: base_link` 在新链路下是否仍逐点一致（应然一致，因为输入帧没变）。
+
+---
+
+## §48 第三十七轮（**本机 date=2026-10-30，01:22–01:45**）：2027 mapper 参数"改一改"的确定性 A/B —— 回环三件套 + 节点密度；candidate 小胜，但**回环在本 bag 里一次也没触发**；任务书的 `loop_search_space_resolution=0.1` 会让节点 abort
+
+> **本节只新增**（append-only；§1–§47 正文未改）。用户原话是"**改参数试一试**"（针对 2027 的弱回环）。
+> 本节把 §46.3 的 2027 槽值（0.6/0.5）与 candidate（0.5/0.3 + 回环搜索 15 m / 链 5 / 细匹配 0.60 +
+> scan_buffer 20 + correlation 0.3 + loop 窗 8→5 m + map_update 1.5）放进**同一条 bag、同一个
+> `async_slam_toolbox_node`** 做确定性 A/B；**candidate 在 6 项指标上小胜、1 项（POS 中位）差 5 mm**，
+> 于是 2027 槽换成 candidate（10 项）。但必须说清楚：**本 bag 只有 2.9 m 路线、没有真回访 ⇒ 回环一次
+> 也没触发**；本轮能证明的是"回环参数不崩、不改变本 bag 的位姿/地图"，**不能**证明"弱回环修好了"。
+> 另：任务书里的 `loop_search_space_resolution 0.1` 与参数文件里的 `smear 0.03` 冲突，karto 会直接
+> throw（§48.3 的 C1 档）⇒ **不采纳 0.1**，保留 0.05；补 `smear 0.06` 的 C3 档可跑且与 0.05 逐字节同结果。
+>
+> §46.3 的"2027 = 0.6/0.5"**被本节取代**；2026 的默认路径（参数文件 0.2/0.2 + 不传覆盖）一个字节没动。
+
+### 48.1 环境、构建、改动面
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `/home/weicheng/HzMi_rmsimulation`，起点/提交前 HEAD `ec48cc7`（= `origin/master`；`git merge-base --is-ancestor HEAD origin/master` 通过） |
+| 构建 | `colcon build --symlink-install --packages-select rm_nav_bringup` |
+| 数据 | `third_party/eval_data/capture_map2027/bag/raw`：sim **4.798–22.098 s**（17.3 s）、174 条 `/scan`、174 朵 `/cloud_registered`、174 条 `/odom_ground_truth`、3986 条 `/tf`；GT 路线全长 **2.9 m**（§46.3 同一条） |
+| 回放协议 | §45.2c（确定性）：一个私有 `ROS_DOMAIN_ID=83`、私有 `HOME`/`ROS_LOG_DIR`、`unset DISPLAY`、`ROS_LOCALHOST_ONLY=1`；先起节点 6 s，再按 `header.stamp` 1.0× 发 `/clock` + `/tf`（剔掉 `map→odom`）+ `/tf_static` + `/scan` + `/cloud_registered` + GT；回放完 tail 6 s 让 5 s 档也能刷新到完整的最终图；只按 setsid 进程组 kill（无机器级 pkill） |
+| 节点 | `ros2 run slam_toolbox async_slam_toolbox_node --params-file <合并后的 sim yaml + 覆盖>`（`--params-file` 会盖掉命令行 `-p`，§45 的老坑） |
+| 改代码 | **只改** `src/rm_nav_bringup/launch/bringup_sim.launch.py` 的 `_MAPPER_PARAMS_BY_WORLD`（2027 槽 10 项）+ 槽表注释 + launch 横幅；**没有**新增/删除 launch 参数 |
+| **没有**改 | `mapper_params_online_async_sim.yaml`、`mapper_params_online_async.yaml`、2026 的 world/资产/参数、2027 的 world 几何/PCD/PGM/DB、帧图、URDF/xacro |
+| 任务书的路径 | 任务书写的是 `src/rm_navigation/rm_navigation/params/mapper_params_online_async.yaml`；**sim 栈实际读的是** `src/rm_localization/slam_toolbox/config/mapper_params_online_async_sim.yaml`（`bringup_sim.launch.py:2465` 的 `get_package_share_directory('slam_toolbox')/config/mapper_params_online_async_sim.yaml`）。**两份都没改**，只在 launch 的 per-world 槽里加值（见 48.6） |
+| scratch | 全在 `.tmp_47/`（gitignored，不入库） |
+
+### 48.2 参数档
+
+`B1` = 现状（§46.3 的槽）；`C1` = 任务书 candidate **原样**；`C2` = candidate 去掉 `loop_search_space_resolution 0.1`（其余 9 项 + 0.5/0.3 全保留）；`C3` = C1 但把 `smear_deviation` 补到 0.06；`M1` = 中间档（回环搜索 10 / 链 6 / map_update 2.0，其余同 C2）。
+
+| 参数 | 文件原值（2026） | **B1 现状** | C1（任务书原样） | **C2 candidate** | C3（C1+smear 0.06） | M1（中间） |
+|---|---|---|---|---|---|---|
+| `minimum_travel_distance` | 0.2 | **0.6** | 0.5 | **0.5** | 0.5 | 0.5 |
+| `minimum_travel_heading` | 0.2 | **0.5** | 0.3 | **0.3** | 0.3 | 0.3 |
+| `loop_search_maximum_distance` | 3.0 | 3.0 | 15.0 | **15.0** | 15.0 | 10.0 |
+| `loop_match_minimum_chain_size` | 10 | 10 | 5 | **5** | 5 | 6 |
+| `map_update_interval` | 5.0 | 5.0 | 1.5 | **1.5** | 1.5 | 2.0 |
+| `loop_search_space_dimension` | 8.0 | 8.0 | 5.0 | **5.0** | 5.0 | 5.0 |
+| `loop_search_space_resolution` | 0.05 | 0.05 | **0.1** | **0.05**（保留） | 0.1 | 0.05 |
+| `loop_search_space_smear_deviation` | 0.03 | 0.03 | 0.03 | **0.03** | 0.06 | 0.03 |
+| `loop_match_minimum_response_fine` | 0.45 | 0.45 | 0.60 | **0.60** | 0.60 | 0.60 |
+| `link_match_minimum_response_fine` | 0.1 | 0.1 | 0.3 | **0.3** | 0.3 | 0.3 |
+| `scan_buffer_size` | 10 | 10 | 20 | **20** | 20 | 20 |
+| `correlation_search_space_dimension` | 0.5 | 0.5 | 0.3 | **0.3** | 0.3 | 0.3 |
+
+不变的：`do_loop_closing: true`、`use_scan_matching: true`、`resolution 0.05`、`max_laser_range 10.0`（sim yaml 原值；任务书写的 20 是**另一份** `mapper_params_online_async.yaml` 的值）、`odom_frame: odom`。
+
+### 48.3 确定性，以及 C1 为什么会 abort
+
+| 事实 | 证据 |
+|---|---|
+| **回放逐字节确定性** | 今天 B1 的去重后 174 条 `map→odom` 与 **10-29 的 G46**（§46.3）**逐元素相同**（`same True`）；C2 与重复跑 C2b 的 `mo.jsonl`/`map.npy` **md5 相同** |
+| C2 / C3 / M1 完全同结果 | 三档的 `mo.jsonl` md5 都是 `23d7084…`、`map.npy` 都是 `74438d2…` ⇒ **回环搜索三件套 + map_update_interval 在本 bag 上对位姿/地图零影响**（原因见 48.4 的回环计数） |
+| **C1（任务书原样）起不来** | 节点构造时：`terminate called after throwing an instance of 'std::runtime_error' what(): Mapper Error: Smear deviation too small: Must be between 0.05 and 1`；`ros2run: Aborted` ⇒ 0 条 `map→odom`、0 条 `/map` |
+
+原因（读源码）：`CorrelationGrid::CalculateKernel()`（`lib/karto_sdk/include/karto_sdk/Mapper.h:1225-1236`）要求
+`smear_deviation ∈ [0.5·resolution, 10·resolution]`。`resolution 0.1` ⇒ 下界 0.05 > 0.03 ⇒ throw。
+**这是"参数组合非法"，不是"效果不好"**；任务书的 candidate 必须改一处才能上线（见 48.6）。
+
+### 48.4 A/B 数字（同一 bag、同一节点；每档一条命令）
+
+判据与 §46.3 相同：`map→base` 对 GT（map 系 = world − 出生点 `(5.90, 2.72)`）；按**每个处理帧**统计（把 50 Hz 重发的同一 `map→odom` 按 stamp 去重后 174 条，去掉前 1 s，GT 最近邻 ≤0.15 s），
+"刚性" = 整段轨迹消掉最优刚体偏移后的逐帧残差 max（网格 ±180°/0.25°）。**注意**：§46.3 表里的数字用的是**不去重的 50 Hz 原始流**，与本表的第三位小数会差一点（例：G46 的 POS 中位 0.047 vs B1 的 0.046），同一次跑、同一份数据。
+
+| 档 | POS 中位 / p90 / max (m) | YAW 中位 / p90 / max (°) | 刚性 max（rot, t） | `map→odom` 单步 max / 突变数 | `/map` 条数 | 节点 CPU%（回放 29.4 s） |
+|---|---|---|---|---|---|---|
+| **B1**（0.6/0.5 现状） | **0.046 / 0.156 / 0.158** | 3.85 / 4.62 / 5.11 | **0.085 m**（4.0°, (0.028,−0.078)） | 0.0385 m / **0** | 5（5.0 s） | 1.80%（0.53 s） |
+| C1（原样） | — | — | — | — | — | **abort** |
+| **C2**（candidate） | **0.051 / 0.141 / 0.143** | **3.24 / 4.21 / 4.68** | **0.069 m**（3.0°, (0.050,−0.066)） | **0.0319 m / 0** | **16（1.5 s）** | 1.74%（0.51 s） |
+| C3（0.1 + smear 0.06） | 0.051 / 0.141 / 0.143 | 3.24 / 4.21 / 4.68 | 0.069 m（3.0°） | 0.0319 m / 0 | 16 | 1.80%（0.53 s） |
+| M1（10 / 6 / 2.0） | 0.051 / 0.141 / 0.143 | 3.24 / 4.21 / 4.68 | 0.069 m（3.0°） | 0.0319 m / 0 | 12 | 1.84%（0.54 s） |
+
+读法：
+1. **C2 赢在"尾部"**：POS p90 −15 mm、max −15 mm、刚性 max −16 mm、YAW max −0.44°；**唯一变差**是 POS 中位 +5 mm（0.046→0.051）。两档都远好于 `<0.15 m` 的中位/刚性判据（§46.3），绝对 max 也都 <0.15 m（C2 0.143 全部达标；B1 0.158 是锚点刚体偏置）。
+2. **差别不来自回环**：C2/C3/M1 三档的"回环搜索半径/链/匹配门/map_update"完全不同，结果却 **md5 相同** ⇒ 本 bag 上真正起作用的是**节点密度（0.6→0.5）+ scan_buffer 10→20 + correlation 窗 0.5→0.3 + link 细匹配 0.1→0.3** 这一组顺序匹配参数。
+3. **回环事件 = 0（不是"没测"，是"这个 bag 不可能有"）**：karto 的 `FindPossibleLoopClosure()`（`Mapper.cpp:1960-2007`）要求"当前位姿 `loop_search_maximum_distance` 内出现一段 **≥ chain** 个**未连通**的旧节点"；本 bag 的 2.9 m 路线没有任何回访（GT 起点 (5.90,2.72) → 终点 (8.73,4.19)，全程不闭环）⇒ 搜索半径 3 m 还是 15 m 都不会触发。代理观测量也一致：`map→odom` 单步最大只有 **0.0385 m（B1）/ 0.0319 m（C2）**，没有任何 >0.05 m 或 >2° 的阶跃；连续 `/map` 快照的占用格"消失率"最大 **0.4%（B1）/ 1.1%（C2）**（都是地图增量长大，不是 snap）。
+4. **回环事件无法直接数**：本仓 `slam_toolbox 2.6.10` **没有** `/slam_toolbox/loop_closure_event`，`SlamToolbox` 也**没有**注册 `MapperLoopClosureListener`（`grep -rn "LoopClosureCheck\|BeginLoopClosure\|EndLoopClosure" src/rm_localization/slam_toolbox/src src/rm_localization/slam_toolbox/include` 无输出）⇒ 只能用上面的 `map→odom` 阶跃 + `/map` 快照做代理。要"回环次数"这个数，得给 vendored 节点加 listener（本轮没改上游代码）。
+5. **CPU**：1.63–1.84%（进程组 jiffies / 回放墙钟），五档在噪声内；`map_update_interval 5→1.5` 只把 `/map` 从 5 条变 16 条，**CPU 无可测增加**。**RTF 不是本装置的观测量**（回放自己发 1.0× 合成 `/clock`）；本机 live 的 RTF 0.43（§47.2）本轮没有重测、也没有因为改参数而改变。
+
+### 48.5 2D 图质量 vs GT 图 + STL（live `/map`，不拟合任何旋转/平移）
+
+口径：
+* 图 = 每档回放最后一条 `/map`（tail 6 s ⇒ 5 s 档也刷新到了最后一帧）。
+* **帧一致性**：live `map` 系 = odom 系在 t0 的姿态（轴与 world 平行）⇒ 与 `map/RMUC2027_gt.*`（同样出生点相对系）**不拟合**直接叠。实测（B1/C2 都是）**占用格到 GT 占用格的距离中位 0.000 m**；作为对照，按 §46.3 轨迹刚性拟合出的 4° 旋转去叠会把中位拉到 0.050 m ⇒ 那个 4° 是**位姿 yaw 偏差**，不是图的帧偏差，不能拿来对齐图。
+* GT 图 = `map/RMUC2027_gt.pgm`（582×324 @0.05，§45 用 GT 位姿 + 同一批云投影）。
+* STL 真值 = `height_grid(RMUC2027.stl, spawn=(5.90,2.72), lift=0.0, floor=0.0)`。**⚠ 仓库工具默认值不适用 2027**：`verify_low_terrain.py` / `map_prior_ab.py` 的 `truth_grid` 默认 spawn 是 **RMUC2026 的 (10.925,2.524)**、lift 是 **2026 网格的 1.6413436**；2027 网格是世界系、地面 z=0（`RMUC2027_world/model.sdf` 注释 "mesh 已经是世界系 … 可行驶地面在 z=0 … 不需要抬升"）。本轮没改工具，只在 scratch 里用同一套 `truth_grid`/`local_slope` 函数、按正确 spawn/lift 算。
+* "窗口" = 该档 `/map` 已知格（free+occ）∪ 其 10 格膨胀；避免拿"没看过的那半个场"充数。
+
+| 指标 | **B1（现状）** | **C2（candidate）** | 谁好 |
+|---|---|---|---|
+| `/map` 占用格 / 已知格 | 371 / 89 100 | **457 / 88 803** | C2 多画出 86 个占用格 |
+| 墙残差：占用格 → GT 占用格 中位 / p90 | **0.000 / 0.112 m** | **0.000 / 0.112 m** | 平 |
+| 占用格落在 GT 墙 0.05 / 0.10 m 内 | 84.9% / 89.5% | **86.4% / 89.5%** | C2 微好 |
+| GT 墙被"表示"（0.10 m 内，窗口内 / 全场） | 19.3% / 14.6% | **23.5% / 17.8%** | **C2 好**（+4.2 个百分点） |
+| 自由空间：已知格里 GT-free 占比 | 62.3% | 62.4% | 平 |
+| GT-free 被标 free / 被标 occ | **99.81% / 0.19%** | 99.77% / 0.23% | B1 微好（差 0.04 个百分点） |
+| STL 边沿覆盖（台阶/边沿格 0.10 m 内有占用，窗口内） | 11.1%（4716 格） | **14.0%（4715 格）** | **C2 好**（+2.9 个百分点） |
+| STL 可行驶面被误标占用（窗口内 29 258 格） | 0.06% | 0.10% | B1 微好（都 <0.1%） |
+| 可行驶面 free / unknown | 98.2% / 1.7% | 98.2% / 1.7% | 平 |
+
+读法：
+1. 两档的**墙位**都贴 GT（中位 0.000、p90 0.112 m ≈ 2 格），没有"鬼影墙"（false occ 10.5%，与 §45 的旧资产 30% 级不是一回事——这里 GT 图本身就是同一批扫描的投影，所以 precision 的分母是"图上的占用格"，不是全场）。
+2. C2 **多覆盖了边沿/墙**（GT 墙召回 +4.2、STL 边沿 +2.9 个百分点），代价是可行驶面上的假占用从 0.06% 到 0.10%（绝对量 18 格 → 29 格，仍然可以忽略）。方向与 48.4 的位姿尾部改善一致：0.5 m 节点 + 更长的 scan_buffer 让远处结构多进了图。
+3. **不能用 §45 的离线 PCD 资产口径来比这两档**：本节点 `odom_frame=odom`，`accumulate_pcd_gt.py --pose-source trace` 出来的 3D 图落在**倾斜 odom 系**里（实测 y 跨度 7.7 m，§45 的 `odom_level` 资产是 15.9 m），与 STL 不是同一个二维投影；它的差异会被"帧"而不是"参数"主导。live `/map` 是 nav2 真正消费的那张图，且帧一致性已用 0.000 m 的中位残差钉住 ⇒ 用它。
+
+### 48.6 选定：C2 写进 2027 槽（RMUC2027 + RMUL2027），2026 不动
+
+`src/rm_nav_bringup/launch/bringup_sim.launch.py` 顶部：
+
+```python
+_MAPPER_2027_SLOT = {
+    'minimum_travel_distance': 0.5,
+    'minimum_travel_heading': 0.3,
+    'loop_search_maximum_distance': 15.0,
+    'loop_match_minimum_chain_size': 5,
+    'loop_match_minimum_response_fine': 0.6,
+    'loop_search_space_dimension': 5.0,
+    'scan_buffer_size': 20,
+    'link_match_minimum_response_fine': 0.3,
+    'correlation_search_space_dimension': 0.3,
+    'map_update_interval': 1.5,
+}
+_MAPPER_PARAMS_BY_WORLD = {
+    'RMUC2027': dict(_MAPPER_2027_SLOT),
+    'RMUL2027': dict(_MAPPER_2027_SLOT),
+}
+```
+
+为什么是这 10 项：
+* **采纳**：C2 在 POS p90/max、刚性、YAW、GT 墙召回、STL 边沿覆盖上全部小胜，唯一变差是 POS 中位 +5 mm；两档都在 §46.3 的 `<0.15 m` 判据内。
+* **不采纳 `loop_search_space_resolution 0.1`**：与 `smear 0.03` 组合会让节点 abort（48.3）；补 0.06 的 C3 与 C2 **md5 相同**（本 bag 上零差别），所以没有理由为了 0.1 多带一个未验证的 `smear` 改动。
+* **`loop_search_space_dimension 5.0` 保留**：它只是回环匹配的相关搜索窗（±2.5 m），不是回环半径；半径由 `loop_search_maximum_distance 15.0` 给。
+* **`map_update_interval 1.5`**：不改位姿/地图，只让 live `/map` 刷新从 5 s 变 1.5 s（nav2 拿到的图更新鲜），CPU 无可测增加。
+* **中间档没有存在理由**：M1（10 / 6 / 2.0）与 C2 逐字节同结果 ⇒ 不是"两端之间取中"，而是"这几项在本 bag 上无效"。
+
+### 48.7 live 生效 + 2026 默认路径（实测，不是静态推断）
+
+`world:=RMUC2027 mode:=mapping …` 起来后 `ros2 param get /slam_toolbox`：
+
+| 参数 | 生效值 | 参数 | 生效值 |
+|---|---|---|---|
+| `minimum_travel_distance` | **0.5** | `loop_search_maximum_distance` | **15.0** |
+| `minimum_travel_heading` | **0.3** | `loop_match_minimum_chain_size` | **5** |
+| `map_update_interval` | **1.5** | `loop_match_minimum_response_fine` | **0.6** |
+| `scan_buffer_size` | **20** | `correlation_search_space_dimension` | **0.3** |
+| `link_match_minimum_response_fine` | **0.3** | `loop_search_space_dimension` | **5.0** |
+
+`loop_search_space_resolution` = 0.05、`loop_search_space_smear_deviation` = 0.03、`odom_frame` = odom（均参数文件原值）。
+`world:=RMUC2026` 同一命令：**0.2 / 0.2 / 5.0 / 10 / 0.1 / 3.0 / 10 / 0.45 / 0.5 / 8.0**（全部 = 参数文件原值），启动日志里**没有** `[mapper 槽]` 那一行 ⇒ 2026 的 `params.update({})` 是 no-op。
+两次 launch 前后 4 个资产 md5 全部相同；`ros2 launch ... --show-args` 的 108 条声明**逐字节相同**（`diff` 空）。
+
+### 48.8 诚实清单（§48）
+
+1. **回环没有被验证**（最重要）：本 bag 只有 2.9 m、没有回访，`FindPossibleLoopClosure` 的"≥ chain 个未连通旧节点"条件不可能满足 ⇒ 3 m 和 15 m 都不会触发。所以"回环参数是否修好弱回环"**没有证据**；有证据的只是"这组参数能跑、不崩、在本 bag 上不改变位姿/地图"。**`loop_search_maximum_distance 15` 在 28×15 m 的重复格栅上会不会造成假回环，本 bag 回答不了**——必须用一条真的绕场一圈、回到起点的 bag 复测（`loop_match_minimum_response_fine 0.60` 是为此加严的，但没有数据支撑）。
+2. **无法直接数回环事件**：2.6.10 没有事件话题，也没注册 karto 的 `MapperLoopClosureListener`（48.4#3 的 grep）；本轮用 `map→odom` 阶跃 + `/map` 快照做代理，**不是** `FireEndLoopClosure` 的计数。要那个数得给 vendored 节点加 listener（没做）。
+3. **`minimum_travel_heading 0.5→0.3` 是死参数**：本版本（2.6.10）`shouldProcessScan()` 不读它（`mapper_params_online_async_sim.yaml` 的注释、上游 PR #888）⇒ 实际效果 0；保留只是"与用户提出的组一致"。
+4. **任务书的 `loop_search_space_resolution 0.1` 非法**（`smear 0.03 < 0.5·0.1`）：原样上线会让节点 abort；C3（0.1 + smear 0.06）可跑且与 C2 **md5 相同**，但仍不采纳 0.1（48.6）。
+5. **中间档不是"折中"**：M1 与 C2 逐字节同结果 ⇒ 本 bag 上回环三件套 + map_update_interval 对位姿/地图**零影响**，所以"极端 vs 中间"在本轮不可分辨（不是两端之间挑，是一端无效）。
+6. **A/B 是离线 bag 回放，不是 live Gazebo**：理由同 §46.3(c)（capture 的 drive 是"定时"动作，live 的闭环 drive 会开出 capture 轨迹并让 LIO 发散）。本轮的结论**不覆盖**"新参数在真实新采集/live 里也成立"。
+7. **2D 图质量用的是 live `/map`**，不是 §45 的离线 PCD 资产（帧不同口径，48.5#3）。live `/map` 来自 capture 的 `/scan`，而该 `/scan` 本身有近距自碰（约 10% 的 ray 落在 `range_min≈0.05 m`）；两档同样受影响，且 B1 的 371 个占用格里只有 **24 个**落在轨迹 0.3 m 内（`>2 m` 的 183 个），所以 A/B 的方向仍可信，但**绝对**"图有多干净"不要拿它当交付资产的质量。
+8. **STL 真值口径是本轮手算的**：`verify_low_terrain.py` / `map_prior_ab.py` 的默认 spawn/lift 是 2026 的（48.5），直接用会整体错位；本轮按同一套函数、正确参数算，但**没有**改这两个工具的参数化（要改的话是下一步）。
+9. **`map_update_interval 1.5` 的收益（图更新鲜）没有量化**：只数了 `/map` 条数 5→16 和 CPU 不变；没有测 nav2 侧"看到新图"的时延收益。
+10. **RMUL2027 的槽写了但没跑**：没有 RMUL2027 的 GT/DB（§46.4#8 同）；槽值与 RMUC2027 相同是**惯例**，不是实测。
+11. **没有真机**；没有改 world 几何/2026 资产/§1–§47 正文；没有机器级 pkill（每次一个栈，只按 setsid 进程组 + 端口/URI 作用域清理）。
+12. **`--show-args` 的代价**：两个 `slam_min_travel_*` 的 `description` 里仍写着 "2027 = 0.6 / 0.5"（为了 `--show-args` 逐字节不变，**故意冻结**）；实际生效值以 `_MAPPER_PARAMS_BY_WORLD` / `ros2 param get` / 本节为准（launch 里已加注释说明）。
+13. 本轮只提交 launch 槽表 + 本节；工作树里既有的未提交修改（`1.txt`、`RMUC2026_spl.*`、attic 备份、`third_party/zloc*` 等）没有碰、没有提交。
+
+### 48.9 复现命令（scratch 在 `.tmp_47/`，不入库）
+
+```bash
+# 0) 构建
+colcon build --symlink-install --packages-select rm_nav_bringup
+
+# 1) 三档回放（同一条 bag / 同一个节点；每档一条）
+bash .tmp_47/run.sh B1 minimum_travel_distance=0.6 minimum_travel_heading=0.5
+bash .tmp_47/run.sh C2 minimum_travel_distance=0.5 minimum_travel_heading=0.3 \
+  loop_search_maximum_distance=15.0 loop_match_minimum_chain_size=5 map_update_interval=1.5 \
+  loop_search_space_dimension=5.0 loop_match_minimum_response_fine=0.6 \
+  link_match_minimum_response_fine=0.3 scan_buffer_size=20 correlation_search_space_dimension=0.3
+bash .tmp_47/run.sh C1 minimum_travel_distance=0.5 minimum_travel_heading=0.3 \
+  loop_search_maximum_distance=15.0 loop_match_minimum_chain_size=5 map_update_interval=1.5 \
+  loop_search_space_dimension=5.0 loop_search_space_resolution=0.1 \
+  loop_match_minimum_response_fine=0.6 link_match_minimum_response_fine=0.3 \
+  scan_buffer_size=20 correlation_search_space_dimension=0.3     # ← 构造时 abort（预期）
+
+# 2) 位姿 / 阶跃 / 图快照
+python3 .tmp_47/analyze.py B1 --json .tmp_47/B1/analysis.json
+python3 .tmp_47/map_quality.py B1 --json .tmp_47/B1/map_quality.json
+
+# 3) live 生效 + 2026 不变 + show-args
+bash .tmp_47/param_check.sh RMUC2027 91 11927
+bash .tmp_47/param_check.sh RMUC2026 92 11928
+diff .tmp_47/show_args_before.txt .tmp_47/show_args_after.txt   # 空
+```
+
+### 48.10 一句话给用户
+
+**candidate 那组（0.5/0.3 + 回环搜索 15 m / 链 5 / 细匹配 0.60 / scan_buffer 20 / correlation 0.3 / loop 窗 5 m / map_update 1.5）
+在同一条 bag 上比现在的 0.6/0.5 小胜（POS p90 −15 mm、刚性 −16 mm、YAW max −0.44°、墙召回 +4.2 个百分点、STL 边沿 +2.9 个百分点，只有 POS 中位 +5 mm），
+已经写进 2027 槽并 `ros2 param get` 验证生效，2026 一个字节没动；但这条 bag 只有 2.9 m、没有回访，
+**回环本身一次也没触发**，所以"弱回环修好了"这句话还不能说——要拿一条真的绕场一圈的 bag 再测。**
+另外任务书里的 `loop_search_space_resolution 0.1` 会让节点直接 abort（karto 要求 smear ≥ 0.05），
+我们保留了 0.05；补 0.06 的版本跑出来和 0.05 逐字节一样。**

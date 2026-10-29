@@ -1342,14 +1342,41 @@ _HZMI_SPAWN_GROUND_Z = {'RMUC2026': 0.0, 'RMUL2026': 0.0, 'RMUC2027': 0.030, 'RM
 #: "上次修正 + 里程计"先验下**沿栅栏方向没有约束**：karto 只在 ±0.5 m/±20° 的窗口里匹配最近
 #: ~10 个节点（4 Hz ⇒ 0.5–0.8 m 基线），0.2 m 的节点间距让基线短到贴着同一段栅栏 ⇒
 #: 每帧允许的 0.1–0.2 m 滑动被下一帧继承，`map→base` 最终跑掉 2.19 m/28.4°（§45.2c 的 A 档）。
-#: 把节点间距放到 0.6 m/0.5 rad（G 档）后位置误差回到 0.047 m 中位（0.158 max）。
+#: §46.3 先把节点间距放到 0.6 m/0.5 rad（G 档），位置误差回到 0.047 m 中位（0.158 max）。
+#:
+#: ★ 2026-10-30（meas §48）：用户要求"改参数试一试"**弱回环** ⇒ 以同一条 bag / 同一个节点做
+#:   确定性 A/B（B1 = §46.3 的 0.6/0.5 现状 vs C2 = candidate）。**C2 赢**（10 项，见下）：
+#:   0.6/0.5 → 0.5/0.3 节点密度 + 回环搜索窗 3→15 m、链 10→5、回环细匹配 0.45→0.60、
+#:   顺序细匹配 0.1→0.3、scan_buffer 10→20、correlation 窗 0.5→0.3、loop 搜索窗 8→5 m、
+#:   map_update_interval 5.0→1.5。实测：POS p90 0.156→0.141、max 0.158→0.143、刚性
+#:   0.085→0.069 m、YAW max 5.11→4.68°；2D 图占用格 371→457、GT 墙召回 19.3→23.5%、
+#:   STL 边沿覆盖 11.1→14.0%（POS 中位 0.046→0.051 m 是唯一变差项，+5 mm）。
+#: ★ 任务书里的 `loop_search_space_resolution: 0.1` **没有采纳**：karto 2.6.10 要求
+#:   smear_deviation ∈ [0.5·resolution, 10·resolution]，0.1 + 0.03 会在节点构造时 throw
+#:   "Smear deviation too small" 直接 abort（§48 的 C1 档）。补 0.06 可跑（C3 档），但与 0.05
+#:   逐字节同结果 ⇒ 保留参数文件的 0.05（不引入第 11 个改动）。
 #: ★ 默认**只对 2027 生效**；2026 不在表里 ⇒ 不传任何覆盖 ⇒ 参数文件 + 节点构造**逐字节不变**。
-#: ★ 这里只动"节点密度"（纯建图质量参数），不动 world 几何/资产/帧图。
-#:   仍**不**采用 §45.2c H 档的 `odom_frame:=odom_level`：那会让 slam_toolbox 发 map→odom_level，
+#: ★ 仍**不**采用 §45.2c H 档的 `odom_frame:=odom_level`：那会让 slam_toolbox 发 map→odom_level，
 #:   与静态边 odom→odom_level 冲突（两个父节点，§45.7#2）。
+_MAPPER_2027_SLOT = {
+    # 节点密度（§46.3 的 0.6/0.5 → candidate 的 0.5/0.3）
+    'minimum_travel_distance': 0.5,
+    'minimum_travel_heading': 0.3,
+    # 回环：搜索半径 / 链长 / 细匹配门（§48 实测：本 bag 无真回环 ⇒ 未触发，只验证了不崩）
+    'loop_search_maximum_distance': 15.0,
+    'loop_match_minimum_chain_size': 5,
+    'loop_match_minimum_response_fine': 0.6,
+    'loop_search_space_dimension': 5.0,
+    # 顺序匹配：缓冲区 / 细匹配门 / 相关搜索窗（§48 的实测差别主要来自这三项 + 节点密度）
+    'scan_buffer_size': 20,
+    'link_match_minimum_response_fine': 0.3,
+    'correlation_search_space_dimension': 0.3,
+    # 图刷新（5.0 → 1.5 s；CPU 无 measurable 变化，见 §48）
+    'map_update_interval': 1.5,
+}
 _MAPPER_PARAMS_BY_WORLD = {
-    'RMUC2027': {'minimum_travel_distance': 0.6, 'minimum_travel_heading': 0.5},
-    'RMUL2027': {'minimum_travel_distance': 0.6, 'minimum_travel_heading': 0.5},
+    'RMUC2027': dict(_MAPPER_2027_SLOT),
+    'RMUL2027': dict(_MAPPER_2027_SLOT),
 }
 
 
@@ -3016,7 +3043,10 @@ def generate_launch_description():
 
     # ★ 2026-10-29（meas §46.3）：slam_toolbox 的**节点密度**覆盖（只影响 mode:=mapping 的
     #   slam_toolbox；<=0 = 用 `_MAPPER_PARAMS_BY_WORLD` 的 per-world 槽）。默认 -1 ⇒
-    #   2027 = 0.6/0.5、2026 = 参数文件原值（0.2/0.2）⇒ 默认路径**逐字节不变**。
+    #   2027 = 槽值、2026 = 参数文件原值（0.2/0.2）⇒ 默认路径**逐字节不变**。
+    #   ★ 2026-10-30（meas §48）：2027 槽值从 0.6/0.5 换成 A/B 赢家的 0.5/0.3（仍是 -1 默认）；
+    #     下面两条 description 里的 "0.6/0.5" 是**故意冻结**的历史文本 —— 改了会让
+    #     `ros2 launch ... --show-args` 不再逐字节相同；实际生效值以槽表 / §48 为准。
     #   给 0.2/0.2 = 复现 §45.2 的坏 map→odom（A/B 对照用）。
     declare_slam_min_travel_distance_cmd = DeclareLaunchArgument(
         'slam_min_travel_distance',
@@ -4116,13 +4146,13 @@ def generate_launch_description():
         if mapper_overrides:
             params.update(mapper_overrides)
             banner += (
-                '\n  · [mapper 槽] world=%s ⇒ minimum_travel_distance=%s / minimum_travel_heading=%s'
-                '（per-world 槽：2027 = 0.6/0.5；2026 保持参数文件的 0.2/0.2。'
-                'A/B：slam_min_travel_distance:=0.2 slam_min_travel_heading:=0.2；'
-                '见 meas §45.2c / §46.3）'
+                '\n  · [mapper 槽] world=%s ⇒ %s'
+                '（per-world 槽：2027 = meas §48 的 A/B 赢家；2026 保持参数文件原值。'
+                'A/B：slam_min_travel_distance:=0.6 slam_min_travel_heading:=0.5；'
+                '见 meas §45.2c / §46.3 / §48）'
                 % (world_v,
-                   params.get('minimum_travel_distance', 'yaml 原值'),
-                   params.get('minimum_travel_heading', 'yaml 原值')))
+                   ', '.join('%s=%s' % (k, mapper_overrides[k])
+                             for k in sorted(mapper_overrides))))
         node = Node(
             package='slam_toolbox',
             executable='async_slam_toolbox_node',
