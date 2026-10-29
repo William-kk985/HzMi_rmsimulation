@@ -147,6 +147,12 @@
       <uri>model://RMUC2027_fence</uri>
       <name>RMUC2027_fence</name>
     </include>
+    <!-- 2027-10-29：中央塔"断口"的支撑（STEP 网格在 world z 1.50~1.86 有一段 0.36 m 真空，
+         塔看着是悬空的；支撑把它接回下段斜撑）。依据见 docs/worlds_2027.md §9.7。 -->
+    <include>
+      <uri>model://RMUC2027_tower_support</uri>
+      <name>RMUC2027_tower_support</name>
+    </include>
     <!-- 灯光：类型/颜色/衰减与 RMUL2026_world.world 逐个相同，
          位置整体平移到新场地中心（RMUL2026 场地中心 (8.5,4.5) → RMUC2026 场地中心 (0,1.62)，
          即平移 (-8.5,-2.88)），并采用 RMUL2026 world 里 <state> 段的实际运行高度 z=7~14
