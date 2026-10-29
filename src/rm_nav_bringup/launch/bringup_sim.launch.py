@@ -1336,6 +1336,22 @@ _HZMI_SPAWN_AT_SETTLED_WORLDS = ('RMUC2026', 'RMUL2026', 'RMUC2027', 'RMUL2027')
 #: 了一次小下落，正是 `_SpawnZForRobot` 要消掉的东西）。默认值表里没有的 world ⇒ 0.0（= 旧行为）。
 _HZMI_SPAWN_GROUND_Z = {'RMUC2026': 0.0, 'RMUL2026': 0.0, 'RMUC2027': 0.030, 'RMUL2027': 0.010}
 
+#: **每个 world 的 mapper 参数槽**（2026-10-29，meas §45.2 / §46.3）。
+#: 为什么需要它：`slam_toolbox` 的 `minimum_travel_distance=0.2` 是为 2026 场地调出来的
+#: （`docs/slam_toolbox_tuning.md`），但 2027 的**格栅围栏**（2 m 立柱 + 3 根 5 cm 横杆）在
+#: "上次修正 + 里程计"先验下**沿栅栏方向没有约束**：karto 只在 ±0.5 m/±20° 的窗口里匹配最近
+#: ~10 个节点（4 Hz ⇒ 0.5–0.8 m 基线），0.2 m 的节点间距让基线短到贴着同一段栅栏 ⇒
+#: 每帧允许的 0.1–0.2 m 滑动被下一帧继承，`map→base` 最终跑掉 2.19 m/28.4°（§45.2c 的 A 档）。
+#: 把节点间距放到 0.6 m/0.5 rad（G 档）后位置误差回到 0.047 m 中位（0.158 max）。
+#: ★ 默认**只对 2027 生效**；2026 不在表里 ⇒ 不传任何覆盖 ⇒ 参数文件 + 节点构造**逐字节不变**。
+#: ★ 这里只动"节点密度"（纯建图质量参数），不动 world 几何/资产/帧图。
+#:   仍**不**采用 §45.2c H 档的 `odom_frame:=odom_level`：那会让 slam_toolbox 发 map→odom_level，
+#:   与静态边 odom→odom_level 冲突（两个父节点，§45.7#2）。
+_MAPPER_PARAMS_BY_WORLD = {
+    'RMUC2027': {'minimum_travel_distance': 0.6, 'minimum_travel_heading': 0.5},
+    'RMUL2027': {'minimum_travel_distance': 0.6, 'minimum_travel_heading': 0.5},
+}
+
 
 class _SpawnZForRobot(Substitution):
     """`rm_simulation.launch.py` 的 `spawn_z`：**该模型落定时的 base_link 高度 + 1 mm**。
@@ -2990,6 +3006,21 @@ def generate_launch_description():
         choices=['cartographer', 'slam_toolbox'],
         description='Choose 2D mapping backend (only mode:=mapping): slam_toolbox | cartographer')
 
+    # ★ 2026-10-29（meas §46.3）：slam_toolbox 的**节点密度**覆盖（只影响 mode:=mapping 的
+    #   slam_toolbox；<=0 = 用 `_MAPPER_PARAMS_BY_WORLD` 的 per-world 槽）。默认 -1 ⇒
+    #   2027 = 0.6/0.5、2026 = 参数文件原值（0.2/0.2）⇒ 默认路径**逐字节不变**。
+    #   给 0.2/0.2 = 复现 §45.2 的坏 map→odom（A/B 对照用）。
+    declare_slam_min_travel_distance_cmd = DeclareLaunchArgument(
+        'slam_min_travel_distance',
+        default_value='-1.0',
+        description='slam_toolbox minimum_travel_distance 覆盖（m；<=0 = 用 per-world 槽：'
+                    '2027 = 0.6，2026 = 参数文件的 0.2）。只影响 mode:=mapping 的 slam_toolbox。')
+    declare_slam_min_travel_heading_cmd = DeclareLaunchArgument(
+        'slam_min_travel_heading',
+        default_value='-1.0',
+        description='slam_toolbox minimum_travel_heading 覆盖（rad；<=0 = 用 per-world 槽：'
+                    '2027 = 0.5，2026 = 参数文件的 0.2）。只影响 mode:=mapping 的 slam_toolbox。')
+
     # ★ 2026-10-06：新增 **地面分割槽位** `ground`。
     #   为什么需要它：现有链路的"什么算障碍"由 linefit 一家决定（每扇区直线拟合 + 硬
     #   `max_dist_to_line`）。linefit 在**斜面**上会把坡道/路缘判错（坡面点超出垂直容差 ⇒ 判成障碍
@@ -4032,6 +4063,35 @@ def generate_launch_description():
         if verdict is not None and verdict['may_load']:
             params['map_file_name'] = base          # ← slam_toolbox 反序列化并接着建（续建的全部秘密）
             params['map_start_pose'] = start_pose   # ← 机器人在旧图里的位姿（出生点相对系 ⇒ [0,0,0]）
+        # ★ 2026-10-29（meas §46.3）：**per-world mapper 槽** + 两个显式覆盖（<=0 = 用槽）。
+        #   2026 不在 _MAPPER_PARAMS_BY_WORLD 里且两个覆盖都是 -1（默认）⇒ mapper_overrides 为空
+        #   ⇒ params 与 node 的构造**逐字节不变**（默认路径不变）。
+        mapper_overrides = dict(_MAPPER_PARAMS_BY_WORLD.get(world_v, {}))
+        mt_dist_raw = context.perform_substitution(
+            LaunchConfiguration('slam_min_travel_distance')).strip()
+        mt_head_raw = context.perform_substitution(
+            LaunchConfiguration('slam_min_travel_heading')).strip()
+        try:
+            mt_dist = float(mt_dist_raw) if mt_dist_raw else -1.0
+            mt_head = float(mt_head_raw) if mt_head_raw else -1.0
+        except ValueError:
+            raise RuntimeError(
+                '[mapper 槽] slam_min_travel_distance/heading 不是数字：%r / %r'
+                % (mt_dist_raw, mt_head_raw))
+        if mt_dist > 0.0:
+            mapper_overrides['minimum_travel_distance'] = mt_dist
+        if mt_head > 0.0:
+            mapper_overrides['minimum_travel_heading'] = mt_head
+        if mapper_overrides:
+            params.update(mapper_overrides)
+            banner += (
+                '\n  · [mapper 槽] world=%s ⇒ minimum_travel_distance=%s / minimum_travel_heading=%s'
+                '（per-world 槽：2027 = 0.6/0.5；2026 保持参数文件的 0.2/0.2。'
+                'A/B：slam_min_travel_distance:=0.2 slam_min_travel_heading:=0.2；'
+                '见 meas §45.2c / §46.3）'
+                % (world_v,
+                   params.get('minimum_travel_distance', 'yaml 原值'),
+                   params.get('minimum_travel_heading', 'yaml 原值')))
         node = Node(
             package='slam_toolbox',
             executable='async_slam_toolbox_node',
@@ -4381,6 +4441,8 @@ def generate_launch_description():
     ld.add_action(declare_nav_cmd)
     ld.add_action(declare_planner_cmd)
     ld.add_action(declare_mapper_cmd)
+    ld.add_action(declare_slam_min_travel_distance_cmd)
+    ld.add_action(declare_slam_min_travel_heading_cmd)
     ld.add_action(declare_ground_cmd)
     # ★ 2026-10-27（契约 §4.15）：`_check_robot11_mount_combination` 已随 `robot11_mount` 删除
     #   （它检查的 "sensor ⇔ ground:=linefit" 前提已不存在：sensor 语义现在是唯一且无覆盖文件）。

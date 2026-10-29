@@ -150,6 +150,16 @@ if(BUILD_TESTING)
   target_include_directories(gicp_seed_math_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(gicp_seed_math_test Eigen3::Eigen)
   add_test(NAME gicp_seed_math_test COMMAND gicp_seed_math_test)
+
+  # ============================ 种后宽门 + 空间信任域回归测试（契约 §4.17.6 / meas §46.1） ============================
+  # test/gicp_seed_trust_test.cpp 只测 include/gicp_registration/seed_trust.hpp 的纯数学：
+  #   · seedGateThresholds()：窗口内前 K 帧取 max(普通门, seed_gate_*)（只放宽、不收窄）；
+  #   · seedTrustDeviation()：候选 map→odom 相对种子的偏差 + 是否在域内；
+  #   · 用 §45.5b 的 kf8 实测数值钉住"0.15 m 会挡掉合法精修、0.35 m 放行、错种子 2 m 被拒"。
+  add_executable(gicp_seed_trust_test test/gicp_seed_trust_test.cpp)
+  target_include_directories(gicp_seed_trust_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(gicp_seed_trust_test Eigen3::Eigen)
+  add_test(NAME gicp_seed_trust_test COMMAND gicp_seed_trust_test)
 endif()
 
 ament_auto_package(

@@ -123,10 +123,23 @@ private:
   // publishGateMetrics 的注释。存在的理由：判据的输入（创新/dt/门限）在日志里是**限频**的
   // （WARN_THROTTLE 1 s、采纳帧的 DEBUG 默认不可见）⇒ "逐帧"证据只能靠这条话题。
   // 语义 = 只读观测，**不改变**任何判据/发布行为（与 ~/fitness_score、~/converged 同一契约）。
+  // diag = 2026-10-29 追加的诊断（种子宽门 / 空间信任域 / 地面去除），只进 ~/gate 的追加列。
+  struct GateDiagnostics
+  {
+    bool seed_gate_wide = false;        // 本帧用了种后宽门
+    int seed_frame_no = 0;              // 本帧是窗口内第几帧（0 = 不在窗口）
+    bool seed_trust_checked = false;    // 本帧执行了空间信任域检查
+    double seed_dev_trans_m = 0.0;      // 候选 map→odom 离种子的平移（m）
+    double seed_dev_rot_deg = 0.0;      // 候选 map→odom 离种子的旋转（°）
+    int seed_trust_rejects = 0;         // 窗口内累计被信任域拒绝的帧数
+    bool ground_filter_on = false;      // 本帧真的做了地面去除
+    size_t ground_removed = 0;          // 本帧被地面去除过滤掉的源点数
+  };
   void publishGateMetrics(
     double innov_xy, double innov_yaw_deg, double allow_xy, double allow_yaw_deg, double gate_dt,
     double score, bool converged, bool accepted, size_t source_points, double align_ms,
-    int reject_streak, int flags, const Eigen::Vector3d & innov_vec);
+    int reject_streak, int flags, const Eigen::Vector3d & innov_vec,
+    const GateDiagnostics & diag);
 
   // ---- 参数（键名与依据逐条见 config/gicp_registration_sim.yaml） ----
   std::string pcd_path_;
@@ -215,6 +228,26 @@ private:
   // 但在**刚给了全局种子**的场景里，第一帧的"创新"= 种子对不对，此时豁免 = 把错种子放行。
   // 0 = 关闭本窗口（逐字节回到 2026-10-28 行为）。
   double seed_trust_window_sec_;
+  // ---- 种后**宽门** + **空间信任域**（2026-10-29，契约 §4.17.6；治 §45 的两个尾巴）----
+  // ① 宽门：种后前 seed_gate_frames 帧把创新门限放宽到 seed_gate_*（取 max ⇒ 只放宽、不收窄）。
+  //    依据：§45.5b 的首帧创新 0.308 m vs 普通门限 0.300 m（只差 8 mm）⇒ 52 帧全拒 ⇒ NO_CONVERGE，
+  //    而那个种子离真值只有 0.272 m，是**应该被精修**的。
+  // ② 信任域：窗口内每帧的**候选 map→odom** 相对**种子**不得超过 seed_max_trans/yaw；超出 ⇒ 拒绝
+  //    并保持种子（窗口到期仍无采纳 ⇒ NO_CONVERGE）。为什么必须"作用在 map→odom"：机器人自身
+  //    在窗口内可以合法移动（里程计带走），而 map→odom 才是本节点拥有的"修正量"。
+  //    为什么默认 0.35 m 而不是 0.15：kf8 的合法精修终点离种子 0.292 m / 4.68°，0.15 会把它挡掉
+  //    （单测 gicp_seed_trust_test 显式钉住）；0.30 只剩 8 mm 余量 ⇒ 不取。
+  int seed_gate_frames_;
+  double seed_gate_trans_m_;
+  double seed_gate_yaw_deg_;
+  double seed_max_trans_m_;
+  double seed_max_yaw_deg_;
+  // ---- 地面去除（2026-10-29，meas §46.2）----
+  // 把**源**点云变换到重力对齐帧后只保留 z >= ground_filter_min_z 的点（去掉地板，让栅栏/墙主导）。
+  // 默认 false ⇒ 默认路径逐字节不变；运行期可用 `ros2 param set` 切换（每帧读参数，便于 A/B）。
+  bool ground_filter_enable_;
+  std::string ground_filter_frame_;
+  double ground_filter_min_z_;
   // 以下只在 align 组内读写（consumePendingInitialPose / pointcloudCallback / publishGateMetrics）
   // ⇒ 不需要 mutex_；定时器不读它们。
   bool seed_trust_active_ = false;          // true = 当前处于种子信任窗口
@@ -223,6 +256,8 @@ private:
   rclcpp::Time seed_trust_deadline_;        // 窗口截止
   double seed_trust_elapsed_ = 0.0;         // 窗口结束时的实际时长（诊断）
   int seed_trust_reanchor_suppressed_ = 0;  // 窗口内被抑制的重锚次数（应恒为 0 执行；这是"触发过"计数）
+  int seed_frames_in_window_ = 0;           // 窗口内已处理的帧数（1-based；宽门只覆盖前 seed_gate_frames 帧）
+  int seed_trust_rejects_ = 0;              // 窗口内被**空间信任域**拒绝的帧数（累计）
   Eigen::Matrix4d seed_T_map_odom_ = Eigen::Matrix4d::Identity();  // 本次种子应用的 map→odom（算"离种子多远"）
   // 种子 round-trip 不变量（§4.17）：/initialpose 应用后，map→base 必须回到 /initialpose。
   bool seed_roundtrip_valid_ = false;
