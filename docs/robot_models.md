@@ -487,6 +487,17 @@ ros2 launch hzmi_rm_simulation rm_simulation.launch.py robot:=hzmirm world:=RMUC
 
 ---
 
+### 9.0 ★ 2026-10-29：`livox_frame` 拆成"物理 + 数据帧"（mesh/link 归属变了）
+
+| link | 几何 | TF | 说明 |
+|---|---|---|---|
+| **`livox_physical`**（新） | **`l12` 的 visual（= MID-360 本体）+ 上游惯量**；**无 collision** | `base_link→livox_physical` **rpy = −30°**（`livox_tilt_rpy`）、`xyz` 与 `body_to_livox` 逐字相同 | 物理安装姿态。**画出来的雷达现在真的斜**（之前是平的）；射线传感器也挂这里 ⇒ 原始云 `/livox/lidar_raw`（`frame_id=livox_physical`） |
+| **`livox_frame`** | **无几何**（只有 1e-6 的占位惯量） | `base_link→livox_frame` **rpy = 0**（不变） | **数据帧**。`livox_cloud_extrinsic` 把原始云旋 `Rx(+30°)` 进这个帧 ⇒ `/livox/lidar` + `/livox/lidar/pointcloud` |
+
+⇒ `livox_frame` **不再承载 mesh**；`l12` 的 mesh 现在画在 `livox_physical` 上。
+数据链未变（下游仍吃 `/livox/lidar` 与 `/livox/lidar/pointcloud`），细节见契约 §4.12.6 与
+measurements §47（含第一次接线接断的复盘）。
+
 ## 9. Phase 1：用户 `robot11` 的 mesh 打包与量测（2026-10-07）
 
 > 状态：**新增**。这一节只做"资产与量测"，**不改任何默认值、不接 URDF**（接入是 §10）。

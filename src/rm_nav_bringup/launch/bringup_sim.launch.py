@@ -1929,7 +1929,15 @@ class _MountReadout(Substitution):
     """
 
     def perform(self, context):
-        return ('  · 雷达安装方式 = **实车约定**（契约 §4.12；2026-10-27 起没有 `robot11_mount` 参数）：'
+        return ('  · 雷达安装方式 = **实车约定（2026-10-29 起拆成"物理 + 数据帧"两层）**（契约 §4.12.3）：'
+                '`base_link→livox_physical` **rpy = −30°**（物理安装姿态，mesh 挂这里 ⇒ **画出来是斜的**），'
+                '射线传感器也挂 `livox_physical` ⇒ 插件发 `/livox/lidar_raw`（点表达在**斜**的物理系）；'
+                '`livox_cloud_extrinsic` 复刻驱动器 `extrinsic_parameter`：Rx(+30°) 旋正 → `/livox/lidar` '
+                '（`frame_id=livox_frame`，`base_link→livox_frame` **rpy=0**，与实车 TF 一致）；'
+                '`livox_frame→imu_link` 仍是倾角（IMU 物理上真的斜 30°）+ LIO `extrinsic_R` 由本 launch '
+                '从 URDF 解析成 Rx(+30°)（水平点云 → 斜 IMU 系）、`extrinsic_T` = [0,0,0.05]；'
+                '⇒ 下游看到的仍是**水平**点云（地面法向 ≈ +z）⇒ linefit 用槽位那份 '
+                '（`sensor_height: 0.2595`、`gravity_aligned_frame: ""`）、p2l 用 `target_frame: base_link`。'
                 '`base_link→livox_frame` **rpy=0**（与实车 TF 一致，只有平移 0.204443 m）+ 倾角在 '
                 '`livox_frame→imu_link`（IMU 物理上真的斜 30°，加速度计感受得到）+ 插件 '
                 '`<tilt_rpy>` 把**射线**旋斜、并把**点**旋进**水平**的 `livox_frame`（= 实车驱动器 '
@@ -3231,6 +3239,29 @@ def generate_launch_description():
     #   （`base_link→livox_frame` rpy=0、插件把点旋进这个帧），linefit 槽位那份
     #   `segmentation_sim_robot11.yaml`（`sensor_height: 0.2595` + `gravity_aligned_frame: ""`）
     #   的语义重新成立 ⇒ 与原 'plugin' 档走同一份参数文件。
+    # ★★ 2026-10-29（契约 §4.12.3，**实车分解**的最后一步）：驱动器那样的外参。
+    #   链路：`livox_physical`（物理斜 30°，mesh + 射线传感器都挂它）→ 插件发
+    #   `/livox/lidar_raw`（点表达在**斜的**物理系）→ 本节点旋 Rx(+30°)（= 安装倾角的逆）
+    #   → `/livox/lidar` + `frame_id=livox_frame`（**水平**数据帧）。
+    #   ⇒ 下游（linefit / p2l / LIO）看到的仍是水平的 `/livox/lidar`，数据链一字未改。
+    #   旋转默认**从 TF 读** `livox_frame←livox_physical`（唯一真源 = URDF 的 body_to_livox_physical）；
+    #   其它机器人模型没有 `/livox/lidar_raw`（插件仍直接发 `/livox/lidar`）⇒ 本节点是空转，无副作用。
+    bringup_livox_cloud_extrinsic_node = Node(
+        package='cloud_accumulator',
+        executable='livox_cloud_extrinsic',
+        name='livox_cloud_extrinsic',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'input_topic': '/livox/lidar_raw',
+            'output_topic': '/livox/lidar',
+            'frame_id': 'livox_frame',
+            'source_frame': 'livox_physical',
+            'extrinsic_rpy': [0.523598775598293, 0.0, 0.0],
+            'use_tf': True,
+        }],
+    )
+
     def _linefit_node(params, condition):
         return Node(
             package='linefit_ground_segmentation_ros',
@@ -4491,6 +4522,8 @@ def generate_launch_description():
     ld.add_action(bringup_imu_complementary_filter_node)
     # 地面分割槽位：两个节点都进 LaunchDescription，但各自的 condition 保证**只有一个**真的被启动
     #（⇒ /segmentation/obstacle 与 /segmentation/ground 恒定只有一个发布者）。
+    # 先有水平点云（/livox/lidar），再做分割/降采样
+    ld.add_action(bringup_livox_cloud_extrinsic_node)
     ld.add_action(bringup_linefit_ground_segmentation_node)
     # ★ 2026-10-21（§4.14）：gravity:=base 的 linefit（gravity_aligned_frame=base_link）；与上面互斥
     ld.add_action(bringup_linefit_ground_segmentation_node_base)

@@ -10321,3 +10321,80 @@ python3 .tmp_45/eval_replay.py A46b --show 0  # before：0.920 / 1.987 / 1.988 m
 **种子那条（8 mm）修好了并且有 live 证据（0.3080 被宽门接受、0.3086 在信任域内、错种子仍然大声失败）；
 yaw 那条没修好——去掉地板后仍是 6.87°，我们诚实地把它降级为"机制已否证、需要更强的 yaw 约束"；
 mapper 那条按 per-world 槽落地（0.6/0.5 实测生效），地图对 GT 的形变从 1.99 m 降到 7.5 cm。**
+
+---
+
+## 47. 雷达"物理斜装 + 驱动器外参"的分解（2026-10-29）
+
+用户的原话是"**模型斜，点云也倾斜，然后改之前说的那个外参给点云转正**"。这一节记录怎么落的、
+以及**第一次接线接错了什么**（§47.1，最贵的一课）。
+
+### 47.0 分解（三层，与实车一一对应）
+
+| 层 | 载体 | 现在的值 | 与实车对应 |
+|---|---|---|---|
+| 物理安装 | link `livox_physical` + 关节 `body_to_livox_physical` | `base_link→livox_physical`：`xyz = (0.000562, 0.130916, 0.157028)`、**`rpy = ( −0.523599, 0, 0 )`** | MID-360 真的斜装 30° |
+| ② 原始点云 | 插件（挂在 `livox_physical`、`<tilt_rpy>0 0 0`） | `/livox/lidar_raw`（`CustomMsg`）+ `/livox/lidar_raw/pointcloud`（`PointCloud2`），点表达在**斜的物理系** | 驱动器**旋之前**的原始点云 |
+| ③ 驱动器外参 | 节点 `livox_cloud_extrinsic`（`cloud_accumulator` 包） | 旋转 = TF `livox_frame←livox_physical`（= `Rx(+30°)`），输出 `/livox/lidar` + `/livox/lidar/pointcloud`，`frame_id=livox_frame` | 驱动器的 `extrinsic_parameter`（只旋点云） |
+
+数据帧：`base_link→livox_frame` **rpy = 0**（与实车 TF 一致）；mesh 画在 `livox_physical` 上 ⇒ **画出来是斜的**；
+`livox_frame→imu_link` 仍是 `rpy=−30°`（IMU 物理上斜）⇒ `h_imu` / §4.11 静态边 / LIO `extrinsic_R`(=Rx(+30°)) **全不变**。
+
+### 47.1 ⚠️ 第一次接线把数据链**接断了**（用户当场看到：RViz 没图、没点云）
+
+**症状与根因**（全部 `ros2 topic info -v` 实测）：
+
+| 话题 | 真实类型 | 我第一版的做法 | 后果 |
+|---|---|---|---|
+| `/livox/lidar_raw` | `livox_ros_driver2/msg/CustomMsg`（BEST_EFFORT） | 用 `sensor_msgs/PointCloud2` 订阅 | 一条也收不到 |
+| `/livox/lidar_raw/pointcloud` | `sensor_msgs/msg/PointCloud2` | 没订阅 | 白丢一路数据 |
+| `/livox/lidar` | **CustomMsg**（LIO 的 `lidar_type: livox_custom_msg` 吃这个） | 只发 PointCloud2 | **LIO 断流** |
+| `/livox/lidar/pointcloud` | **PointCloud2**（linefit 的 `input_topic`、cloud_accumulator 的 `cloud_topic`、p2l 都吃这个） | 没人发 | **地面分割/`/scan`/3D 累积全断** |
+
+还有一个更隐蔽的：我第二版把 CustomMsg 的订阅写成 **RELIABLE**，而插件那条是 **BEST_EFFORT**
+⇒ QoS 不兼容 ⇒ `/livox/lidar` 仍然是 0 Hz。**教训：类型/QoS 必须用 `ros2 topic info -v` 看，不能读代码猜。**
+
+**修法**（节点现在两个通道都接、按原类型各发一路）：
+
+```
+/livox/lidar_raw            CustomMsg     (BEST_EFFORT) ─┐
+/livox/lidar_raw/pointcloud PointCloud2   (BEST_EFFORT) ─┤ livox_cloud_extrinsic（点 ×R，frame_id→livox_frame）
+                                                          ├→ /livox/lidar            CustomMsg  (RELIABLE)
+                                                          └→ /livox/lidar/pointcloud PointCloud2(RELIABLE)
+```
+
+### 47.2 实测（`ros2 topic info -v` / `ros2 topic hz`，`robot:=robot11 world:=RMUC2026`）
+
+| 话题 | 类型 | 发布者 | 订阅者 | 速率 |
+|---|---|---|---|---|
+| `/livox/lidar_raw` | `CustomMsg` | `livox_physical_plugin`（BEST_EFFORT） | `livox_cloud_extrinsic`（BEST_EFFORT） | **4.28 Hz** |
+| `/livox/lidar_raw/pointcloud` | `PointCloud2` | 同上 | 同上 | 4.4 Hz 量级 |
+| `/livox/lidar` | `CustomMsg` | **`livox_cloud_extrinsic`**（RELIABLE） | —（LIO 在 bringup 里才起） | **4.49 Hz** |
+| `/livox/lidar/pointcloud` | `PointCloud2` | **`livox_cloud_extrinsic`**（RELIABLE） | —（linefit/accumulator 在 bringup 里才起） | **4.44 Hz** |
+| `/livox/imu` | `Imu` | imu 插件 | — | 36.1 Hz |
+
+> 这里的 4.4 Hz（而不是 10 Hz）是**本机 gzserver 的 RTF ≈0.43**导致的：`/livox/imu` 同时只有 36 Hz
+> （设定 100 Hz）⇒ 传感器链没有额外掉帧。**判据看的是"比例"**，不是绝对值。
+
+**姿态（实测）**：
+
+| 量 | 值 | 判读 |
+|---|---|---|
+| TF `base_link→livox_frame` | `xyz=(0.001,0.131,0.157)`、`RPY=(0.000, −0.000, 0.000)` | **数据帧水平** ✓ |
+| TF `base_link→livox_physical` | `xyz` 同上、`RPY=(−0.524, 0.000, 0.000)` | **物理 30°** ✓ |
+| 原始云 `/livox/lidar_raw/pointcloud` 地面法向（RANSAC，r∈[0.5,4] m） | **`[+0.0006, −0.5023, +0.8647]`，偏离 +z 30.15°**（frame_id = `livox_physical`） | **斜的** ✓ 与 −30° 安装角一致 |
+| 转正后 `/livox/lidar/pointcloud` 地面法向 | **`[+0.0006, −0.0020, +1.0000]`，偏离 +z 0.12°**（frame_id = `livox_frame`） | **水平** ✓（30.15° → 0.12°，残差 = RANSAC 拟合噪声） |
+
+### 47.3 诚实清单（§47）
+
+* **没跑完整的 `mode:=mapping` 冒烟**（`/scan`、`/segmentation/obstacle`、accumulator 的云增长）：
+  本机 gzserver 只有 0.43 RTF，全套 nav/LIO 起齐要十几分钟；本轮只验到**话题层**
+  （§47.2：原始→转正两路都 >4 Hz、类型/QoS 全对、TF 两条边对）。**这是本轮最大的未验证项。**
+* `/robot_description`：实测由 `robot_state_publisher` 以 **TRANSIENT_LOCAL + RELIABLE** 发布
+  （`ros2 topic info -v`），`nav2.rviz` 的 RobotModel 正好配的是 Transient Local/Reliable，
+  `install/.../nav2.rviz` 是指向源码的符号链接 ⇒ 配置侧没问题。用户看到的 RobotModel 不显示
+  更可能是 **Fixed Frame `map` 还没发布**（没起 SLAM/AMCL 时 `map→odom` 不存在），本轮没进一步定位。
+* 节点的 CustomMsg 通道用**逐点 Python 旋转**（30k 点/帧）：RTF 0.43 下 4.5 Hz 不吃紧；
+  如果以后跑满 10 Hz/30 万点，这段要改成 C++ 或 numpy 化。
+* 没验证 `livox_ros_driver2` 的 `CustomMsg` 里 `offset_time` 语义（原样透传，与插件一致）；
+  也没验证 p2l 的 `target_frame: base_link` 在新链路下是否仍逐点一致（应然一致，因为输入帧没变）。

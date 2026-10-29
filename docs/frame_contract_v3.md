@@ -709,8 +709,8 @@ roll/pitch 是 **<0.5°**）。⇒ 全局层的"水平"只能和 `map` 一样好
 | `base_link→livox_frame` | `rpy = Rx(−30°)`、`xyz = (0.000562, 0.130916, 0.157028)` | **`rpy = 0`**、`xyz` **逐位不变** |
 | `livox_frame→imu_link` | `rpy = 0`、`xyz = (0, 0, −0.05)` | **`rpy = Rx(−30°)`**、`xyz = Rx(−30°)·(0,0,−0.05) = (0, −0.025, −0.043301)` |
 | ⤷ 派生：`base_link→imu_link` | `rpy = Rx(−30°)`、`xyz = (0.000562, 0.105916, 0.113727)` | **完全相同**（物理几何一个字节没动） |
-| 插件 `<tilt_rpy>` | 单位阵（倾角由 link 姿态带斜） | **`Rx(−30°)`**（射线真的斜） |
-| 点云表达 | 传感器系（`frame_id=livox_frame`，而该帧自己斜 30°） | **水平**的 `livox_frame`（与实车驱动器旋完点云后的语义一致） |
+| 插件 `<tilt_rpy>` | 单位阵（倾角由 link 姿态带斜） | 2026-10-21~10-28：**`Rx(−30°)`**；**2026-10-29 起 = `0 0 0`**（倾角改由 `body_to_livox_physical` 的关节 rpy 承担，见 §4.12.6） |
+| 点云表达 | 传感器系（`frame_id=livox_frame`，而该帧自己斜 30°） | 2026-10-21~10-28：插件直接把点写进**水平**的 `livox_frame`；**2026-10-29 起**：插件发**斜**的 `/livox/lidar_raw`（`frame_id=livox_physical`），`livox_cloud_extrinsic` 旋正后发 `/livox/lidar`（`frame_id=livox_frame`）—— 见 §4.12.6 |
 | LIO `extrinsic_R` | `I`（IMU 与雷达同姿态） | **`Rx(+30°)`**（水平点云 → 斜的 IMU 系；由 launch 从 URDF 解析注入） |
 | LIO `extrinsic_T` | `[0, 0, 0.05]` | **`[0, 0, 0.05]`（不变）** |
 | `gravity_align_rpy`（= E1 先验 / §4.11 的 `R_grav`）来源 | `base_link→livox_frame` | **`base_link→imu_link`**（值同样是 `[−30, 0, 0]°` ⇒ **§4.11 静态边的数值不变**） |
@@ -744,7 +744,7 @@ roll/pitch 是 **<0.5°**）。⇒ 全局层的"水平"只能和 `map` 一样好
 | p2l | 仍用 `target_frame: base_link`（契约要求 `/scan` 在 `base_link`；点云水平后这条只是"换帧"，语义不变） |
 | `lio_tf_adapter` | **不用改**：它的 `T(imu←base_link)` 与改动前逐位相同（IMU 的物理位姿没动） |
 | 默认模型 / `hzmirm` | **零改动**：它们的 IMU 链本来就没有倾角（解析出来的 `extrinsic_R` = I、`gravity_rpy` = 0） |
-| 画出来的雷达 mesh | 现在**水平**（物理上斜）—— 纯显示差异，与实车的"TF 是平的"一致 |
+| 画出来的雷达 mesh | 2026-10-21~10-28：**水平**（物理上斜，纯显示差异）；**2026-10-29 起**：**斜的**（mesh 挂在 `livox_physical` 上） |
 | `robot11_mount:=plugin｜urdf` | **删除**（硬报错）。它们是"倾角记在哪"的实验臂，新约定下没有意义 |
 
 **验收（实测见 measurements §29）**：`base_link→livox_frame` rpy = 0；`base_link→imu_link`
@@ -1985,3 +1985,29 @@ ROS 2 Humble 对**未知**的 `name:=value` 是**静默接受**的（§28.4 实�
   `base_link` z：地面峰 ≈ −0.13 m），但**同一份资产内部**必须自洽，且不得混用。
 - 2D 图的 `origin` 是**栅格左下角**，不是地图原点；把它当地图原点会让 amcl/gicp 的
   `initial_pose` 偏一个窗口尺寸。
+
+### 4.12.6 物理/数据两层分解（2026-10-29）：`livox_physical` + `livox_cloud_extrinsic`
+
+> 用户要求"**模型斜，点云也倾斜，然后改之前说的那个外参给点云转正**"——把实车的三段式在仿真里摊开。
+> 上一版（§4.12.2）为了绕开 linefit 的 `gravity_aligned_frame` bug，把倾角藏在插件参数里、
+> **mesh 画成平的**，这跟实车"物理真的斜"不一致，也不利于按图排查。
+
+| 层 | sim 里的落点 | 关键值 |
+|---|---|---|
+| 物理安装 | link **`livox_physical`** + 关节 `body_to_livox_physical`（fixed，parent=`base_link`） | `xyz = (0.000562, 0.130916, 0.157028)`、**`rpy = livox_tilt_rpy`（−30°）**；mesh（visual，**无 collision**）与射线传感器都挂它 |
+| 原始云 | 插件（`<gazebo reference="livox_physical">`、`<tilt_rpy>0 0 0</tilt_rpy>`） | 话题 `/livox/lidar_raw`（**`livox_ros_driver2/msg/CustomMsg`**）+ `/livox/lidar_raw/pointcloud`（**`PointCloud2`**），`frame_id = livox_physical`，**点表达在斜系** |
+| 驱动器外参 | 节点 **`livox_cloud_extrinsic`**（`cloud_accumulator` 包，`ros2 run cloud_accumulator livox_cloud_extrinsic`） | 旋转 = TF `livox_frame ← livox_physical`（= `Rx(+30°)`，**从 TF 读、不写死**）；输出 `/livox/lidar`（CustomMsg）**和** `/livox/lidar/pointcloud`（PointCloud2），`frame_id = livox_frame` |
+| 数据帧 | link **`livox_frame`**（**无几何**，只有占位惯量）+ 关节 `body_to_livox` | `base_link→livox_frame` **rpy = 0**（与实车 TF 一致）；`livox_frame→imu_link` 仍是 `rpy=−30°`（IMU 物理上斜） |
+
+**不变的东西**（所以下游一个参数都没改）：`h = 0.259527`、`h_imu = 0.216226`、§4.11 静态边
+`odom→odom_level`、LIO 的 `extrinsic_R = Rx(+30°)` / `extrinsic_T = [0,0,0.05]`、linefit 的
+`gravity_aligned_frame: ""` + `sensor_height: 0.2595`、p2l 的 `target_frame: base_link`。
+
+**消息类型/QoS 契约（踩过坑，必须记住）**：这条路两端各是**两种类型** ——
+`/livox/lidar_raw` 是 `CustomMsg`（**插件用 BEST_EFFORT 发**，订阅必须同样 BEST_EFFORT，否则一条都收不到），
+`/livox/lidar_raw/pointcloud` 是 `PointCloud2`；转正后必须**按原类型**分别发回 `/livox/lidar`（CustomMsg，
+LIO 吃）与 `/livox/lidar/pointcloud`（PointCloud2，linefit/accumulator/p2l 吃）。
+只发一种 ⇒ 另一半链路断流（2026-10-29 的第一次接线就是这么断的，见 measurements §47.1）。
+
+**验收（实测 measurements §47.2）**：`base_link→livox_frame` rpy = 0；`base_link→livox_physical`
+rpy = −0.524；原始云地面法向 **30.15°**；转正后 **0.12°**；四种话题类型/QoS/速率全部对上。

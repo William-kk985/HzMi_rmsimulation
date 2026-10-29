@@ -645,20 +645,32 @@
   <!-- ==================== link l11 ==================== -->
   <!-- ==================== link livox_frame ==================== -->
   <link name="livox_frame">
-    <!-- 【上游原样】inertial -->
+    <!-- ★ 2026-10-29：本 link 现在是**纯数据帧**（`base_link→livox_frame` rpy=0，与实车 TF 一致）。
+         几何（mesh/inertial）搬到 `livox_physical`；点云由 `livox_cloud_extrinsic` 从
+         `/livox/lidar_raw`（斜的物理系）旋 `Rx(+倾角)` 到本帧后发 `/livox/lidar`。
+         为什么留一个极小惯量：Gazebo 对"固定关节链上的无惯量 link"会走 lumping 告警路径，
+         给个 1e-6 量级的占位最省事（物理质量在 livox_physical 上，总质量不变）。 -->
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1e-6" />
+      <inertia ixx="1e-9" ixy="0" ixz="0" iyy="1e-9" iyz="0" izz="1e-9" />
+    </inertial>
+  </link>
+
+  <!-- ==================== link livox_physical（2026-10-29 新增：物理雷达） ==================== -->
+  <link name="livox_physical">
+    <!-- 物理本体：inertial + mesh 都从 livox_frame 搬过来（逐字），**故意不给 collision**
+         （射线传感器就在本 link 原点，给碰撞体 ⇒ 每条射线打自己；docs/robot_models.md §10.5）。 -->
     <inertial>
       <origin xyz="-0.000348524070196802 0.00208606529928732 0.0221378690951775" rpy="0 0 0" />
       <mass value="0.13998133026592" />
       <inertia ixx="4.17032187760686E-05" ixy="-5.98077892665089E-09" ixz="3.05517185056836E-07" iyy="4.50191700802289E-05" iyz="-5.90930308926011E-10" izz="6.87178468496533E-05" />
     </inertial>
-    <!-- 【上游原样】visual（几何位置/单位/材质逐字照抄；mesh 文件按 `visual_dir` 换档，见文件头 Phase 5） -->
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry><mesh filename="package://robot11/${visual_dir}/l12${visual_ext}" /></geometry>
       <material name=""><color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" /></material>
     </visual>
-    <!-- 【我们加的｜替换】上游这里是 mesh collision；按 Phase 1 实测换掉（原因见文件头） -->
-    <!-- livox_frame：**故意不给 collision**（射线传感器就在本 link 原点上，给碰撞体 = 每条射线打自己；实测见 docs/robot_models.md §10.5） -->
   </link>
 
   <!-- ==================== joint j2 ==================== -->
@@ -715,6 +727,17 @@
     <axis xyz="0 0 0" />
   </joint>
 
+  <!-- ==================== joint body_to_livox_physical（2026-10-29 新增） ==================== -->
+  <!-- 物理安装姿态：`base_link→livox_physical` 的 rpy = `livox_tilt_rpy`（实车的 −30° 下俯），
+       xyz 与 `body_to_livox` **逐字相同**（雷达的物理位置没动，只是把 30° 从插件参数搬到 link 上）。
+       ⇒ 射线方向不变（世界系里逐条相同），但**点云表达在斜系**（`/livox/lidar_raw`），
+       与实车驱动器"原始点云在传感器系"一致。 -->
+  <joint name="body_to_livox_physical" type="fixed">
+    <origin xyz="0.000561701465058485 0.130915824456595 ${0.15702816968305 + livox_raise_m_p}" rpy="${livox_tilt_rpy_p}" />
+    <parent link="base_link" />
+    <child link="livox_physical" />
+  </joint>
+
 
   <!-- ==================== 【我们加的】配件：IMU / 雷达 / 底盘 ==================== -->
   <!-- 上游 URDF 里**没有** imu_link、没有 <gazebo>、没有 <sensor>、没有 <plugin>
@@ -769,13 +792,13 @@
        ⇒ header.frame_id = livox_frame，与本栈 `lidar_frame: livox_frame` 契约一致）。
        射线参数与宏一致：水平 100 × 垂直 360、10 Hz、0.1–200 m、σ=2 mm、
        垂直 FOV −7.22°…+55.22°（这是本仓 mid360.xacro 的既有取值）。 -->
-  <gazebo reference="livox_frame">
-    <sensor type="ray" name="livox_frame">
+  <gazebo reference="livox_physical">
+    <sensor type="ray" name="livox_physical">
       <pose>0 0 0 0 0 0</pose>
       <always_on>true</always_on>
       <visualize>false</visualize>
       <update_rate>10</update_rate>
-      <plugin name="livox_frame_plugin" filename="libros2_livox.so">
+      <plugin name="livox_physical_plugin" filename="libros2_livox.so">
         <ray>
           <scan>
             <horizontal>
@@ -812,11 +835,12 @@
              ★ 2026-10-08：这个值现在是 `livox_mount` 的函数 —— plugin 档（默认）=
              $(arg livox_tilt_rpy)（下面这条，与 2026-10-07 逐字节相同）；
              urdf/sensor 档 = `0 0 0`（倾角已经写在关节上，射线由 link 姿态带斜）。 -->
-        <tilt_rpy>${livox_plugin_tilt_rpy}</tilt_rpy>
+        <!-- 0 0 0：倾角改由 `body_to_livox_physical` 的关节 rpy 承担（2026-10-29） -->
+        <tilt_rpy>0 0 0</tilt_rpy>
         <samples>30000</samples>
         <downsample>1</downsample>
         <csv_file_name>$(find ros2_livox_simulation)/scan_mode/mid360.csv</csv_file_name>
-        <topic>/livox/lidar</topic><!--【我们加的｜2026-10-09】`livox_mount:=sensor` 档才发下面这个元素（**写在行内**：
+        <topic>/livox/lidar_raw</topic><!--【我们加的｜2026-10-09】`livox_mount:=sensor` 档才发下面这个元素（**写在行内**：
              条件为假时 xacro 连同它的缩进一起删掉 ⇒ plugin/urdf 两档的渲染去注释后逐字节不变）。
              语义（`livox_points_plugin.cpp` 的 `cloud_frame_sensor_`）：点云表达在**真·传感器系**
              （`axis = mount_rot·ray`），与 `frame_id`（= `<sensor name>` = `livox_frame`）自洽；
@@ -869,7 +893,7 @@
 
   <!-- ⑤ 材质（纯观感） -->
   <gazebo reference="base_link"><material>Gazebo/Orange</material></gazebo>
-  <gazebo reference="livox_frame"><material>Gazebo/LightBlueLaser</material></gazebo>
+  <gazebo reference="livox_physical"><material>Gazebo/LightBlueLaser</material></gazebo>
   <gazebo reference="imu_link"><material>Gazebo/BuildingFrame</material></gazebo>
 
   <!-- ⑥ 【我们加的｜2026-10-20】**轮子对地摩擦**（★ Gazebo 只认 `<gazebo reference>` 这一种写法）
@@ -925,7 +949,7 @@
        ==================================================================
        把 11 个 link（base_link, l10, l11, l2, l3, l4, l5, l6, l7, l8, l9）塌成 1 个刚体：碰撞/视觉几何**逐条**搬进根 link，
        质量/质心/惯量按平行轴定理合成（M=9.4121 kg、Izz=0.12677 kg·m²）；
-       删掉 10 个关节（j2…j11），**保留** livox_frame/imu_link 与它们的固定关节。
+       删掉 10 个关节（j2…j11），**保留** livox_frame/livox_physical/imu_link 与它们的固定关节。
        为什么（实测，见 docs/tilted_lidar_fidelity.md §M）：planar_move 是
        `Model::Set*Vel` = 把同一个 (v,ω) 写给**每一个 link**，只有单刚体才自洽；
        多刚体 + 关节树时关节约束每步都要把它掰回来，实测角速度只执行 1.03%

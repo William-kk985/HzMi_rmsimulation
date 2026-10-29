@@ -65,7 +65,9 @@ def _register_xacro_prefix(root):
     return False
 
 #: 这些 link **不参与**塌陷（感知链要它们当独立帧：雷达/IMU 的 TF 由固定关节给出）
-DEFAULT_KEEP = ('livox_frame', 'imu_link')
+# ★ 2026-10-29：`livox_physical`（物理雷达，见 robot11_make_sim_xacro.py 的 _split_livox_physical）
+# 也保留 —— 它与 livox_frame 同位置、只是带倾角；塌进刚体会丢掉"物理斜装"这件事。
+DEFAULT_KEEP = ('livox_frame', 'livox_physical', 'imu_link')
 
 
 def _rpy2R(r, p, y):

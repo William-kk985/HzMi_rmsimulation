@@ -640,6 +640,95 @@ def check_wheel_friction(xacro_text, wheel_mu, root='base_link',
     return rep
 
 
+
+def _split_livox_physical(txt):
+    """★ 2026-10-29（按用户"实车分解"要求）：把雷达拆成**物理 link** + **水平数据帧**。
+
+    背景：在这之前 `livox_frame` 一个 link 兼两职 —— 帧是水平的（`base_link→livox_frame` rpy=0），
+    倾角只写在插件 `<tilt_rpy>` 里，所以点云出来就是**水平**的、而且**画出来的雷达 mesh 是平的**
+    （`docs/robot_models.md` §11 的 provenance 偏离项）。用户要求镜像实车：
+    模型真的斜画、原始点云真的斜、再由"驱动器那样的外参"把点云转正。
+
+    转换后：
+      · `livox_physical`：**物理** link。`base_link→livox_physical` 的 rpy = `livox_tilt_rpy`
+        （倾角来自 link 姿态，插件 `<tilt_rpy>` 变 `0 0 0`），mesh 挂这里 ⇒ **画出来是斜的**；
+        射线传感器也挂这里 ⇒ 点云表达在 `livox_physical`（**斜**）系里，发到 `/livox/lidar_raw`。
+      · `livox_frame`：**数据帧**，保持 `base_link→livox_frame` rpy=0（与实车 TF 一致），
+        不含任何几何；`livox_cloud_extrinsic` 把 `/livox/lidar_raw` 旋 `Rx(+倾角)` 后发 `/livox/lidar`
+        并标 `frame_id=livox_frame` ⇒ **下游看到的仍是水平点云**，数据链一字未改。
+
+    只动文本、不碰上游合并逻辑；缺元素时原样返回（幂等/可回归）。
+    """
+    import re as _re
+    m_link = _re.search(r'<link name="livox_frame">.*?</link>', txt, _re.S)
+    m_joint = _re.search(r'<joint name="body_to_livox" type="fixed">.*?</joint>', txt, _re.S)
+    if not m_link or not m_joint:
+        return txt
+    link = m_link.group(0)
+    m_vis = _re.search(r'\n(    <visual>.*?</visual>)', link, _re.S)
+    m_ine = _re.search(r'\n(    <inertial>.*?</inertial>)', link, _re.S)
+    if not m_vis:
+        return txt
+    vis = m_vis.group(1)
+    ine = m_ine.group(1) if m_ine else '    <inertial><mass value="1e-3"/><origin xyz="0 0 0" rpy="0 0 0"/>' \
+        '<inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>'
+
+    new_frame = """<link name="livox_frame">
+    <!-- ★ 2026-10-29：本 link 现在是**纯数据帧**（`base_link→livox_frame` rpy=0，与实车 TF 一致）。
+         几何（mesh/inertial）搬到 `livox_physical`；点云由 `livox_cloud_extrinsic` 从
+         `/livox/lidar_raw`（斜的物理系）旋 `Rx(+倾角)` 到本帧后发 `/livox/lidar`。
+         为什么留一个极小惯量：Gazebo 对"固定关节链上的无惯量 link"会走 lumping 告警路径，
+         给个 1e-6 量级的占位最省事（物理质量在 livox_physical 上，总质量不变）。 -->
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1e-6" />
+      <inertia ixx="1e-9" ixy="0" ixz="0" iyy="1e-9" iyz="0" izz="1e-9" />
+    </inertial>
+  </link>
+
+  <!-- ==================== link livox_physical（2026-10-29 新增：物理雷达） ==================== -->
+  <link name="livox_physical">
+    <!-- 物理本体：inertial + mesh 都从 livox_frame 搬过来（逐字），**故意不给 collision**
+         （射线传感器就在本 link 原点，给碰撞体 ⇒ 每条射线打自己；docs/robot_models.md §10.5）。 -->
+""" + ine + "\n" + vis + """
+  </link>"""
+    txt = txt.replace(link, new_frame, 1)
+
+    # 关节：base_link→livox_physical，rpy = 倾角（xyz 与 body_to_livox 逐字相同）
+    m_xyz = _re.search(r'<origin xyz="([^"]*)" rpy=', m_joint.group(0))
+    xyz = m_xyz.group(1) if m_xyz else '0 0 0.15702816968305'
+    new_joint = m_joint.group(0) + """
+
+  <!-- ==================== joint body_to_livox_physical（2026-10-29 新增） ==================== -->
+  <!-- 物理安装姿态：`base_link→livox_physical` 的 rpy = `livox_tilt_rpy`（实车的 −30° 下俯），
+       xyz 与 `body_to_livox` **逐字相同**（雷达的物理位置没动，只是把 30° 从插件参数搬到 link 上）。
+       ⇒ 射线方向不变（世界系里逐条相同），但**点云表达在斜系**（`/livox/lidar_raw`），
+       与实车驱动器"原始点云在传感器系"一致。 -->
+  <joint name="body_to_livox_physical" type="fixed">
+    <origin xyz="%s" rpy="${livox_tilt_rpy_p}"/>
+    <parent link="base_link"/>
+    <child link="livox_physical"/>
+  </joint>""" % xyz
+    txt = txt.replace(m_joint.group(0), new_joint, 1)
+
+    # 传感器块：从 livox_frame 搬到 livox_physical；sensor/plugin 改名；tilt→0；topic→/livox/lidar_raw
+    m_gz = _re.search(r'  <gazebo reference="livox_frame">\s*<sensor .*?</gazebo>', txt, _re.S)
+    if m_gz:
+        gz = m_gz.group(0)
+        gz2 = gz.replace('<gazebo reference="livox_frame">', '<gazebo reference="livox_physical">')
+        gz2 = gz2.replace('<sensor type="ray" name="livox_frame">', '<sensor type="ray" name="livox_physical">')
+        gz2 = gz2.replace('name="livox_frame_plugin"', 'name="livox_physical_plugin"')
+        gz2 = gz2.replace('<tilt_rpy>${livox_plugin_tilt_rpy}</tilt_rpy>',
+                          '<!-- 0 0 0：倾角改由 `body_to_livox_physical` 的关节 rpy 承担（2026-10-29） -->\n'
+                          '        <tilt_rpy>0 0 0</tilt_rpy>')
+        gz2 = gz2.replace('<topic>/livox/lidar</topic>', '<topic>/livox/lidar_raw</topic>')
+        txt = txt.replace(gz, gz2, 1)
+    # 材质块
+    txt = txt.replace('<gazebo reference="livox_frame"><material>',
+                      '<gazebo reference="livox_physical"><material>', 1)
+    return txt
+
+
 def _sanitize_comments(txt):
     """XML 注释里**不允许出现 `--`**（解析器直接报 not well-formed）。
 
@@ -1050,6 +1139,7 @@ def main():
     L.append(FOOTER.replace('__ROOT__', root_name)
              .replace('__WHEEL_MU_BLOCK__', wheel_mu_block(root_name, mu)))
     txt = _sanitize_comments(''.join(L))
+    txt = _split_livox_physical(txt)
     rep = {}
     if a.chassis == 'rigid':
         sys.path.insert(0, os.path.join(REPO, 'tools', 'scripts', 'regress'))
