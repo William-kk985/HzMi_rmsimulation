@@ -2,12 +2,11 @@
 <sdf version='1.7'>
   <!-- RMUC2027 场地模型（独立 model 入口，供 model://RMUC2027_world 直接 include；
        与 world/RMUC2027_world/RMUC2027_world.world 里内联的那份等价）。
-       结构镜像 RMUC2026_world/model.sdf，差异只有两处（依据见 docs/worlds_2027.md §2.3b/§3.2b）：
-         1. mesh 单位是毫米 ⇒ scale 0.001（与 world 内联那份一致）
-         2. mesh 本来就是 Z 轴朝上 ⇒ 不需要旋转；低区地面在 mesh 局部 z=-1.700 m（局部平坦格众数），
-            所以 pose 抬 +1.700 m 让地面落在 world z=0（RMUC2026 那份是 +1.6413436）
-       注意：本场地**不是单一平面**：顶层高度四分位 -1.71/-1.48 m（中央高台 + 四条坡道 + 0.42 m 立墙），
-       所以"地面在 z=0"只对低区成立，实测分布见 docs/worlds_2027.md §4.3。 -->
+       结构镜像 RMUC2026_world/model.sdf，差异（2027-10-29 换新 STL 后，依据见 docs/worlds_2027.md §9.8）：
+         1. mesh 单位是毫米 ⇒ scale 0.001
+         2. mesh 已经是世界系（Z 朝上、可行驶地面在 z=0、场地 x±14000）⇒ **不需要旋转、不需要抬升**，
+            pose 是 (0,0,0)（旧 STL 那份是 +1.700）
+         3. 塔的上段（原 1.86~3.56 m）已被整体下移 0.959 m 并进 mesh，塔顶 3.56 → 2.60 m（网格最高点 2.92 m）-->
   <model name='RMUC2027_world'>
     <static>true</static>
     <allow_auto_disable>true</allow_auto_disable>
@@ -33,7 +32,7 @@
       <enable_wind>false</enable_wind>
 
       <visual name='visual'>
-        <pose>0 0 1.700 0 0 0</pose>
+        <pose>0 0 0 0 0 0</pose>
         <geometry>
           <mesh>
             <uri>model://RMUC2027_world/meshes/RMUC2027.stl</uri>
@@ -58,7 +57,7 @@
       <collision name='collision'>
         <laser_retro>0</laser_retro>
         <max_contacts>10</max_contacts>
-        <pose>0 0 1.700 0 0 0</pose>
+        <pose>0 0 0 0 0 0</pose>
         <geometry>
           <mesh>
             <uri>model://RMUC2027_world/meshes/RMUC2027.stl</uri>

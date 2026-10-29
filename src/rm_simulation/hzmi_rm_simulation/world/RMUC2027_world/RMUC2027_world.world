@@ -31,8 +31,9 @@
          · mesh 原始单位 = 毫米（bbox 28000 x 16003 x 3799，见 docs/worlds_2027.md §2.3b）⇒ <scale>0.001</scale>
          · mesh 是 **Z 轴朝上**的（竖直方向只有 3.80 m，水平 28.0 x 16.0 m）⇒ **不需要旋转**
            （RMUL2027 那份是 Y 竖直、且 +y 朝下，所以那边有 -1.5707963 的 X 轴旋转）
-         · 底板（可行驶地面）顶面在 mesh 局部坐标 z = -1.6413928 m（按面积加权取水平面众数，
-           算法在 docs/worlds_2027.md §3.2）⇒ 视觉/碰撞 pose 抬 +1.700 m，地面落在 world z = 0
+         · 2027-10-29 换用组委会给的新 STL（rmuc_2027 (1).stl，378,666 面 / 18.9 MB，米制、Z 朝上）：
+           已把"米→毫米 + 平移(-14149.1, -6441.0, -260.7) + 塔上段下移 0.959 m"全部**烘进 STL**，
+           所以 mesh 的**可行驶地面就在 z=0**、场地 x±14000 / y 与旧网格一致 ⇒ 视觉/碰撞 pose 是 (0,0,0)
          · 模型 pose 保持 (0,0,0)：mesh 局部坐标 == world 坐标（m），和 RMUC2026 同口径
          ===================================================================== -->
     <model name='RMUC_2027'>
@@ -55,7 +56,7 @@
         <kinematic>0</kinematic>
         <enable_wind>0</enable_wind>
         <visual name='visual'>
-          <pose>0 0 1.700 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry>
             <mesh>
               <uri>model://RMUC2027_world/meshes/RMUC2027.stl</uri>
@@ -82,7 +83,7 @@
         <collision name='collision'>
           <laser_retro>0</laser_retro>
           <max_contacts>10</max_contacts>
-          <pose>0 0 1.700 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry>
             <mesh>
               <uri>model://RMUC2027_world/meshes/RMUC2027.stl</uri>
@@ -146,12 +147,6 @@
     <include>
       <uri>model://RMUC2027_fence</uri>
       <name>RMUC2027_fence</name>
-    </include>
-    <!-- 2027-10-29：中央塔"断口"的支撑（STEP 网格在 world z 1.50~1.86 有一段 0.36 m 真空，
-         塔看着是悬空的；支撑把它接回下段斜撑）。依据见 docs/worlds_2027.md §9.7。 -->
-    <include>
-      <uri>model://RMUC2027_tower_support</uri>
-      <name>RMUC2027_tower_support</name>
     </include>
     <!-- 灯光：类型/颜色/衰减与 RMUL2026_world.world 逐个相同，
          位置整体平移到新场地中心（RMUL2026 场地中心 (8.5,4.5) → RMUC2026 场地中心 (0,1.62)，
