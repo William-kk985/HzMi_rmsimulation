@@ -95,6 +95,22 @@
 | `good_map_preview.png`（仓库根，1136x636，旧默认 2D 先验的预览图） | **移入 `map/attic/`**（它预览的那张图已被本次提升取代；当前默认图的预览见 `docs/img/RMUC2026_prior_20261007.png`） |
 | `.tmp_*`（`.tmp_mapassets/` 为本次的测试目录）、`log/`、`build/`、`install/` | 测试/构建产物，不入库；本次的测试目录用完即清（§7） |
 
+### 2.4 2027 场地资产（2026-10-29，meas §45）
+
+| 文件 | 是什么 | 状态 |
+|---|---|---|
+| `PCD/RMUC2027.pcd` + `.meta.yaml` | **当前 3D 先验**（§45 用可靠轨迹重出；13,214 点、28.1×15.9 m） | **当前** |
+| `PCD/RMUC2027_gt.pcd` + `.meta.yaml` | **GT 上界参考**（同一次扫描 + 真值位姿累积；13,157 点） | **参考**（不进运行时，用于质量对照） |
+| `PCD/RMUC2027_sc_db.npz` | **Scan Context 关键帧库**（12 kf；`build_sc_db` 产物） | **当前**（`global_relocalizer:=scan_context` 用） |
+| `PCD/RMUC2027_slam_poses.jsonl` | 建库用的 `T_map_base` 源（可复核 / 重建 DB） | **当前** |
+| `map/RMUC2027.pgm` + `.yaml` | 由 `RMUC2027.pcd` 投影的 2D 先验（582×325） | **当前** |
+| `map/RMUC2027_gt.pgm` + `.yaml` | 由 `RMUC2027_gt.pcd` 投影的 2D 先验 | **参考** |
+
+- **同帧检查**：`tools/scripts/mapping/check_db_pcd_same_frame.py`（旧资产 ❌ FAIL、新资产 ✅ PASS，见 §45.4）。
+- ⚠️ **换场地网格（`RMUC2027.stl`）后要重建** `RMUC2027.pcd` / `.pgm` / `_sc_db.npz` / `_slam_poses.jsonl`（流程见 §45.8）。
+- `map/.session.yaml` 仍被 `.gitignore` 忽略（本机产物）。
+- 2026 的**候选图**（`_spl`、`_cloud`、`_v4/v5/v6w_spl`、`RMUL2026_world_backup`）**仍原位保留**：它们被多份文档按路径引用（见 §2.1）；要清理得**整组搬 `attic/` 并同步改引用**，本轮不动。
+
 ---
 
 ## 3. 实测对照（2026-10-07）
