@@ -3456,10 +3456,10 @@ def generate_launch_description():
             error_hint='pointcloud_to_laserscan 参数文件缺失：'
                        '`colcon build --symlink-install --packages-select '
                        'pointcloud_to_laserscan` 后重试',
-            # 2026-10-30：chassis 恢复用**共享 p2l 配置**（不设特殊 min_height）——
-            #   地面/障碍的分拣完全交给 patchwork（segmentation/obstacle 里本来就没有地面），
-            #   车体自击由 cloud_crop 的几何盒子剔除。
-        )])
+            # 2026-10-30：chassis 用**专用 p2l 配置**：min_height = -0.068（= 世界高度 0.03 m）
+            #   ⇒ 地面 3 cm 以上的点全保留、矮墙完整；地面噪声由 3 cm 下界 + patchwork 兜住，
+            #   车体自击由 cloud_crop 的 AABB+圆柱剔。
+            slot_map={'chassis': ('config', 'laserscan_params_chassis.yaml')})])
 
     bringup_LIO_group = GroupAction([
         GroupAction(
