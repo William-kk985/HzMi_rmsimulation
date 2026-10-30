@@ -190,10 +190,6 @@ _ROBOT_SLOTS = {
     'chassis': ('sentry_robot_chassis_sim.xacro',
                 '用户的起伏底盘（4 轮、固定轮；真 mesh + 真 inertial；'
                 '雷达**平放**在车顶、离地 0.188 m；IMU 平放）'),
-    # ★ 2026-10-30：**诊断用**——与 chassis 几何/质量/插件完全相同，只把 <visual> 换成基本体
-    #   （排查 gzclient 卡死是否由 STL 视觉件引起；不是正式槽位）。
-    'chassis_boxvis': ('sentry_robot_chassis_boxvis_sim.xacro',
-                       '诊断：起伏底盘 + 基本体视觉（排查 gzclient）'),
 }
 
 #: robot:=robot11 的雷达安装倾角 **不再有 launch 常数**（2026-10-21 收口，契约 §4.12）。
@@ -394,7 +390,7 @@ def _robot_xacro_args(context, xyz, rpy):
     robot = (LaunchConfiguration('robot').perform(context) or '').strip()
     # ★ 2026-10-30：起伏底盘的雷达平放在车顶（xyz=0 0 0.09 / rpy=0 0 0）——覆盖平台 yaml 的
     #   "默认模型"安装几何（0.12,0,0.175），否则 spawn 的模型与解析的模型会分叉。
-    if robot in ('chassis', 'chassis_boxvis'):
+    if robot == 'chassis':
         xyz, rpy = '0 0 0.09', '0 0 0'
     args = [('xyz', _xacro_unquote(xyz), True), ('rpy', _xacro_unquote(rpy), True)]
     # ★ 2026-10-27（契约 §4.15）：`robot:=hzmirm` 的 `turret_yaw_deg` / `turret_pitch_deg`
@@ -645,7 +641,7 @@ def _urdf_livox_mount_table(context):
         #   （云台是**静态**的：上游两个关节都是 fixed，本仓没有 gimbal 控制器。）
         rpy = [0.0, 0.0, 0.0]
         xyz = [0.0, 0.0, 0.8]
-    elif robot in ('chassis', 'chassis_boxvis'):
+    elif robot == 'chassis':
         # 起伏底盘：雷达平放在车顶（z 0.09），与 sentry_robot_chassis_sim.xacro 的一致。
         rpy = [0.0, 0.0, 0.0]
         xyz = [0.0, 0.0, 0.09]
@@ -667,7 +663,7 @@ def _adapter_table(context):
         return _lio_adapter_robot11()
     if robot == 'hzmirm':
         return [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
-    if robot in ('chassis', 'chassis_boxvis'):
+    if robot == 'chassis':
         return [0.0, 0.0, -0.04], [0.0, 0.0, 0.0]
     return [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
 
@@ -1344,7 +1340,7 @@ class _GravityAlignRpy(Substitution):
 #:    下沉；robot11 的 0.2595 与几何 0.259527 差 0.03 mm（几乎无下沉）。运行时由节点初始化时的
 #:    **地面拟合互检**负责（|h_meas−h_urdf| ≥0.03/0.05 m ⇒ WARN/ERROR，见契约 v3 §4.3 与
 #:    `small_point_lio/src/gravity_align_ground.cpp`）；本 launch 只提供先验，不重复那段逻辑。
-_HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06, 'chassis': 0.098, 'chassis_boxvis': 0.098}
+_HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06, 'chassis': 0.098}
 
 #: 出生高度在"落定高度"之上再加的余量（m）。为什么不是 0：`spawn_entity.py` 把模型按**几何**
 #: 摆到 `base_link_height + margin`，留 1 mm 让接触在第一个物理步里就解出来，而不是一出生就
@@ -2457,8 +2453,7 @@ def generate_launch_description():
                    '`colcon build --symlink-install --packages-select rm_nav_bringup` 后重试；'
                    '或删掉 launch 里这一路参数（回到"没有掩膜"的行为）',
         slot_map={'robot11': ('config', 'traversability_self_mask_robot11.yaml'),
-                  'chassis': ('config', 'traversability_self_mask_chassis.yaml'),
-                  'chassis_boxvis': ('config', 'traversability_self_mask_chassis.yaml')})
+                  'chassis': ('config', 'traversability_self_mask_chassis.yaml')})
     ########################## 自击掩膜（self_mask）parameters end ####################################
 
     ########################## 近地剔除（near_ground）parameters start ################################
@@ -2821,7 +2816,7 @@ def generate_launch_description():
                     "=base_link）与 p2l 参数（target_frame=base_link，高度带改在重力系量）。"
                     "默认模型的改动（实测数字/影响面）见 docs/frame_contract_v3_measurements.md §20，"
                     "范围/数值对照见 docs/robot_models.md",
-        choices=['', 'hzmirm', 'robot11', 'chassis', 'chassis_boxvis'])
+        choices=['', 'hzmirm', 'robot11', 'chassis'])
 
     # ★ 2026-10-21：robot:=robot11 的安装倾角与抬高都不再有 launch 开关：
     #   `livox_tilt_axis` / `livox_raise_m` 已删除（§28），`livox_tilt_rpy` 也不再由本 launch 传
@@ -3430,8 +3425,7 @@ def generate_launch_description():
                        '`colcon build --symlink-install --packages-select '
                        'pointcloud_to_laserscan` 后重试',
             # 起伏底盘：车体顶面在 base_link +0.078 m ⇒ 抬 min_height 剔自击残影
-            slot_map={'chassis': ('config', 'laserscan_params_chassis.yaml'),
-                      'chassis_boxvis': ('config', 'laserscan_params_chassis.yaml')})])
+            slot_map={'chassis': ('config', 'laserscan_params_chassis.yaml')})])
 
     bringup_LIO_group = GroupAction([
         GroupAction(

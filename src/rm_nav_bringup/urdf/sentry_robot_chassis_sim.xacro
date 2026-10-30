@@ -85,16 +85,16 @@
   </link>
   <joint
     name="w1"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="0.1615 -0.198 -0.04"
+      xyz="0.1615 -0.10895 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w1" />
     <axis
-      xyz="0 1 0" />
+      xyz="0 0 0" />
   </joint>
   <link
     name="w2">
@@ -138,16 +138,16 @@
   </link>
   <joint
     name="w2"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="0.1615 0.262 -0.04"
+      xyz="0.1615 0.17205 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w2" />
     <axis
-      xyz="0 1 0" />
+      xyz="0 0 0" />
   </joint>
   <link
     name="w3">
@@ -191,16 +191,16 @@
   </link>
   <joint
     name="w3"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="-0.1615 -0.262 -0.04"
+      xyz="-0.1615 -0.17205 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w3" />
     <axis
-      xyz="0 1 0" />
+      xyz="0 0 0" />
   </joint>
   <link
     name="w4">
@@ -244,20 +244,20 @@
   </link>
   <joint
     name="w4"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="-0.1615 0.198 -0.04"
+      xyz="-0.1615 0.10895 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w4" />
     <axis
-      xyz="0 1 0" />
+      xyz="0 0 0" />
   </joint>
 
-  <!-- ===== 以下为仿真附加（原 SolidWorks URDF 没有）===== -->
-  <!-- IMU（平放，100 Hz）-->
+  <!-- ===================== 仿真附加（原 URDF 没有；几何/惯量/碰撞一律不动）===================== -->
+  <!-- ① IMU（平放 100 Hz）-->
   <link name="imu_link"/>
   <joint name="imu_joint" type="fixed">
     <origin xyz="0 0 0.04" rpy="0 0 0"/>
@@ -265,7 +265,8 @@
   </joint>
   <gazebo reference="imu_link">
     <sensor name="chassis_imu" type="imu">
-      <always_on>true</always_on><update_rate>100</update_rate>
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
       <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
         <ros><namespace>/</namespace><remapping>~/out:=/livox/imu</remapping></ros>
         <frame_name>imu_link</frame_name>
@@ -273,38 +274,30 @@
     </sensor>
   </gazebo>
 
-  <!-- 雷达（平放在车顶）-->
+  <!-- ② 雷达：平放在车顶（livox_frame，rpy=0，z=+0.09）-->
   <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro"/>
   <xacro:mid360 name="livox_frame" parent="base_link" topic="/livox/lidar">
     <origin xyz="0 0 0.09" rpy="0 0 0"/>
   </xacro:mid360>
 
-  <!-- 真轮驱动：w1(左)/w2(右) 由差速插件驱动，w3/w4 被动滚动 -->
+  <!-- ③ 驱动：planar_move（与默认模型/robot11 同款；轮子不转、底盘直接速度驱动）-->
   <gazebo>
-    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
       <ros>
         <namespace>/</namespace>
         <remapping>cmd_vel:=cmd_vel_chassis</remapping>
         <remapping>odom:=odom_ground_truth</remapping>
       </ros>
       <update_rate>100</update_rate>
-      <left_joint>w1</left_joint>
-      <right_joint>w2</right_joint>
-      <wheel_separation>0.46</wheel_separation>
-      <wheel_diameter>0.116</wheel_diameter>
-      <max_wheel_torque>5.0</max_wheel_torque>
-      <max_wheel_acceleration>2.0</max_wheel_acceleration>
-      <command_topic>cmd_vel</command_topic>
-      <odometry_topic>odom</odometry_topic>
-      <odometry_frame>odom</odometry_frame>
-      <robot_base_frame>base_link</robot_base_frame>
+      <publish_rate>10</publish_rate>
       <publish_odom>true</publish_odom>
       <publish_odom_tf>false</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <covariance_x>0.0001</covariance_x>
+      <covariance_y>0.0001</covariance_y>
+      <covariance_yaw>0.01</covariance_yaw>
     </plugin>
   </gazebo>
-  <gazebo reference="w1"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
-  <gazebo reference="w2"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
-  <gazebo reference="w3"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
-  <gazebo reference="w4"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
 
 </robot>

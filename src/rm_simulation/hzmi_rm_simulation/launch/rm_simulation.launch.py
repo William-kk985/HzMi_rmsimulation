@@ -292,7 +292,7 @@ def generate_launch_description():
                     '⚠️ 本文件不起感知/LIO ⇒ 选 hzmirm 不会自动切 linefit sensor_height 与 '
                     'lio_tf_adapter 杆臂；要完整链路请用 bringup_sim.launch.py robot:=hzmirm。'
                     '详见 docs/robot_models.md',
-        choices=['', 'hzmirm', 'robot11', 'chassis', 'chassis_boxvis']
+        choices=['', 'hzmirm', 'robot11', 'chassis']
     )
 
     # ★ 2026-10-21：**出生高度**（米）—— opt-in 覆盖 world 配置里的 z。
