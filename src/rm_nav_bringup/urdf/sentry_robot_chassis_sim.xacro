@@ -269,4 +269,11 @@
   <gazebo reference="w3"><material>Gazebo/DarkGrey</material></gazebo>
   <gazebo reference="w4"><material>Gazebo/DarkGrey</material></gazebo>
 
+  <!-- 轮子对地摩擦 0.02（robot11 同款）：固定轮+planar_move 时，默认 μ=1 会让轮子"抓地"
+       而在加速/急转/坡道产生倾覆力矩（翻车）；0.02 让轮子滑动、底盘被速度直接推 ⇒ 不翻。 -->
+  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+
 </robot>
