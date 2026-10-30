@@ -641,6 +641,10 @@ def _urdf_livox_mount_table(context):
         #   （云台是**静态**的：上游两个关节都是 fixed，本仓没有 gimbal 控制器。）
         rpy = [0.0, 0.0, 0.0]
         xyz = [0.0, 0.0, 0.8]
+    elif robot == 'chassis':
+        # 起伏底盘：雷达平放在车顶（z 0.09），与 sentry_robot_chassis_sim.xacro 的一致。
+        rpy = [0.0, 0.0, 0.0]
+        xyz = [0.0, 0.0, 0.09]
     else:                                   # 默认模型：平台外参 YAML = xacro 的 xyz/rpy 实参
         xyz_s, rpy_s = _platform_livox_origin()
         xyz = [float(v) for v in xyz_s.split()]
@@ -659,6 +663,8 @@ def _adapter_table(context):
         return _lio_adapter_robot11()
     if robot == 'hzmirm':
         return [0.0, 0.0, -0.75], [0.0, 0.0, 0.0]
+    if robot == 'chassis':
+        return [0.0, 0.0, -0.04], [0.0, 0.0, 0.0]
     return [-0.12, 0.0, -0.125], [0.0, 0.0, 0.0]
 
 
