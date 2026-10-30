@@ -83,8 +83,7 @@
       link="base_link" />
     <child
       link="w1" />
-    <axis
-      xyz="0 1 0" />
+    <axis xyz="0 1 0" />
   </joint>
   <link
     name="w2">
@@ -131,8 +130,7 @@
       link="base_link" />
     <child
       link="w2" />
-    <axis
-      xyz="0 1 0" />
+    <axis xyz="0 -1 0" />
   </joint>
   <link
     name="w3">
@@ -179,8 +177,7 @@
       link="base_link" />
     <child
       link="w3" />
-    <axis
-      xyz="0 1 0" />
+    <axis xyz="0 1 0" />
   </joint>
   <link
     name="w4">
@@ -227,8 +224,7 @@
       link="base_link" />
     <child
       link="w4" />
-    <axis
-      xyz="0 1 0" />
+    <axis xyz="0 -1 0" />
   </joint>
 
   <!-- 仿真附加（原 URDF 没有；几何/惯量/碰撞一律不动）-->
