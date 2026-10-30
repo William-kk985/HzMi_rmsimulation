@@ -24,7 +24,7 @@
     </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
-      <geometry><mesh filename="package://chassis_description/meshes/decimated/base_link.stl" /></geometry>
+      <geometry><mesh filename="package://chassis_description/meshes/base_link.STL" /></geometry>
       <material name="chassis_body"><color rgba="0.792 0.820 0.933 1" /></material>
     </visual>
     <!-- ★ 2026-10-30：collision 用**基本体**（box），visual 才用 STL。
@@ -47,7 +47,7 @@
       </inertial>
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
-        <geometry><mesh filename="package://chassis_description/meshes/decimated/${name}.stl" /></geometry>
+        <geometry><mesh filename="package://chassis_description/meshes/${name}.STL" /></geometry>
         <material name="wheel_white"><color rgba="1 1 1 1" /></material>
       </visual>
       <collision>
@@ -55,13 +55,11 @@
         <geometry><cylinder radius="0.058" length="0.03" /></geometry>
       </collision>
     </link>
-    <joint name="${name}" type="continuous">
+    <joint name="${name}" type="fixed">
       <origin xyz="${xyz}" rpy="0 0 0" />
       <parent link="base_link" />
       <child link="${name}" />
-      <!-- 轮轴 = 轮子坐标系 y（轮 mesh 的轴向；collision 圆柱 rpy=+90° 也把轴转到 y）
-           ⇒ 轮子**被动滚动**（与默认模型一致，无轮控制器；底盘由 planar_move 驱动）。 -->
-      <axis xyz="0 1 0" />
+      <axis xyz="0 0 0" />
     </joint>
   </xacro:macro>
 
@@ -90,12 +88,13 @@
     </plugin>
   </gazebo>
 
-  <!-- 轮子：**continuous 被动滚动**（与默认模型同款，无轮控制器）⇒ 不需要把摩擦降到 0.02
-       （那是"焊接固定轮"才需要的）；滚动轮随地面滚动，planar_move 驱动底盘，不会因"抓地"掀翻。 -->
-  <gazebo reference="w1"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
-  <gazebo reference="w2"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
-  <gazebo reference="w3"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
-  <gazebo reference="w4"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <!-- 轮子：**固定轮**（与 robot11 同款处理）——4 轮用 μ=0.02 **滑动**而不是抓地，
+       底盘由 planar_move 直接驱动（速度驱动，爬坡靠"直接设速度"、不靠抓地）；
+       高摩擦固定轮会被加速/转向掀翻（实测）。 -->
+  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
 
   <!-- ===================== IMU（平放） ===================== -->
   <link name="imu_link" />
