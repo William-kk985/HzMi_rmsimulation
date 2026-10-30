@@ -59,10 +59,12 @@ class CloudCropNode(Node):
             return
         off = {k: fields[k].offset for k in ('x', 'y', 'z')}
         step = msg.point_step
-        x = data[off['x']::step].view(np.float32)[:n]
-        y = data[off['y']::step].view(np.float32)[:n]
-        z = data[off['z']::step].view(np.float32)[:n]
-        pts = np.stack([x, y, z], axis=1)
+        # 步进读取：data[off::step] 是**非连续**的，不能直接 .view(float32)；
+        # 用 strided ndarray 视图（等价 stride 读取）再 copy ⇒ 连续 float32
+        def _read(name):
+            return np.ndarray(shape=(n,), dtype=np.float32, buffer=data,
+                              offset=off[name], strides=(step,)).copy()
+        pts = np.stack([_read('x'), _read('y'), _read('z')], axis=1)
         # 需要把点变到 target_frame（p2l 也做这步；这里先做，保证盒子语义正确）
         frame = msg.header.frame_id.lstrip('/')
         if self.target_frame and frame != self.target_frame:
