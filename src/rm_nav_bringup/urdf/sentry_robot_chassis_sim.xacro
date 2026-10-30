@@ -25,7 +25,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://chassis_description/meshes/base_link.STL" />
+          filename="package://chassis_description/meshes/decimated/base_link.stl" />
       </geometry>
       <material
         name="">
@@ -34,13 +34,8 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://chassis_description/meshes/base_link.STL" />
-      </geometry>
+      <origin xyz="0 0 0.0295" rpy="0 0 0" />
+      <geometry><box size="0.456 0.446 0.097" /></geometry>
     </collision>
   </link>
   <link
@@ -65,7 +60,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://chassis_description/meshes/w1.STL" />
+          filename="package://chassis_description/meshes/decimated/w1.stl" />
       </geometry>
       <material
         name="">
@@ -74,13 +69,8 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://chassis_description/meshes/w1.STL" />
-      </geometry>
+      <origin xyz="0 -0.032 0" rpy="1.5707963 0 0" />
+      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
     </collision>
   </link>
   <joint
@@ -118,7 +108,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://chassis_description/meshes/w2.STL" />
+          filename="package://chassis_description/meshes/decimated/w2.stl" />
       </geometry>
       <material
         name="">
@@ -127,13 +117,8 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://chassis_description/meshes/w2.STL" />
-      </geometry>
+      <origin xyz="0 -0.032 0" rpy="1.5707963 0 0" />
+      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
     </collision>
   </link>
   <joint
@@ -171,7 +156,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://chassis_description/meshes/w3.STL" />
+          filename="package://chassis_description/meshes/decimated/w3.stl" />
       </geometry>
       <material
         name="">
@@ -180,13 +165,8 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://chassis_description/meshes/w3.STL" />
-      </geometry>
+      <origin xyz="0 0.032 0" rpy="1.5707963 0 0" />
+      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
     </collision>
   </link>
   <joint
@@ -224,7 +204,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://chassis_description/meshes/w4.STL" />
+          filename="package://chassis_description/meshes/decimated/w4.stl" />
       </geometry>
       <material
         name="">
@@ -233,13 +213,8 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://chassis_description/meshes/w4.STL" />
-      </geometry>
+      <origin xyz="0 0.032 0" rpy="1.5707963 0 0" />
+      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
     </collision>
   </link>
   <joint
