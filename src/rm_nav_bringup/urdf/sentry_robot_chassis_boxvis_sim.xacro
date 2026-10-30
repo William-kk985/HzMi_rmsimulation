@@ -55,11 +55,13 @@
         <geometry><cylinder radius="0.058" length="0.03" /></geometry>
       </collision>
     </link>
-    <joint name="${name}" type="fixed">
+    <joint name="${name}" type="continuous">
       <origin xyz="${xyz}" rpy="0 0 0" />
       <parent link="base_link" />
       <child link="${name}" />
-      <axis xyz="0 0 0" />
+      <!-- 轮轴 = 轮子坐标系 y（轮 mesh 的轴向；collision 圆柱 rpy=+90° 也把轴转到 y）
+           ⇒ 轮子**被动滚动**（与默认模型一致，无轮控制器；底盘由 planar_move 驱动）。 -->
+      <axis xyz="0 1 0" />
     </joint>
   </xacro:macro>
 
@@ -88,10 +90,10 @@
     </plugin>
   </gazebo>
 
-  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w1"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
 
   <!-- ===================== IMU（平放） ===================== -->
   <link name="imu_link" />
