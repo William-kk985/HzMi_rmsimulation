@@ -3450,7 +3450,8 @@ def generate_launch_description():
                        'pointcloud_to_laserscan` 后重试',
             # 2026-10-30：chassis 恢复用**共享 p2l 配置**（不设特殊 min_height）——
             #   地面/障碍的分拣完全交给 patchwork（segmentation/obstacle 里本来就没有地面），
-            #   车体自击由 cloud_crop 的几何盒子剔除。')])
+            #   车体自击由 cloud_crop 的几何盒子剔除。
+        )])
 
     bringup_LIO_group = GroupAction([
         GroupAction(
