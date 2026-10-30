@@ -32,12 +32,21 @@ class CloudCropNode(Node):
             -0.220, 0.125, -0.098, 0.220, 0.155, 0.018,       # 右轮（w2/w4）
         ])
         self.declare_parameter('invert', False)   # False = 剔除盒内点
+        # 近场半径（m，base_link 系 XY）：r_xy < min_radius 且 z ∈ [radius_z_min, radius_z_max] 的点
+        # 也剔除。用于"车体 AABB 之外、但仍在车体半对角附近"的自击/近场点（盒子是轴对齐的，
+        # 车体对角 0.319 m 的角落区域盒子盖不住）。0 = 关。
+        self.declare_parameter('min_radius', 0.0)
+        self.declare_parameter('radius_z_min', -0.12)
+        self.declare_parameter('radius_z_max', 0.25)
         inp = self.get_parameter('input_topic').value
         out = self.get_parameter('output_topic').value
         self.target_frame = self.get_parameter('target_frame').value
         raw = self.get_parameter('boxes').value
         self.boxes = [raw[i:i+6] for i in range(0, len(raw) - 5, 6)]
         self.invert = bool(self.get_parameter('invert').value)
+        self.min_radius = float(self.get_parameter('min_radius').value)
+        self.radius_z_min = float(self.get_parameter('radius_z_min').value)
+        self.radius_z_max = float(self.get_parameter('radius_z_max').value)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -85,6 +94,10 @@ class CloudCropNode(Node):
                 [2*(qx*qz-qy*qw), 2*(qy*qz+qx*qw), 1-2*(qx*qx+qy*qy)]])
             pts = (R @ pts.T).T + np.array([t.x, t.y, t.z])
         inside = np.zeros(len(pts), dtype=bool)
+        if self.min_radius > 0.0:
+            r_xy = np.hypot(pts[:, 0], pts[:, 1])
+            inside |= ((r_xy < self.min_radius) &
+                       (pts[:, 2] >= self.radius_z_min) & (pts[:, 2] <= self.radius_z_max))
         for b in self.boxes:
             inside |= ((pts[:, 0] >= b[0]) & (pts[:, 0] <= b[3]) &
                        (pts[:, 1] >= b[1]) & (pts[:, 1] <= b[4]) &

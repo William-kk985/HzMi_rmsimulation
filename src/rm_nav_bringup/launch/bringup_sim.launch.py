@@ -3442,6 +3442,10 @@ def generate_launch_description():
                 'output_topic': '/segmentation/obstacle_cropped',
                 'target_frame': 'base_link',
                 'boxes': boxes,
+                # 近场圆柱：车体半对角 0.319 + 余量 ⇒ 0.36；覆盖"AABB 角落之外"的近场自击
+                'min_radius': 0.36 if robot == 'chassis' else 0.0,
+                'radius_z_min': -0.12,
+                'radius_z_max': 0.25,
             }])]
 
     bringup_cloud_crop_node = OpaqueFunction(function=_launch_cloud_crop)
