@@ -77,7 +77,7 @@
     name="w1"
     type="continuous">
     <origin
-      xyz="0.1615 -0.10895 -0.04"
+      xyz="0.1615 -0.198 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -124,7 +124,7 @@
     name="w2"
     type="continuous">
     <origin
-      xyz="0.1615 0.17205 -0.04"
+      xyz="0.1615 0.262 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -171,7 +171,7 @@
     name="w3"
     type="continuous">
     <origin
-      xyz="-0.1615 -0.17205 -0.04"
+      xyz="-0.1615 -0.262 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -218,7 +218,7 @@
     name="w4"
     type="continuous">
     <origin
-      xyz="-0.1615 0.10895 -0.04"
+      xyz="-0.1615 0.198 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -254,7 +254,7 @@
       <update_rate>100</update_rate>
       <left_joint>w1</left_joint>
       <right_joint>w2</right_joint>
-      <wheel_separation>0.281</wheel_separation>
+      <wheel_separation>0.46</wheel_separation>
       <wheel_diameter>0.116</wheel_diameter>
       <max_wheel_torque>5.0</max_wheel_torque>
       <max_wheel_acceleration>1.0</max_wheel_acceleration>
