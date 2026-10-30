@@ -254,7 +254,7 @@
        ③ launch 里的 livox_cloud_extrinsic 用 TF(livox_frame←livox_physical) 把点云旋正 →
           /livox/lidar（frame_id=livox_frame）⇒ 下游（linefit/patchwork/LIO）看到的仍是水平点云。 -->
   <xacro:mid360 name="livox_physical" parent="base_link" topic="/livox/lidar_raw">
-    <origin xyz="0 0 0.09" rpy="-0.78539816 0 0"/>
+    <origin xyz="0 0 0.09" rpy="-0.52359878 0 0"/>
   </xacro:mid360>
   <!-- 水平数据帧（与物理雷达同位置，rpy=0；无 visual）-->
   <link name="livox_frame"/>
