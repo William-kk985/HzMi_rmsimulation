@@ -140,7 +140,7 @@
     name="w2"
     type="continuous">
     <origin
-      xyz="0.1615 0.198 -0.04"
+      xyz="0.1615 0.262 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -193,7 +193,7 @@
     name="w3"
     type="continuous">
     <origin
-      xyz="-0.1615 -0.198 -0.04"
+      xyz="-0.1615 -0.262 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
