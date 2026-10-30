@@ -55,11 +55,12 @@
         <geometry><cylinder radius="0.058" length="0.03" /></geometry>
       </collision>
     </link>
-    <joint name="${name}" type="fixed">
+    <joint name="${name}" type="continuous">
       <origin xyz="${xyz}" rpy="0 0 0" />
       <parent link="base_link" />
       <child link="${name}" />
-      <axis xyz="0 0 0" />
+      <!-- 轮轴 = 轮子坐标系 y（轮 mesh 的轴向；collision 圆柱 rpy=+90° 也把轴转到 y） -->
+      <axis xyz="0 1 0" />
     </joint>
   </xacro:macro>
 
@@ -69,32 +70,40 @@
   <xacro:chassis_wheel name="w4" xyz="-0.1615 0.10895 -0.04" />
 
   <!-- ===================== 驱动 + 真值里程计（与 robot11 同款） ===================== -->
+  <!-- ★ 2026-10-30：真轮驱动（diff_drive）——planar_move 换成"轮子扭矩"：
+       前轮 w1(左)/w2(右) 由差速插件驱动，后轮 w3/w4 连续被动滚动。
+       轮径 0.116 m、轮距 0.281 m；扭矩上限 5 N·m、加速度上限 2 m/s²（防起步掀翻）。 -->
   <gazebo>
-    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
       <ros>
         <namespace>/</namespace>
         <remapping>cmd_vel:=cmd_vel_chassis</remapping>
         <remapping>odom:=odom_ground_truth</remapping>
       </ros>
       <update_rate>100</update_rate>
-      <publish_rate>10</publish_rate>
-      <publish_odom>true</publish_odom>
-      <publish_odom_tf>false</publish_odom_tf>
+      <left_joint>w1</left_joint>
+      <right_joint>w2</right_joint>
+      <wheel_separation>0.281</wheel_separation>
+      <wheel_diameter>0.116</wheel_diameter>
+      <max_wheel_torque>5.0</max_wheel_torque>
+      <max_wheel_acceleration>2.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
       <odometry_frame>odom</odometry_frame>
       <robot_base_frame>base_link</robot_base_frame>
-      <covariance_x>0.0001</covariance_x>
-      <covariance_y>0.0001</covariance_y>
-      <covariance_yaw>0.01</covariance_yaw>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>false</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
     </plugin>
   </gazebo>
 
   <!-- 轮子：**固定轮**（与 robot11 同款处理）——4 轮用 μ=0.02 **滑动**而不是抓地，
        底盘由 planar_move 直接驱动（速度驱动，爬坡靠"直接设速度"、不靠抓地）；
        高摩擦固定轮会被加速/转向掀翻（实测）。 -->
-  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w1"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
 
   <!-- ===================== IMU（平放） ===================== -->
   <link name="imu_link" />
