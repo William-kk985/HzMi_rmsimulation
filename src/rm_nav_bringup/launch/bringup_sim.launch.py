@@ -1402,12 +1402,9 @@ _MAPPER_2027_SLOT = {
     'correlation_search_space_dimension': 0.3,
     # 图刷新（5.0 → 1.5 s；CPU 无 measurable 变化，见 §48）
     'map_update_interval': 1.5,
-    # ★ 2026-10-30（用户"改纯 LIO 的 odom 建图试一试"，§49）：**关掉扫描匹配 + 回环**，
-    #   让 slam_toolbox 退化成"用 LIO 的 odom 栅格化器"——没有 map→odom 的离散修正
-    #   （坡上/围栏旁的"突然一跳"消失），2D 图 = LIO odom 的精度（§45.2 实测 0.335 m/8.1°）。
-    #   代价：绕大圈会累积 LIO 漂移（连续、不跳）。只对 2027 生效，2026 不受影响。
-    'use_scan_matching': False,
-    'do_loop_closing': False,
+    # ★ 2026-10-30（§49 实测）：**纯 LIO odom 模式（use_scan_matching/do_loop_closing=false）
+    #   会累积 LIO 漂移**（绕大圈地图整体漂），已**恢复**扫描匹配 + 回环（= 参数文件默认 true，
+    #   所以这里不再写这两键）。回环三件套的调参仍是 §48 的 A/B 赢家。
 }
 _MAPPER_PARAMS_BY_WORLD = {
     'RMUC2027': dict(_MAPPER_2027_SLOT),
