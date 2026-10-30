@@ -48,6 +48,11 @@ class WorldType:
 #: robot 槽位 → 需要补 `model://` 解析根的 ROS 包名（只登记 `<visual>` 里真有 mesh 的槽位）。
 _GAZEBO_MODEL_PATH_PKGS = {
     'robot11': ('robot11',),
+    # ★ 2026-10-30：起伏底盘的 mesh 在 chassis_description 包里；sdformat 把 `package://`
+    #   改写成 `model://chassis_description/...` ⇒ 必须把这个包的 share 父目录加进
+    #   GAZEBO_MODEL_PATH，否则 gzclient 会去**在线模型库**找、卡"Waiting for model database
+    #   update to complete..."并最终 `No mesh specified`（车模不显示）。
+    'chassis': ('chassis_description',),
 }
 
 
