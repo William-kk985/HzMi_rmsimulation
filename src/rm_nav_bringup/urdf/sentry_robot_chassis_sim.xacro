@@ -248,7 +248,7 @@
   </gazebo>
   <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro"/>
   <!-- ★ 2026-10-30：雷达**物理倾斜 45° 下俯**（与实车一致）——与 robot11 同款"物理/数据两层"：
-       ① livox_physical：物理安装位置（rpy=-45° 下俯），**射线传感器挂这里** ⇒ 插件发
+       ① livox_physical：物理安装位置（rpy=-30° 下俯），**射线传感器挂这里** ⇒ 插件发
           /livox/lidar_raw（点表达在**斜的**物理系）；
        ② livox_frame：**水平的数据帧**（rpy=0），只做 TF 锚点；
        ③ launch 里的 livox_cloud_extrinsic 用 TF(livox_frame←livox_physical) 把点云旋正 →
