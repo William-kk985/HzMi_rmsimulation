@@ -2459,7 +2459,9 @@ def generate_launch_description():
         error_hint='该文件属于 Phase 4 的自击掩膜：'
                    '`colcon build --symlink-install --packages-select rm_nav_bringup` 后重试；'
                    '或删掉 launch 里这一路参数（回到"没有掩膜"的行为）',
-        slot_map={'robot11': ('config', 'traversability_self_mask_robot11.yaml')})
+        slot_map={'robot11': ('config', 'traversability_self_mask_robot11.yaml'),
+                  'chassis': ('config', 'traversability_self_mask_chassis.yaml'),
+                  'chassis_boxvis': ('config', 'traversability_self_mask_chassis.yaml')})
     ########################## 自击掩膜（self_mask）parameters end ####################################
 
     ########################## 近地剔除（near_ground）parameters start ################################
@@ -3424,8 +3426,15 @@ def generate_launch_description():
 
     # 「点云在斜系」的唯一安装约定：`target_frame: base_link`（只含这一个键的增量覆盖文件）。
     bringup_pointcloud_to_laserscan_node = _p2l_node(
-        [_PackageShareFile('pointcloud_to_laserscan', 'config',
-                           'laserscan_params_sensor_frame.yaml')])
+        [_RobotSlotFile(
+            'pointcloud_to_laserscan',
+            ('config', 'laserscan_params_sensor_frame.yaml'),
+            error_hint='pointcloud_to_laserscan 参数文件缺失：'
+                       '`colcon build --symlink-install --packages-select '
+                       'pointcloud_to_laserscan` 后重试',
+            # 起伏底盘：车体顶面在 base_link +0.078 m ⇒ 抬 min_height 剔自击残影
+            slot_map={'chassis': ('config', 'laserscan_params_chassis.yaml'),
+                      'chassis_boxvis': ('config', 'laserscan_params_chassis.yaml')})])
 
     bringup_LIO_group = GroupAction([
         GroupAction(
