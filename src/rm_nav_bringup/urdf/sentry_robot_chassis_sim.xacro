@@ -88,11 +88,14 @@
     </plugin>
   </gazebo>
 
-  <!-- 轮子对地摩擦（与 robot11 同款）：planar_move 直接设速度，摩擦只影响"刮地"损耗 -->
-  <gazebo reference="base_link">
-    <mu1>0.02</mu1>
-    <mu2>0.02</mu2>
-  </gazebo>
+  <!-- 轮子对地摩擦：planar_move 直接设速度、轮子**不转**（固定关节）⇒ 若轮子高摩擦
+       （默认 μ=1）会在加速/转向时"抓住"地面把车**掀翻**（实测：起步/急转就翻）。
+       与 robot11 同款处理：4 个轮子的 collision 都降到 μ=0.02（轮子滑动而不是抓地），
+       底盘由 planar_move 直接驱动 ⇒ 不再翻车。base_link 的 box 离地 0.08 m，不触地。 -->
+  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
 
   <!-- ===================== IMU（平放） ===================== -->
   <link name="imu_link" />

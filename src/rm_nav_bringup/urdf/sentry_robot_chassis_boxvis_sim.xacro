@@ -88,11 +88,10 @@
     </plugin>
   </gazebo>
 
-  <!-- 轮子对地摩擦（与 robot11 同款）：planar_move 直接设速度，摩擦只影响"刮地"损耗 -->
-  <gazebo reference="base_link">
-    <mu1>0.02</mu1>
-    <mu2>0.02</mu2>
-  </gazebo>
+  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
 
   <!-- ===================== IMU（平放） ===================== -->
   <link name="imu_link" />
