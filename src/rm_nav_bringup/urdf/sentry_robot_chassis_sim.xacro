@@ -27,9 +27,12 @@
       <geometry><mesh filename="package://chassis_description/meshes/base_link.STL" /></geometry>
       <material name="chassis_body"><color rgba="0.792 0.820 0.933 1" /></material>
     </visual>
+    <!-- ★ 2026-10-30：collision 用**基本体**（box），visual 才用 STL。
+         为什么：mesh-vs-378k 面场地 mesh 的 ODE trimesh 碰撞极慢（实测启动/RTF 直接卡死）；
+         基本体碰撞是标准做法（默认模型/robot11 的轮子也用 cylinder）。 -->
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0" />
-      <geometry><mesh filename="package://chassis_description/meshes/base_link.STL" /></geometry>
+      <origin xyz="0 0 0.0295" rpy="0 0 0" />
+      <geometry><box size="0.456 0.446 0.097" /></geometry>
     </collision>
   </link>
 
@@ -48,8 +51,8 @@
         <material name="wheel_white"><color rgba="1 1 1 1" /></material>
       </visual>
       <collision>
-        <origin xyz="0 0 0" rpy="0 0 0" />
-        <geometry><mesh filename="package://chassis_description/meshes/${name}.STL" /></geometry>
+        <origin xyz="0 0 0" rpy="1.5707963 0 0" />
+        <geometry><cylinder radius="0.058" length="0.03" /></geometry>
       </collision>
     </link>
     <joint name="${name}" type="fixed">
