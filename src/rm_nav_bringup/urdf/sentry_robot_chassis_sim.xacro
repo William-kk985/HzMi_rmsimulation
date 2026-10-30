@@ -24,7 +24,7 @@
     </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
-      <geometry><mesh filename="package://chassis_description/meshes/base_link.STL" /></geometry>
+      <geometry><mesh filename="package://chassis_description/meshes/decimated/base_link.stl" /></geometry>
       <material name="chassis_body"><color rgba="0.792 0.820 0.933 1" /></material>
     </visual>
     <!-- ★ 2026-10-30：collision 用**基本体**（box），visual 才用 STL。
@@ -47,7 +47,7 @@
       </inertial>
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
-        <geometry><mesh filename="package://chassis_description/meshes/${name}.STL" /></geometry>
+        <geometry><mesh filename="package://chassis_description/meshes/decimated/${name}.stl" /></geometry>
         <material name="wheel_white"><color rgba="1 1 1 1" /></material>
       </visual>
       <collision>
