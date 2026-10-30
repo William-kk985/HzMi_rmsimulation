@@ -30,12 +30,17 @@
       <material
         name="">
         <color
-          rgba="1.0 0.85 0.1 1" />
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0.0295" rpy="0 0 0" />
-      <geometry><box size="0.456 0.446 0.097" /></geometry>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/base_link.STL" />
+      </geometry>
     </collision>
   </link>
   <link
@@ -65,25 +70,31 @@
       <material
         name="">
         <color
-          rgba="0.25 0.25 0.25 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
-      <origin xyz="0 -0.032 0" rpy="1.5707963 0 0" />
-      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w1.STL" />
+      </geometry>
     </collision>
   </link>
   <joint
     name="w1"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="0.1615 -0.198 -0.04"
+      xyz="0.1615 -0.10895 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w1" />
-    <axis xyz="0 1 0" />
+    <axis
+      xyz="0 0 0" />
   </joint>
   <link
     name="w2">
@@ -112,25 +123,31 @@
       <material
         name="">
         <color
-          rgba="0.25 0.25 0.25 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
-      <origin xyz="0 -0.032 0" rpy="1.5707963 0 0" />
-      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w2.STL" />
+      </geometry>
     </collision>
   </link>
   <joint
     name="w2"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="0.1615 0.262 -0.04"
+      xyz="0.1615 0.17205 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w2" />
-    <axis xyz="0 -1 0" />
+    <axis
+      xyz="0 0 0" />
   </joint>
   <link
     name="w3">
@@ -159,25 +176,31 @@
       <material
         name="">
         <color
-          rgba="0.25 0.25 0.25 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0.032 0" rpy="1.5707963 0 0" />
-      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w3.STL" />
+      </geometry>
     </collision>
   </link>
   <joint
     name="w3"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="-0.1615 -0.262 -0.04"
+      xyz="-0.1615 -0.17205 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w3" />
-    <axis xyz="0 1 0" />
+    <axis
+      xyz="0 0 0" />
   </joint>
   <link
     name="w4">
@@ -206,28 +229,34 @@
       <material
         name="">
         <color
-          rgba="0.25 0.25 0.25 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0.032 0" rpy="1.5707963 0 0" />
-      <geometry><cylinder radius="0.058" length="0.03" /></geometry>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w4.STL" />
+      </geometry>
     </collision>
   </link>
   <joint
     name="w4"
-    type="continuous">
+    type="fixed">
     <origin
-      xyz="-0.1615 0.198 -0.04"
+      xyz="-0.1615 0.10895 -0.04"
       rpy="0 0 0" />
     <parent
       link="base_link" />
     <child
       link="w4" />
-    <axis xyz="0 -1 0" />
+    <axis
+      xyz="0 0 0" />
   </joint>
 
-  <!-- 仿真附加（原 URDF 没有；几何/惯量/碰撞一律不动）-->
+  <!-- ===================== 仿真附加（原 URDF 没有；其余逐字节不动）===================== -->
   <link name="imu_link"/>
   <joint name="imu_joint" type="fixed">
     <origin xyz="0 0 0.04" rpy="0 0 0"/>
@@ -247,29 +276,16 @@
     <origin xyz="0 0 0.09" rpy="0 0 0"/>
   </xacro:mid360>
   <gazebo>
-    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
       <ros><namespace>/</namespace>
         <remapping>cmd_vel:=cmd_vel_chassis</remapping>
         <remapping>odom:=odom_ground_truth</remapping></ros>
-      <update_rate>100</update_rate>
-      <left_joint>w1</left_joint>
-      <right_joint>w2</right_joint>
-      <wheel_separation>0.46</wheel_separation>
-      <wheel_diameter>0.116</wheel_diameter>
-      <max_wheel_torque>5.0</max_wheel_torque>
-      <max_wheel_acceleration>1.0</max_wheel_acceleration>
-      <command_topic>cmd_vel</command_topic>
-      <odometry_topic>odom</odometry_topic>
-      <odometry_frame>odom</odometry_frame>
-      <robot_base_frame>base_link</robot_base_frame>
-      <publish_odom>true</publish_odom>
-      <publish_odom_tf>false</publish_odom_tf>
+      <update_rate>100</update_rate><publish_rate>10</publish_rate>
+      <publish_odom>true</publish_odom><publish_odom_tf>false</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame><robot_base_frame>base_link</robot_base_frame>
+      <covariance_x>0.0001</covariance_x><covariance_y>0.0001</covariance_y>
+      <covariance_yaw>0.01</covariance_yaw>
     </plugin>
   </gazebo>
-  <gazebo reference="w1"><mu1>0.8</mu1><mu2>0.8</mu2><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="w2"><mu1>0.8</mu1><mu2>0.8</mu2><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="w3"><mu1>0.8</mu1><mu2>0.8</mu2><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="w4"><mu1>0.8</mu1><mu2>0.8</mu2><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="base_link"><material>Gazebo/Yellow</material></gazebo>
 
 </robot>
