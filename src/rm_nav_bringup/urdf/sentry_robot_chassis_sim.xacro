@@ -30,7 +30,7 @@
       <material
         name="">
         <color
-          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+          rgba="0.02 0.02 0.02 1" />
       </material>
     </visual>
     <collision>
@@ -70,7 +70,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.22 0.22 0.22 1" />
       </material>
     </visual>
     <collision>
@@ -123,7 +123,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.22 0.22 0.22 1" />
       </material>
     </visual>
     <collision>
@@ -176,7 +176,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.22 0.22 0.22 1" />
       </material>
     </visual>
     <collision>
@@ -229,7 +229,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.22 0.22 0.22 1" />
       </material>
     </visual>
     <collision>
@@ -295,5 +295,12 @@
   <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
   <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
   <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+
+  <!-- 颜色：车体黑、轮子深灰（Gazebo 渲染用；URDF 的 <visual> 材质给 RViz）-->
+  <gazebo reference="base_link"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="w1"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="w2"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="w3"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="w4"><material>Gazebo/DarkGrey</material></gazebo>
 
 </robot>
