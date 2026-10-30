@@ -85,7 +85,7 @@
   </link>
   <joint
     name="w1"
-    type="fixed">
+    type="continuous">
     <origin
       xyz="0.1615 -0.10895 -0.04"
       rpy="0 0 0" />
@@ -93,8 +93,7 @@
       link="base_link" />
     <child
       link="w1" />
-    <axis
-      xyz="0 0 0" />
+    <axis xyz="0 1 0" />
   </joint>
   <link
     name="w2">
@@ -138,7 +137,7 @@
   </link>
   <joint
     name="w2"
-    type="fixed">
+    type="continuous">
     <origin
       xyz="0.1615 0.17205 -0.04"
       rpy="0 0 0" />
@@ -146,8 +145,7 @@
       link="base_link" />
     <child
       link="w2" />
-    <axis
-      xyz="0 0 0" />
+    <axis xyz="0 -1 0" />
   </joint>
   <link
     name="w3">
@@ -191,7 +189,7 @@
   </link>
   <joint
     name="w3"
-    type="fixed">
+    type="continuous">
     <origin
       xyz="-0.1615 -0.17205 -0.04"
       rpy="0 0 0" />
@@ -199,8 +197,7 @@
       link="base_link" />
     <child
       link="w3" />
-    <axis
-      xyz="0 0 0" />
+    <axis xyz="0 1 0" />
   </joint>
   <link
     name="w4">
@@ -244,7 +241,7 @@
   </link>
   <joint
     name="w4"
-    type="fixed">
+    type="continuous">
     <origin
       xyz="-0.1615 0.10895 -0.04"
       rpy="0 0 0" />
@@ -252,8 +249,7 @@
       link="base_link" />
     <child
       link="w4" />
-    <axis
-      xyz="0 0 0" />
+    <axis xyz="0 -1 0" />
   </joint>
 
   <!-- ===================== 仿真附加（原 URDF 没有；其余逐字节不动）===================== -->
@@ -276,25 +272,52 @@
     <origin xyz="0 0 0.09" rpy="0 0 0"/>
   </xacro:mid360>
   <gazebo>
-    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+    <plugin name="diff_drive_front" filename="libgazebo_ros_diff_drive.so">
       <ros><namespace>/</namespace>
         <remapping>cmd_vel:=cmd_vel_chassis</remapping>
         <remapping>odom:=odom_ground_truth</remapping></ros>
-      <update_rate>100</update_rate><publish_rate>10</publish_rate>
-      <publish_odom>true</publish_odom><publish_odom_tf>false</publish_odom_tf>
-      <odometry_frame>odom</odometry_frame><robot_base_frame>base_link</robot_base_frame>
-      <covariance_x>0.0001</covariance_x><covariance_y>0.0001</covariance_y>
-      <covariance_yaw>0.01</covariance_yaw>
+      <update_rate>100</update_rate>
+      <left_joint>w1</left_joint>
+      <right_joint>w2</right_joint>
+      <wheel_separation>0.281</wheel_separation>
+      <wheel_diameter>0.116</wheel_diameter>
+      <max_wheel_torque>5.0</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>false</publish_odom_tf>
+    </plugin>
+  </gazebo>
+  <gazebo>
+    <plugin name="diff_drive_rear" filename="libgazebo_ros_diff_drive.so">
+      <ros><namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel_chassis</remapping></ros>
+      <update_rate>100</update_rate>
+      <left_joint>w3</left_joint>
+      <right_joint>w4</right_joint>
+      <wheel_separation>0.281</wheel_separation>
+      <wheel_diameter>0.116</wheel_diameter>
+      <max_wheel_torque>5.0</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <publish_odom>false</publish_odom>
+      <publish_odom_tf>false</publish_odom_tf>
     </plugin>
   </gazebo>
 
   <!-- 轮子对地摩擦：与 robot11 同款（固定轮 + planar_move 的组合）——
        默认 μ=1 时轮子"抓住"地面，planar_move 直接推底盘会在斜坡/台阶处产生倾覆力矩（翻车）；
        降到 μ=0.02 ⇒ 轮子滑动、底盘被速度直接推上去 ⇒ 不翻。只改摩擦，不改几何。 -->
-  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w1"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.8</mu1><mu2>0.8</mu2></gazebo>
 
   <!-- 颜色：车体黑、轮子深灰（Gazebo 渲染用；URDF 的 <visual> 材质给 RViz）-->
   <gazebo reference="base_link"><material>Gazebo/Black</material></gazebo>
