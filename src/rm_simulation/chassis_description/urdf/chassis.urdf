@@ -1,0 +1,259 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="起伏底盘 wheel 1-4">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.000525210630645196 -9.88787776028818E-05 0.0228529229233079"
+        rpy="0 0 0" />
+      <mass
+        value="4.30908483392141" />
+      <inertia
+        ixx="0.00356918503421658"
+        ixy="2.91111233555378E-06"
+        ixz="-1.58536389762567E-13"
+        iyy="0.00315932138586126"
+        iyz="-2.59640985562635E-14"
+        izz="0.00442129535026619" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="w1">
+    <inertial>
+      <origin
+        xyz="2.21156426505331E-13 -0.0310131419857252 -5.0563719877772E-14"
+        rpy="0 0 0" />
+      <mass
+        value="0.0968885662811193" />
+      <inertia
+        ixx="0.000142054002080831"
+        ixy="-1.76056439722202E-16"
+        ixz="6.85752968055349E-16"
+        iyy="0.000270826964366967"
+        iyz="4.04461765349949E-17"
+        izz="0.000142054002078526" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="w1"
+    type="fixed">
+    <origin
+      xyz="0.1615 -0.10895 -0.04"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="w1" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="w2">
+    <inertial>
+      <origin
+        xyz="2.21295204383409E-13 -0.0310131419857247 -5.06504560515708E-14"
+        rpy="0 0 0" />
+      <mass
+        value="0.0968885662811196" />
+      <inertia
+        ixx="0.000142054002080838"
+        ixy="-1.7562802007376E-16"
+        ixz="6.85790224897307E-16"
+        iyy="0.000270826964366966"
+        iyz="4.0237417683157E-17"
+        izz="0.000142054002078533" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="w2"
+    type="fixed">
+    <origin
+      xyz="0.1615 0.17205 -0.04"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="w2" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="w3">
+    <inertial>
+      <origin
+        xyz="-2.21350715534641E-13 0.0310131419857251 -5.07198449906099E-14"
+        rpy="0 0 0" />
+      <mass
+        value="0.096888566281119" />
+      <inertia
+        ixx="0.000142054002080834"
+        ixy="-1.75804051692341E-16"
+        ixz="-6.8568793984376E-16"
+        iyy="0.000270826964366966"
+        iyz="-4.0245017491951E-17"
+        izz="0.000142054002078529" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="w3"
+    type="fixed">
+    <origin
+      xyz="-0.1615 -0.17205 -0.04"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="w3" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="w4">
+    <inertial>
+      <origin
+        xyz="-2.21156426505331E-13 0.0310131419857252 -5.0563719877772E-14"
+        rpy="0 0 0" />
+      <mass
+        value="0.0968885662811193" />
+      <inertia
+        ixx="0.000142054002080831"
+        ixy="-1.76056144471508E-16"
+        ixz="-6.85753899441331E-16"
+        iyy="0.000270826964366967"
+        iyz="-4.04759497027718E-17"
+        izz="0.000142054002078526" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/w4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="w4"
+    type="fixed">
+    <origin
+      xyz="-0.1615 0.10895 -0.04"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="w4" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

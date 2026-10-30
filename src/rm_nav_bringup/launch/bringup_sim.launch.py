@@ -187,6 +187,9 @@ _ROBOT_SLOTS = {
     'robot11': ('sentry_robot_robot11_sim.xacro',
                 '用户的哨兵 robot11（SolidWorks 导出：真 mesh + 真 inertial；'
                 '雷达在底盘上、斜 30° 下俯、离地 0.2595 m）'),
+    'chassis': ('sentry_robot_chassis_sim.xacro',
+                '用户的起伏底盘（4 轮、固定轮；真 mesh + 真 inertial；'
+                '雷达**平放**在车顶、离地 0.188 m；IMU 平放）'),
 }
 
 #: robot:=robot11 的雷达安装倾角 **不再有 launch 常数**（2026-10-21 收口，契约 §4.12）。
@@ -314,6 +317,7 @@ _LINEFIT_SLOT_FILES = {
     '': ('config', 'segmentation_sim.yaml'),
     'hzmirm': ('config', 'segmentation_sim_hzmirm.yaml'),
     'robot11': ('config', 'segmentation_sim_robot11.yaml'),
+    'chassis': ('config', 'segmentation_sim_chassis.yaml'),
 }
 
 
@@ -383,8 +387,12 @@ def _robot_xacro_args(context, xyz, rpy):
     `_RobotXacroCommand.perform`（真的 spawn 用）与 `_robot_xacro_mappings`（解析器用）都走这里
     ⇒ "解析的模型"与"spawn 的模型"在参数层面不可能分叉。改这里两边同时变。
     """
-    args = [('xyz', _xacro_unquote(xyz), True), ('rpy', _xacro_unquote(rpy), True)]
     robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+    # ★ 2026-10-30：起伏底盘的雷达平放在车顶（xyz=0 0 0.09 / rpy=0 0 0）——覆盖平台 yaml 的
+    #   "默认模型"安装几何（0.12,0,0.175），否则 spawn 的模型与解析的模型会分叉。
+    if robot == 'chassis':
+        xyz, rpy = '0 0 0.09', '0 0 0'
+    args = [('xyz', _xacro_unquote(xyz), True), ('rpy', _xacro_unquote(rpy), True)]
     # ★ 2026-10-27（契约 §4.15）：`robot:=hzmirm` 的 `turret_yaw_deg` / `turret_pitch_deg`
     #   **已删除** —— 云台是**静态**的（上游 URDF 里两个云台关节都是 fixed，本仓**没有**
     #   gimbal 控制器），这两个参数只改 spawn 时的静态姿态；默认 0/0 ⇒ 不再传，
@@ -587,7 +595,18 @@ def _parse_mount_from_urdf(urdf_path, mappings, robot='?', mount='?'):
         # LIO 的 `extrinsic_R/T` = T(imu←livox)：p_imu = R_IL·p_lidar + T_IL。
         #   `extrinsic_T` 仍然是 [0,0,0.05]（= 雷达原点在 IMU 系里的位置：沿两者共同的 z 偏 5 cm）；
         #   `extrinsic_R` = R(imu←livox) = 倾角的**逆**（水平点云 → 斜的 IMU 系）。
-        T_il, _ilk = _compose_fixed_chain(xml_text, 'imu_link', 'livox_frame', label)  # T(livox←imu)
+        # ★ 2026-10-30：IMU 与 livox 可能是**兄弟**（都挂在 base_link 下，如起伏底盘）⇒ 直接
+        #   向上走链会失败；此时用两条 base 链合成 T(livox←imu) = T(base←livox)^-1 · T(base←imu)。
+        try:
+            T_il, _ilk = _compose_fixed_chain(xml_text, 'imu_link', 'livox_frame', label)  # T(livox←imu)
+        except _MountParseError:
+            # T(base←livox) 的逆
+            R_l = [row[:3] for row in T_livox[:3]]
+            p_l = [T_livox[i][3] for i in range(3)]
+            R_lt = _mat3_transpose(R_l)
+            p_lt = [-sum(R_lt[i][j] * p_l[j] for j in range(3)) for i in range(3)]
+            T_livox_inv = [[R_lt[i][0], R_lt[i][1], R_lt[i][2], p_lt[i]] for i in range(3)] + [[0.0, 0.0, 0.0, 1.0]]
+            T_il = _mat4_mul(T_livox_inv, T_imu)   # T(livox←imu) = T(livox←base)·T(base←imu)
         R_li = [row[:3] for row in T_il[:3]]
         p_li = [T_il[i][3] for i in range(3)]
         R_il = _mat3_transpose(R_li)
@@ -1315,7 +1334,7 @@ class _GravityAlignRpy(Substitution):
 #:    下沉；robot11 的 0.2595 与几何 0.259527 差 0.03 mm（几乎无下沉）。运行时由节点初始化时的
 #:    **地面拟合互检**负责（|h_meas−h_urdf| ≥0.03/0.05 m ⇒ WARN/ERROR，见契约 v3 §4.3 与
 #:    `small_point_lio/src/gravity_align_ground.cpp`）；本 launch 只提供先验，不重复那段逻辑。
-_HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06}
+_HZMI_BASE_LINK_HEIGHT_M = {'robot11': 0.102499, 'hzmirm': 0.0, '': 0.06, 'chassis': 0.098}
 
 #: 出生高度在"落定高度"之上再加的余量（m）。为什么不是 0：`spawn_entity.py` 把模型按**几何**
 #: 摆到 `base_link_height + margin`，留 1 mm 让接触在第一个物理步里就解出来，而不是一出生就
@@ -2390,7 +2409,8 @@ def generate_launch_description():
                    'linefit_ground_segmentation_ros 后重试；'
                    '或去掉 robot:=<模型> 回到默认模型',
         slot_map={'hzmirm': ('config', 'segmentation_sim_hzmirm.yaml'),
-                  'robot11': ('config', 'segmentation_sim_robot11.yaml')})
+                  'robot11': ('config', 'segmentation_sim_robot11.yaml'),
+                  'chassis': ('config', 'segmentation_sim_chassis.yaml')})
     ########################## linefit_ground_segementation parameters end ############################
 
     ########################## 可通行性判据（坡度/台阶）parameters start #############################
@@ -2792,7 +2812,7 @@ def generate_launch_description():
                     "=base_link）与 p2l 参数（target_frame=base_link，高度带改在重力系量）。"
                     "默认模型的改动（实测数字/影响面）见 docs/frame_contract_v3_measurements.md §20，"
                     "范围/数值对照见 docs/robot_models.md",
-        choices=['', 'hzmirm', 'robot11'])
+        choices=['', 'hzmirm', 'robot11', 'chassis'])
 
     # ★ 2026-10-21：robot:=robot11 的安装倾角与抬高都不再有 launch 开关：
     #   `livox_tilt_axis` / `livox_raise_m` 已删除（§28），`livox_tilt_rpy` 也不再由本 launch 传

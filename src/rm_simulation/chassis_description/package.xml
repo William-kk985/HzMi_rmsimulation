@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>chassis_description</name>
+  <version>1.0.0</version>
+  <description>起伏底盘（4 轮、固定轮）的 mesh 与 URDF —— 用户提供的 SolidWorks 导出模型（ROS 1 catkin 包 "起伏底盘 wheel 1-4" 的 ROS 2 适配版）。</description>
+  <maintainer email="TODO@email.com">TODO</maintainer>
+  <license>BSD</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

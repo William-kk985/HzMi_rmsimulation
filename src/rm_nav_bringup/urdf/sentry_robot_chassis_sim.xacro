@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 起伏底盘（用户提供的 SolidWorks 模型，4 轮、固定轮）的**仿真模型**。
+     与上游 chassis.urdf 的几何/质量/惯量逐条相同（只改 mesh 的包路径 + 加 <gazebo> 插件）。
+     · 驱动：libgazebo_ros_planar_move.so（与默认模型/robot11 逐字同款）⇒ 只有它订阅
+       /cmd_vel_chassis；真值里程计发 /odom_ground_truth（/odom 留给 LIO）；不发 odom→base_link。
+     · IMU：gazebo_ros_imu_sensor，100 Hz，帧 imu_link，话题 /livox/imu；**平放**（rpy 0）。
+     · 雷达：mid360 宏（libros2_livox.so），**平放在车顶**（livox_frame，rpy=0，xyz 0 0 0.09），
+       话题 /livox/lidar（CustomMsg）+ /livox/lidar/pointcloud（PointCloud2）。
+       ⇒ 与 robot11（斜 30°、物理/数据两层）不同：这里没有 livox_physical / 外参旋正节点。
+     · 落地高度：轮心 z=-0.04、轮半径 0.058 ⇒ 轮底 z=-0.098 ⇒ base_link 原点离地 0.098 m。 -->
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="chassis">
+  <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro" />
+
+  <xacro:arg name="xyz" default="0 0 0.09" />
+  <xacro:arg name="rpy" default="0 0 0" />
+
+  <!-- ===================== 车体 ===================== -->
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0.000525210630645196 -9.88787776028818E-05 0.0228529229233079" rpy="0 0 0" />
+      <mass value="4.30908483392141" />
+      <inertia ixx="0.00356918503421658" ixy="2.91111233555378E-06" ixz="-1.58536389762567E-13"
+               iyy="0.00315932138586126" iyz="-2.59640985562635E-14" izz="0.00442129535026619" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry><mesh filename="package://chassis_description/meshes/base_link.STL" /></geometry>
+      <material name="chassis_body"><color rgba="0.792 0.820 0.933 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry><mesh filename="package://chassis_description/meshes/base_link.STL" /></geometry>
+    </collision>
+  </link>
+
+  <!-- ===================== 四个轮子（固定关节，与上游一致） ===================== -->
+  <xacro:macro name="chassis_wheel" params="name xyz">
+    <link name="${name}">
+      <inertial>
+        <origin xyz="0 -0.0310131419857 0" rpy="0 0 0" />
+        <mass value="0.0968885662811" />
+        <inertia ixx="0.000142054002080831" ixy="-1.76056439722202E-16" ixz="6.85752968055349E-16"
+                 iyy="0.000270826964366967" iyz="4.04461765349949E-17" izz="0.000142054002078526" />
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <geometry><mesh filename="package://chassis_description/meshes/${name}.STL" /></geometry>
+        <material name="wheel_white"><color rgba="1 1 1 1" /></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <geometry><mesh filename="package://chassis_description/meshes/${name}.STL" /></geometry>
+      </collision>
+    </link>
+    <joint name="${name}" type="fixed">
+      <origin xyz="${xyz}" rpy="0 0 0" />
+      <parent link="base_link" />
+      <child link="${name}" />
+      <axis xyz="0 0 0" />
+    </joint>
+  </xacro:macro>
+
+  <xacro:chassis_wheel name="w1" xyz="0.1615 -0.10895 -0.04" />
+  <xacro:chassis_wheel name="w2" xyz="0.1615 0.17205 -0.04" />
+  <xacro:chassis_wheel name="w3" xyz="-0.1615 -0.17205 -0.04" />
+  <xacro:chassis_wheel name="w4" xyz="-0.1615 0.10895 -0.04" />
+
+  <!-- ===================== 驱动 + 真值里程计（与 robot11 同款） ===================== -->
+  <gazebo>
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel_chassis</remapping>
+        <remapping>odom:=odom_ground_truth</remapping>
+      </ros>
+      <update_rate>100</update_rate>
+      <publish_rate>10</publish_rate>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>false</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <covariance_x>0.0001</covariance_x>
+      <covariance_y>0.0001</covariance_y>
+      <covariance_yaw>0.01</covariance_yaw>
+    </plugin>
+  </gazebo>
+
+  <!-- 轮子对地摩擦（与 robot11 同款）：planar_move 直接设速度，摩擦只影响"刮地"损耗 -->
+  <gazebo reference="base_link">
+    <mu1>0.02</mu1>
+    <mu2>0.02</mu2>
+  </gazebo>
+
+  <!-- ===================== IMU（平放） ===================== -->
+  <link name="imu_link" />
+  <joint name="imu_joint" type="fixed">
+    <origin xyz="0 0 0.04" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="imu_link" />
+  </joint>
+  <gazebo reference="imu_link">
+    <sensor name="chassis_imu" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+        <ros>
+          <namespace>/</namespace>
+          <remapping>~/out:=/livox/imu</remapping>
+        </ros>
+        <frame_name>imu_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- ===================== 雷达（平放在车顶） ===================== -->
+  <xacro:mid360 name="livox_frame" parent="base_link" topic="/livox/lidar">
+    <origin xyz="$(arg xyz)" rpy="$(arg rpy)" />
+  </xacro:mid360>
+
+  <!-- 观感材质 -->
+  <gazebo reference="base_link"><material>Gazebo/Orange</material></gazebo>
+  <gazebo reference="livox_frame"><material>Gazebo/LightBlueLaser</material></gazebo>
+  <gazebo reference="imu_link"><material>Gazebo/BuildingFrame</material></gazebo>
+</robot>

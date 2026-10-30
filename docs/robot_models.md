@@ -2171,3 +2171,31 @@ ros2 launch rm_nav_bringup bringup_sim.launch.py world:=RMUC2026 mode:=nav lio:=
 * **LIO 漂移同协议 A/B 做了**（新增 `--drive`：直行 10 s ↔ 原地转 10 s）：driven 窗
   `plugin` 0.0094 m / `urdf` 0.0483 m，静止窗 0.0264 / 0.0134 m ⇒ **两种协议下排序相反，
   仍在噪声量级内**，不主张"哪个档漂得多"。
+
+## 9.1 起伏底盘（`robot:=chassis`，2026-10-30）
+
+用户提供的 SolidWorks 模型（原 ROS 1 包 "起伏底盘 wheel 1-4"，本仓适配为
+`chassis_description`）。**4 轮、轮子全 fixed**（无转向/滚动关节），2 个 STL 来源：
+`base_link.STL`（4.31 kg）+ `w1..w4.STL`（各 0.097 kg）。
+
+| 项 | 值 |
+|---|---|
+| 轮位（相对 base_link） | w1 (0.1615,−0.10895,−0.04)、w2 (0.1615,+0.17205,−0.04)、w3 (−0.1615,−0.17205,−0.04)、w4 (−0.1615,+0.10895,−0.04) |
+| 轮半径 / 轮底 | 0.058 m / z=−0.098 m ⇒ **base_link 原点离地 0.098 m**（已加进 `_HZMI_BASE_LINK_HEIGHT_M`） |
+| 车体 bbox | x ±0.228、y ±0.223、z −0.019..+0.078 |
+| 驱动 | `libgazebo_ros_planar_move.so`（mecanum_controller，与默认模型/robot11 同款）⇒ `/cmd_vel_chassis` → 底盘 + `/odom_ground_truth`；**不加轮控制器**（轮子固定） |
+| IMU | `gazebo_ros_imu_sensor`，100 Hz，`imu_link`（平放，z=+0.04）→ `/livox/imu` |
+| **雷达** | `mid360` 宏（`libros2_livox.so`），**平放在车顶**：`livox_frame`，rpy=0，xyz=(0,0,0.09) ⇒ **离地 0.188 m**（linefit `sensor_height: 0.188`，`segmentation_sim_chassis.yaml`） |
+| 外参 | 平放 ⇒ `extrinsic_R=I`、`extrinsic_T=[0,0,0.05]`（launch 从 URDF 解析；IMU 与 livox 是**兄弟**链路，已修 `_parse_mount_from_urdf` 的兄弟链合成） |
+| 代价图 | 复用 base（`robot_radius: 0.22` ≈ 车体内切 0.223） |
+
+**启动**：
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  world:=RMUC2027 mode:=mapping lio:=small_point_lio gravity:=tf \
+  mapper:=slam_toolbox ground:=patchwork robot:=chassis spin_speed:=0.0
+```
+
+⚠️ **验证边界**：本机（沙箱）只能验证到**静态**（xacro 展开、槽位、`[URDF mount]` rpy=0/xyz=0.09、
+`[lio_extrinsic]` R=I、`[odom_level]` h=0.188、spawn 成功）；**运行时**（`/livox/lidar` 频率、
+`/scan`、落定高度、LIO init）需在用户桌面上复核（沙箱的 `ros2` CLI 发现/daemon 不可靠）。
