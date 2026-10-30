@@ -288,4 +288,12 @@
     </plugin>
   </gazebo>
 
+  <!-- 轮子对地摩擦：与 robot11 同款（固定轮 + planar_move 的组合）——
+       默认 μ=1 时轮子"抓住"地面，planar_move 直接推底盘会在斜坡/台阶处产生倾覆力矩（翻车）；
+       降到 μ=0.02 ⇒ 轮子滑动、底盘被速度直接推上去 ⇒ 不翻。只改摩擦，不改几何。 -->
+  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
+
 </robot>
