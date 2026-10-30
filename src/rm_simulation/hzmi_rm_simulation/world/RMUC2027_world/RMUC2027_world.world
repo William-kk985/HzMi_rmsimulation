@@ -58,9 +58,8 @@
         <visual name='visual'>
           <pose>0 0 0 0 0 0</pose>
           <geometry>
-            <!-- 仅 GUI 视觉用低面数 LOD（45,438 面）；collision/射线仍用原 378,666 面 mesh -->
             <mesh>
-              <uri>model://RMUC2027_world/meshes/RMUC2027_lod.stl</uri>
+              <uri>model://RMUC2027_world/meshes/RMUC2027.stl</uri>
               <scale>0.001 0.001 0.001</scale>
             </mesh>
           </geometry>
