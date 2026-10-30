@@ -3369,8 +3369,16 @@ def generate_launch_description():
         name='ground_segmentation',      # 与 linefit 节点同名（两者互斥 ⇒ 不会重名冲突）
         output='screen',
         parameters=[
-            _PackageShareFile('patchwork_ground_segmentation', 'config',
-                              'ground_segmentation_sim.yaml'),
+            # ★ 2026-10-30：按 robot 槽位选 patchwork 参数文件（linefit 同款 _RobotSlotFile）——
+            #   默认模型 sensor_height 0.226，起伏底盘 0.188（base_link 离地 0.098 + 雷达 0.09）。
+            _RobotSlotFile(
+                'patchwork_ground_segmentation',
+                ('config', 'ground_segmentation_sim.yaml'),
+                error_hint='该文件属于 patchwork 地面分割槽位：'
+                           '`colcon build --symlink-install --packages-select '
+                           'patchwork_ground_segmentation` 后重试；'
+                           '或去掉 ground:=patchwork 回到 linefit',
+                slot_map={'chassis': ('config', 'ground_segmentation_sim_chassis.yaml')}),
             *traversability_params_list,
             self_mask_params,
             near_ground_params,
