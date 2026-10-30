@@ -191,7 +191,11 @@ local_costmap:
         enabled: false                      # 默认关（launch 按 local_obstacle 覆盖）；A/B 验证过再开
         observation_sources: cloud
         cloud:
-          topic: /segmentation/obstacle
+          # ★ 2026-10-31：改用 cloud_crop 的输出（车体 AABB+近场圆柱已剔）——
+          #   原来吃 /segmentation/obstacle（含车体自击）⇒ STVL 把机器人自己
+          #   包成一圈障碍（local/global 两个 costmap 都是）。
+          #   非 chassis 机器人：cloud_crop 的 boxes 为空 ⇒ 该话题等于原数据（直通）。
+          topic: /segmentation/obstacle_cropped
           data_type: "PointCloud2"
           min_obstacle_height: -0.02
           max_obstacle_height: 2.0
@@ -243,7 +247,11 @@ local_costmap:
         observation_sources:      livox_mark livox_clear
         livox_mark:
           data_type: PointCloud2
-          topic: /segmentation/obstacle
+          # ★ 2026-10-31：改用 cloud_crop 的输出（车体 AABB+近场圆柱已剔）——
+          #   原来吃 /segmentation/obstacle（含车体自击）⇒ STVL 把机器人自己
+          #   包成一圈障碍（local/global 两个 costmap 都是）。
+          #   非 chassis 机器人：cloud_crop 的 boxes 为空 ⇒ 该话题等于原数据（直通）。
+          topic: /segmentation/obstacle_cropped
           marking: true
           clearing: false
           obstacle_range: 3.0
@@ -258,7 +266,11 @@ local_costmap:
         livox_clear:
           enabled: true
           data_type: PointCloud2
-          topic: /segmentation/obstacle
+          # ★ 2026-10-31：改用 cloud_crop 的输出（车体 AABB+近场圆柱已剔）——
+          #   原来吃 /segmentation/obstacle（含车体自击）⇒ STVL 把机器人自己
+          #   包成一圈障碍（local/global 两个 costmap 都是）。
+          #   非 chassis 机器人：cloud_crop 的 boxes 为空 ⇒ 该话题等于原数据（直通）。
+          topic: /segmentation/obstacle_cropped
           marking: false
           clearing: true
           max_z: 8.0
@@ -343,7 +355,11 @@ global_costmap:
         observation_sources:      livox_mark livox_clear
         livox_mark:
           data_type: PointCloud2
-          topic: /segmentation/obstacle
+          # ★ 2026-10-31：改用 cloud_crop 的输出（车体 AABB+近场圆柱已剔）——
+          #   原来吃 /segmentation/obstacle（含车体自击）⇒ STVL 把机器人自己
+          #   包成一圈障碍（local/global 两个 costmap 都是）。
+          #   非 chassis 机器人：cloud_crop 的 boxes 为空 ⇒ 该话题等于原数据（直通）。
+          topic: /segmentation/obstacle_cropped
           marking: true
           clearing: false
           obstacle_range: 3.0                                       # meters
@@ -364,7 +380,11 @@ global_costmap:
         livox_clear:
           enabled: true                                             # default true, can be toggled on/off with associated service call
           data_type: PointCloud2
-          topic: /segmentation/obstacle
+          # ★ 2026-10-31：改用 cloud_crop 的输出（车体 AABB+近场圆柱已剔）——
+          #   原来吃 /segmentation/obstacle（含车体自击）⇒ STVL 把机器人自己
+          #   包成一圈障碍（local/global 两个 costmap 都是）。
+          #   非 chassis 机器人：cloud_crop 的 boxes 为空 ⇒ 该话题等于原数据（直通）。
+          topic: /segmentation/obstacle_cropped
           marking: false
           clearing: true
           max_z: 8.0                                                # default 10, meters
