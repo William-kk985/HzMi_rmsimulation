@@ -26,6 +26,8 @@ setup(
             'cloud_accumulator_node = cloud_accumulator.accumulator_node:main',
             # ★ 2026-10-29：复刻实车 Livox 驱动器的 extrinsic_parameter（斜点云 -> 水平 livox_frame）
             'livox_cloud_extrinsic = cloud_accumulator.livox_extrinsic_node:main',
+            # ★ 2026-10-30：按几何盒子裁掉车体自身的点（PCL CropBox 等价物），治 p2l 高度带误伤矮墙
+            'cloud_crop = cloud_accumulator.cloud_crop_node:main',
         ],
     },
 )

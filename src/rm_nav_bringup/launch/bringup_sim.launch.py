@@ -3403,7 +3403,8 @@ def generate_launch_description():
     def _p2l_node(extra_params):
         return Node(
             package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
-            remappings=[('cloud_in',  ['/segmentation/obstacle']),
+            # 2026-10-30：p2l 吃 cloud_crop 的输出（车体已按几何盒子剔掉；其它 robot 是直通）
+            remappings=[('cloud_in',  ['/segmentation/obstacle_cropped']),
                         ('scan',  ['/scan'])],
             # 参数已回归 pointcloud_to_laserscan 包 config/（R1）
             # ★ 2026-09-23 修复：同上，原来漏了 use_sim_time。p2l 内部用
@@ -3417,6 +3418,29 @@ def generate_launch_description():
             name='pointcloud_to_laserscan')
 
     # 「点云在斜系」的唯一安装约定：`target_frame: base_link`（只含这一个键的增量覆盖文件）。
+    # ★ 2026-10-30：车体自身点的**几何裁剪**（cloud_crop，PCL CropBox 等价物）。
+    #   为什么：chassis 的车体顶面离雷达 1.2 cm，p2l 的 min_height 高度带会误伤 0.2 m 矮墙；
+    #   改成"点云层按 base_link 系的 AABB 剔车体" ⇒ p2l 的 min_height 可以放回"离地 2 cm"。
+    #   其它 robot 的 boxes 为空 ⇒ 节点只做直通（数据不变）。
+    _crop_boxes = [-0.228, -0.223, -0.019, 0.228, 0.223, 0.078,
+                   -0.220, -0.155, -0.098, 0.220, -0.125, 0.018,
+                   -0.220, 0.125, -0.098, 0.220, 0.155, 0.018]
+
+    def _launch_cloud_crop(context):
+        robot = (LaunchConfiguration('robot').perform(context) or '').strip()
+        boxes = _crop_boxes if robot == 'chassis' else []
+        return [Node(
+            package='cloud_accumulator', executable='cloud_crop', name='cloud_crop',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'input_topic': '/segmentation/obstacle',
+                'output_topic': '/segmentation/obstacle_cropped',
+                'target_frame': 'base_link',
+                'boxes': boxes,
+            }])]
+
+    bringup_cloud_crop_node = OpaqueFunction(function=_launch_cloud_crop)
     bringup_pointcloud_to_laserscan_node = _p2l_node(
         [_RobotSlotFile(
             'pointcloud_to_laserscan',
@@ -4602,6 +4626,7 @@ def generate_launch_description():
     # ★ 2026-10-21（§4.14）：gravity:=base 的 linefit（gravity_aligned_frame=base_link）；与上面互斥
     ld.add_action(bringup_linefit_ground_segmentation_node_base)
     ld.add_action(bringup_patchwork_ground_segmentation_node)
+    ld.add_action(bringup_cloud_crop_node)
     ld.add_action(bringup_pointcloud_to_laserscan_node)
     ld.add_action(bringup_LIO_group)
     
