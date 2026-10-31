@@ -59,6 +59,10 @@ bool PlanGoalChecker::isGoalReached(
     plan = plan_;
   }
   if (!plan || plan->poses.empty()) {
+    RCLCPP_WARN_THROTTLE(
+      lc_node_->get_logger(), *lc_node_->get_clock(), 2000,
+      "[plan_goal_checker] 还没收到 /plan（plan_=%s）⇒ 无法判到达",
+      plan ? "空" : "null");
     return false;
   }
 
@@ -91,6 +95,16 @@ bool PlanGoalChecker::isGoalReached(
   const double dist = std::hypot(dx, dy);
   const double dyaw = std::fabs(
     tf2::getYaw(robot_in_goal.pose.orientation) - tf2::getYaw(goal_stamped.pose.orientation));
+
+  // ★ 诊断（1 Hz）：plan 是否收到、目标在哪、车在哪、差多少
+  RCLCPP_INFO_THROTTLE(
+    lc_node_->get_logger(), *lc_node_->get_clock(), 1000,
+    "[plan_goal_checker] plan_poses=%zu goal=(%.2f,%.2f)@%s robot=(%.2f,%.2f) dist=%.3f "
+    "dyaw=%.2f° tol=%.2f/%.2f ⇒ %s",
+    plan->poses.size(), goal_stamped.pose.position.x, goal_stamped.pose.position.y,
+    goal_frame.c_str(), robot_in_goal.pose.position.x, robot_in_goal.pose.position.y,
+    dist, dyaw * 180.0 / M_PI, xy_tolerance_, yaw_tolerance_,
+    (dist <= xy_tolerance_ && dyaw <= yaw_tolerance_) ? "REACHED" : "not-yet");
 
   if (dist > xy_tolerance_) {
     return false;
