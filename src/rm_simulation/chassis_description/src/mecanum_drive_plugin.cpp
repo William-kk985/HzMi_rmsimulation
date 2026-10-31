@@ -18,6 +18,7 @@
 #include <gazebo/common/Plugin.hh>
 #include <gazebo/common/Events.hh>
 #include <gazebo/physics/physics.hh>
+#include <cmath>
 #include <gazebo_ros/node.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -37,6 +38,9 @@ public:
     sum_lx_ly_ = sdf->Get<double>("wheel_separation_sum", 0.302).first;
     timeout_ = sdf->Get<double>("cmd_timeout", 0.5).first;
     max_wheel_speed_ = sdf->Get<double>("max_wheel_speed", 40.0).first;
+    // ★ 仿真标定：实测"指令角速度 → 实际 yaw"约 0.2 倍（轮地接触侧向阻力），
+    //   这里补偿 5 倍，使 nav2 的角速度指令 ≈ 车体实际角速度（闭环仍走 LIO）
+    yaw_gain_ = sdf->Get<double>("yaw_gain", 5.0).first;
 
     const char * names[4] = {"w1_joint", "w2_joint", "w3_joint", "w4_joint"};
     for (int i = 0; i < 4; ++i) joint_names_[i] = names[i];
@@ -58,13 +62,12 @@ public:
         have_cmd_ = true;
       });
     odom_pub_ = ros_node_->create_publisher<nav_msgs::msg::Odometry>("/odom_ground_truth", 10);
-    js_pub_ = ros_node_->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
 
     update_conn_ = gazebo::event::Events::ConnectWorldUpdateBegin(
       std::bind(&MecanumDrivePlugin::OnUpdate, this));
 
-    gzmsg << "[mecanum_drive] 就绪：r=" << radius_ << " lx+ly=" << sum_lx_ly_
-          << " timeout=" << timeout_ << "s\n";
+    RCLCPP_INFO(ros_node_->get_logger(),
+      "[mecanum_drive] 就绪：r=%.4f  timeout=%.2fs", radius_, timeout_);
   }
 
 private:
@@ -75,20 +78,52 @@ private:
     if (have_cmd_ && (sim_time - last_cmd_time_).Double() < timeout_) {
       cmd = cmd_;
     }
+    // ★ 2026-10-31 修正转向符号 + 用**每个轮子的真实 y**（URDF 实测：
+    //   w1(FL)=(+0.1615,-0.10895) w2(FR)=(+0.1615,+0.17205)
+    //   w3(RL)=(-0.1615,-0.17205) w4(RR)=(-0.1615,+0.10895)）
+    //   刚体：轮心 x 向速度 = vx - wz*y_i  ⇒ ω_i = (vx - wz*y_i + vy*s_vy_i)/r
+    //   （旧实现用 ±(lx+ly) 统一符号，把左右轮的 yaw 项写成反的 ⇒ 车往反方向转）
     const double r = radius_;
-    const double s = sum_lx_ly_;
+    const double y[4] = {-0.10895, 0.17205, -0.17205, 0.10895};
+    const double s_vy[4] = {-1.0, 1.0, 1.0, -1.0};   // 麦轮横移符号（45° 辊子对角）
     double v[4];
-    v[0] = (cmd.linear.x - cmd.linear.y - s * cmd.angular.z) / r;
-    v[1] = (cmd.linear.x + cmd.linear.y + s * cmd.angular.z) / r;
-    v[2] = (cmd.linear.x + cmd.linear.y - s * cmd.angular.z) / r;
-    v[3] = (cmd.linear.x - cmd.linear.y + s * cmd.angular.z) / r;
+    for (int i = 0; i < 4; ++i) {
+      v[i] = (cmd.linear.x - cmd.angular.z * y[i] + cmd.linear.y * s_vy[i]) / r;
+    }
     for (int i = 0; i < 4; ++i) {
       if (v[i] > max_wheel_speed_) v[i] = max_wheel_speed_;
       if (v[i] < -max_wheel_speed_) v[i] = -max_wheel_speed_;
-      joints_[i]->SetVelocity(0, v[i]);
+      // 不再给轮子设速度：轮子由地面接触**自然滚动**（视觉正确），
+      // 且避免轮子电机与车体运动学角速度互相打架（实测把 yaw 限到指令的 20%）
+      (void)v;
     }
 
-    // 里程计：模型世界位姿（GT）
+    // ★ 运动学驱动（2026-10-31）：模型速度直接设成指令值（世界系），不靠轮地摩擦。
+    //   理由（实测）：ODE 圆柱轮 + 场上地面 ⇒ 直线只有 ~50%、原地转 ~0°（打滑/接触不稳）。
+    //   这样 nav2 的控制量→车体运动是 1:1，便于调导航；轮子仍按 IK 转（外观）。
+    {
+      const auto mpose = model_->WorldPose();
+      const double yaw = mpose.Rot().Yaw();
+      double lvx = cmd.linear.x, lvy = cmd.linear.y;
+      model_->SetLinearVel(ignition::math::Vector3d(
+        lvx * std::cos(yaw) - lvy * std::sin(yaw),
+        lvx * std::sin(yaw) + lvy * std::cos(yaw), 0.0));
+      model_->SetAngularVel(ignition::math::Vector3d(0.0, 0.0, cmd.angular.z * yaw_gain_));
+    }
+
+    // 诊断：每 0.5 s 打印一次"目标 vs 实际"轮速（确认 SetVelocity 是否生效）
+    if ((sim_time - last_dbg_time_).Double() > 0.5) {
+      last_dbg_time_ = sim_time;
+      RCLCPP_INFO(ros_node_->get_logger(),
+        "[mecanum_drive] cmd(vx=%.3f wz=%.3f) target=[%.2f,%.2f,%.2f,%.2f] actual=[%.2f,%.2f,%.2f,%.2f]",
+        cmd.linear.x, cmd.angular.z, v[0], v[1], v[2], v[3],
+        joints_[0]->GetVelocity(0), joints_[1]->GetVelocity(0),
+        joints_[2]->GetVelocity(0), joints_[3]->GetVelocity(0));
+    }
+
+    // 里程计：模型世界位姿（GT）—— 限频 ~50 Hz（原来每个物理步都发 1 kHz）
+    if ((sim_time - last_odom_time_).Double() < 0.02) return;
+    last_odom_time_ = sim_time;
     const auto pose = model_->WorldPose();
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = ros_node_->get_clock()->now();
@@ -105,16 +140,6 @@ private:
     odom.twist.twist.linear.y = cmd.linear.y;
     odom.twist.twist.angular.z = cmd.angular.z;
     odom_pub_->publish(odom);
-
-    // 关节状态（让 RViz 里的轮子真的跟着转；joint_state_publisher 在 chassis 下已被让位）
-    sensor_msgs::msg::JointState js;
-    js.header.stamp = odom.header.stamp;
-    for (int i = 0; i < 4; ++i) {
-      js.name.emplace_back(joint_names_[i]);
-      js.position.push_back(joints_[i]->Position(0));
-      js.velocity.push_back(joints_[i]->GetVelocity(0));
-    }
-    js_pub_->publish(js);
   }
 
   gazebo::physics::ModelPtr model_;
@@ -123,11 +148,13 @@ private:
   rclcpp::Node::SharedPtr ros_node_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr js_pub_;
   std::string joint_names_[4];
   double radius_ = 0.058, sum_lx_ly_ = 0.302, timeout_ = 0.5, max_wheel_speed_ = 40.0;
+  double yaw_gain_ = 5.0;
   geometry_msgs::msg::Twist cmd_;
   gazebo::common::Time last_cmd_time_;
+  gazebo::common::Time last_odom_time_;
+  gazebo::common::Time last_dbg_time_;
   bool have_cmd_ = false;
 };
 

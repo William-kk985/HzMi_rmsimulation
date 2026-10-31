@@ -84,6 +84,8 @@
     <child
       link="w1" />
     <axis xyz="0 1 0" />
+    <limit effort="20.0" velocity="60.0" />
+    <dynamics damping="0.02" friction="0.0" />
   </joint>
   <link
     name="w2">
@@ -131,6 +133,8 @@
     <child
       link="w2" />
     <axis xyz="0 1 0" />
+    <limit effort="20.0" velocity="60.0" />
+    <dynamics damping="0.02" friction="0.0" />
   </joint>
   <link
     name="w3">
@@ -178,6 +182,8 @@
     <child
       link="w3" />
     <axis xyz="0 1 0" />
+    <limit effort="20.0" velocity="60.0" />
+    <dynamics damping="0.02" friction="0.0" />
   </joint>
   <link
     name="w4">
@@ -225,6 +231,8 @@
     <child
       link="w4" />
     <axis xyz="0 1 0" />
+    <limit effort="20.0" velocity="60.0" />
+    <dynamics damping="0.02" friction="0.0" />
   </joint>
 
   <!-- 仿真附加（原 URDF 没有；几何/惯量/碰撞一律不动）-->
@@ -255,13 +263,30 @@
       <wheel_separation_sum>0.302</wheel_separation_sum>
       <cmd_timeout>0.5</cmd_timeout>
       <max_wheel_speed>40.0</max_wheel_speed>
+      <yaw_gain>5.0</yaw_gain>
     </plugin>
   </gazebo>
 
   <gazebo reference="base_link"><material>Gazebo/Black</material></gazebo>
-  <gazebo reference="w1"><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="w2"><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="w3"><material>Gazebo/DarkGrey</material></gazebo>
-  <gazebo reference="w4"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="w1">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1><mu2>0.01</mu2>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+  <gazebo reference="w2">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1><mu2>0.01</mu2>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+  <gazebo reference="w3">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1><mu2>0.01</mu2>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+  <gazebo reference="w4">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1><mu2>0.01</mu2>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
 
 </robot>
