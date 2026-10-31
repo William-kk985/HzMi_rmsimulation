@@ -2610,8 +2610,18 @@ def generate_launch_description():
              #   每 30 ms 刷 "Transform data too old when converting from map to odom_level"、
              #   局部代价图不可用 ⇒ 车不动、全局路径在 RViz 里看着"固定不动"。
              #   odom→base_link 是 LIO 直发（50 Hz）⇒ 不经过 map，链短且稳。
-             (('local_costmap.local_costmap.ros__parameters.global_frame', TextSubstitution(text='odom')),
-              ('behavior_server.ros__parameters.global_frame', TextSubstitution(text='odom')))),
+             # ★ 2026-10-31 根治：局部代价图/behavior 的 global_frame 直接用 **map**。
+             #   根因（读 nav2 源码确认，nav2_controller/src/controller_server.cpp::isGoalReached）：
+             #     end_pose_（路径末点，frame=map）经 nav_2d_utils::transformPose 转到
+             #     **costmap 的 global_frame**；该函数失败时**返回值被忽略**，
+             #     transformed_end_pose 保持默认 (0,0)——于是 goal checker 拿车去跟 (0,0) 比，
+             #     任何目标都"瞬间 Reached"（容差 0.25/0.05 都一样）。
+             #     transformPose 的第一行：in_pose.frame_id == 目标 frame ⇒ 直接拷贝、不做 TF。
+             #   ⇒ 把局部帧设成 map，这条转换就**短路成功**，end_pose 正确。
+             #   代价图自身的 map→base_link_fake 由 map→odom(gicp) + odom→odom_level(静态)
+             #   + LIO 的 odom_level→base_link 组成，都是健康的 50 Hz TF。
+             (('local_costmap.local_costmap.ros__parameters.global_frame', TextSubstitution(text='map')),
+              ('behavior_server.ros__parameters.global_frame', TextSubstitution(text='map')))),
         ))
     nav2_params_launch_args = {
         'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）

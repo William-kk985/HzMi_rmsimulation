@@ -40,7 +40,7 @@ public:
     max_wheel_speed_ = sdf->Get<double>("max_wheel_speed", 40.0).first;
     // ★ 仿真标定：实测"指令角速度 → 实际 yaw"约 0.2 倍（轮地接触侧向阻力），
     //   这里补偿 5 倍，使 nav2 的角速度指令 ≈ 车体实际角速度（闭环仍走 LIO）
-    yaw_gain_ = sdf->Get<double>("yaw_gain", 5.0).first;
+    yaw_gain_ = sdf->Get<double>("yaw_gain", 1.0).first;
 
     const char * names[4] = {"w1_joint", "w2_joint", "w3_joint", "w4_joint"};
     for (int i = 0; i < 4; ++i) joint_names_[i] = names[i];
@@ -88,28 +88,17 @@ private:
     const double s_vy[4] = {-1.0, 1.0, 1.0, -1.0};   // 麦轮横移符号（45° 辊子对角）
     double v[4];
     for (int i = 0; i < 4; ++i) {
-      v[i] = (cmd.linear.x - cmd.angular.z * y[i] + cmd.linear.y * s_vy[i]) / r;
+      v[i] = (cmd.linear.x - cmd.angular.z * yaw_gain_ * y[i] + cmd.linear.y * s_vy[i]) / r;
     }
     for (int i = 0; i < 4; ++i) {
       if (v[i] > max_wheel_speed_) v[i] = max_wheel_speed_;
       if (v[i] < -max_wheel_speed_) v[i] = -max_wheel_speed_;
-      // 不再给轮子设速度：轮子由地面接触**自然滚动**（视觉正确），
-      // 且避免轮子电机与车体运动学角速度互相打架（实测把 yaw 限到指令的 20%）
-      (void)v;
+      joints_[i]->SetVelocity(0, v[i]);   // 物理轮驱动（IMU 才有加速度 → LIO 才动）
     }
 
-    // ★ 运动学驱动（2026-10-31）：模型速度直接设成指令值（世界系），不靠轮地摩擦。
-    //   理由（实测）：ODE 圆柱轮 + 场上地面 ⇒ 直线只有 ~50%、原地转 ~0°（打滑/接触不稳）。
-    //   这样 nav2 的控制量→车体运动是 1:1，便于调导航；轮子仍按 IK 转（外观）。
-    {
-      const auto mpose = model_->WorldPose();
-      const double yaw = mpose.Rot().Yaw();
-      double lvx = cmd.linear.x, lvy = cmd.linear.y;
-      model_->SetLinearVel(ignition::math::Vector3d(
-        lvx * std::cos(yaw) - lvy * std::sin(yaw),
-        lvx * std::sin(yaw) + lvy * std::cos(yaw), 0.0));
-      model_->SetAngularVel(ignition::math::Vector3d(0.0, 0.0, cmd.angular.z * yaw_gain_));
-    }
+    // ★ 2026-10-31 回到**物理轮驱动**：运动学 SetLinearVel/SetAngularVel 会让 Gazebo 的 IMU
+    //   看不到加速度 ⇒ LIO 里程计原地不动（实测 LIO 位移 0.00 m，而 GT 走了 4.47 m）
+    //   ⇒ 导航姿态估计全靠 gicp，朝向错 ⇒ 车斜着跑。轮子转起来，IMU 才有真实加速度。
 
     // 诊断：每 0.5 s 打印一次"目标 vs 实际"轮速（确认 SetVelocity 是否生效）
     if ((sim_time - last_dbg_time_).Double() > 0.5) {
@@ -150,7 +139,7 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   std::string joint_names_[4];
   double radius_ = 0.058, sum_lx_ly_ = 0.302, timeout_ = 0.5, max_wheel_speed_ = 40.0;
-  double yaw_gain_ = 5.0;
+  double yaw_gain_ = 1.0;
   geometry_msgs::msg::Twist cmd_;
   gazebo::common::Time last_cmd_time_;
   gazebo::common::Time last_odom_time_;
