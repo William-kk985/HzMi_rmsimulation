@@ -32,7 +32,7 @@
   ros__parameters:
     # ★ 唯一的一个键：`/scan` 的坐标系 = base_link（重力对齐）⇒ 高度带语义恢复"离地高度"。
     #   "" = 缺省（点云自带帧 = livox_frame，本仓"点云在源头已重力对齐"那两档用）。
-    target_frame: "base_link"
+    target_frame: "odom_level"   # 重力水平系：坡上 /scan 仍是水平切片（原 base_link 会跟着车身俯仰）
     # ★ 2026-10-30：起伏底盘的 LiDAR 平放在车顶（雷达 z=+0.09，车体顶面 z=+0.078）⇒
     #   车体顶面在 `/scan` 的高度带里 ⇒ 出一圈"自击残影"。抬到 0.10 剔掉车体、保住 ≥0.2 m 的场地矮墙。
-    min_height: -0.088   # = 世界高度 0.01 m（base_link 离地 0.098）——实测最干净档
+    min_height: 0.010   # odom_level 系 = 世界高度（原 base_link 系 -0.088 等价换算）
