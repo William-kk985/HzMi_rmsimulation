@@ -88,6 +88,14 @@ def _gazebo_model_path_setup(context):
             added.append(root)
 
     actions = []
+    # ★ 2026-10-31：chassis 的自定义麦轮插件 libchassis_mecanum_drive.so 装在
+    #   install/chassis_description/lib ⇒ 必须追加进 GAZEBO_PLUGIN_PATH，
+    #   否则 gzserver 找不到插件（静默不加载 ⇒ 车不动/不转向；实测转向 yaw 只变 0.2°）。
+    for root in added:
+        libdir = os.path.join(root, 'lib')
+        if os.path.isdir(libdir):
+            actions.append(AppendEnvironmentVariable('GAZEBO_PLUGIN_PATH', libdir))
+            actions.append(LogInfo(msg='[gzplugin] GAZEBO_PLUGIN_PATH 追加 %s（chassis 麦轮插件）' % libdir))
     for why in broken:
         actions.append(LogInfo(msg='[gzmodel] ⚠️ 无法为 robot:=%s 补 model:// 解析根：%s；'
                                    '本次会退回旧行为（gzclient 可能卡在"等在线模型库"、'
