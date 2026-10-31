@@ -13,6 +13,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch.conditions import LaunchConfigurationEquals
+from launch.conditions import LaunchConfigurationNotEquals
 from launch.conditions import IfCondition
 from launch.actions.append_environment_variable import AppendEnvironmentVariable
 from launch.actions import SetEnvironmentVariable
@@ -379,6 +380,8 @@ def generate_launch_description():
         package='joint_state_publisher',
         executable='joint_state_publisher',
         name='joint_state_publisher',
+        # ★ 2026-10-31：chassis 的麦轮插件自己发 /joint_states，这里让位避免双发布者
+        condition=LaunchConfigurationNotEquals('robot', 'chassis'),
         parameters=[{
             'use_sim_time': use_sim_time,
             # URDF 是 XML，必须显式声明为字符串，否则 launch_ros 会按 YAML 解析而报错

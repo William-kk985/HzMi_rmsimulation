@@ -1,0 +1,48 @@
+# =============================================================================
+# mecanum_controller.yaml —— 起伏底盘（麦轮）的 ros2_control 控制器配置
+#
+# 链路：/cmd_vel_chassis ──► mecanum_drive_controller（麦轮逆解）
+#                ──► 4 个轮 joint 的 velocity 命令 ──► gazebo_ros2_control（Gazebo 物理）
+#
+# 几何（来自 URDF）：
+#   · 轮半径 0.058 m
+#   · 轴距 0.323 m（x ±0.1615）⇒ 半轴距 lx = 0.1615
+#   · 轮距 0.281 m（轮盘心 y ±0.1405）⇒ 半轮距 ly = 0.1405
+#   · sum_of_robot_center_projection_on_X_Y_axis = lx + ly = 0.302
+# 轮序：w1=左前 / w2=右前 / w3=左后 / w4=右后
+# =============================================================================
+controller_manager:
+  ros__parameters:
+    update_rate: 100   # Hz
+
+    mecanum_drive_controller:
+      type: mecanum_drive_controller/MecanumDriveController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+mecanum_drive_controller:
+  ros__parameters:
+    front_left_wheel_command_joint_name: "w1_joint"
+    front_left_wheel_state_joint_name: "w1_joint"
+    front_right_wheel_command_joint_name: "w2_joint"
+    front_right_wheel_state_joint_name: "w2_joint"
+    rear_left_wheel_command_joint_name: "w3_joint"
+    rear_left_wheel_state_joint_name: "w3_joint"
+    rear_right_wheel_command_joint_name: "w4_joint"
+    rear_right_wheel_state_joint_name: "w4_joint"
+
+    kinematics:
+      wheels_radius: 0.058
+      base_frame_offset:
+        x: 0.0
+        y: 0.0
+        theta: 0.0
+      sum_of_robot_center_projection_on_X_Y_axis: 0.302
+
+    base_frame_id: base_link
+    odom_frame_id: odom
+    enable_odom_tf: false
+    publish_rate: 50.0
+    cmd_vel_timeout: 0.5
+    use_stamped_vel: false
