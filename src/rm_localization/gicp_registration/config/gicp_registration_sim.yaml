@@ -221,10 +221,10 @@
     gate_enable: true                    # false = 完全回到 2026-10-06 之前的行为（只留 score 判据）
     gate_trans_rate: 3.0                 # m/s；门限 = clamp(rate·dt, step_min, step_max)
     gate_trans_step_min: 0.10            # m；dt 很小时的**单帧下限**（别把量测噪声当发散）
-    gate_trans_step_max: 0.6             # m；**单帧硬上限**（掉帧/长间隔也不许一次跳这么远）
+    gate_trans_step_max: 1.0             # m；**单帧硬上限**（掉帧/长间隔也不许一次跳这么远）
     gate_yaw_rate_deg: 60.0              # °/s；同上（yaw 方向）
     gate_yaw_step_min_deg: 3.0           # °；行驶段 yaw 逐帧 p99=1.60° ⇒ 3° 只切尾巴（yaw 本身可观测）
-    gate_yaw_step_max_deg: 15.0          # °；单帧最多转这么多（用户那次是整帧转飞）
+    gate_yaw_step_max_deg: 25.0          # °；单帧最多转这么多（用户那次是整帧转飞）
     #
     # ② 合理性 / 定义域（结果蕴含的 **map→base_link** 必须还在图里）：
     #    · XY：PCD 包围盒 + plausible_margin_xy。本场地 PCD bbox = 30.2 × 18.4 m
@@ -235,14 +235,14 @@
     #      ⇒ 这条几乎零成本。带宽比"地面 ±0.2"宽得多：允许上下台阶/坡道的姿态变化与 z 系差异。
     plausible_margin_xy: 1.0             # m；地图 XY 包围盒外扩多少仍算"在图里"
     plausible_z_min: -0.9                # m；map→base_link 的 z 下限（map 系绝对）
-    plausible_z_max: 0.7                 # m；上限
+    plausible_z_max: 1.2                 # m；上限
     #
     # ③ 失效策略：连续 N 帧被拒 ⇒ 判"定位失效" ⇒ **停发 map→odom**（同时停止配准与 ~/pose），
     #    大声 ERROR + 状态行改 ERROR，等 /initialpose。**绝不为了继续发 TF 而编造位姿**
     #    —— 那正是这次要修的失败模式。恢复：自愈探针（见 ⑤）/ RViz 2D Pose Estimate / 重启导航栈。
     #    25 帧 @10 Hz = 2.5 s：足够长（不会被偶发坏帧触发），足够短（不会让 nav2 拿着错位姿跑很久）。
     #    <=0 = 永不放弃（只沿用上次采纳值，不入失效态）——实车保守用法可这么设。
-    lost_after_rejections: 25
+    lost_after_rejections: 50
     #
     # ⑤ **首帧门语义 / 自愈**（2026-10-21 新增；修 docs/frame_contract_v3_measurements.md 里
     #    「GICP 首帧门死锁」那一节实测的病：`采纳 0/25`、创新 0.176–0.227 m、**dt = 0.000 s**、
