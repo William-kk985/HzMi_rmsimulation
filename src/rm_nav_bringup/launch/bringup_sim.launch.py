@@ -13,7 +13,7 @@ from launch.actions import (IncludeLaunchDescription, DeclareLaunchArgument, Gro
 from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression, TextSubstitution
 from launch.conditions import LaunchConfigurationEquals, LaunchConfigurationNotEquals, IfCondition
 from launch.substitution import Substitution
 
@@ -2604,8 +2604,14 @@ def generate_launch_description():
             ('level_frame',
              os.path.join(rm_nav_bringup_dir, 'config', 'nav2_params_sim_level_frame.yaml'),
              lambda ctx: _level_frame(ctx) == 'odom_level',
-             (('local_costmap.local_costmap.ros__parameters.global_frame', _LevelFrame()),
-              ('behavior_server.ros__parameters.global_frame', _LevelFrame()))),
+             # ★ 2026-10-31 修正：局部代价图/behavior 的 global_frame 用 **odom**，不用 odom_level。
+             #   原因（实测）：odom_level 只存在于 map→odom→odom_level 链上；nav2 的 costmap TF
+             #   缓存里 map→odom_level 会卡在某个时刻不动（实测卡在 7.65 s），于是 controller
+             #   每 30 ms 刷 "Transform data too old when converting from map to odom_level"、
+             #   局部代价图不可用 ⇒ 车不动、全局路径在 RViz 里看着"固定不动"。
+             #   odom→base_link 是 LIO 直发（50 Hz）⇒ 不经过 map，链短且稳。
+             (('local_costmap.local_costmap.ros__parameters.global_frame', TextSubstitution(text='odom')),
+              ('behavior_server.ros__parameters.global_frame', TextSubstitution(text='odom')))),
         ))
     nav2_params_launch_args = {
         'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）

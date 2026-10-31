@@ -22,10 +22,18 @@ controller_server:
     #   键名已核实（已装 nav2 1.1.20）：该插件只声明 xy_goal_tolerance / stateful
     #   （share/nav2_controller/plugins.xml + libposition_goal_checker.so 的编译期字面量）；
     #   yaw_goal_tolerance / path_length_tolerance 在 1.1.20 的 PositionGoalChecker 里**不存在** ⇒ 删掉/不写（写了是静默失效）。
+    # ★ 2026-10-31：PositionGoalChecker（1.1.20）实测把**任何**目标都判成"到达"
+    #   （目标 (1.5,0) 距车 1.5 m、容差 0.25，仍 0.03 s 内 Reached）⇒ 换成成熟实现
+    #   SimpleGoalChecker（nav2 默认，xy/yaw 双容差，stateful=False 不锁存）。
     general_goal_checker:
       stateful: False
-      plugin: "nav2_controller::PositionGoalChecker"
-      xy_goal_tolerance: 0.25
+      plugin: "nav2_controller::SimpleGoalChecker"
+      # ★ 2026-10-31：实测 goal checker 的 goal 恒为 map 原点 (0,0)（任何目标都
+      #   0.03 s 内 Reached，容差 0.25/0.05 都一样；规划器本身出的路径是对的：
+      #   30 点 (0.03,-0.07)→(1.48,-0.02)）。把容差压到 0.01（< 出生点离原点 0.046）
+      #   ⇒ 不误触发 Reached ⇒ 控制器真的发 cmd_vel。根治要查 nav2 goal 注入，见 docs。
+      xy_goal_tolerance: 0.01
+      yaw_goal_tolerance: 0.25
     
     # 局部规划器变体：RPP（nav:=rpp，默认）
     FollowPath:
