@@ -28,11 +28,7 @@ controller_server:
     general_goal_checker:
       stateful: False
       plugin: "nav2_controller::SimpleGoalChecker"
-      # ★ 2026-10-31：实测 goal checker 的 goal 恒为 map 原点 (0,0)（任何目标都
-      #   0.03 s 内 Reached，容差 0.25/0.05 都一样；规划器本身出的路径是对的：
-      #   30 点 (0.03,-0.07)→(1.48,-0.02)）。把容差压到 0.01（< 出生点离原点 0.046）
-      #   ⇒ 不误触发 Reached ⇒ 控制器真的发 cmd_vel。根治要查 nav2 goal 注入，见 docs。
-      xy_goal_tolerance: 0.01
+      xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
     
     # 局部规划器变体：TEB（nav:=teb）
