@@ -25,11 +25,15 @@ controller_server:
     # ★ 2026-10-31：PositionGoalChecker（1.1.20）实测把**任何**目标都判成"到达"
     #   （目标 (1.5,0) 距车 1.5 m、容差 0.25，仍 0.03 s 内 Reached）⇒ 换成成熟实现
     #   SimpleGoalChecker（nav2 默认，xy/yaw 双容差，stateful=False 不锁存）。
+    # ★ 2026-10-31：nav2 自带的 PositionGoalChecker/SimpleGoalChecker 都会**瞬间到达**
+    #   （根因：controller_server::isGoalReached 丢弃 transformPose 的返回值 ⇒ goal 退化成 (0,0)）。
+    #   换成自研插件 rm_goal_checker::PlanGoalChecker：直接取 /plan 末点当目标，
+    #   并用 tf2::TimePointZero（最新变换）比较 ⇒ 不受时间戳问题影响。
     general_goal_checker:
       stateful: False
-      plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.01
-      yaw_goal_tolerance: 0.25
+      plugin: "rm_goal_checker::PlanGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 3.15      # 哨兵允许倒着到点：朝向不作为硬条件（3.15 rad ≈ 180°）
     
     # 局部规划器变体：RPP（nav:=rpp，默认）
     FollowPath:

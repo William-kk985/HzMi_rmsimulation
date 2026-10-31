@@ -1,0 +1,9 @@
+<library path="rm_goal_checker">
+  <class name="rm_goal_checker::PlanGoalChecker"
+         type="rm_goal_checker::PlanGoalChecker"
+         base_class_type="nav2_core::GoalChecker">
+    <description>
+      用 /plan 末点当目标的 nav2 GoalChecker（绕开 isGoalReached 吞掉 transformPose 失败的问题）
+    </description>
+  </class>
+</library>

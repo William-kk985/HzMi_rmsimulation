@@ -454,8 +454,11 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [2.0, 2.0, 3.0]
-    min_velocity: [-2.0, -2.0, -3.0]
+    # ★ 2026-10-31：安全限速。实测（headless）给 1.5 m 目标时车 10 s 就跑过 4 m、
+    #   一路冲到 27 m 外，LIO/gicp 全部发散 ⇒ 先把速度上限压到 0.6 m/s / 1.0 rad/s，
+    #   让"到点判定"有机会接住。调通后可按需放宽。
+    max_velocity: [0.6, 0.6, 1.0]
+    min_velocity: [-0.6, -0.6, -1.0]
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
     max_accel: [4.0, 4.0, 6.0]
