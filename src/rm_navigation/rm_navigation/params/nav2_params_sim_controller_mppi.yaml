@@ -28,7 +28,7 @@ controller_server:
     #   （share/nav2_controller/plugins.xml + libposition_goal_checker.so 的编译期字面量）；
     #   yaw_goal_tolerance / path_length_tolerance 在 1.1.20 的 PositionGoalChecker 里**不存在** ⇒ 删掉/不写（写了是静默失效）。
     general_goal_checker:
-      stateful: True
+      stateful: False
       plugin: "nav2_controller::PositionGoalChecker"
       xy_goal_tolerance: 0.25
     
