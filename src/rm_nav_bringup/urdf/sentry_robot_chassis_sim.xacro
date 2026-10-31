@@ -247,21 +247,9 @@
     </sensor>
   </gazebo>
   <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro"/>
-  <!-- ★ 2026-10-30：雷达**物理倾斜 45° 下俯**（与实车一致）——与 robot11 同款"物理/数据两层"：
-       ① livox_physical：物理安装位置（rpy=-30° 下俯），**射线传感器挂这里** ⇒ 插件发
-          /livox/lidar_raw（点表达在**斜的**物理系）；
-       ② livox_frame：**水平的数据帧**（rpy=0），只做 TF 锚点；
-       ③ launch 里的 livox_cloud_extrinsic 用 TF(livox_frame←livox_physical) 把点云旋正 →
-          /livox/lidar（frame_id=livox_frame）⇒ 下游（linefit/patchwork/LIO）看到的仍是水平点云。 -->
-  <xacro:mid360 name="livox_physical" parent="base_link" topic="/livox/lidar_raw">
-    <origin xyz="0 0 0.09" rpy="-0.52359878 0 0"/>
-  </xacro:mid360>
-  <!-- 水平数据帧（与物理雷达同位置，rpy=0；无 visual）-->
-  <link name="livox_frame"/>
-  <joint name="livox_frame_joint" type="fixed">
+  <xacro:mid360 name="livox_frame" parent="base_link" topic="/livox/lidar">
     <origin xyz="0 0 0.09" rpy="0 0 0"/>
-    <parent link="base_link"/><child link="livox_frame"/>
-  </joint>
+  </xacro:mid360>
   <gazebo>
     <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
       <ros><namespace>/</namespace>
@@ -280,12 +268,5 @@
   <gazebo reference="w2"><material>Gazebo/DarkGrey</material></gazebo>
   <gazebo reference="w3"><material>Gazebo/DarkGrey</material></gazebo>
   <gazebo reference="w4"><material>Gazebo/DarkGrey</material></gazebo>
-
-  <!-- 轮子对地摩擦 0.02（robot11 同款）：固定轮+planar_move 时，默认 μ=1 会让轮子"抓地"
-       而在加速/急转/坡道产生倾覆力矩（翻车）；0.02 让轮子滑动、底盘被速度直接推 ⇒ 不翻。 -->
-  <gazebo reference="w1"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w2"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w3"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
-  <gazebo reference="w4"><mu1>0.02</mu1><mu2>0.02</mu2></gazebo>
 
 </robot>
