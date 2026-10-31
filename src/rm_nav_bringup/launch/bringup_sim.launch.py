@@ -2620,8 +2620,8 @@ def generate_launch_description():
              #   ⇒ 把局部帧设成 map，这条转换就**短路成功**，end_pose 正确。
              #   代价图自身的 map→base_link_fake 由 map→odom(gicp) + odom→odom_level(静态)
              #   + LIO 的 odom_level→base_link 组成，都是健康的 50 Hz TF。
-             (('local_costmap.local_costmap.ros__parameters.global_frame', TextSubstitution(text='map')),
-              ('behavior_server.ros__parameters.global_frame', TextSubstitution(text='map')))),
+             (('local_costmap.local_costmap.ros__parameters.global_frame', _LevelFrame()),
+              ('behavior_server.ros__parameters.global_frame', _LevelFrame()))),
         ))
     nav2_params_launch_args = {
         'params_file': nav2_base_params_for_slot,           # 公共段（base；robot11 时 = 合并后）
