@@ -71,6 +71,7 @@ def _gazebo_model_path_setup(context):
     cur = os.environ.get('GAZEBO_MODEL_PATH', '')
     cur_items = [p for p in cur.split(os.pathsep) if p]
     added, covered, broken = [], [], []
+    _covered_roots = []
     for pkg in pkgs:
         try:
             share = os.path.abspath(get_package_share_directory(pkg))
@@ -81,6 +82,7 @@ def _gazebo_model_path_setup(context):
         root = os.path.dirname(share)
         if any(os.path.realpath(p) == os.path.realpath(root) for p in cur_items):
             covered.append('%s（已在 GAZEBO_MODEL_PATH 里）' % root)
+            _covered_roots.append(root)
         elif not os.path.isdir(os.path.join(root, pkg)):
             broken.append('%s（%s/ 不存在 ⇒ install/ 不完整，请 colcon build 后重试）'
                           % (root, pkg))
@@ -91,7 +93,7 @@ def _gazebo_model_path_setup(context):
     # ★ 2026-10-31：chassis 的自定义麦轮插件 libchassis_mecanum_drive.so 装在
     #   install/chassis_description/lib ⇒ 必须追加进 GAZEBO_PLUGIN_PATH，
     #   否则 gzserver 找不到插件（静默不加载 ⇒ 车不动/不转向；实测转向 yaw 只变 0.2°）。
-    for root in added:
+    for root in list(added) + list(_covered_roots):
         libdir = os.path.join(root, 'lib')
         if os.path.isdir(libdir):
             actions.append(AppendEnvironmentVariable('GAZEBO_PLUGIN_PATH', libdir))
