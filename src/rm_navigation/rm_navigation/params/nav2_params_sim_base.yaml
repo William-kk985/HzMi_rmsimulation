@@ -128,6 +128,10 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link_fake
       use_sim_time: True
+      # ★ 2026-10-31：**不要**为了绕过 isGoalReached 的 transformPose 失败而放大本值
+      #   （控制器槽文件里 2026-09-24 已有同样尝试被撤销的记录：放大后会变成 tf2 等待超时，
+      #    把 costmap 线程一次阻塞到超时）。真因是 costmap 的 tf 摄入 + 规划器 path 的时间戳，
+      #   见 docs/issues_and_findings.md。这里保持不动。
       rolling_window: true
       width: 5
       height: 5

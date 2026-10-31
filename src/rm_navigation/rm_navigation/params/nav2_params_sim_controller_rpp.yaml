@@ -28,7 +28,7 @@ controller_server:
     general_goal_checker:
       stateful: False
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.01
       yaw_goal_tolerance: 0.25
     
     # 局部规划器变体：RPP（nav:=rpp，默认）
