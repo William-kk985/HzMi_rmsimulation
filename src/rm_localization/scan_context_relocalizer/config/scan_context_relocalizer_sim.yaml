@@ -21,8 +21,8 @@
     # ---- 检索 ----
     max_candidates: 20                # ring-key top-K（再逐个做 60 次列移位）
     candidate_min_sep: 1.0            # m；次优"地点"至少离最优这么远（否则不参与 margin）
-    min_score: 0.70                   # score = 1/(1+SC 距离)；0.70 ⇒ 距离 <= 0.4286
-    min_margin: 0.01                  # 次优距离 - 最优距离；小 = 两个地点一样像
+    min_score: 0.88                   # 2026-10-31: 0.70->0.88（RMUC2027 自相似墙体导致 0.81 的假阳性）
+    min_margin: 0.03                  # 2026-10-31: 0.01->0.03（要求第一名明显优于第二名）
     max_sc_dist: 0.60                 # 硬上限（score 与它取与；防 min_score 被调成 0）
     min_scan_points: 500
 
